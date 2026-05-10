@@ -6,7 +6,7 @@
     {
       "name": "debate-conductor",
       "source": "./debate-conductor",
-      "description": "Claude conducts a Generator(Gemini) vs Critic(Codex) adversarial debate over N rounds. Three-pane tmux view; bootstrap + run skills."
+      "description": "Claude conducts a Generator(Gemini) vs Critic(Codex) adversarial debate over N rounds. Three-pane tmux view; bootstrap + run + continue skills."
     }
   ]
 }
