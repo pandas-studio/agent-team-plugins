@@ -1,0 +1,8 @@
+신규 Python 백엔드 프로젝트 (FastAPI 기반, 팀원 6명, 첫 production 출시 6주 후)는
+SQLAlchemy 1.4 (legacy `Query` 스타일과 2.0 스타일 병행 지원)가 아니라
+SQLAlchemy 2.0 의 새 typed Core/ORM 스타일로 *처음부터* 가야 한다 —
+점진 마이그레이션 비용보다 1.4 의 dual-stack 인지 부하가 더 큼.
+
+이 stance 를 옹호하라. 1.4 에서 시작해 점진 이전하자는 반론에 대해
+구체적으로 어떤 비용이 더 큰지 (학습 곡선·doc 분기·typing·deprecation timeline)
+근거와 함께 제시하라.

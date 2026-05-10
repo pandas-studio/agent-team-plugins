@@ -1,0 +1,8 @@
+팀원 8명·서비스 4개·공유 라이브러리 2개를 가진 백엔드 조직은
+지금 시점에 polyrepo 에서 monorepo (Nx / Turborepo / Pants 중 하나) 로
+*올해 안에* 통합해야 한다 — 공유 라이브러리의 버전 drift 와 cross-cutting refactor
+비용이 monorepo 도입 비용을 넘어선 상태.
+
+이 stance 를 옹호하라. polyrepo 유지가 합리적이라는 반론
+(빌드 성능·툴체인 학습·CI 비용)에 대해 구체적으로 답하라.
+context 파일이 있으면 그 팀의 실제 제약을 반영해 답할 것.

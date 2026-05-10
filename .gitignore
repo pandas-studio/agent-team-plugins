@@ -1,0 +1,9 @@
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Workspace artifacts that should never live in this repo
+.debate-conductor/log/

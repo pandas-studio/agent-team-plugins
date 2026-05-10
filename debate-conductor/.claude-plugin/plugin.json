@@ -1,0 +1,9 @@
+{
+  "name": "debate-conductor",
+  "version": "0.1.0",
+  "description": "Claude conducts a Generator(Gemini) vs Critic(Codex) adversarial debate over N rounds. Three-pane tmux view: left=Claude PM, middle=Generator transcript, right=Critic transcript.",
+  "author": { "name": "pandas-studio" },
+  "homepage": "https://github.com/pandas-studio/agent-team-plugins/tree/main/debate-conductor",
+  "repository": "https://github.com/pandas-studio/agent-team-plugins",
+  "license": "MIT"
+}
