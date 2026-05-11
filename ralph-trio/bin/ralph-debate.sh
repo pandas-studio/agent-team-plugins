@@ -173,6 +173,16 @@ last_critic_file() {
 
 ITER=0
 COMPLETED=0
+# --dry-run termination ceiling. --max-iter 0 (unlimited) combined with the
+# synthetic-topic path below would otherwise run forever (no backlog drain,
+# no completion promise on this variant). Count unchecked BACKLOG topics
+# up front and stop after that many iters. 0 outside dry-run (unused).
+if [ "$DRY_RUN" = "1" ]; then
+  DRY_RUN_BACKLOG_COUNT=$(grep -cE '^[[:space:]]*-[[:space:]]*\[[ ]\][[:space:]]+' "$BACKLOG_FILE" 2>/dev/null || echo 0)
+  [ "$DRY_RUN_BACKLOG_COUNT" -lt 1 ] && DRY_RUN_BACKLOG_COUNT=1
+else
+  DRY_RUN_BACKLOG_COUNT=0
+fi
 while :; do
   ITER=$((ITER + 1))
   if ! enforce_max_iter "$ITER" "$MAX_ITER"; then
@@ -187,8 +197,13 @@ while :; do
   fi
 
   if [ "$DRY_RUN" = "1" ]; then
-    # Don't mutate the user's BACKLOG under --dry-run. Synthesize a topic so
-    # the loop still fires; --max-iter bounds it instead of backlog drain.
+    # Don't mutate the user's BACKLOG under --dry-run; synthesize a topic.
+    # Cap iters at DRY_RUN_BACKLOG_COUNT so --max-iter 0 still terminates.
+    if [ "$ITER" -gt "$DRY_RUN_BACKLOG_COUNT" ]; then
+      ralph_log "dry-run: synthetic backlog drained ($DRY_RUN_BACKLOG_COUNT iters). Stopping."
+      echo "=== STOP (dry-run-backlog-empty) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
+      break
+    fi
     TASK="(dry-run synthetic topic — iter $ITER)"
   else
     TASK=$(pop_top_task "$BACKLOG_FILE") || true
