@@ -178,16 +178,70 @@ build_coder_prompt() {
 
 # to_manifest_verdict provided by lib/manifest.sh (sourced above).
 
-# Returns: SHIP / NEEDS-FIX / DISCUSS / UNKNOWN  (echoed to stdout)
+# Returns: SHIP / NEEDS-FIX / DISCUSS / OUT-OF-SCOPE / UNKNOWN  (echoed to stdout).
+#
+# Anchored to the canonical 4-token vocab (memory: codex placeholder-echo
+# invariant). Free-text substring matching is unsafe — codex frequently emits
+# explanatory text like "NEEDS-FIX — do not SHIP because ..." inside the
+# Verdict section, and codex also re-emits the role-prompt placeholder list
+# `Verdict: <one of: SHIP, NEEDS-FIX, DISCUSS, OUT-OF-SCOPE>` on errors. The
+# naive substring check `/SHIP/` fires on both, yielding bogus SHIPs.
+#
+# Preference order:
+#   1. Canonical `Verdict: <TOKEN>` line on its own — the strict signal.
+#   2. A line inside `## Verdict` section that *starts with* a canonical token
+#      followed by a non-token boundary (space / dash-em / colon / period /
+#      asterisk / EOL). Order matters: try longest tokens first so OUT-OF-SCOPE
+#      isn't swallowed by SHIP/DISCUSS, and NEEDS-FIX isn't shadowed by SHIP.
+# The placeholder echo `Verdict: <one of: ...>` does NOT match (1) because of
+# the strict `$` anchor, and does NOT match (2) because it doesn't appear
+# inside a `## Verdict` section.
 parse_codex_verdict() {
   local f="$1"
   awk '
-    /^## Verdict/         { in_v = 1; next }
-    in_v && /^## /        { in_v = 0 }
-    in_v && /SHIP/        { print "SHIP"; exit }
-    in_v && /NEEDS-FIX/   { print "NEEDS-FIX"; exit }
-    in_v && /DISCUSS/     { print "DISCUSS"; exit }
-  ' "$f" 2>/dev/null || echo "UNKNOWN"
+    # 1. Canonical: `Verdict: TOKEN` / `**Verdict:** TOKEN` (line on its own).
+    tolower($0) ~ /^[[:space:]]*\**[[:space:]]*verdict[[:space:]]*:[[:space:]]*\**[[:space:]]*(ship|needs-fix|discuss|out-of-scope)[[:space:]]*\**[[:space:]]*$/ {
+      v = toupper($0)
+      sub(/.*VERDICT[[:space:]]*:[[:space:]]*\**[[:space:]]*/, "", v)
+      sub(/[[:space:]]*\**[[:space:]]*$/, "", v)
+      canonical = v
+      next
+    }
+    # 2. Section: line starts with a TOKEN, followed by a non-token boundary.
+    #    Boundary `[^A-Z-]` rejects "SHIPPING" / "NEEDS-FIX-MORE"; accepts
+    #    space, em-dash bytes, asterisk, punctuation, EOL.
+    /^#+[[:space:]]*Verdict/ { in_v = 1; next }
+    in_v && /^#+[[:space:]]/ { in_v = 0 }
+    in_v && !section_hit {
+      up = toupper($0)
+      if      (match(up, /^[[:space:]]*\**[[:space:]]*OUT-OF-SCOPE([^A-Z-]|$)/)) section_hit = "OUT-OF-SCOPE"
+      else if (match(up, /^[[:space:]]*\**[[:space:]]*NEEDS-FIX([^A-Z-]|$)/))    section_hit = "NEEDS-FIX"
+      else if (match(up, /^[[:space:]]*\**[[:space:]]*DISCUSS([^A-Z-]|$)/))      section_hit = "DISCUSS"
+      else if (match(up, /^[[:space:]]*\**[[:space:]]*SHIP([^A-Z-]|$)/))         section_hit = "SHIP"
+    }
+    END {
+      if (canonical)        { print canonical }
+      else if (section_hit) { print section_hit }
+    }
+  ' "$f" 2>/dev/null
+}
+
+# Build the explicit-diff-range hint for the reviewer. Given the HEAD ref we
+# snapshot before stage 2, if HEAD has advanced (i.e. the coder committed) we
+# tell codex the exact range to inspect; otherwise (still working-tree only)
+# we say so explicitly so codex doesn't assume there's nothing to review.
+build_range_hint() {
+  local pre_ref="$1" work_dir="$2"
+  [ -n "$pre_ref" ] || { echo ""; return 0; }
+  local post_ref
+  post_ref=$(git -C "$work_dir" rev-parse HEAD 2>/dev/null || true)
+  if [ -n "$post_ref" ] && [ "$post_ref" != "$pre_ref" ]; then
+    printf ' The just-coded diff is in the range `%s..%s` (plus any uncommitted changes still in the working tree); inspect via `git diff %s..HEAD` AND `git status --short` / `git diff HEAD`.' \
+      "$pre_ref" "$post_ref" "$pre_ref"
+  else
+    printf ' The coder did NOT commit (HEAD is still at `%s`); inspect the working-tree state via `git status --short` and `git diff HEAD`.' \
+      "$pre_ref"
+  fi
 }
 
 # Extract the NEED RESEARCH question(s) if present
@@ -290,6 +344,15 @@ while :; do
   manifest_finalize
   PARENT_RUN_ID="$PLAN_RUN_ID"
 
+  # Snapshot HEAD before the coder runs so we can point the reviewer at the
+  # explicit diff range $PRE_CODE_REF..HEAD. Without this hint, ask-codex.sh
+  # defaults to the working-tree state — and after the worker commits its work
+  # the tree is clean, so the reviewer would miss the just-created commit.
+  PRE_CODE_REF=""
+  if git -C "$WORK_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+    PRE_CODE_REF=$(git -C "$WORK_DIR" rev-parse HEAD 2>/dev/null || true)
+  fi
+
   # ---- Stage 2: Coder ----
   ralph_log "  [stage 2/3] coder  → $CODE_LOG"
   CODE_RC=0
@@ -340,8 +403,21 @@ while :; do
     # Reviewer role recorded by ask-codex.sh into the parent manifest via
     # the PR 9 nested-write carve-out (it knows REVIEWER_ROLE_FILE; we don't).
     # ask-codex.sh is on PATH via the dev-trio plugin.
-    ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-codex.sh "Review uncommitted+committed changes related to this task: '$TASK'. Use the standard SHIP/NEEDS-FIX/DISCUSS verdict format." 2>&1 ) | tee "$REVIEW_LOG" >/dev/null || true
-    VERDICT=$(parse_codex_verdict "$REVIEW_LOG")
+    RANGE_HINT=$(build_range_hint "$PRE_CODE_REF" "$WORK_DIR")
+    REVIEW_FOCUS="Review changes related to this task: '$TASK'.${RANGE_HINT} Use the standard SHIP/NEEDS-FIX/DISCUSS verdict format with the verdict on its own canonical line: \`Verdict: <TOKEN>\`."
+    ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-codex.sh "$REVIEW_FOCUS" 2>&1 ) | tee "$REVIEW_LOG" >/dev/null
+    # PIPESTATUS[0] = ask-codex.sh's rc (the subshell). Non-zero here means
+    # codex itself errored — but codex frequently still echoes the role-prompt
+    # `Verdict: <one of: ...>` placeholder, so naive parsing would yield a
+    # bogus SHIP/NEEDS-FIX. Force UNKNOWN whenever codex didn't cleanly exit.
+    CODEX_RC=${PIPESTATUS[0]}
+    if [ "$CODEX_RC" -ne 0 ]; then
+      ralph_log "  ask-codex.sh exited rc=$CODEX_RC — forcing UNKNOWN verdict (review log: $REVIEW_LOG)"
+      VERDICT="UNKNOWN"
+      manifest_add_input kind=codex-rc value="$CODEX_RC"
+    else
+      VERDICT=$(parse_codex_verdict "$REVIEW_LOG")
+    fi
     [ -z "$VERDICT" ] && VERDICT="UNKNOWN"
     MV=$(to_manifest_verdict "$VERDICT")
     if [ "$MV" = "null" ] && [ -n "$VERDICT" ]; then
@@ -367,6 +443,12 @@ while :; do
         ralph_log "  [stage 2 retry] re-running coder with research"
         RESEARCH="$(cat "$RESEARCH_LOG")"
         CODE2_LOG="$LOG_DIR/ralph-trio-$TS-iter-$ITER-code2.log"
+        # Re-snapshot HEAD before Code2 so the post-retry reviewer gets the
+        # right diff range. Use $PRE_CODE_REF (from before Stage 2) as the base
+        # so the reviewer sees the full iter's changes, not just the retry
+        # delta — if the worker amended/replaced commits, this still captures
+        # the cumulative diff that needs review.
+        PRE_CODE2_REF="$PRE_CODE_REF"
         manifest_init ralph-code "$CODE2_LOG"
         CODE2_RUN_ID="$MANIFEST_RUN_ID"
         manifest_set_parent "$RESEARCH_RUN_ID"
@@ -385,8 +467,17 @@ while :; do
         # Reviewer role recorded by ask-codex.sh via the PR 9 carve-out.
         manifest_add_input kind=task value="$TASK"
         manifest_add_input kind=code-log path="$CODE2_LOG"
-        ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-codex.sh "Re-review the same task after research-informed retry: '$TASK'. Standard verdict format." 2>&1 ) | tee "$REVIEW2_LOG" >/dev/null || true
-        VERDICT=$(parse_codex_verdict "$REVIEW2_LOG")
+        RANGE_HINT2=$(build_range_hint "$PRE_CODE2_REF" "$WORK_DIR")
+        REVIEW2_FOCUS="Re-review the same task after research-informed retry: '$TASK'.${RANGE_HINT2} Standard verdict format with the verdict on its own canonical line: \`Verdict: <TOKEN>\`."
+        ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-codex.sh "$REVIEW2_FOCUS" 2>&1 ) | tee "$REVIEW2_LOG" >/dev/null
+        CODEX2_RC=${PIPESTATUS[0]}
+        if [ "$CODEX2_RC" -ne 0 ]; then
+          ralph_log "  ask-codex.sh (re-review) exited rc=$CODEX2_RC — forcing UNKNOWN verdict (log: $REVIEW2_LOG)"
+          VERDICT="UNKNOWN"
+          manifest_add_input kind=codex-rc value="$CODEX2_RC"
+        else
+          VERDICT=$(parse_codex_verdict "$REVIEW2_LOG")
+        fi
         [ -z "$VERDICT" ] && VERDICT="UNKNOWN"
         MV=$(to_manifest_verdict "$VERDICT")
         if [ "$MV" = "null" ] && [ -n "$VERDICT" ]; then

@@ -1,31 +1,64 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Ralph overnight launchd template — macOS LaunchAgent.
+  Ralph overnight launchd template — macOS LaunchAgent for the ralph-trio plugin.
+
+  Two placeholders to fill in:
+    {{REPO}}            absolute path to your repo (workspace)
+    {{RALPH_SOLO_BIN}}  absolute path to the plugin's ralph-solo.sh
+
+  Why {{RALPH_SOLO_BIN}} is a placeholder: launchd inherits a minimal
+  environment that does NOT see your shell's PATH, so plugin scripts that are
+  on PATH inside a `claude` session are NOT discoverable when launchd fires
+  out-of-band. You need the absolute path.
 
   Setup steps:
-    1. Replace every occurrence of {{REPO}} with the absolute path to your repo.
-       Example: sed -i '' 's|{{REPO}}|/Users/me/projects/myrepo|g' com.user.ralph.plist
-    2. (Optional) Adjust the Hour/Minute below for your preferred start time.
-    3. (Optional) Adjust --max-iter / --max-runtime to your overnight budget.
-    4. Make sure {{REPO}}/PROMPT.md exists and is filled in.
-    5. Copy to ~/Library/LaunchAgents/:
+    1. Inside a shell that has the ralph-trio plugin active (any shell where
+       `claude` would activate plugins works), discover the absolute path:
+         command -v ralph-solo.sh
+       It will look something like
+         /Users/you/.claude/plugins/<marketplace>/<install-id>/ralph-trio/bin/ralph-solo.sh
+       Capture it:
+         RALPH_SOLO_BIN=$(command -v ralph-solo.sh)
+         REPO=$(pwd)   # or the absolute path to your repo
+
+    2. Substitute both placeholders in this template:
+         sed -e "s|{{REPO}}|$REPO|g" \
+             -e "s|{{RALPH_SOLO_BIN}}|$RALPH_SOLO_BIN|g" \
+             com.user.ralph.plist.template > com.user.ralph.plist
+
+    3. (Optional) Adjust Hour/Minute below for your preferred start time.
+    4. (Optional) Adjust --max-iter / --max-runtime to your overnight budget.
+    5. Make sure {{REPO}}/PROMPT.md exists and is filled in — see
+       /ralph-trio:bootstrap (skill) or copy prompts/PROMPT.md.template manually.
+
+    6. Copy + load:
          cp com.user.ralph.plist ~/Library/LaunchAgents/
-    6. Load:
          launchctl load -w ~/Library/LaunchAgents/com.user.ralph.plist
-    7. Manually trigger once to verify:
+
+    7. Manually trigger once to verify (this fires immediately rather than
+       waiting for the scheduled time):
          launchctl start com.user.ralph
+
     8. Inspect:
-         tail -F {{REPO}}/.agents-ralph/log/overnight/launchd.log
+         tail -F {{REPO}}/.ralph-trio/log/overnight/launchd.stdout.log
+         tail -F {{REPO}}/.ralph-trio/log/overnight/launchd.stderr.log
 
   To stop / unload:
     launchctl unload -w ~/Library/LaunchAgents/com.user.ralph.plist
 
+  Caveat — plugin install paths are volatile. The absolute path captured at
+  step 1 can drift when the marketplace is re-installed or the plugin updates
+  to a new install-id. If launchd starts failing with "command not found",
+  re-run step 1 and re-deploy. For an overnight job that survives plugin
+  re-installs, symlink ralph-solo.sh to a stable location once:
+    ln -sf "$(command -v ralph-solo.sh)" ~/bin/ralph-solo
+  and point this template at ~/bin/ralph-solo instead.
+
   Cron alternative (one line in `crontab -e`, runs at 23:00 daily):
-    0 23 * * * cd {{REPO}} && AGENT_TEAM=overnight \
-      .agents-ralph/scripts/ralph-solo.sh \
+    0 23 * * * cd {{REPO}} && AGENT_TEAM=overnight {{RALPH_SOLO_BIN}} \
       --max-iter 50 --max-runtime 6h --worktree \
       --prompt {{REPO}}/PROMPT.md \
-      >> {{REPO}}/.agents-ralph/log/overnight/cron.log 2>&1
+      >> {{REPO}}/.ralph-trio/log/overnight/cron.log 2>&1
 
   Safety notes:
     - --worktree is STRONGLY recommended for unattended runs. Without it,
@@ -48,7 +81,7 @@
   <array>
     <string>/bin/bash</string>
     <string>-c</string>
-    <string>cd {{REPO}} &amp;&amp; AGENT_TEAM=overnight {{REPO}}/.agents-ralph/scripts/ralph-solo.sh --max-iter 50 --max-runtime 6h --worktree --prompt {{REPO}}/PROMPT.md --test-cmd 'echo replace-with-your-test-command'</string>
+    <string>cd {{REPO}} &amp;&amp; AGENT_TEAM=overnight {{RALPH_SOLO_BIN}} --max-iter 50 --max-runtime 6h --worktree --prompt {{REPO}}/PROMPT.md --test-cmd 'echo replace-with-your-test-command'</string>
   </array>
 
   <key>RunAtLoad</key>
@@ -66,10 +99,10 @@
   <string>{{REPO}}</string>
 
   <key>StandardOutPath</key>
-  <string>{{REPO}}/.agents-ralph/log/overnight/launchd.stdout.log</string>
+  <string>{{REPO}}/.ralph-trio/log/overnight/launchd.stdout.log</string>
 
   <key>StandardErrorPath</key>
-  <string>{{REPO}}/.agents-ralph/log/overnight/launchd.stderr.log</string>
+  <string>{{REPO}}/.ralph-trio/log/overnight/launchd.stderr.log</string>
 
   <key>EnvironmentVariables</key>
   <dict>

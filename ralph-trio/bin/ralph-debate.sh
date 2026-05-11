@@ -199,10 +199,17 @@ while :; do
     VERDICT="STRENGTHEN"
     DEBATE_DIR=""
   else
+    # Pin DEBATE_LOG_DIR explicitly so it survives the cd into $WORK_DIR. Under
+    # --worktree, $WORK_DIR is the throwaway worktree path — without this pin
+    # debate.sh would default to $WORK_DIR/.debate-conductor/log and write its
+    # latest-debate symlink there, while our DEBATE_TEAM_DIR (resolved before
+    # the cd) still points at $ORIGINAL_DIR/.debate-conductor/log, so the
+    # subsequent latest-debate lookup would miss the just-created transcript
+    # and turn every completed debate into an UNKNOWN verdict.
     if [ -n "$PROMPT_FILE" ]; then
-      ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" debate.sh -n "$ROUNDS" "$TASK" "$PROMPT_FILE" >&2 ) || true
+      ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEBATE_LOG_DIR="$DEBATE_LOG_BASE" debate.sh -n "$ROUNDS" "$TASK" "$PROMPT_FILE" >&2 ) || true
     else
-      ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" debate.sh -n "$ROUNDS" "$TASK" >&2 ) || true
+      ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEBATE_LOG_DIR="$DEBATE_LOG_BASE" debate.sh -n "$ROUNDS" "$TASK" >&2 ) || true
     fi
     # Locate the just-created debate dir via the latest-debate symlink.
     DEBATE_DIR_NAME=$(readlink "$DEBATE_TEAM_DIR/latest-debate" 2>/dev/null || true)

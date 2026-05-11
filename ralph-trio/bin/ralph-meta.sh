@@ -82,13 +82,60 @@ TS=$(date +%Y%m%d-%H%M%S)
 META_LOG="$LOG_DIR/ralph-meta-$TS.log"
 AUDIT_MD="$LOG_DIR/ralph-meta-$TS.md"
 
-# Find ralph log files since the cutoff
-PATTERN="ralph-*-*.log"
-[ -n "$VARIANT" ] && PATTERN="ralph-$VARIANT-*-*.log"
-mapfile -t RALPH_LOGS < <(find "$LOG_DIR" -maxdepth 1 -name "$PATTERN" -newermt "$SINCE" 2>/dev/null | sort)
+# Find ralph log files since the cutoff. Bash 3.2 + BSD find on macOS lack
+# `mapfile` and `find -newermt`, so we drive the filter through python3 (which
+# we already require for the Stop-hook) and accumulate with while-read.
+PATTERN_GLOB="ralph-*-*.log"
+[ -n "$VARIANT" ] && PATTERN_GLOB="ralph-$VARIANT-*-*.log"
 
-# Find ralph commits in git history since the cutoff (uses cwd's repo)
-mapfile -t RALPH_COMMITS < <(git log --since="$SINCE" --pretty=format:'%h %s' --grep='^ralph' 2>/dev/null)
+# Parse $SINCE to an epoch cutoff. Supports:
+#   absolute: "YYYY-MM-DD [HH:MM[:SS]]"
+#   relative: "N {seconds,minutes,hours,days,weeks} ago"
+# (--since-latest-run already normalises to the absolute form upstream.)
+CUTOFF=$(python3 - "$SINCE" <<'PY'
+import re, sys
+from datetime import datetime, timedelta
+spec = sys.argv[1].strip()
+now = datetime.now()
+m = re.match(r'^(\d+)\s+(second|minute|hour|day|week)s?\s+ago$', spec)
+if m:
+    n, unit = int(m.group(1)), m.group(2)
+    delta = {'second': timedelta(seconds=n), 'minute': timedelta(minutes=n),
+             'hour':   timedelta(hours=n),   'day':    timedelta(days=n),
+             'week':   timedelta(weeks=n)}[unit]
+    cutoff = now - delta
+else:
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d'):
+        try:
+            cutoff = datetime.strptime(spec, fmt)
+            break
+        except ValueError:
+            continue
+    else:
+        sys.exit(2)
+print(int(cutoff.timestamp()))
+PY
+) || { echo "ralph-meta: could not parse --since '$SINCE' (expected 'YYYY-MM-DD [HH:MM[:SS]]' or 'N {minutes,hours,days,weeks} ago')" >&2; exit 2; }
+
+RALPH_LOGS=()
+while IFS= read -r f; do
+  [ -n "$f" ] && RALPH_LOGS+=("$f")
+done < <(
+  for f in "$LOG_DIR"/$PATTERN_GLOB; do
+    [ -f "$f" ] || continue
+    # mtime in epoch seconds, portable across BSD (-f) and GNU (-c).
+    mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo "")
+    [ -n "$mtime" ] || continue
+    [ "$mtime" -ge "$CUTOFF" ] && printf '%s\n' "$f"
+  done | sort
+)
+
+# Find ralph commits in git history since the cutoff (uses cwd's repo). git's
+# own --since parser is liberal enough to consume the same forms above.
+RALPH_COMMITS=()
+while IFS= read -r line; do
+  [ -n "$line" ] && RALPH_COMMITS+=("$line")
+done < <(git log --since="$SINCE" --pretty=format:'%h %s' --grep='^ralph' 2>/dev/null)
 
 ralph_log "scope: $TEAM, since=$SINCE, variant=${VARIANT:-any}"
 ralph_log "  ralph logs found: ${#RALPH_LOGS[@]}"
