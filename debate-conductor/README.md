@@ -50,13 +50,19 @@ claude --plugin-dir ./agent-team-plugins/debate-conductor
    ```
    This splits the current pane into 3 columns and starts the role-tail viewers.
 
-3. Run a debate:
+3. (Recommended on first install) Install the PM orchestration policy into the workspace's `CLAUDE.md`:
+   ```
+   /debate-conductor:install-pm
+   ```
+   This appends a marked block to `$PWD/CLAUDE.md` between `<!-- BEGIN debate-conductor PM policy -->` / `<!-- END debate-conductor PM policy -->`. Re-running upgrades in place; safe to run again after plugin updates. The policy is intentionally tight (~20 lines) and only carries the per-turn routing rules: when to dispatch a debate vs answer directly, how to frame the stance, how to report the verdict back.
+
+4. Run a debate:
    ```
    /debate-conductor:run 1
    ```
    Resolves topic 1 from `topics/`, runs the default 3-round debate (Gemini gen → Codex crit → Gemini gen), and afterwards Claude reads the round files and surfaces verdict + move-by-move.
 
-4. Follow up in natural language: "round 3 결정타?", "5라운드로 다시 돌려줘", "rotate ON으로 토픽 2", etc.
+5. Follow up in natural language: "round 3 결정타?", "5라운드로 다시 돌려줘", "rotate ON으로 토픽 2", etc.
 
 ## Workspace topics
 
@@ -89,6 +95,7 @@ Override the log location with `DEBATE_LOG_DIR=/path/to/logs`.
 | `/debate-conductor:bootstrap` | One-time per session: splits the current tmux pane into 3 and starts role tails. |
 | `/debate-conductor:run [N] [rounds]` | Resolves topic N, runs `debate.sh`, summarises verdict + moves. |
 | `/debate-conductor:continue [extra-rounds]` | Append N more rounds (default 2) to the most recent debate in the same `debate-<TS>/`. Round numbering continues; tail panes pick up new rounds without retarget. |
+| `/debate-conductor:install-pm` | Writes/upgrades the PM orchestration policy in the workspace's `CLAUDE.md` (idempotent, marker-guarded). Tells Claude when to dispatch a debate vs answer directly. |
 
 All skills have `disable-model-invocation: true` — Claude won't trigger them implicitly. You always invoke explicitly via `/`.
 
@@ -107,14 +114,16 @@ debate-conductor/
 ├── skills/
 │   ├── bootstrap/SKILL.md
 │   ├── run/SKILL.md
-│   └── continue/SKILL.md
+│   ├── continue/SKILL.md
+│   └── install-pm/SKILL.md
 ├── bin/                       # on PATH while plugin is active
 │   ├── debate.sh              # round orchestrator (skill calls this)
 │   ├── team-3pane.sh          # tmux 3-pane splitter (--here mode)
 │   └── tail-role.sh           # live-tail one role's round files
-├── lib/                       # internal — invoked by debate.sh, not user-facing
+├── lib/                       # internal — invoked by debate.sh / install-pm
 │   ├── ask-generator.sh       # Generator wrapper (gemini|codex|claude)
 │   ├── ask-critic.sh          # Critic wrapper (codex|gemini|claude)
+│   ├── pm.md                  # PM orchestration policy (source of truth)
 │   └── roles/
 │       ├── generator.md       # Generator role prompt
 │       └── critic.md          # Critic role prompt
