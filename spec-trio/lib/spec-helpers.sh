@@ -80,8 +80,18 @@ path_in_allowlist() {
 # Enumerate changed paths under <work_dir> the same way the reviewer would
 # inspect them: tracked modifications, staged changes, untracked-and-not-
 # ignored files, and committed-but-not-yet-on-base diffs. De-duplicated.
+#
+# <base_ref> (optional, but strongly preferred): SHA recorded at the start of
+# this iteration. When supplied, the committed-diff scan walks $base_ref..HEAD
+# so EVERY commit the coder made during the iteration is inspected — not just
+# the last commit's diff to its parent. Without it, a coder that makes two
+# commits in one iter could land an out-of-scope path in the first commit and
+# slip past the gate (the second commit's diff hides it from git status). The
+# legacy HEAD~1..HEAD fallback only fires when no base_ref is supplied (kept
+# for standalone-test invocations of this helper).
 collect_changed_paths() {
   local work_dir="$1"
+  local base_ref="${2:-}"
   {
     # Uncommitted (staged + unstaged) via porcelain v1.
     # Format: "XY path" where XY is two-char status, path may contain "->" for renames.
@@ -99,9 +109,15 @@ collect_changed_paths() {
         }
       }
     '
-    # Committed-but-not-yet-on-base (worktree mode common case): list paths
-    # touched by HEAD vs its parent. If HEAD has no parent, this is empty.
-    git -C "$work_dir" diff --name-only HEAD~1 HEAD 2>/dev/null
+    # Committed-but-not-yet-on-base. Prefer the iter-base ref so all commits
+    # made during this iteration are caught; fall back to HEAD~1..HEAD only
+    # when no base was supplied. Empty output is fine (e.g. no commits yet,
+    # or HEAD == base_ref).
+    if [ -n "$base_ref" ]; then
+      git -C "$work_dir" diff --name-only "$base_ref" HEAD 2>/dev/null
+    else
+      git -C "$work_dir" diff --name-only HEAD~1 HEAD 2>/dev/null
+    fi
   } | awk 'NF { gsub(/^"|"$/, "", $0); if (!seen[$0]++) print }'
 }
 
@@ -114,9 +130,9 @@ collect_changed_paths() {
 # output. Those paths are excluded from the change set before the allowlist
 # check, so harness bookkeeping doesn't trip the scope gate.
 check_scope() {
-  local work_dir="$1" allowlist="$2" scope_log="$3" ignore_list="${4:-}"
+  local work_dir="$1" allowlist="$2" scope_log="$3" ignore_list="${4:-}" base_ref="${5:-}"
   local changed normalized_list
-  changed="$(collect_changed_paths "$work_dir")"
+  changed="$(collect_changed_paths "$work_dir" "$base_ref")"
 
   # Drop harness-managed paths from the change set (after newline-split) so
   # the allowlist check only sees worker output.

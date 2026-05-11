@@ -314,6 +314,110 @@ assert_cmd "BACKLOG.md preserved (both entries unchecked)" \
   "[ \"\$(grep -c '^- \\[ \\]' $WD8b/BACKLOG.md)\" = '2' ]"
 
 # --------------------------------------------------------------------------
+section "Case 9a: gate 2 catches an earlier commit in a multi-commit iter"
+# Regression for check_scope's diff range: the legacy HEAD~1..HEAD walk only
+# saw the iter's LAST commit, so a coder that staged an out-of-scope path in
+# commit #1 and an in-scope path in commit #2 would slip past gate 2. The
+# iter-base SHA (ITER_BASE_SHA) recorded at iter start now feeds a full
+# base..HEAD walk so every commit is inspected.
+WD9a="$(mktemp -d -t spec-pr5-9a-XXXXXX)"
+( cd "$WD9a"
+  git init -q
+  cat > spec.md <<'EOF'
+# Smoke spec
+## §1 Goals
+foo() returns 42.
+## §5 Test criteria
+### §5.1 returns 42
+EOF
+  printf -- '- [ ] §5.1 add foo() (multi-commit)\n' > BACKLOG.md
+  cat > wrap-claude.sh <<'CLAUDE_EOF'
+#!/usr/bin/env bash
+PROMPT="$2"
+if printf '%s' "$PROMPT" | grep -q 'Spec-driven Planner'; then
+  cat <<'PLAN'
+<allowed-paths>foo.py</allowed-paths>
+PLAN
+elif printf '%s' "$PROMPT" | grep -q 'Spec-driven Worker'; then
+  # Commit 1: bar.py (OUT-OF-SCOPE — not in allowlist). Commit 2: foo.py
+  # (in allowlist). HEAD~1..HEAD only shows foo.py; iter-base..HEAD shows both.
+  printf 'bar = 1\n' > bar.py
+  git add bar.py >/dev/null 2>&1
+  git -c user.email=w@test -c user.name=w commit -qm "spec §5.1: stage bar.py first" >/dev/null 2>&1
+  printf 'def foo():\n    return 42\n' > foo.py
+  git add foo.py >/dev/null 2>&1
+  git -c user.email=w@test -c user.name=w commit -qm "spec §5.1: add foo.py" >/dev/null 2>&1
+fi
+CLAUDE_EOF
+  cat > wrap-codex.sh <<'CODEX_EOF'
+#!/usr/bin/env bash
+echo "## Verdict"
+echo "SHIP — fine"
+CODEX_EOF
+  chmod +x wrap-claude.sh wrap-codex.sh
+  git add spec.md BACKLOG.md wrap-claude.sh wrap-codex.sh
+  git -c user.email=smoke@test -c user.name=smoke commit -qm "smoke fixtures"
+)
+run_spec_trio case9a "$WD9a" --max-iter 1
+LD9a="$(case_log_dir case9a)"
+S9a="$LD9a/spec-trio-*-iter-1-scope.manifest.json"
+assert_cmd "scope manifest emitted (gate 2 caught earlier commit)" "ls $S9a"
+assert_eq  "scope verdict=OUT-OF-SCOPE" "OUT-OF-SCOPE" "$(manifest_field "$S9a" '.verdict')"
+assert_eq  "scope-fail=scope-violation" "scope-violation" "$(manifest_field "$S9a" '[.inputs[]?|select(.kind=="scope-fail")|.value][0]')"
+# Confirm the scope log specifically called out bar.py as the offending path.
+assert_cmd "scope log lists bar.py as offending" \
+  "grep -qE '^bar\\.py\$' $LD9a/spec-trio-*-iter-1-scope.log"
+
+# --------------------------------------------------------------------------
+section "Case 9b: --coverage-requeue handles workspace paths with spaces"
+# Regression for unquoted REQUEUE_ARGS / MANIFEST_HISTORY_ARGS expansion in
+# spec-trio.sh: if either the workspace or backlog path contained a space,
+# the old string-built form split on whitespace and spec-coverage.sh got the
+# wrong arguments (silently dropping --requeue or pointing --manifest-history
+# at half a path). The fix builds an argv array.
+WD9b_BASE="$(mktemp -d -t spec-pr5-9b-XXXXXX)"
+WD9b="$WD9b_BASE/work dir with spaces"
+mkdir -p "$WD9b"
+( cd "$WD9b"
+  git init -q
+  cat > spec.md <<'EOF'
+# Smoke spec
+## §1 Goals
+trivial
+## §5 Test criteria
+### §5.99 deliberately-not-covered criterion
+EOF
+  printf -- '- [ ] §5.99 placeholder\n' > BACKLOG.md
+  cat > wrap-claude.sh <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  cat > wrap-codex.sh <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x wrap-claude.sh wrap-codex.sh
+  git add spec.md BACKLOG.md wrap-claude.sh wrap-codex.sh
+  git -c user.email=smoke@test -c user.name=smoke commit -qm "fixtures"
+)
+# Also put SPEC_TRIO_WORKSPACE under a path with spaces so $LOG_DIR (passed
+# to --manifest-history) contains a space too.
+(
+  cd "$WD9b"
+  SPEC_TRIO_WORKSPACE="$WD9b_BASE/spec ws with spaces" \
+  AGENT_TEAM="smoke-pr5-case9b" \
+  CLAUDE_CLI="$WD9b/wrap-claude.sh" CODEX_CLI="$WD9b/wrap-codex.sh" \
+    "$SPEC_TRIO" --spec "$WD9b/spec.md" --backlog "$WD9b/BACKLOG.md" \
+      --no-research --max-iter 1 --dry-run --coverage-check --coverage-requeue \
+      >/dev/null 2>&1
+)
+# §5.99 was never cited in any commit; --coverage-requeue should append it.
+# If the args had been split on space, --requeue would point at a partial
+# path or be silently dropped, and the line wouldn't appear.
+assert_cmd "spaces-in-path: BACKLOG appended with §5.99 coverage gap" \
+  "grep -q 'spec coverage gap §5.99' '$WD9b/BACKLOG.md'"
+
+# --------------------------------------------------------------------------
 section "Case 8: re-init guard (unit-style, direct source)"
 T9="$(mktemp -d -t spec-pr5-guard-XXXXXX)"
 GUARD_OUT="$(

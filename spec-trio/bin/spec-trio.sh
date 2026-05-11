@@ -334,6 +334,13 @@ while :; do
     export RALPH_WT_DIR="$WT"
     printf '  worktree: %s\n' "$WT" >> "$SUMMARY_LOG"
   fi
+  # Iter-base SHA: HEAD as of this iter's start, captured AFTER worktree setup
+  # (so worktree mode anchors on the throwaway branch, not $ORIGINAL_DIR).
+  # check_scope uses this to walk every commit the coder produces during the
+  # iter — without it the gate would only see HEAD~1..HEAD and miss earlier
+  # commits in a multi-commit iter. Empty (e.g. unborn HEAD) → check_scope
+  # falls back to its legacy HEAD~1..HEAD behavior.
+  ITER_BASE_SHA="$(git -C "$WORK_DIR" rev-parse HEAD 2>/dev/null || true)"
 
   PLAN_LOG="$LOG_DIR/spec-trio-$TS-iter-$ITER-plan.log"
   CODE_LOG="$LOG_DIR/spec-trio-$TS-iter-$ITER-code.log"
@@ -474,7 +481,7 @@ while :; do
           ;;
       esac
     done
-    if check_scope "$WORK_DIR" "$ALLOWED_PATHS_LIST" "$SCOPE_LOG" "$HARNESS_IGNORE"; then
+    if check_scope "$WORK_DIR" "$ALLOWED_PATHS_LIST" "$SCOPE_LOG" "$HARNESS_IGNORE" "$ITER_BASE_SHA"; then
       printf '  scope:    in-scope\n' >> "$SUMMARY_LOG"
     else
       if [ "$STRICT_SCOPE" = "1" ]; then
@@ -672,22 +679,27 @@ if [ "$COVERAGE_CHECK" = "1" ]; then
   if [ ! -x "$COVERAGE_HELPER" ]; then
     echo "WARN: $COVERAGE_HELPER not found or not executable; skipping --coverage-check" | tee -a "$SUMMARY_LOG" >&2
   else
-    REQUEUE_ARGS=""
-    [ "$COVERAGE_REQUEUE" = "1" ] && REQUEUE_ARGS="--requeue $BACKLOG_FILE"
+    # Build coverage helper's extra-args as an array so paths with spaces
+    # (BACKLOG.md path, $LOG_DIR) survive intact. The earlier string-built
+    # form expanded unquoted and split on whitespace, which would silently
+    # break --coverage-requeue or --manifest-history when the workspace or
+    # backlog path contained a space.
+    COVERAGE_EXTRA_ARGS=()
+    if [ "$COVERAGE_REQUEUE" = "1" ]; then
+      COVERAGE_EXTRA_ARGS+=( --requeue "$BACKLOG_FILE" )
+    fi
     # RFC 0004 PR 5: pass --manifest-history when this run produced manifests
     # so spec-coverage's report can roll up reviewer verdicts per §5.N.
-    MANIFEST_HISTORY_ARGS=""
     if [ -n "$(ls "$LOG_DIR"/*.manifest.json 2>/dev/null)" ]; then
-      MANIFEST_HISTORY_ARGS="--manifest-history $LOG_DIR"
+      COVERAGE_EXTRA_ARGS+=( --manifest-history "$LOG_DIR" )
     fi
     {
       echo
       echo "=== coverage check @ $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
       echo "since-ref: $START_HEAD"
       echo
-      # shellcheck disable=SC2086
       "$COVERAGE_HELPER" --spec "$SPEC_FILE" --since-ref "$START_HEAD" \
-        --repo "$ORIGINAL_DIR" $REQUEUE_ARGS $MANIFEST_HISTORY_ARGS --quiet
+        --repo "$ORIGINAL_DIR" "${COVERAGE_EXTRA_ARGS[@]+${COVERAGE_EXTRA_ARGS[@]}}" --quiet
     } 2>&1 | tee "$COVERAGE_LOG" >> "$SUMMARY_LOG"
     echo "coverage report: $COVERAGE_LOG" >&2
   fi
