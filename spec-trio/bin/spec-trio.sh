@@ -268,8 +268,16 @@ COMPLETED=0
 # the loop after that many iters; matches the non-dry-run "backlog drained"
 # stop. Set to 0 when not in dry-run (unused on that path).
 if [ "$DRY_RUN" = "1" ]; then
-  DRY_RUN_BACKLOG_COUNT=$(grep -cE '^[[:space:]]*-[[:space:]]*\[[ ]\][[:space:]]+' "$BACKLOG_FILE" 2>/dev/null || echo 0)
-  [ "$DRY_RUN_BACKLOG_COUNT" -lt 1 ] && DRY_RUN_BACKLOG_COUNT=1
+  # Count unchecked BACKLOG entries up front. The pipe-to-wc form is
+  # deliberate: `grep -c` exits rc=1 on zero matches AND still prints "0",
+  # so the prior `|| echo 0` fallback yielded "0\n0" — a non-integer that
+  # made the later -gt / -lt tests fail with "integer expression expected"
+  # and (with --max-iter 0) silently restored the infinite dry-run loop on
+  # the empty-or-fully-checked BACKLOG case this cap exists to prevent.
+  # wc -l always emits a single integer; tr strips BSD wc's leading
+  # whitespace. Defense-in-depth: any unexpected non-numeric → 0.
+  DRY_RUN_BACKLOG_COUNT=$(grep -E '^[[:space:]]*-[[:space:]]*\[[ ]\][[:space:]]+' "$BACKLOG_FILE" 2>/dev/null | wc -l | tr -d ' ')
+  case "$DRY_RUN_BACKLOG_COUNT" in *[!0-9]*|"") DRY_RUN_BACKLOG_COUNT=0 ;; esac
 else
   DRY_RUN_BACKLOG_COUNT=0
 fi

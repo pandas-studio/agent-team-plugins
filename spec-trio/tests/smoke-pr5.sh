@@ -314,6 +314,31 @@ assert_cmd "BACKLOG.md preserved (both entries unchecked)" \
   "[ \"\$(grep -c '^- \\[ \\]' $WD8b/BACKLOG.md)\" = '2' ]"
 
 # --------------------------------------------------------------------------
+section "Case 8c: --dry-run --max-iter 0 on empty BACKLOG terminates cleanly"
+# Regression for the grep -c rc=1 + `|| echo 0` non-numeric bug: when the
+# BACKLOG had zero unchecked entries, DRY_RUN_BACKLOG_COUNT became "0\n0",
+# making the later -gt comparison fail with "integer expression expected"
+# and (under --max-iter 0) restoring the infinite loop. Fix uses a wc-pipe
+# form. With the fix, count=0 ⇒ the very first iter check breaks out and
+# no stage manifests are emitted.
+WD8c="$(make_workspace 'unused' '' 'unused' '- [x] already done')"
+# Override the task line — make_workspace seeds an unchecked entry; we want
+# the BACKLOG to be effectively empty (all entries already checked) so the
+# count is genuinely 0.
+printf '%s\n' '- [x] already done' > "$WD8c/BACKLOG.md"
+run_spec_trio case8c "$WD8c" --max-iter 0 --dry-run
+LD8c="$(case_log_dir case8c)"
+assert_eq  "empty BACKLOG: 0 iter manifests emitted" \
+  "0" "$(ls $LD8c/spec-trio-*-iter-*-plan.manifest.json 2>/dev/null | wc -l | tr -d ' ')"
+# Summary log still gets written (header + STOP line). Confirm the STOP
+# reason is dry-run-backlog-empty, not a hang/timeout (which the test
+# would have triggered by exceeding the smoke's max time budget).
+assert_cmd "empty BACKLOG: STOP recorded as dry-run-backlog-empty" \
+  "grep -q 'STOP (dry-run-backlog-empty)' $LD8c/spec-trio-*.log"
+assert_cmd "empty BACKLOG: BACKLOG.md unchanged" \
+  "grep -q '^- \\[x\\] already done\$' $WD8c/BACKLOG.md"
+
+# --------------------------------------------------------------------------
 section "Case 9a: gate 2 catches an earlier commit in a multi-commit iter"
 # Regression for check_scope's diff range: the legacy HEAD~1..HEAD walk only
 # saw the iter's LAST commit, so a coder that staged an out-of-scope path in
