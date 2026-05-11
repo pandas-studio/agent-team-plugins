@@ -298,6 +298,8 @@ while :; do
   RESEARCH_RUN_ID=""
   CODE2_RUN_ID=""
   REVIEW2_RUN_ID=""
+  PLAN_FAILED=0
+  PLAN_RC=0
   if ! enforce_max_iter "$ITER" "$MAX_ITER"; then
     ralph_log "max-iter cap reached ($MAX_ITER). Stopping."
     echo "=== STOP (max-iter) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
@@ -373,7 +375,21 @@ while :; do
     fi
     PLAN_PROMPT=$(build_planner_prompt "$TASK" "$PROMPT_CONTEXT" "$FP_EXCERPT")
     ( cd "$WORK_DIR" && "${PLANNER_CLI:-${CLAUDE_CLI:-claude}}" -p "$PLAN_PROMPT" 2>&1 ) | tee "$PLAN_LOG" >/dev/null
+    PLAN_RC="${PIPESTATUS[0]}"
     PLAN="$(cat "$PLAN_LOG")"
+    if [ "$PLAN_RC" != "0" ]; then
+      # Planner CLI exited non-zero (auth, rate-limit, missing binary, …).
+      # Without this check the loop would treat the planner's stderr as the
+      # plan and feed it to a coder that has no way to know the plan is bogus.
+      # Worse: pop_top_task already consumed the BACKLOG entry, so the task
+      # would silently disappear. Mark the iter as plan-failed; Stage 2 + 3
+      # below treat the flag as a hard skip and the verdict dispatch
+      # re-queues via the NEEDS-FIX path.
+      PLAN_FAILED=1
+      manifest_add_input kind=skip-reason value=plan-failed
+      manifest_add_input kind=plan-rc value="$PLAN_RC"
+      ralph_log "  [stage 1/3] planner exited rc=$PLAN_RC — marking iter PLAN-FAILED (re-queue task, skip Stage 2+3)"
+    fi
   fi
   manifest_finalize
   PARENT_RUN_ID="$PLAN_RUN_ID"
@@ -388,28 +404,41 @@ while :; do
   fi
 
   # ---- Stage 2: Coder ----
-  ralph_log "  [stage 2/3] coder  → $CODE_LOG"
   CODE_RC=0
-  manifest_init ralph-code "$CODE_LOG"
-  CODE_RUN_ID="$MANIFEST_RUN_ID"
-  manifest_set_parent "$PARENT_RUN_ID"
-  manifest_add_input kind=task value="$TASK"
-  manifest_add_input kind=plan path="$PLAN_LOG"
-  if [ "$DRY_RUN" = "1" ]; then
-    manifest_add_input kind=skip-reason value=dry-run
-    echo "[dry-run code] would implement plan for: $TASK" | tee "$CODE_LOG" >/dev/null
+  if [ "$PLAN_FAILED" = "1" ]; then
+    ralph_log "  [stage 2/3] coder SKIPPED (planner failed rc=$PLAN_RC)"
+    echo "PLAN_FAILED=1 — skipping coder (planner exited rc=$PLAN_RC)" > "$CODE_LOG"
+    manifest_init ralph-code "$CODE_LOG"
+    CODE_RUN_ID="$MANIFEST_RUN_ID"
+    manifest_set_parent "$PARENT_RUN_ID"
+    manifest_add_input kind=task value="$TASK"
+    manifest_add_input kind=plan path="$PLAN_LOG"
+    manifest_add_input kind=skip-reason value=plan-failed
+    manifest_finalize
+    PARENT_RUN_ID="$CODE_RUN_ID"
   else
-    manifest_add_role worker claude "$ROLES_DIR/worker.md"
-    [ -n "$PROMPT_FILE" ] && manifest_add_input kind=prompt-md path="$PROMPT_FILE"
-    if [ "$INJECT_FIX_PLAN" = "1" ]; then
-      manifest_add_input kind=fix-plan path="$FIX_PLAN_FILE"
-      manifest_add_input kind=fix-plan-tail value="$FIX_PLAN_TAIL"
+    ralph_log "  [stage 2/3] coder  → $CODE_LOG"
+    manifest_init ralph-code "$CODE_LOG"
+    CODE_RUN_ID="$MANIFEST_RUN_ID"
+    manifest_set_parent "$PARENT_RUN_ID"
+    manifest_add_input kind=task value="$TASK"
+    manifest_add_input kind=plan path="$PLAN_LOG"
+    if [ "$DRY_RUN" = "1" ]; then
+      manifest_add_input kind=skip-reason value=dry-run
+      echo "[dry-run code] would implement plan for: $TASK" | tee "$CODE_LOG" >/dev/null
+    else
+      manifest_add_role worker claude "$ROLES_DIR/worker.md"
+      [ -n "$PROMPT_FILE" ] && manifest_add_input kind=prompt-md path="$PROMPT_FILE"
+      if [ "$INJECT_FIX_PLAN" = "1" ]; then
+        manifest_add_input kind=fix-plan path="$FIX_PLAN_FILE"
+        manifest_add_input kind=fix-plan-tail value="$FIX_PLAN_TAIL"
+      fi
+      CODE_PROMPT=$(build_coder_prompt "$TASK" "$PLAN" "$PROMPT_CONTEXT" "" "$FP_EXCERPT")
+      ( cd "$WORK_DIR" && "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p "$CODE_PROMPT" 2>&1 ) | tee "$CODE_LOG" >/dev/null || CODE_RC=$?
     fi
-    CODE_PROMPT=$(build_coder_prompt "$TASK" "$PLAN" "$PROMPT_CONTEXT" "" "$FP_EXCERPT")
-    ( cd "$WORK_DIR" && "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p "$CODE_PROMPT" 2>&1 ) | tee "$CODE_LOG" >/dev/null || CODE_RC=$?
+    manifest_finalize
+    PARENT_RUN_ID="$CODE_RUN_ID"
   fi
-  manifest_finalize
-  PARENT_RUN_ID="$CODE_RUN_ID"
   printf '  code rc:  %d\n' "$CODE_RC" >> "$SUMMARY_LOG"
 
   # ---- Stage 3: Reviewer ----
@@ -418,7 +447,30 @@ while :; do
   manifest_set_parent "$PARENT_RUN_ID"
   manifest_add_input kind=task value="$TASK"
   manifest_add_input kind=code-log path="$CODE_LOG"
-  if [ "$AUTOSHIP" = "1" ]; then
+  if [ "$PLAN_FAILED" = "1" ]; then
+    # Planner exited non-zero; we never ran Stage 2. Don't fabricate a SHIP.
+    # NEEDS-FIX routes to the dispatch's re-queue path so the task gets
+    # another shot (next iter, fresh planner attempt).
+    VERDICT="NEEDS-FIX"
+    ralph_log "  [stage 3/3] reviewer SKIPPED (planner failed)"
+    echo "PLAN_FAILED=1 — skipping reviewer (planner rc=$PLAN_RC, see $PLAN_LOG)" > "$REVIEW_LOG"
+    manifest_add_input kind=skip-reason value=plan-failed
+    manifest_add_input kind=plan-rc value="$PLAN_RC"
+    manifest_set_verdict NEEDS-FIX
+    manifest_finalize
+  elif [ "$AUTOSHIP" = "1" ] && [ "$CODE_RC" != "0" ]; then
+    # --autoship skips review, NOT coder failure. Without this check, a
+    # broken coder run (rate-limit, partial diff, missing CLI) would be
+    # marked SHIP and — in worktree mode — get fast-forward-merged. Route
+    # to NEEDS-FIX (re-queue) so the task survives a transient coder error.
+    VERDICT="NEEDS-FIX"
+    ralph_log "  [stage 3/3] reviewer SKIPPED (--autoship), but coder rc=$CODE_RC — NEEDS-FIX (re-queue, refusing to ship a failed coder run)"
+    echo "AUTOSHIP=1 + coder rc=$CODE_RC — refusing to ship a failed coder run" > "$REVIEW_LOG"
+    manifest_add_input kind=skip-reason value=autoship-coder-failed
+    manifest_add_input kind=coder-rc value="$CODE_RC"
+    manifest_set_verdict NEEDS-FIX
+    manifest_finalize
+  elif [ "$AUTOSHIP" = "1" ]; then
     VERDICT="SHIP"
     ralph_log "  [stage 3/3] reviewer SKIPPED (--autoship)"
     echo "AUTOSHIP=1 — skipping codex review" > "$REVIEW_LOG"
