@@ -4,14 +4,14 @@
   "description": "Multi-CLI agent team patterns from pandas-studio's YouTube series. Each plugin packages a Claude-as-conductor pattern with companion CLIs (Gemini, Codex) playing specialised roles.",
   "plugins": [
     {
-      "name": "debate-conductor",
-      "source": "./debate-conductor",
-      "description": "Claude conducts a Generator(Gemini) vs Critic(Codex) adversarial debate over N rounds. Three-pane tmux view; bootstrap + run + continue skills."
-    },
-    {
       "name": "dev-trio",
       "source": "./dev-trio",
       "description": "Claude PM orchestrates a 3-vendor dev team: Gemini (Researcher) + Codex (Reviewer). Three-pane tmux view; bootstrap + research + review + install-pm skills."
+    },
+    {
+      "name": "debate-conductor",
+      "source": "./debate-conductor",
+      "description": "Claude conducts a Generator(Gemini) vs Critic(Codex) adversarial debate over N rounds. Three-pane tmux view; bootstrap + run + continue skills."
     }
   ]
 }
