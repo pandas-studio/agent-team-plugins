@@ -12,22 +12,22 @@ Claude Code plugin marketplace from pandas-studio's YouTube series on multi-CLI 
 Then install the plugins you want:
 
 ```bash
-/plugin install debate-conductor@pandas-studio
 /plugin install dev-trio@pandas-studio
+/plugin install debate-conductor@pandas-studio
 ```
 
 ## Plugins
 
 | Name | Roles | Episode | Status |
 | :--- | :--- | :--- | :--- |
-| [debate-conductor](./debate-conductor) | Claude=PM · Gemini=Generator · Codex=Critic | EP B | shipped |
 | [dev-trio](./dev-trio) | Claude=PM/Coder · Gemini=Researcher · Codex=Reviewer | EP A | shipped |
+| [debate-conductor](./debate-conductor) | Claude=PM · Gemini=Generator · Codex=Critic | EP B | shipped |
 
 More plugins (watch-pair, spec-trio, bisect-bot, ralph-trio) follow the same shape and will land here as their EPs publish.
 
 ## Pattern
 
-Every plugin in this marketplace follows broadly the same layout. Skill set varies per pattern (`debate-conductor` ships `bootstrap`/`run`/`continue`; `dev-trio` ships `bootstrap`/`research`/`review`/`install-pm`), but the directory shape is stable:
+Every plugin in this marketplace follows broadly the same layout. Skill set varies per pattern (`dev-trio` ships `bootstrap`/`research`/`review`/`install-pm`; `debate-conductor` ships `bootstrap`/`run`/`continue`), but the directory shape is stable:
 
 ```
 <plugin>/
@@ -50,8 +50,8 @@ Every plugin in this marketplace follows broadly the same layout. Skill set vari
 ```bash
 git clone git@github.com:pandas-studio/agent-team-plugins.git
 cd agent-team-plugins
-claude --plugin-dir ./debate-conductor   # load one plugin
-claude --plugin-dir ./dev-trio
+claude --plugin-dir ./dev-trio           # load one plugin
+claude --plugin-dir ./debate-conductor
 ```
 
 `/reload-plugins` picks up edits without restarting Claude Code.
