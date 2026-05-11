@@ -97,9 +97,56 @@ $PWD/.dev-trio/log/<team>/
 
 Override the log root with `DEV_TRIO_LOG_DIR=/path/to/logs`.
 
-## tmux keybinding (optional convenience)
+## Live dashboard
 
-`bootstrap` already wires the layout. For users who skip Claude Code and want to spawn the layout from a raw shell via `prefix + R`, add this to `~/.tmux.conf`:
+Two side panes run a flicker-free dashboard showing **distilled key points only** — the full raw output stays in the Claude (PM) pane and on disk. Each side pane shows:
+
+- **Gemini**: query, status, *answer lead* (first paragraph), sources cited count
+- **Codex**: focus, status, **verdict box** (color-coded), findings counts, **Blocker/Major text** (when present)
+
+```bash
+dashboard.sh gemini   # in one side pane
+dashboard.sh codex    # in another side pane
+```
+
+Color legend (codex verdict):
+
+- 🟢 **SHIP** — green bar
+- 🔴 **NEEDS-FIX** — red bar
+- 🟡 **DISCUSS** — yellow bar
+
+**Controls** (inside dashboard pane):
+
+- `l` — open the full log in `less` (`q` to return)
+- `space` — pause auto-refresh (so you can use `Ctrl-b [` to scroll), space again to resume
+- `q` — quit
+- `Ctrl-C` — also quits
+
+The wrappers append `=== END (rc=N) ===` to each log when the run finishes; that's how the dashboard distinguishes ⏳ running... from ✓ done / ✗ failed. Rendering only happens when content actually changes (cksum-based skip), and uses cursor-home + per-line erase instead of a full screen clear, so there's no visible flicker.
+
+**Raw fallback** (when the dashboard misbehaves or you want unfiltered output):
+
+```bash
+tail -F .dev-trio/log/${AGENT_TEAM:-default}/latest-gemini.log
+tail -F .dev-trio/log/${AGENT_TEAM:-default}/latest-codex.log
+```
+
+The wrapper scripts print both the dashboard command and the raw `tail -F` hint to stderr when they start.
+
+## Layout commands
+
+`/dev-trio:bootstrap` already wires the layout from inside Claude Code. For other entry points, the underlying `team-layout.sh` is on the plugin PATH:
+
+```bash
+team-layout.sh                # creates session "dev-trio", attaches
+team-layout.sh -n myteam      # custom session/team name
+team-layout.sh --here         # split current tmux window in place
+team-layout.sh --no-attach    # create session detached
+```
+
+The left pane is left as an idle shell — run `claude` (or whatever) yourself.
+
+For users who skip Claude Code and want to spawn the layout from a raw shell via `prefix + R`, add this to `~/.tmux.conf`:
 
 ```tmux
 # Adjust the path to your dev-trio install dir.
@@ -144,6 +191,15 @@ dev-trio-doctor.sh
 ```
 
 Checks `tmux` / `gemini` / `codex` / `jq` presence and verifies that `ask-gemini.sh` produces a well-formed RFC 0004 manifest under stub CLIs. **Stub smokes are necessary but not sufficient** — verdict / dashboard / parse-affecting changes need a real-CLI dry-run on top.
+
+## Security model
+
+The wrappers use **two layers** of injection defense:
+
+1. **Role-prompt level** — each role file has a `Trust boundary` section telling the agent to ignore directives inside `<user_question>` / `<review_target>` / `<research_context>` tags.
+2. **Literal-string level** — the wrapper scripts strip the matching closing tag from untrusted input before embedding.
+
+We **deliberately did not** add JSON/base64 encoding of payloads (which Codex flagged as the "proper" fix). This is a local dev tool, not a production surface receiving adversarial input. The most realistic attack vector is **Gemini's research output flowing into Codex**; if the threat model changes (e.g., Gemini starts pulling untrusted external content as context), upgrade to encoded payloads. Until then, the two layers above are sufficient.
 
 ## License
 
