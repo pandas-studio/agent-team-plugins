@@ -296,6 +296,24 @@ assert_cmd "no kind=scope-fail anywhere"     "! jq -se 'map(.inputs[]?|select(.k
 assert_cmd "no kind=scope-warning anywhere"  "! jq -se 'map(.inputs[]?|select(.kind==\"scope-warning\"))|flatten|length>0' $LD8/*.manifest.json"
 
 # --------------------------------------------------------------------------
+section "Case 8b: --dry-run --max-iter 0 terminates at synthetic backlog drain"
+# Regression: the synthetic-task path under --dry-run removed the natural
+# "backlog drained" stop, so combined with --max-iter 0 (unlimited) the loop
+# could run forever. Should now stop after N iters where N = unchecked count.
+WD8b="$(make_workspace 'unused' '' 'unused' '- [ ] §5.1 dry one')"
+# Add a second unchecked entry so we can assert "stops at N, not 1".
+printf -- '- [ ] §5.1 dry two\n' >> "$WD8b/BACKLOG.md"
+run_spec_trio case8b "$WD8b" --max-iter 0 --dry-run
+LD8b="$(case_log_dir case8b)"
+# Two iters fired, three didn't — exactly N=2 iter manifests.
+assert_eq "dry-run unlimited terminates after N=2 iters" \
+  "2" "$(ls $LD8b/spec-trio-*-iter-*-plan.manifest.json 2>/dev/null | wc -l | tr -d ' ')"
+assert_cmd "no iter-3 manifest emitted" \
+  "[ -z \"\$(ls $LD8b/spec-trio-*-iter-3-plan.manifest.json 2>/dev/null)\" ]"
+assert_cmd "BACKLOG.md preserved (both entries unchecked)" \
+  "[ \"\$(grep -c '^- \\[ \\]' $WD8b/BACKLOG.md)\" = '2' ]"
+
+# --------------------------------------------------------------------------
 section "Case 8: re-init guard (unit-style, direct source)"
 T9="$(mktemp -d -t spec-pr5-guard-XXXXXX)"
 GUARD_OUT="$(

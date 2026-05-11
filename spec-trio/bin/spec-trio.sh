@@ -261,6 +261,18 @@ extract_need_research() {
 
 ITER=0
 COMPLETED=0
+# --dry-run termination ceiling. --max-iter 0 (unlimited) combined with the
+# synthetic-task path below would otherwise run forever: enforce_max_iter
+# treats 0 as unlimited, the backlog isn't drained, and dry-run never writes
+# the completion promise. Count unchecked BACKLOG entries up front and stop
+# the loop after that many iters; matches the non-dry-run "backlog drained"
+# stop. Set to 0 when not in dry-run (unused on that path).
+if [ "$DRY_RUN" = "1" ]; then
+  DRY_RUN_BACKLOG_COUNT=$(grep -cE '^[[:space:]]*-[[:space:]]*\[[ ]\][[:space:]]+' "$BACKLOG_FILE" 2>/dev/null || echo 0)
+  [ "$DRY_RUN_BACKLOG_COUNT" -lt 1 ] && DRY_RUN_BACKLOG_COUNT=1
+else
+  DRY_RUN_BACKLOG_COUNT=0
+fi
 # RFC 0004 PR 5: stage-chain run-id holders. set -u makes any unset read fatal,
 # so initialize all stage slots here and reset at the top of each iter. Cross-iter
 # chaining is intentionally not done — each iter pops a different BACKLOG task,
@@ -293,9 +305,14 @@ while :; do
   fi
 
   if [ "$DRY_RUN" = "1" ]; then
-    # Don't mutate the user's BACKLOG under --dry-run. Synthesize a task so
-    # the manifest pipeline still fires; --max-iter bounds the loop instead
-    # of "backlog drained" detection.
+    # Don't mutate the user's BACKLOG under --dry-run; synthesize a task so
+    # the manifest pipeline still fires. Cap iters at DRY_RUN_BACKLOG_COUNT
+    # so --max-iter 0 (unlimited) still terminates.
+    if [ "$ITER" -gt "$DRY_RUN_BACKLOG_COUNT" ]; then
+      ralph_log "dry-run: synthetic backlog drained ($DRY_RUN_BACKLOG_COUNT iters). Stopping."
+      echo "=== STOP (dry-run-backlog-empty) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
+      break
+    fi
     TASK="(dry-run synthetic task — iter $ITER)"
   else
     TASK=$(pop_top_task "$BACKLOG_FILE") || true

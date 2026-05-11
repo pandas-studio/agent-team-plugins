@@ -1,8 +1,16 @@
 <!-- Vendored from ralph-trio plugin (snapshot 2026-05-11). Re-sync with:
        cp ../ralph-trio/prompts/fix_plan.md.template ./prompts/fix_plan.md.template
      then restore this provenance comment. spec-trio uses the same per-iteration
-     log format and `<promise>COMPLETE</promise>` completion marker as ralph-* so
-     fix_plan reading/writing is identical across variants. -->
+     log format and the same completion marker as ralph-* (see "Completion
+     signal" section below) so fix_plan reading/writing is identical across
+     variants.
+
+     IMPORTANT: do NOT spell the completion marker out literally in this
+     comment or anywhere else in the template. lib/common.sh:check_promise
+     greps the whole file for the literal 31-byte tag; a single occurrence
+     would make the harness think every run completed on iter 1. The body
+     below splits the marker across backticks for this reason — the template
+     itself contains zero greppable copies. -->
 
 # Ralph fix_plan — iteration log + completion signal
 
