@@ -443,6 +443,102 @@ assert_cmd "spaces-in-path: BACKLOG appended with §5.99 coverage gap" \
   "grep -q 'spec coverage gap §5.99' '$WD9b/BACKLOG.md'"
 
 # --------------------------------------------------------------------------
+section "Case 10a: planner failure re-queues task (NEEDS-FIX, not OUT-OF-SCOPE)"
+# Regression: when the planner CLI exits non-zero, the old code treated the
+# planner's stderr as the plan and fed it to the coder; pop_top_task had
+# already consumed the BACKLOG entry, so the task vanished silently. The fix
+# captures PIPESTATUS[0] into PLAN_RC, sets PLAN_FAILED=1, skips Stage 2+3,
+# and routes Stage 3 to NEEDS-FIX (re-queue via dispatch). NOT OUT-OF-SCOPE
+# (which is for spec violations and routes to human-attention without
+# re-queue — wrong for a transient planner crash).
+WD10a="$(mktemp -d -t spec-pr5-10a-XXXXXX)"
+( cd "$WD10a"
+  git init -q
+  cat > spec.md <<'EOF'
+# Smoke spec
+## §1 Goals
+foo
+## §5 Test criteria
+### §5.1 dummy
+EOF
+  printf -- '- [ ] §5.1 task that the planner will fail on\n' > BACKLOG.md
+  printf '#!/usr/bin/env bash\nexit 7\n' > planner-fail.sh
+  printf '#!/usr/bin/env bash\nexit 0\n' > coder-stub.sh
+  cat > wrap-codex.sh <<'EOF'
+#!/usr/bin/env bash
+echo "## Verdict"
+echo "SHIP"
+EOF
+  chmod +x planner-fail.sh coder-stub.sh wrap-codex.sh
+  git add . && git -c user.email=t@x -c user.name=t commit -qm "fixtures"
+)
+(
+  cd "$WD10a"
+  AGENT_TEAM="smoke-pr5-case10a" \
+  PLANNER_CLI="$WD10a/planner-fail.sh" CODER_CLI="$WD10a/coder-stub.sh" \
+  CODEX_CLI="$WD10a/wrap-codex.sh" \
+    "$SPEC_TRIO" --spec "$WD10a/spec.md" --backlog "$WD10a/BACKLOG.md" \
+      --no-research --max-iter 1 --autoship >/dev/null 2>&1
+)
+LD10a="$(case_log_dir case10a)"
+R10a="$LD10a/spec-trio-*-iter-1-review.manifest.json"
+assert_cmd "planner-fail: review manifest exists" "ls $R10a"
+assert_eq  "planner-fail: review verdict=NEEDS-FIX (not OUT-OF-SCOPE)" \
+  "NEEDS-FIX" "$(manifest_field "$R10a" '.verdict')"
+assert_eq  "planner-fail: skip-reason=plan-failed" \
+  "plan-failed" "$(manifest_field "$R10a" '[.inputs[]?|select(.kind=="skip-reason")|.value][0]')"
+assert_eq  "planner-fail: plan-rc=7 recorded" \
+  "7" "$(manifest_field "$R10a" '[.inputs[]?|select(.kind=="plan-rc")|.value][0]')"
+assert_cmd "planner-fail: BACKLOG.md got retry line" \
+  "grep -q 'retry (iter 1 NEEDS-FIX): §5.1 task that the planner will fail on' $WD10a/BACKLOG.md"
+
+# --------------------------------------------------------------------------
+section "Case 10b: --autoship refuses to ship a failed coder run"
+# Regression: --autoship used to force VERDICT=SHIP regardless of CODE_RC,
+# so a coder crash (auth/rate-limit/partial diff) would be marked shipped —
+# and under --worktree would even fast-forward-merge whatever broken state
+# the failed Claude invocation left. Fix gates the autoship SHIP branch on
+# CODE_RC=0; non-zero routes to NEEDS-FIX with autoship-coder-failed.
+WD10b="$(mktemp -d -t spec-pr5-10b-XXXXXX)"
+( cd "$WD10b"
+  git init -q
+  cat > spec.md <<'EOF'
+# Smoke spec
+## §1 Goals
+foo
+## §5 Test criteria
+### §5.1 dummy
+EOF
+  printf -- '- [ ] §5.1 task that the coder will fail on\n' > BACKLOG.md
+  # Planner emits a valid allowlist so scope gate 1 passes.
+  cat > planner-stub.sh <<'EOF'
+#!/usr/bin/env bash
+echo '<allowed-paths>foo.py</allowed-paths>'
+EOF
+  printf '#!/usr/bin/env bash\nexit 13\n' > coder-fail.sh
+  chmod +x planner-stub.sh coder-fail.sh
+  git add . && git -c user.email=t@x -c user.name=t commit -qm "fixtures"
+)
+(
+  cd "$WD10b"
+  AGENT_TEAM="smoke-pr5-case10b" \
+  PLANNER_CLI="$WD10b/planner-stub.sh" CODER_CLI="$WD10b/coder-fail.sh" \
+    "$SPEC_TRIO" --spec "$WD10b/spec.md" --backlog "$WD10b/BACKLOG.md" \
+      --no-research --max-iter 1 --autoship >/dev/null 2>&1
+)
+LD10b="$(case_log_dir case10b)"
+R10b="$LD10b/spec-trio-*-iter-1-review.manifest.json"
+assert_cmd "autoship+coder-fail: review manifest exists" "ls $R10b"
+assert_eq  "autoship+coder-fail: review verdict=NEEDS-FIX (not SHIP)" \
+  "NEEDS-FIX" "$(manifest_field "$R10b" '.verdict')"
+assert_eq  "autoship+coder-fail: skip-reason=autoship-coder-failed" \
+  "autoship-coder-failed" "$(manifest_field "$R10b" '[.inputs[]?|select(.kind=="skip-reason")|.value][0]')"
+assert_eq  "autoship+coder-fail: coder-rc=13 recorded" \
+  "13" "$(manifest_field "$R10b" '[.inputs[]?|select(.kind=="coder-rc")|.value][0]')"
+assert_cmd "autoship+coder-fail: BACKLOG.md got retry line" \
+  "grep -q 'retry (iter 1 NEEDS-FIX): §5.1 task that the coder will fail on' $WD10b/BACKLOG.md"
+
+# --------------------------------------------------------------------------
 section "Case 8: re-init guard (unit-style, direct source)"
 T9="$(mktemp -d -t spec-pr5-guard-XXXXXX)"
 GUARD_OUT="$(

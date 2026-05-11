@@ -358,6 +358,8 @@ while :; do
   SCOPE_FAIL=0           # 1 = pipeline short-circuited to OUT-OF-SCOPE
   ALLOWED_PATHS_LIST=""  # populated after Stage 1; empty = no plan parse yet
   VERDICT=""
+  PLAN_FAILED=0          # 1 = planner CLI exited non-zero; skip Stage 2+3
+  PLAN_RC=0
 
   # Wrapped fix_plan excerpt (optional, -literal-stripped)
   FP_EXCERPT=""
@@ -389,14 +391,31 @@ while :; do
     fi
     PLAN_PROMPT=$(build_planner_prompt "$TASK" "$SPEC_BODY" "$PROMPT_CONTEXT" "$FP_EXCERPT")
     ( cd "$WORK_DIR" && "${PLANNER_CLI:-${CLAUDE_CLI:-claude}}" -p "$PLAN_PROMPT" 2>&1 ) | tee "$PLAN_LOG" >/dev/null
+    PLAN_RC="${PIPESTATUS[0]}"
     PLAN="$(cat "$PLAN_LOG")"
+    if [ "$PLAN_RC" != "0" ]; then
+      # Planner CLI exited non-zero. Without this check the loop would treat
+      # the planner's stderr as the plan and feed it to a coder that has no
+      # way to know the plan is bogus — and pop_top_task already consumed
+      # the BACKLOG entry. Set PLAN_FAILED=1; Stage 2 + 3 below treat it as
+      # a hard skip and the verdict dispatch re-queues via NEEDS-FIX.
+      PLAN_FAILED=1
+      manifest_add_input kind=skip-reason value=plan-failed
+      manifest_add_input kind=plan-rc value="$PLAN_RC"
+      ralph_log "  [stage 1/3] planner exited rc=$PLAN_RC — marking iter PLAN-FAILED (re-queue task, skip Stage 2+3)"
+    fi
   fi
   manifest_finalize
   PARENT_RUN_ID="$PLAN_RUN_ID"
 
   # ---- Scope gate 1: plan-invalid check (after Stage 1, before Stage 2) ----
-  # Only meaningful when there's a real plan log; --dry-run skips.
-  if [ "$DRY_RUN" != "1" ]; then
+  # Only meaningful when there's a real plan log; --dry-run skips. Also skip
+  # when the planner CLI itself exited non-zero — that's a transient infra
+  # failure (auth/rate-limit/missing binary), not a contract violation.
+  # Routing it through plan-invalid OUT-OF-SCOPE would send the task to
+  # human-attention without re-queue; we want the dispatch's NEEDS-FIX path
+  # to re-queue for another planner attempt next iter.
+  if [ "$DRY_RUN" != "1" ] && [ "$PLAN_FAILED" != "1" ]; then
     ALLOWED_PATHS_LIST="$(parse_allowed_paths "$PLAN_LOG")"
     if [ -z "$ALLOWED_PATHS_LIST" ]; then
       if [ "$STRICT_SCOPE" = "1" ]; then
@@ -439,7 +458,23 @@ while :; do
   if [ -n "$ALLOWED_PATHS_LIST" ]; then
     ALLOWED_JOINED="$(printf '%s' "$ALLOWED_PATHS_LIST" | tr '\n' ',' | sed 's/,$//')"
   fi
-  if [ "$SCOPE_FAIL" = "1" ]; then
+  if [ "$PLAN_FAILED" = "1" ]; then
+    # Planner CLI exited non-zero in Stage 1; no plan to feed the coder.
+    # Emit a minimal coder manifest so manifest-consumers see the skip,
+    # then let the verdict dispatch route NEEDS-FIX via Stage 3.
+    ralph_log "  [stage 2/3] coder SKIPPED (planner failed rc=$PLAN_RC)"
+    echo "PLAN_FAILED=1 — skipping coder (planner exited rc=$PLAN_RC, see $PLAN_LOG)" > "$CODE_LOG"
+    manifest_init spec-code "$CODE_LOG"
+    CODE_RUN_ID="$MANIFEST_RUN_ID"
+    manifest_set_parent "$PARENT_RUN_ID"
+    manifest_add_input kind=task value="$TASK"
+    manifest_add_input kind=spec path="$SPEC_FILE"
+    manifest_add_input kind=plan path="$PLAN_LOG"
+    manifest_add_input kind=skip-reason value=plan-failed
+    manifest_add_input kind=plan-rc value="$PLAN_RC"
+    manifest_finalize
+    PARENT_RUN_ID="$CODE_RUN_ID"
+  elif [ "$SCOPE_FAIL" = "1" ]; then
     # Gate 1 already emitted the synthetic review manifest; no coder manifest
     # in this branch (asymmetric vs autoship/dry-run intentionally — this is a
     # contract failure, not a user opt-out).
@@ -474,7 +509,9 @@ while :; do
 
   # ---- Scope gate 2: scope-violation check (after Stage 2, before Stage 3) ----
   # Only run if Stage 2 actually executed and we have an allowlist to enforce.
-  if [ "$SCOPE_FAIL" = "0" ] && [ "$DRY_RUN" != "1" ] && [ -n "$ALLOWED_PATHS_LIST" ]; then
+  # PLAN_FAILED short-circuits the same way --dry-run does: no coder ran, so
+  # there's nothing to scope-check against.
+  if [ "$SCOPE_FAIL" = "0" ] && [ "$PLAN_FAILED" != "1" ] && [ "$DRY_RUN" != "1" ] && [ -n "$ALLOWED_PATHS_LIST" ]; then
     # Build the harness-ignore set: paths the harness writes itself, which
     # would otherwise trip the allowlist (BACKLOG.md gets popped, fix_plan.md
     # is created from template, spec.md is the contract input). All three are
@@ -520,10 +557,44 @@ while :; do
   fi
 
   # ---- Stage 3: Reviewer ----
-  if [ "$SCOPE_FAIL" = "1" ]; then
+  if [ "$PLAN_FAILED" = "1" ]; then
+    # Planner CLI exited non-zero; we never ran Stage 2. Don't fabricate SHIP.
+    # NEEDS-FIX routes to the dispatch's re-queue path so the task gets
+    # another shot (next iter, fresh planner attempt).
+    VERDICT="NEEDS-FIX"
+    ralph_log "  [stage 3/3] reviewer SKIPPED (planner failed)"
+    echo "PLAN_FAILED=1 — skipping reviewer (planner rc=$PLAN_RC, see $PLAN_LOG)" > "$REVIEW_LOG"
+    manifest_init spec-review "$REVIEW_LOG"
+    REVIEW_RUN_ID="$MANIFEST_RUN_ID"
+    manifest_set_parent "$PARENT_RUN_ID"
+    manifest_add_input kind=task value="$TASK"
+    manifest_add_input kind=spec path="$SPEC_FILE"
+    manifest_add_input kind=skip-reason value=plan-failed
+    manifest_add_input kind=plan-rc value="$PLAN_RC"
+    manifest_set_verdict NEEDS-FIX
+    manifest_finalize
+  elif [ "$SCOPE_FAIL" = "1" ]; then
     # Gate 1 or Gate 2 already wrote a synthetic spec-review manifest with
     # verdict=OUT-OF-SCOPE; nothing to emit here.
     ralph_log "  [stage 3/3] reviewer SKIPPED (scope-gate)"
+  elif [ "$AUTOSHIP" = "1" ] && [ "$CODE_RC" != "0" ]; then
+    # --autoship skips review, NOT coder failure. Without this check, a
+    # broken coder run (rate-limit, partial diff, missing CLI) would be
+    # marked SHIP and — in worktree mode — get fast-forward-merged. Route
+    # to NEEDS-FIX (re-queue) so the task survives a transient coder error.
+    VERDICT="NEEDS-FIX"
+    ralph_log "  [stage 3/3] reviewer SKIPPED (--autoship), but coder rc=$CODE_RC — NEEDS-FIX (re-queue, refusing to ship a failed coder run)"
+    echo "AUTOSHIP=1 + coder rc=$CODE_RC — refusing to ship a failed coder run" > "$REVIEW_LOG"
+    manifest_init spec-review "$REVIEW_LOG"
+    REVIEW_RUN_ID="$MANIFEST_RUN_ID"
+    manifest_set_parent "$PARENT_RUN_ID"
+    manifest_add_input kind=task value="$TASK"
+    manifest_add_input kind=spec path="$SPEC_FILE"
+    manifest_add_input kind=code-log path="$CODE_LOG"
+    manifest_add_input kind=skip-reason value=autoship-coder-failed
+    manifest_add_input kind=coder-rc value="$CODE_RC"
+    manifest_set_verdict NEEDS-FIX
+    manifest_finalize
   elif [ "$AUTOSHIP" = "1" ]; then
     VERDICT="SHIP"
     ralph_log "  [stage 3/3] reviewer SKIPPED (--autoship)"
