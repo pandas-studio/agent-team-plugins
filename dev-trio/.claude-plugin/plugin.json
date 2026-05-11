@@ -1,0 +1,9 @@
+{
+  "name": "dev-trio",
+  "version": "0.1.0",
+  "description": "Claude PM orchestrates a 3-vendor dev team: Gemini (Researcher) + Codex (Reviewer). Three-pane tmux view: left=Claude PM, top-right=Gemini dashboard, bottom-right=Codex dashboard. Skills: bootstrap, research, review, install-pm.",
+  "author": { "name": "pandas-studio" },
+  "homepage": "https://github.com/pandas-studio/agent-team-plugins/tree/main/dev-trio",
+  "repository": "https://github.com/pandas-studio/agent-team-plugins",
+  "license": "MIT"
+}

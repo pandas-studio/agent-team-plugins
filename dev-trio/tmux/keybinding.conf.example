@@ -1,0 +1,28 @@
+# dev-trio tmux keybinding — bind R to spawn Gemini/Codex dashboards alongside
+# the main (Claude) pane in the current tmux window.
+#
+# ── Install ──────────────────────────────────────────────────────────────────
+# Add ONE of these to your ~/.tmux.conf. The exact plugin install path depends
+# on how you added the marketplace; local-marketplace installs typically land
+# under ~/.claude/plugins/dev-trio/. Adjust as needed.
+#
+#   bind-key R run-shell "~/.claude/plugins/dev-trio/bin/team-layout.sh --here"
+#
+# Or, if you cloned the repo for local development:
+#
+#   bind-key R run-shell "/abs/path/to/agent-team-plugins/dev-trio/bin/team-layout.sh --here"
+#
+# Then reload tmux config:
+#
+#   tmux source-file ~/.tmux.conf
+#
+# ── Usage ────────────────────────────────────────────────────────────────────
+# Inside any tmux window, press your prefix (default: Ctrl-b) followed by R.
+# The current pane is split into a 3-pane layout: Claude (left) + Gemini
+# dashboard (top-right) + Codex dashboard (bottom-right).
+#
+# NOTE: This binding is a convenience for users who skip `claude` and want to
+# spawn the layout from a raw shell. From inside a Claude Code session, you can
+# simply invoke `/dev-trio:bootstrap` instead.
+
+bind-key R run-shell "~/.claude/plugins/dev-trio/bin/team-layout.sh --here"

@@ -7,6 +7,11 @@
       "name": "debate-conductor",
       "source": "./debate-conductor",
       "description": "Claude conducts a Generator(Gemini) vs Critic(Codex) adversarial debate over N rounds. Three-pane tmux view; bootstrap + run + continue skills."
+    },
+    {
+      "name": "dev-trio",
+      "source": "./dev-trio",
+      "description": "Claude PM orchestrates a 3-vendor dev team: Gemini (Researcher) + Codex (Reviewer). Three-pane tmux view; bootstrap + research + review + install-pm skills."
     }
   ]
 }
