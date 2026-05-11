@@ -1,7 +1,7 @@
 ---
 description: One-shot Codex review. Default scope = uncommitted working-tree changes. Optional --with-research <file> and --with-spec <file> for context injection. Streaming output lands in the bottom-right dashboard pane; chat-side surfaces the verdict (SHIP/NEEDS-FIX/DISCUSS) + Blocker/Major counts and handles NEED RESEARCH blocks.
 disable-model-invocation: true
-allowed-tools: Bash(ask-codex.sh:*) Bash(git:*) Bash(cat:*) Bash(ls:*) Read
+allowed-tools: Bash(ask-codex.sh:*) Bash(ask-gemini.sh:*) Bash(git:*) Bash(cat:*) Bash(ls:*) Bash(date:*) Bash(mkdir:*) Bash(echo:*) Bash(sed:*) Read
 argument-hint: [focus] [--with-research <file>] [--with-spec <file>]
 ---
 
@@ -9,37 +9,47 @@ argument-hint: [focus] [--with-research <file>] [--with-spec <file>]
 
 You are the **PM**. Codex is the reviewer (bottom-right pane). You dispatch one review, surface the verdict, and route any `NEED RESEARCH` block back through Gemini.
 
-## 1 · Parse `$ARGUMENTS`
+## 1 · Parse `$ARGUMENTS` and build the dispatch command
 
-Three pieces, any combination, any order:
+`$ARGUMENTS` is a single string that may interleave three pieces in any order:
 
-- **Optional `--with-research <file>`** — research context from a previous Gemini call (typically `latest-gemini.log` or a curated research-N.md).
+- **Optional `--with-research <file>`** — research context from a previous Gemini call (typically `latest-gemini.log` or a curated `research-<TS>.md`).
 - **Optional `--with-spec <file>`** — spec/contract the changes are expected to satisfy.
-- **Optional positional focus** — free-form review scope. Examples:
-  - `"focus on the new retry logic in src/agent.py — concurrency safety"`
-  - `"review HEAD~2..HEAD"`
-  - `"review only the changes to src/auth/"`
+- **Optional free-form focus** — review scope, possibly multi-word. Examples:
+  - `focus on the new retry logic in src/agent.py — concurrency safety`
+  - `review HEAD~2..HEAD`
+  - `review only the changes to src/auth/`
 
-If `$ARGUMENTS` is empty, the default scope is "review the full working-tree state" — `ask-codex.sh` substitutes the inspection-checklist default itself, so just call it with no positional arg.
+**You must parse `$ARGUMENTS` yourself and assemble the bash command with explicit shell quoting.** Do NOT write `ask-codex.sh $ARGUMENTS` — unquoted expansion word-splits the focus across multiple shell args, and `ask-codex.sh` rejects extra positionals with rc=2.
 
-**Pass `$ARGUMENTS` through verbatim** — `ask-codex.sh` parses the `--with-*` flags itself. Do not reorder, quote-strip, or paraphrase.
+Algorithm:
+
+1. Tokenise `$ARGUMENTS` on whitespace, walk left-to-right.
+2. If a token is `--with-research`, the next token is `<research-file>`; consume both.
+3. If a token is `--with-spec`, the next token is `<spec-file>`; consume both.
+4. Every remaining token belongs to the focus; join them with a single space into one FOCUS string.
+5. If `$ARGUMENTS` is empty, omit the focus entirely (the wrapper falls back to the default working-tree scope).
 
 ## 2 · Dispatch
 
-Single Bash call (blocking, ~30–120 s depending on diff size). `ask-codex.sh` is on the plugin's `bin/` PATH while the plugin is active.
+Single Bash call (blocking, ~30–120 s depending on diff size). `ask-codex.sh` is on the plugin's `bin/` PATH while the plugin is active. **Wrap FOCUS in double quotes** so it stays a single positional argument; the `--with-*` flag pairs go through as their own argv slots.
+
+Concrete shapes (these are what you actually invoke):
 
 ```bash
-ask-codex.sh $ARGUMENTS
+ask-codex.sh                                              # $ARGUMENTS empty → default scope
+ask-codex.sh "focus on src/agent.py concurrency"          # focus only
+ask-codex.sh --with-research notes.md "concurrency focus" # flag before focus
+ask-codex.sh "focus on auth flow" --with-spec docs/auth.md  # flag after focus
+ask-codex.sh --with-spec docs/rfcs/0004.md --with-research notes.md "review against the spec"
 ```
 
-Concrete shapes:
+Worked example — if `$ARGUMENTS = "focus on src/agent.py concurrency --with-spec docs/agent.md"`:
 
-```bash
-ask-codex.sh                                                  # default scope
-ask-codex.sh "focus on src/agent.py concurrency"
-ask-codex.sh --with-research $PWD/.dev-trio/log/default/latest-gemini.log "concurrency focus"
-ask-codex.sh --with-spec docs/rfcs/0004-manifests.md "review the implementation against the spec"
-```
+1. Tokens: `focus on src/agent.py concurrency --with-spec docs/agent.md`
+2. `--with-spec` consumes itself + `docs/agent.md` → SPEC = `docs/agent.md`
+3. Remaining tokens joined → FOCUS = `focus on src/agent.py concurrency`
+4. Invoke: `ask-codex.sh --with-spec docs/agent.md "focus on src/agent.py concurrency"`
 
 **Streaming output is already visible in the bottom-right pane — do not duplicate it in the chat.** Acknowledge that it's running and wait.
 
