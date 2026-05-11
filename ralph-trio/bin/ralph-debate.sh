@@ -99,7 +99,19 @@ DEADLINE=$([ "$MAX_RUNTIME_SECS" -gt 0 ] && echo $(( $(date +%s) + MAX_RUNTIME_S
 # debate.sh from the debate-conductor plugin writes to its own log root:
 # $DEBATE_LOG_DIR (default $PWD/.debate-conductor/log) / $TEAM. We resolve the
 # same path here to read back the latest-debate symlink.
+#
+# Normalize to absolute path here, BEFORE any cd into a worktree. With
+# --worktree the subshell `cd "$WORK_DIR"` would re-anchor a relative
+# DEBATE_LOG_BASE to the worktree, while DEBATE_TEAM_DIR (computed in this
+# parent shell) stays anchored to the original cwd — the same lookup
+# mismatch the worktree fix is meant to prevent. The default value embeds
+# $PWD so it's already absolute; this branch only kicks in when callers pass
+# a relative DEBATE_LOG_DIR override.
 DEBATE_LOG_BASE="${DEBATE_LOG_DIR:-$PWD/.debate-conductor/log}"
+case "$DEBATE_LOG_BASE" in
+  /*) ;;  # already absolute
+  *)  DEBATE_LOG_BASE="$PWD/$DEBATE_LOG_BASE" ;;
+esac
 DEBATE_TEAM_DIR="$DEBATE_LOG_BASE/$TEAM"
 
 {
