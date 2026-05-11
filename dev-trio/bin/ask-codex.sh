@@ -49,16 +49,22 @@ LOG_DIR="${DEV_TRIO_LOG_DIR:-$PWD/.dev-trio/log}/$TEAM"
 
 RESEARCH_FILE=""
 SPEC_FILE=""
+FOCUS=""
+# Scan all args so --with-research / --with-spec work in any position relative
+# to the focus (matches the README contract "any combination, in any order").
 while [ $# -gt 0 ]; do
   case "$1" in
     --with-research) RESEARCH_FILE="${2:?--with-research requires a file path}"; shift 2 ;;
     --with-spec)     SPEC_FILE="${2:?--with-spec requires a file path}";         shift 2 ;;
-    --) shift; break ;;
-    *)  break ;;
+    --) shift; [ "$#" -gt 0 ] && FOCUS="$1"; break ;;
+    *)
+      if [ -z "$FOCUS" ]; then FOCUS="$1"; shift
+      else echo "error: unexpected extra positional argument: $1" >&2; exit 2
+      fi ;;
   esac
 done
 
-FOCUS="${1:-Review the full working-tree state in this repo (see role instructions for the inspection checklist — start with \`git status --short\`, then cover both tracked diffs AND untracked files).}"
+FOCUS="${FOCUS:-Review the full working-tree state in this repo (see role instructions for the inspection checklist — start with \`git status --short\`, then cover both tracked diffs AND untracked files).}"
 # Defense-in-depth: strip our own closing fence from untrusted input so it
 # cannot escape the <review_target>/<research_context> boundary downstream.
 FOCUS="${FOCUS//<\/review_target>/[STRIPPED-CLOSING-TAG]}"
@@ -137,3 +143,4 @@ printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG"
 manifest_finalize
 echo
 echo "(log: $LOG, rc=$RC)" >&2
+exit "$RC"

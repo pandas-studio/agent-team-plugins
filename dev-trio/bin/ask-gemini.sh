@@ -97,3 +97,4 @@ printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG"
 manifest_finalize
 echo
 echo "(log: $LOG, rc=$RC)" >&2
+exit "$RC"
