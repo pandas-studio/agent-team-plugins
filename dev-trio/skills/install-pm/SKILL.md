@@ -1,7 +1,7 @@
 ---
 description: Install (or upgrade) the dev-trio PM orchestration policy into the workspace's CLAUDE.md. Idempotent — appends a marker-guarded block; re-running upgrades in place. Run once per workspace after installing the plugin. The policy tells Claude when to dispatch ask-gemini.sh / ask-codex.sh and how to handle NEED RESEARCH round-trips.
 disable-model-invocation: true
-allowed-tools: Bash(cat:*) Bash(ls:*) Read Edit Write
+allowed-tools: Read Edit Write
 ---
 
 # Install the dev-trio PM policy into workspace `CLAUDE.md`
@@ -26,17 +26,11 @@ so re-running the skill replaces the block in place (no duplication). The rest o
 
 ### 1 · Locate the plugin's `pm.md`
 
-The bundled source of truth is at `<plugin-root>/lib/pm.md`. The plugin root depends on how the user installed it; resolve at runtime by walking up from the skill's location, or by leveraging the on-PATH bin scripts:
+The bundled source of truth is at `${CLAUDE_PLUGIN_ROOT}/lib/pm.md`. Claude Code substitutes `CLAUDE_PLUGIN_ROOT` to the plugin's install directory at skill-execution time, so this path is the same regardless of how the marketplace was added (HTTPS, local clone, custom dir).
 
-```bash
-# ask-gemini.sh resolves PLUGIN_ROOT internally; reuse its path to find pm.md.
-GEMINI_BIN=$(command -v ask-gemini.sh) || { echo "dev-trio plugin not loaded — /plugin install dev-trio first" >&2; exit 2; }
-PLUGIN_ROOT=$(cd "$(dirname "$GEMINI_BIN")/.." && pwd)
-PM_SRC="$PLUGIN_ROOT/lib/pm.md"
-[ -f "$PM_SRC" ] || { echo "error: pm.md missing at $PM_SRC" >&2; exit 2; }
-```
+Use the **Read tool** on `${CLAUDE_PLUGIN_ROOT}/lib/pm.md` to load its contents. No shell lookup is needed — the Read tool resolves the env var in the path.
 
-Use `cat` to read its contents.
+If the Read fails (file not found / env var empty), surface this error to the user verbatim and stop: `dev-trio plugin install appears broken — lib/pm.md missing under $CLAUDE_PLUGIN_ROOT; reinstall via /plugin install dev-trio@pandas-studio.`
 
 ### 2 · Determine the target `CLAUDE.md`
 

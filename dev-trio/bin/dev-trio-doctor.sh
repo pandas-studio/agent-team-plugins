@@ -41,7 +41,15 @@ for t in tmux jq; do
 done
 for t in gemini codex; do
   if command -v "$t" >/dev/null 2>&1; then ok "$t — $(command -v "$t")"
-  else warn "$t — missing (override via ${t^^}_CLI or RESEARCHER_CLI/REVIEWER_CLI; stub smoke below does not need it)"; fi
+  else
+    # Inline the env-var hint per CLI — portable case beats Bash-4-only ${t^^}.
+    case "$t" in
+      gemini) env_hint="GEMINI_CLI or RESEARCHER_CLI" ;;
+      codex)  env_hint="CODEX_CLI or REVIEWER_CLI" ;;
+      *)      env_hint="(no documented override)" ;;
+    esac
+    warn "$t — missing (override via $env_hint; stub smoke below does not need it)"
+  fi
 done
 if command -v sha256sum >/dev/null 2>&1; then ok "sha256sum — $(command -v sha256sum)"
 elif command -v shasum >/dev/null 2>&1; then ok "shasum — $(command -v shasum) (manifest.sh fallback)"
