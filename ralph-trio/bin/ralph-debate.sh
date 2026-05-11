@@ -186,11 +186,17 @@ while :; do
     break
   fi
 
-  TASK=$(pop_top_task "$BACKLOG_FILE") || true
-  if [ -z "$TASK" ]; then
-    ralph_log "BACKLOG drained. Stopping."
-    echo "=== STOP (backlog-empty) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
-    break
+  if [ "$DRY_RUN" = "1" ]; then
+    # Don't mutate the user's BACKLOG under --dry-run. Synthesize a topic so
+    # the loop still fires; --max-iter bounds it instead of backlog drain.
+    TASK="(dry-run synthetic topic — iter $ITER)"
+  else
+    TASK=$(pop_top_task "$BACKLOG_FILE") || true
+    if [ -z "$TASK" ]; then
+      ralph_log "BACKLOG drained. Stopping."
+      echo "=== STOP (backlog-empty) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
+      break
+    fi
   fi
 
   ralph_log "iter $ITER · topic: $TASK"

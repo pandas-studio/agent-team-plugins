@@ -83,8 +83,10 @@ BACKLOG_FILE="$(cd "$(dirname "$BACKLOG_FILE")" && pwd)/$(basename "$BACKLOG_FIL
 if [ "$DRY_RUN" != "1" ] && [ "$AUTOSHIP" != "1" ]; then
   command -v ask-codex.sh  >/dev/null 2>&1 || { echo "ERROR: ralph-trio requires the dev-trio plugin (ask-codex.sh not on PATH). Install: /plugin install dev-trio@pandas-studio" >&2; exit 2; }
 fi
-if [ "$DRY_RUN" != "1" ] && [ "$NO_RESEARCH" != "1" ]; then
-  command -v ask-gemini.sh >/dev/null 2>&1 || { echo "ERROR: ralph-trio requires the dev-trio plugin (ask-gemini.sh not on PATH). Install: /plugin install dev-trio@pandas-studio  (or pass --no-research)" >&2; exit 2; }
+if [ "$DRY_RUN" != "1" ] && [ "$AUTOSHIP" != "1" ] && [ "$NO_RESEARCH" != "1" ]; then
+  # NEED RESEARCH can only fire after a real reviewer verdict; --autoship
+  # skips Stage 3 entirely, so ask-gemini.sh is unreachable there.
+  command -v ask-gemini.sh >/dev/null 2>&1 || { echo "ERROR: ralph-trio requires the dev-trio plugin (ask-gemini.sh not on PATH). Install: /plugin install dev-trio@pandas-studio  (or pass --no-research / --autoship)" >&2; exit 2; }
 fi
 
 if [ -z "$FIX_PLAN_FILE" ]; then
@@ -287,11 +289,18 @@ while :; do
     break
   fi
 
-  TASK=$(pop_top_task "$BACKLOG_FILE") || true
-  if [ -z "$TASK" ]; then
-    ralph_log "BACKLOG drained. Stopping."
-    echo "=== STOP (backlog-empty) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
-    break
+  if [ "$DRY_RUN" = "1" ]; then
+    # Don't mutate the user's BACKLOG under --dry-run. Synthesize a task so
+    # the manifest pipeline still fires; --max-iter bounds the loop instead
+    # of "backlog drained" detection.
+    TASK="(dry-run synthetic task — iter $ITER)"
+  else
+    TASK=$(pop_top_task "$BACKLOG_FILE") || true
+    if [ -z "$TASK" ]; then
+      ralph_log "BACKLOG drained. Stopping."
+      echo "=== STOP (backlog-empty) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
+      break
+    fi
   fi
 
   ralph_log "iter $ITER · task: $TASK"

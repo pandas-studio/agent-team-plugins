@@ -132,12 +132,22 @@ done < <(
 
 # Find ralph commits in git history since the cutoff (uses cwd's repo). git's
 # own --since parser is liberal enough to consume the same forms above.
+# --base-ref scopes the walk to $BASE_REF..HEAD; without it, all ancestors of
+# HEAD reachable within --since are considered (legacy behavior).
+if [ -n "$BASE_REF" ]; then
+  git rev-parse --verify "$BASE_REF" >/dev/null 2>&1 || {
+    echo "ralph-meta: --base-ref does not resolve in cwd repo: $BASE_REF" >&2; exit 2;
+  }
+  GIT_RANGE_ARGS=( "$BASE_REF..HEAD" )
+else
+  GIT_RANGE_ARGS=()
+fi
 RALPH_COMMITS=()
 while IFS= read -r line; do
   [ -n "$line" ] && RALPH_COMMITS+=("$line")
-done < <(git log --since="$SINCE" --pretty=format:'%h %s' --grep='^ralph' 2>/dev/null)
+done < <(git log "${GIT_RANGE_ARGS[@]}" --since="$SINCE" --pretty=format:'%h %s' --grep='^ralph' 2>/dev/null)
 
-ralph_log "scope: $TEAM, since=$SINCE, variant=${VARIANT:-any}"
+ralph_log "scope: $TEAM, since=$SINCE, variant=${VARIANT:-any}, base-ref=${BASE_REF:-<none>}"
 ralph_log "  ralph logs found: ${#RALPH_LOGS[@]}"
 ralph_log "  ralph commits found: ${#RALPH_COMMITS[@]}"
 
@@ -147,6 +157,7 @@ ralph_log "  ralph commits found: ${#RALPH_COMMITS[@]}"
   echo
   echo "Team: $TEAM"
   echo "Since: $SINCE"
+  echo "Base-ref: ${BASE_REF:-<none>}"
   echo "Variant filter: ${VARIANT:-any}"
   echo
   echo "## Ralph commits in this window"
