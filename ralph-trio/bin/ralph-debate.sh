@@ -178,8 +178,11 @@ COMPLETED=0
 # no completion promise on this variant). Count unchecked BACKLOG topics
 # up front and stop after that many iters. 0 outside dry-run (unused).
 if [ "$DRY_RUN" = "1" ]; then
-  DRY_RUN_BACKLOG_COUNT=$(grep -cE '^[[:space:]]*-[[:space:]]*\[[ ]\][[:space:]]+' "$BACKLOG_FILE" 2>/dev/null || echo 0)
-  [ "$DRY_RUN_BACKLOG_COUNT" -lt 1 ] && DRY_RUN_BACKLOG_COUNT=1
+  # See ralph-trio.sh for the rationale — grep -c rc=1 + "0" stdout +
+  # `|| echo 0` produced a non-numeric "0\n0" that broke the cap on
+  # empty / fully-checked BACKLOG and reintroduced the infinite loop.
+  DRY_RUN_BACKLOG_COUNT=$(grep -E '^[[:space:]]*-[[:space:]]*\[[ ]\][[:space:]]+' "$BACKLOG_FILE" 2>/dev/null | wc -l | tr -d ' ')
+  case "$DRY_RUN_BACKLOG_COUNT" in *[!0-9]*|"") DRY_RUN_BACKLOG_COUNT=0 ;; esac
 else
   DRY_RUN_BACKLOG_COUNT=0
 fi
