@@ -1,0 +1,29 @@
+# Ralph fix_plan — iteration log + completion signal
+
+Each iteration appends here. Future iterations read this file cold to recover context.
+
+## Format per entry
+
+```
+## iter N · <UTC timestamp>
+What I did:
+- ...
+
+What I learned:
+- ...
+
+> BLOCKER: (optional) describe anything the next iteration must resolve before continuing.
+
+Next:
+- one-line hint for iter N+1
+```
+
+## Completion signal
+
+When **every** completion criterion in `PROMPT.md` is met, append a line consisting of the literal opening tag `<` then `promise` then `>COMPLETE<` then `/promise>` (i.e. the same tag used in PROMPT.md). The harness greps for that exact 31-byte string in this file and exits the loop.
+
+(This template intentionally does NOT contain the literal marker — otherwise the harness would think you're already done before iter 1.)
+
+## Iterations
+
+(no entries yet — first iteration starts here)

@@ -1,0 +1,46 @@
+# Ralph PROMPT — fill this in before running
+
+You are Claude, working inside a Ralph Wiggum loop. The harness re-invokes you with this same prompt each iteration. **Progress lives in files and git, not in your context.** Treat each iteration as fresh — re-read this PROMPT, re-read `fix_plan.md`, re-read `BACKLOG.md`, re-read the relevant code.
+
+## Mission
+
+> _Replace this paragraph with the concrete spec for the work._
+>
+> Example: "Migrate every test file under `tests/` from `unittest` to `pytest`. Preserve test semantics. Keep tests passing at every commit."
+
+## Completion criteria (be strict — the harness exits when this is satisfied)
+
+- [ ] _criterion 1_
+- [ ] _criterion 2_
+- [ ] All tests pass: `<your test command here>`
+
+When **every** criterion is met, append the literal completion marker to `fix_plan.md` on its own line. The marker is the 31-byte string consisting of `<promise>` immediately followed by `COMPLETE` immediately followed by `</promise>` (no spaces, no newlines inside). The harness greps fix_plan.md for that exact string and exits.
+
+(This PROMPT template intentionally does NOT spell the marker out verbatim — otherwise the harness would match it during the first iteration's setup.)
+
+## How to work each iteration
+
+1. Read `fix_plan.md` to see what past iterations learned and where they got stuck.
+2. Pick **one** small, coherent unit of work toward an unmet completion criterion. Do not try to do everything at once — Ralph's strength is incrementalism.
+3. Search the repo before assuming a function/module doesn't exist (`grep`, `find`, `git log -- <path>`).
+4. Make the change. Run the smallest test loop that proves it works.
+5. If green: `git add -A && git commit -m "ralph: <one-line summary>"`.
+6. Update `fix_plan.md` with what you just did, what you learned, and what the *next* iteration should attempt. If you hit a blocker, write it as a `> BLOCKER:` line so the next iteration sees it immediately.
+7. Re-check completion criteria. If all met, append `<promise>COMPLETE</promise>` and stop.
+
+## Helpers available (use only when warranted)
+
+- `.agents-dev/scripts/ask-gemini.sh "<question>"` — research a library/API/spec. Use **before** coding when uncertain about external behavior.
+- `.agents-dev/scripts/ask-codex.sh "<focus>"` — second-pair-of-eyes review of your uncommitted diff. Use **after** writing a non-trivial change, **before** committing.
+- For trio/debate variants the harness handles these calls — solo variant relies on you to invoke them yourself.
+
+## Worktree mode (when `RALPH_WT_DIR` is set in env)
+
+The harness ran `git worktree add` for this iteration; you are working in `$RALPH_WT_DIR` on a throwaway branch. Tests passing → harness merges. Tests failing → harness discards. Commit normally; the harness handles merge/discard from the branch name.
+
+## Anti-patterns to avoid
+
+- Multi-task iterations. One coherent change per loop.
+- Leaving `fix_plan.md` stale. Future-you reads it cold each iteration.
+- Hallucinating that something is "already done" — verify with `git log` / `grep` first.
+- Adding `<promise>COMPLETE</promise>` when criteria aren't actually met. The harness will exit and the human will be unhappy.

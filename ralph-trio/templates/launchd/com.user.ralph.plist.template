@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Ralph overnight launchd template — macOS LaunchAgent.
+
+  Setup steps:
+    1. Replace every occurrence of {{REPO}} with the absolute path to your repo.
+       Example: sed -i '' 's|{{REPO}}|/Users/me/projects/myrepo|g' com.user.ralph.plist
+    2. (Optional) Adjust the Hour/Minute below for your preferred start time.
+    3. (Optional) Adjust --max-iter / --max-runtime to your overnight budget.
+    4. Make sure {{REPO}}/PROMPT.md exists and is filled in.
+    5. Copy to ~/Library/LaunchAgents/:
+         cp com.user.ralph.plist ~/Library/LaunchAgents/
+    6. Load:
+         launchctl load -w ~/Library/LaunchAgents/com.user.ralph.plist
+    7. Manually trigger once to verify:
+         launchctl start com.user.ralph
+    8. Inspect:
+         tail -F {{REPO}}/.agents-ralph/log/overnight/launchd.log
+
+  To stop / unload:
+    launchctl unload -w ~/Library/LaunchAgents/com.user.ralph.plist
+
+  Cron alternative (one line in `crontab -e`, runs at 23:00 daily):
+    0 23 * * * cd {{REPO}} && AGENT_TEAM=overnight \
+      .agents-ralph/scripts/ralph-solo.sh \
+      --max-iter 50 --max-runtime 6h --worktree \
+      --prompt {{REPO}}/PROMPT.md \
+      >> {{REPO}}/.agents-ralph/log/overnight/cron.log 2>&1
+
+  Safety notes:
+    - --worktree is STRONGLY recommended for unattended runs. Without it,
+      ralph commits land directly on your current branch. With it, each
+      iteration's branch is merged on test pass and discarded on test fail
+      (define --test-cmd to gate merges).
+    - --max-iter and --max-runtime are both required as belt-and-suspenders.
+      Set --max-runtime conservatively — a stuck claude can burn an entire
+      night otherwise.
+    - The --test-cmd should be fast (under a few minutes) and trustworthy.
+      Avoid full integration suites; run unit tests only.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.user.ralph</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>cd {{REPO}} &amp;&amp; AGENT_TEAM=overnight {{REPO}}/.agents-ralph/scripts/ralph-solo.sh --max-iter 50 --max-runtime 6h --worktree --prompt {{REPO}}/PROMPT.md --test-cmd 'echo replace-with-your-test-command'</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>23</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>{{REPO}}</string>
+
+  <key>StandardOutPath</key>
+  <string>{{REPO}}/.agents-ralph/log/overnight/launchd.stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>{{REPO}}/.agents-ralph/log/overnight/launchd.stderr.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>
