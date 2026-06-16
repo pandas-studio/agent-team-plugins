@@ -2,7 +2,7 @@
 # team-layout.sh — set up the 3-agent team layout in tmux.
 #
 #   ┌─────────────────┬──────────────────┐
-#   │                 │  gemini          │
+#   │                 │  antigravity     │
 #   │  Claude (PM)    │  dashboard       │
 #   │  shell —        ├──────────────────┤
 #   │  run 'claude'   │  codex           │
@@ -28,7 +28,7 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [options]
 
-Sets up the 3-agent team tmux layout (Claude main + Gemini/Codex dashboards).
+Sets up the 3-agent team tmux layout (Claude main + Antigravity/Codex dashboards).
 
 Options:
   -n NAME        Session / @team-name (default: ${SESSION})
@@ -62,9 +62,9 @@ if [ "$HERE" = "1" ]; then
   # and rename the window for visibility.
   tmux set-option -w '@team-name' "$SESSION"
   tmux rename-window "$SESSION"
-  GEMINI_P=$(tmux split-window -h -c "$REPO_DIR" -P -F "#{pane_id}")
-  tmux send-keys -t "$GEMINI_P" "$DASH gemini" Enter
-  CODEX_P=$(tmux split-window -v -t "$GEMINI_P" -c "$REPO_DIR" -P -F "#{pane_id}")
+  AGY_P=$(tmux split-window -h -c "$REPO_DIR" -P -F "#{pane_id}")
+  tmux send-keys -t "$AGY_P" "$DASH agy" Enter
+  CODEX_P=$(tmux split-window -v -t "$AGY_P" -c "$REPO_DIR" -P -F "#{pane_id}")
   tmux send-keys -t "$CODEX_P" "$DASH codex" Enter
   tmux select-pane -L 2>/dev/null || true
   echo "✓ Layout applied to current window (team: ${SESSION}). Run 'claude' in the left pane."
@@ -76,9 +76,9 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
 else
   MAIN_P=$(tmux new-session -d -s "$SESSION" -n "$SESSION" -c "$REPO_DIR" -P -F "#{pane_id}")
   tmux set-option -w -t "$SESSION" '@team-name' "$SESSION"
-  GEMINI_P=$(tmux split-window -h -t "$MAIN_P" -c "$REPO_DIR" -P -F "#{pane_id}")
-  tmux send-keys -t "$GEMINI_P" "$DASH gemini" Enter
-  CODEX_P=$(tmux split-window -v -t "$GEMINI_P" -c "$REPO_DIR" -P -F "#{pane_id}")
+  AGY_P=$(tmux split-window -h -t "$MAIN_P" -c "$REPO_DIR" -P -F "#{pane_id}")
+  tmux send-keys -t "$AGY_P" "$DASH agy" Enter
+  CODEX_P=$(tmux split-window -v -t "$AGY_P" -c "$REPO_DIR" -P -F "#{pane_id}")
   tmux send-keys -t "$CODEX_P" "$DASH codex" Enter
   tmux select-pane -t "$MAIN_P"
   tmux send-keys -t "$MAIN_P" "# 3-agent team ready (team: ${SESSION}). Run 'claude' to start." Enter

@@ -1,4 +1,4 @@
-# dev-trio tmux keybinding — bind R to spawn Gemini/Codex dashboards alongside
+# dev-trio tmux keybinding — bind R to spawn Antigravity/Codex dashboards alongside
 # the main (Claude) pane in the current tmux window.
 #
 # ── Install ──────────────────────────────────────────────────────────────────
@@ -18,7 +18,7 @@
 #
 # ── Usage ────────────────────────────────────────────────────────────────────
 # Inside any tmux window, press your prefix (default: Ctrl-b) followed by R.
-# The current pane is split into a 3-pane layout: Claude (left) + Gemini
+# The current pane is split into a 3-pane layout: Claude (left) + Antigravity
 # dashboard (top-right) + Codex dashboard (bottom-right).
 #
 # NOTE: This binding is a convenience for users who skip `claude` and want to

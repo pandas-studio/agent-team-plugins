@@ -29,7 +29,7 @@ This skill prepares a 3-pane tmux view: this Claude session stays in the left pa
    `team-3pane.sh` is on the plugin's PATH while the plugin is active. The script splits the current pane into three equal columns and launches `tail-role.sh gen|crit` in the new panes. Logs land in `$PWD/.debate-conductor/log/<team>/` — the team name is the tmux window's `@team-name` option (set automatically) or session name.
 
 3. **Confirm and instruct**. After the split succeeds, tell the user:
-   > Layout ready. The middle pane will live-tail the Generator (Gemini) and the right pane the Critic (Codex) once a debate starts. Pick a topic and run:
+   > Layout ready. The middle pane will live-tail the Generator (Antigravity) and the right pane the Critic (Codex) once a debate starts. Pick a topic and run:
    > ```
    > /debate-conductor:run <topic-number-or-name> [rounds]
    > ```

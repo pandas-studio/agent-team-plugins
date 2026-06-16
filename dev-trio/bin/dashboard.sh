@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# dashboard.sh — live, formatted summary view of gemini/codex wrapper runs.
+# dashboard.sh — live, formatted summary view of agy/codex wrapper runs.
 #
 # Usage:
-#   dashboard.sh gemini    # render Gemini researcher status
+#   dashboard.sh agy       # render Antigravity researcher status
 #   dashboard.sh codex     # render Codex reviewer status
 #
 # Run this in a side tmux pane. Re-renders only when the source log changes
@@ -16,11 +16,11 @@
 #   Ctrl-C  also quits
 set -uo pipefail
 
-ROLE="${1:?usage: $0 gemini|codex}"
+ROLE="${1:?usage: $0 agy|codex}"
 
 case "$ROLE" in
-  gemini)
-    ICON="🔍"; TITLE="GEMINI · researcher"
+  agy)
+    ICON="🔍"; TITLE="ANTIGRAVITY · researcher"
     HEADER_COLOR=$'\033[1;36m'   # bright cyan
     LABEL="Query"
     ;;
@@ -30,7 +30,7 @@ case "$ROLE" in
     LABEL="Focus"
     ;;
   *)
-    echo "usage: $0 gemini|codex" >&2; exit 2 ;;
+    echo "usage: $0 agy|codex" >&2; exit 2 ;;
 esac
 
 # Team namespace — must match what wrappers use.
@@ -88,7 +88,7 @@ while true; do
       BUF+="  ${BOLD}Started:${RESET} ${TS:-unknown}"$'\n\n'
 
       # Query/Focus body
-      if [ "$ROLE" = "gemini" ]; then
+      if [ "$ROLE" = "agy" ]; then
         BODY=$(awk '/^=== QUERY ===$/{flag=1; next} /^=== /{flag=0} flag' "$LATEST" 2>/dev/null)
       else
         BODY=$(awk '/^=== FOCUS ===$/{flag=1; next} /^=== /{flag=0} flag' "$LATEST" 2>/dev/null)
@@ -101,7 +101,7 @@ while true; do
       BUF+=$'\n'
 
       # Extract real response (codex echoes its prompt + duplicates final
-      # response after "tokens used"; gemini doesn't have such framing).
+      # response after "tokens used"; agy doesn't have such framing).
       RESPONSE=""
       if [ "$ROLE" = "codex" ]; then
         RESPONSE=$(awk '/^tokens used/{flag=1; next} /^=== END /{flag=0} flag' "$LATEST" 2>/dev/null)
@@ -125,8 +125,8 @@ while true; do
       fi
 
       # ── Role-specific summary ────────────────────────────────────────────
-      if [ "$ROLE" = "gemini" ] && [ "$DONE" = "1" ]; then
-        # Lead: first paragraph of answer (skip Gemini CLI preamble lines)
+      if [ "$ROLE" = "agy" ] && [ "$DONE" = "1" ]; then
+        # Lead: first paragraph of answer (skip Antigravity CLI preamble lines)
         LEAD=$(echo "$RESPONSE" | awk '
           BEGIN { started=0 }
           /^Ripgrep|^Falling back/ { next }

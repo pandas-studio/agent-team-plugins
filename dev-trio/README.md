@@ -1,24 +1,24 @@
 # dev-trio
 
-Claude Code orchestrates a 3-vendor dev team: Claude (PM/Coder) + Gemini (Researcher) + Codex (Reviewer). Live 3-pane tmux view; ad-hoc research and review skills; opt-in PM orchestration policy that installs into your workspace's `CLAUDE.md`.
+Claude Code orchestrates a 3-vendor dev team: Claude (PM/Coder) + Antigravity (Researcher) + Codex (Reviewer). Live 3-pane tmux view; ad-hoc research and review skills; opt-in PM orchestration policy that installs into your workspace's `CLAUDE.md`.
 
 Default model assignment:
 
 | Pane | Role | CLI |
 | :--- | :--- | :--- |
 | Left | PM / Coder | Claude Code (this session) |
-| Top-right | Researcher dashboard | tails `gemini` output |
+| Top-right | Researcher dashboard | tails `agy` output |
 | Bottom-right | Reviewer dashboard | tails `codex` output |
 
 ## Prerequisites
 
 - `tmux`
 - `claude` (Claude Code)
-- `gemini` (Gemini CLI) authenticated
+- `agy` (Antigravity CLI) authenticated
 - `codex` (OpenAI Codex CLI) authenticated
 - `jq` (1.6+) — required for RFC 0004 run manifests
 
-Override CLI binaries via `GEMINI_CLI` / `RESEARCHER_CLI` and `CODEX_CLI` / `REVIEWER_CLI` env vars.
+Override CLI binaries via `AGY_CLI` / `RESEARCHER_CLI` and `CODEX_CLI` / `REVIEWER_CLI` env vars.
 
 ## Install
 
@@ -55,7 +55,7 @@ claude --plugin-dir ./agent-team-plugins/dev-trio
 
 4. Drive normally. The PM policy tells Claude when to dispatch:
    ```
-   ask-gemini.sh "What's the recommended way to stream tokens with langchain-anthropic 0.3.x?"
+   ask-agy.sh "What's the recommended way to stream tokens with langchain-anthropic 0.3.x?"
    ask-codex.sh "review the new retry logic in src/agent.py — concurrency safety"
    ```
    Or use the wrapping skills:
@@ -68,8 +68,8 @@ claude --plugin-dir ./agent-team-plugins/dev-trio
 
 | Skill | What it does |
 | :--- | :--- |
-| `/dev-trio:bootstrap` | One-time per session: splits the current tmux pane into 3 and starts the gemini/codex dashboards. |
-| `/dev-trio:research <question>` | One-shot Gemini lookup. Streaming output lands in the top-right pane; chat-side surfaces the lead + cited URLs. |
+| `/dev-trio:bootstrap` | One-time per session: splits the current tmux pane into 3 and starts the agy/codex dashboards. |
+| `/dev-trio:research <question>` | One-shot Antigravity lookup. Streaming output lands in the top-right pane; chat-side surfaces the lead + cited URLs. |
 | `/dev-trio:review [focus] [--with-research <file>] [--with-spec <file>]` | One-shot Codex review (default = git-uncommitted scope). Chat-side surfaces verdict (`SHIP / NEEDS-FIX / DISCUSS`) + Blocker/Major counts. Handles `## NEED RESEARCH` blocks. |
 | `/dev-trio:install-pm` | Writes/upgrades the PM orchestration policy in the workspace's `CLAUDE.md` (idempotent, marker-guarded). |
 
@@ -81,9 +81,9 @@ Per-team log namespace. Each invocation writes to:
 
 ```
 $PWD/.dev-trio/log/<team>/
-├── gemini-<TS>.log         # raw Gemini output + framing
+├── agy-<TS>.log            # raw Antigravity output + framing
 ├── codex-<TS>.log          # raw Codex output + framing
-├── latest-gemini.log       # symlink to most recent gemini run
+├── latest-agy.log          # symlink to most recent agy run
 ├── latest-codex.log        # symlink to most recent codex run
 └── <name>-<TS>.manifest.json   # RFC 0004 typed run manifest
 ```
@@ -101,11 +101,11 @@ Override the log root with `DEV_TRIO_LOG_DIR=/path/to/logs`.
 
 Two side panes run a flicker-free dashboard showing **distilled key points only** — the full raw output stays in the Claude (PM) pane and on disk. Each side pane shows:
 
-- **Gemini**: query, status, *answer lead* (first paragraph), sources cited count
+- **Antigravity**: query, status, *answer lead* (first paragraph), sources cited count
 - **Codex**: focus, status, **verdict box** (color-coded), findings counts, **Blocker/Major text** (when present)
 
 ```bash
-dashboard.sh gemini   # in one side pane
+dashboard.sh agy      # in one side pane
 dashboard.sh codex    # in another side pane
 ```
 
@@ -127,7 +127,7 @@ The wrappers append `=== END (rc=N) ===` to each log when the run finishes; that
 **Raw fallback** (when the dashboard misbehaves or you want unfiltered output):
 
 ```bash
-tail -F .dev-trio/log/${AGENT_TEAM:-default}/latest-gemini.log
+tail -F .dev-trio/log/${AGENT_TEAM:-default}/latest-agy.log
 tail -F .dev-trio/log/${AGENT_TEAM:-default}/latest-codex.log
 ```
 
@@ -168,16 +168,16 @@ dev-trio/
 │   ├── review/SKILL.md
 │   └── install-pm/SKILL.md
 ├── bin/                       # on plugin PATH while active
-│   ├── ask-gemini.sh          # Researcher wrapper
+│   ├── ask-agy.sh             # Researcher wrapper
 │   ├── ask-codex.sh           # Reviewer wrapper
-│   ├── dashboard.sh           # live dashboard (gemini|codex)
+│   ├── dashboard.sh           # live dashboard (agy|codex)
 │   ├── team-layout.sh         # tmux 3-pane splitter
 │   └── dev-trio-doctor.sh     # env probe + stub-CLI smoke
 ├── lib/                       # internal
 │   ├── manifest.sh            # RFC 0004 run-manifest helper (vendored)
 │   ├── pm.md                  # PM orchestration policy (source of truth)
 │   └── roles/
-│       ├── researcher.md      # Gemini role prompt
+│       ├── researcher.md      # Antigravity role prompt
 │       └── reviewer.md        # Codex role prompt
 └── tmux/keybinding.conf.example
 ```
@@ -190,7 +190,7 @@ A one-shot env probe + stub-CLI smoke is bundled:
 dev-trio-doctor.sh
 ```
 
-Checks `tmux` / `gemini` / `codex` / `jq` presence and verifies that `ask-gemini.sh` produces a well-formed RFC 0004 manifest under stub CLIs. **Stub smokes are necessary but not sufficient** — verdict / dashboard / parse-affecting changes need a real-CLI dry-run on top.
+Checks `tmux` / `agy` / `codex` / `jq` presence and verifies that `ask-agy.sh` produces a well-formed RFC 0004 manifest under stub CLIs. **Stub smokes are necessary but not sufficient** — verdict / dashboard / parse-affecting changes need a real-CLI dry-run on top.
 
 ## Security model
 
@@ -199,7 +199,7 @@ The wrappers use **two layers** of injection defense:
 1. **Role-prompt level** — each role file has a `Trust boundary` section telling the agent to ignore directives inside `<user_question>` / `<review_target>` / `<research_context>` tags.
 2. **Literal-string level** — the wrapper scripts strip the matching closing tag from untrusted input before embedding.
 
-We **deliberately did not** add JSON/base64 encoding of payloads (which Codex flagged as the "proper" fix). This is a local dev tool, not a production surface receiving adversarial input. The most realistic attack vector is **Gemini's research output flowing into Codex**; if the threat model changes (e.g., Gemini starts pulling untrusted external content as context), upgrade to encoded payloads. Until then, the two layers above are sufficient.
+We **deliberately did not** add JSON/base64 encoding of payloads (which Codex flagged as the "proper" fix). This is a local dev tool, not a production surface receiving adversarial input. The most realistic attack vector is **Antigravity's research output flowing into Codex**; if the threat model changes (e.g., Antigravity starts pulling untrusted external content as context), upgrade to encoded payloads. Until then, the two layers above are sufficient.
 
 ## License
 

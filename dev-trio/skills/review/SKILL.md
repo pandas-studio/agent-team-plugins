@@ -1,19 +1,19 @@
 ---
 description: One-shot Codex review. Default scope = uncommitted working-tree changes. Optional --with-research <file> and --with-spec <file> for context injection. Streaming output lands in the bottom-right dashboard pane; chat-side surfaces the verdict (SHIP/NEEDS-FIX/DISCUSS) + Blocker/Major counts and handles NEED RESEARCH blocks.
 disable-model-invocation: true
-allowed-tools: Bash(ask-codex.sh:*) Bash(ask-gemini.sh:*) Bash(git:*) Bash(cat:*) Bash(ls:*) Bash(date:*) Bash(mkdir:*) Bash(echo:*) Bash(sed:*) Read
+allowed-tools: Bash(ask-codex.sh:*) Bash(ask-agy.sh:*) Bash(git:*) Bash(cat:*) Bash(ls:*) Bash(date:*) Bash(mkdir:*) Bash(echo:*) Bash(sed:*) Read
 argument-hint: [focus] [--with-research <file>] [--with-spec <file>]
 ---
 
 # Review (Codex, one-shot)
 
-You are the **PM**. Codex is the reviewer (bottom-right pane). You dispatch one review, surface the verdict, and route any `NEED RESEARCH` block back through Gemini.
+You are the **PM**. Codex is the reviewer (bottom-right pane). You dispatch one review, surface the verdict, and route any `NEED RESEARCH` block back through Antigravity.
 
 ## 1 · Parse `$ARGUMENTS` and build the dispatch command
 
 `$ARGUMENTS` is a single string that may interleave three pieces in any order:
 
-- **Optional `--with-research <file>`** — research context from a previous Gemini call (typically `latest-gemini.log` or a curated `research-<TS>.md`).
+- **Optional `--with-research <file>`** — research context from a previous Antigravity call (typically `latest-agy.log` or a curated `research-<TS>.md`).
 - **Optional `--with-spec <file>`** — spec/contract the changes are expected to satisfy.
 - **Optional free-form focus** — review scope, possibly multi-word. Examples:
   - `focus on the new retry logic in src/agent.py — concurrency safety`
@@ -83,10 +83,10 @@ Quote the verdict line verbatim. Color the framing — 🟢 SHIP / 🔴 NEEDS-FI
 
 ## 4 · Handle `## NEED RESEARCH` blocks
 
-If the log contains a `## NEED RESEARCH` section after the verdict, Codex needs Gemini's help before the review can finalize. Do this:
+If the log contains a `## NEED RESEARCH` section after the verdict, Codex needs Antigravity's help before the review can finalize. Do this:
 
 1. Surface the questions to the user. Confirm before fetching (research costs latency and tokens).
-2. On confirmation, run each question through `ask-gemini.sh` and concatenate the answers into a temp file:
+2. On confirmation, run each question through `ask-agy.sh` and concatenate the answers into a temp file:
    ```bash
    RTS=$(date +%Y%m%d-%H%M%S)
    RFILE="$PWD/.dev-trio/log/${AGENT_TEAM:-default}/research-$RTS.md"
@@ -95,12 +95,12 @@ If the log contains a `## NEED RESEARCH` section after the verdict, Codex needs 
      echo "# Research for codex review @ $RTS"
      for q in "<question 1>" "<question 2>"; do
        echo; echo "## Q: $q"; echo
-       ask-gemini.sh "$q" | sed -n '/^=== RESPONSE ===/,/^=== END /p' | sed '1d;$d'
+       ask-agy.sh "$q" | sed -n '/^=== RESPONSE ===/,/^=== END /p' | sed '1d;$d'
      done
    } > "$RFILE"
    ```
 3. Re-invoke `ask-codex.sh --with-research <RFILE>` with the **same focus** as the original call.
-4. Use the second verdict as the actionable one. Mention the round-trip to the user (Gemini → Codex re-review) so they understand why latency was higher.
+4. Use the second verdict as the actionable one. Mention the round-trip to the user (Antigravity → Codex re-review) so they understand why latency was higher.
 
 ## 5 · Don't auto-fix
 

@@ -1,5 +1,5 @@
 ---
-description: Run an N-round Generator(Gemini) vs Critic(Codex) debate on a chosen topic, then summarise verdict and round-by-round moves. Topic can be a topics/ file reference OR free-form text. Use when the user wants to start, resume, or analyse a debate. Bootstrap must have run first.
+description: Run an N-round Generator(Antigravity) vs Critic(Codex) debate on a chosen topic, then summarise verdict and round-by-round moves. Topic can be a topics/ file reference OR free-form text. Use when the user wants to start, resume, or analyse a debate. Bootstrap must have run first.
 disable-model-invocation: true
 allowed-tools: Bash(debate.sh:*) Bash(ls:*) Bash(cat:*) Read Glob
 argument-hint: [topic-or-text] [rounds]
@@ -7,7 +7,7 @@ argument-hint: [topic-or-text] [rounds]
 
 # Run a debate
 
-You are the **conductor**. Generator = Gemini (middle pane), Critic = Codex (right pane). You orchestrate; you do not generate or critique.
+You are the **conductor**. Generator = Antigravity (middle pane), Critic = Codex (right pane). You orchestrate; you do not generate or critique.
 
 ## 1 · Resolve the topic from `$ARGUMENTS`
 
@@ -57,7 +57,7 @@ For role rotation experiments, add `--rotate` (model alternates each pair of rou
 Transcripts live at `$PWD/.debate-conductor/log/<team>/latest-debate/round-*.md`. Use `Glob` to enumerate, `Read` to load each file. Then report:
 
 - **Verdict** — the canonical 3-token line at the bottom of the last critic round: `Verdict: STRENGTHEN`, `Verdict: RECONSIDER`, or `Verdict: OVERTURN`. Quote it verbatim.
-- **Move-by-move** — one bullet per round: `R1 (Gen, gemini): <opening claim in 1 line>` → `R2 (Crit, codex): <main attack>` → `R3 (Gen, gemini): <accept/reject/modify of each Blocker/Major>`. Keep each line under 25 words.
+- **Move-by-move** — one bullet per round: `R1 (Gen, agy): <opening claim in 1 line>` → `R2 (Crit, codex): <main attack>` → `R3 (Gen, agy): <accept/reject/modify of each Blocker/Major>`. Keep each line under 25 words.
 - **Two follow-up questions** worth asking next, e.g. "what if the Critic's Blocker #2 had been about X instead?" — concrete, not generic.
 
 ## 5 · Stay in the conversation
