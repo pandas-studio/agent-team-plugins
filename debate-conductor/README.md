@@ -7,17 +7,17 @@ Default model assignment:
 | Pane | Role | CLI |
 | :--- | :--- | :--- |
 | Left | Conductor / PM | Claude Code (this session) |
-| Middle | Generator | `gemini` |
+| Middle | Generator | `agy` |
 | Right | Critic | `codex` |
 
 ## Prerequisites
 
 - `tmux`
 - `claude` (Claude Code)
-- `gemini` (Gemini CLI) authenticated
+- `agy` (Antigravity CLI) authenticated
 - `codex` (OpenAI Codex CLI) authenticated
 
-The wrappers respect overrides via `GEMINI_CLI`, `CODEX_CLI`, `CLAUDE_CLI` env vars if your binaries are at non-standard paths.
+The wrappers respect overrides via `AGY_CLI`, `CODEX_CLI`, `CLAUDE_CLI` env vars if your binaries are at non-standard paths.
 
 ## Install
 
@@ -60,7 +60,7 @@ claude --plugin-dir ./agent-team-plugins/debate-conductor
    ```
    /debate-conductor:run 1
    ```
-   Resolves topic 1 from `topics/`, runs the default 3-round debate (Gemini gen → Codex crit → Gemini gen), and afterwards Claude reads the round files and surfaces verdict + move-by-move.
+   Resolves topic 1 from `topics/`, runs the default 3-round debate (Antigravity gen → Codex crit → Antigravity gen), and afterwards Claude reads the round files and surfaces verdict + move-by-move.
 
 5. Follow up in natural language: "round 3 결정타?", "5라운드로 다시 돌려줘", "rotate ON으로 토픽 2", etc.
 
@@ -121,8 +121,8 @@ debate-conductor/
 │   ├── team-3pane.sh          # tmux 3-pane splitter (--here mode)
 │   └── tail-role.sh           # live-tail one role's round files
 ├── lib/                       # internal — invoked by debate.sh / install-pm
-│   ├── ask-generator.sh       # Generator wrapper (gemini|codex|claude)
-│   ├── ask-critic.sh          # Critic wrapper (codex|gemini|claude)
+│   ├── ask-generator.sh       # Generator wrapper (agy|codex|claude)
+│   ├── ask-critic.sh          # Critic wrapper (codex|agy|claude)
 │   ├── pm.md                  # PM orchestration policy (source of truth)
 │   └── roles/
 │       ├── generator.md       # Generator role prompt

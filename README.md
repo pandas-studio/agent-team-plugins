@@ -1,6 +1,6 @@
 # pandas-studio agent-team-plugins
 
-Claude Code plugin marketplace from pandas-studio's YouTube series on multi-CLI agent teams. Each plugin packages a *Claude-as-conductor* pattern: Claude orchestrates one or more companion CLIs (Gemini, Codex) playing specialised roles, with a tmux multi-pane live view.
+Claude Code plugin marketplace from pandas-studio's YouTube series on multi-CLI agent teams. Each plugin packages a *Claude-as-conductor* pattern: Claude orchestrates one or more companion CLIs (Antigravity, Codex) playing specialised roles, with a tmux multi-pane live view.
 
 ## Install the marketplace
 
@@ -20,8 +20,8 @@ Then install the plugins you want:
 
 | Name | Roles | Episode | Status |
 | :--- | :--- | :--- | :--- |
-| [dev-trio](./dev-trio) | Claude=PM/Coder · Gemini=Researcher · Codex=Reviewer | EP A | shipped |
-| [debate-conductor](./debate-conductor) | Claude=PM · Gemini=Generator · Codex=Critic | EP B | shipped |
+| [dev-trio](./dev-trio) | Claude=PM/Coder · Antigravity=Researcher · Codex=Reviewer | EP A | shipped |
+| [debate-conductor](./debate-conductor) | Claude=PM · Antigravity=Generator · Codex=Critic | EP B | shipped |
 
 More plugins (watch-pair, spec-trio, bisect-bot, ralph-trio) follow the same shape and will land here as their EPs publish.
 
@@ -43,7 +43,7 @@ Every plugin in this marketplace follows broadly the same layout. Skill set vari
 └── <topics/|tmux/|...>      # plugin-specific assets (canned topics, keybindings)
 ```
 
-`bin/` and `lib/` are bash. Roles are markdown. Skills are markdown with YAML frontmatter. No language runtime beyond bash + the third-party CLIs (`claude`, `gemini`, `codex`), plus `jq` for plugins that emit RFC 0004 run manifests.
+`bin/` and `lib/` are bash. Roles are markdown. Skills are markdown with YAML frontmatter. No language runtime beyond bash + the third-party CLIs (`claude`, `agy`, `codex`), plus `jq` for plugins that emit RFC 0004 run manifests.
 
 ## Develop locally
 

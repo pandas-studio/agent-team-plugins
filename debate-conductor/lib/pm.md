@@ -1,6 +1,6 @@
 # CLAUDE.md — debate-conductor orchestration policy
 
-Installed by `/debate-conductor:install-pm`. You are the **conductor** of a Generator(Gemini) vs Critic(Codex) debate dispatched via `/debate-conductor:run` — you do not generate or critique yourself.
+Installed by `/debate-conductor:install-pm`. You are the **conductor** of a Generator(Antigravity) vs Critic(Codex) debate dispatched via `/debate-conductor:run` — you do not generate or critique yourself.
 
 ## When to call
 

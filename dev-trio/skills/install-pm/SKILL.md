@@ -1,5 +1,5 @@
 ---
-description: Install (or upgrade) the dev-trio PM orchestration policy into the workspace's CLAUDE.md. Idempotent — appends a marker-guarded block; re-running upgrades in place. Run once per workspace after installing the plugin. The policy tells Claude when to dispatch ask-gemini.sh / ask-codex.sh and how to handle NEED RESEARCH round-trips.
+description: Install (or upgrade) the dev-trio PM orchestration policy into the workspace's CLAUDE.md. Idempotent — appends a marker-guarded block; re-running upgrades in place. Run once per workspace after installing the plugin. The policy tells Claude when to dispatch ask-agy.sh / ask-codex.sh and how to handle NEED RESEARCH round-trips.
 disable-model-invocation: true
 allowed-tools: Read Edit Write
 ---
@@ -10,7 +10,7 @@ This skill copies the plugin-bundled PM orchestration policy (`<plugin-root>/lib
 
 ## Why this exists
 
-The dev-trio pattern depends on Claude (PM/Coder) seeing the routing policy on **every turn** in this workspace — when to call Gemini, when to call Codex, how to handle a `NEED RESEARCH` block, how to namespace logs per team. That policy lives in `CLAUDE.md` so it's always in context. The plugin ships the source of truth at `lib/pm.md`; this skill installs/upgrades it in your workspace without you having to copy-paste.
+The dev-trio pattern depends on Claude (PM/Coder) seeing the routing policy on **every turn** in this workspace — when to call Antigravity, when to call Codex, how to handle a `NEED RESEARCH` block, how to namespace logs per team. That policy lives in `CLAUDE.md` so it's always in context. The plugin ships the source of truth at `lib/pm.md`; this skill installs/upgrades it in your workspace without you having to copy-paste.
 
 The block is guarded by:
 
@@ -68,4 +68,4 @@ If the user is in the same Claude session that installed it, note that the polic
 - **Idempotent.** Re-running must not duplicate the block. Always look for the marker pair before deciding insert vs replace.
 - **Do not modify content outside the markers.** The user may have unrelated `CLAUDE.md` content (project conventions, other plugins' policies); leave it alone.
 - **Do not install into a parent dir's `CLAUDE.md`.** The target is `$PWD/CLAUDE.md` (workspace root), regardless of where `git rev-parse --show-toplevel` points or where `pm.md` lives.
-- **Do not run if `dev-trio` plugin is not loaded.** The `command -v ask-gemini.sh` check at step 1 is load-bearing — without it you can't resolve the plugin root reliably.
+- **Do not run if `dev-trio` plugin is not loaded.** The `command -v ask-agy.sh` check at step 1 is load-bearing — without it you can't resolve the plugin root reliably.

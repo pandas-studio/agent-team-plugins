@@ -14,9 +14,9 @@
 #   debate.sh --rotate "topic"                 # role rotation ON
 #
 # Model pair:
-#   --primary-gen=MODEL   generator model (default gemini)        — env DEBATE_PRIMARY_GEN
-#   --primary-crit=MODEL  critic model (default = "the other one" — codex if gen∈{gemini,claude}, gemini if gen=codex)
-#   Both accept gemini|codex|claude. Generator and critic must differ.
+#   --primary-gen=MODEL   generator model (default agy)        — env DEBATE_PRIMARY_GEN
+#   --primary-crit=MODEL  critic model (default = "the other one" — codex if gen∈{agy,claude}, agy if gen=codex)
+#   Both accept agy|codex|claude. Generator and critic must differ.
 #
 # Rotation (--rotate):
 #   Round 1 gen=A, Round 2 crit=B, Round 3 gen=B, Round 4 crit=A, then repeats.
@@ -43,27 +43,27 @@ CONTINUE_FROM=""
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [-n ROUNDS] [--rotate] \\
-         [--primary-gen=gemini|codex|claude] [--primary-crit=gemini|codex|claude] \\
+         [--primary-gen=agy|codex|claude] [--primary-crit=agy|codex|claude] \\
          [--continue-from=DIR] \\
          "topic" [context-file.md]
 
 Run an N-round Generator vs Critic debate. Defaults to 3 rounds with no rotation
-(generator=gemini, critic=codex). With --rotate, models alternate roles every
+(generator=agy, critic=codex). With --rotate, models alternate roles every
 two rounds. With --continue-from=<debate-TS dir>, append N more rounds to an
 existing debate (round numbering continues from last+1).
 EOF
 }
 
-valid_model() { case "$1" in gemini|codex|claude) return 0 ;; *) return 1 ;; esac; }
+valid_model() { case "$1" in agy|codex|claude) return 0 ;; *) return 1 ;; esac; }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -n) ROUNDS="$2"; shift 2 ;;
     --rotate) ROTATE=1; shift ;;
     --primary-gen=*) PRIMARY_GEN_OPT="${1#--primary-gen=}"; shift ;;
-    --primary-gen) PRIMARY_GEN_OPT="${2:?--primary-gen requires gemini|codex|claude}"; shift 2 ;;
+    --primary-gen) PRIMARY_GEN_OPT="${2:?--primary-gen requires agy|codex|claude}"; shift 2 ;;
     --primary-crit=*) PRIMARY_CRIT_OPT="${1#--primary-crit=}"; shift ;;
-    --primary-crit) PRIMARY_CRIT_OPT="${2:?--primary-crit requires gemini|codex|claude}"; shift 2 ;;
+    --primary-crit) PRIMARY_CRIT_OPT="${2:?--primary-crit requires agy|codex|claude}"; shift 2 ;;
     --continue-from=*) CONTINUE_FROM="${1#--continue-from=}"; shift ;;
     --continue-from) CONTINUE_FROM="${2:?--continue-from requires a directory}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -82,19 +82,19 @@ case "$ROUNDS" in
 esac
 [ "$ROUNDS" -lt 1 ] && { echo "ROUNDS must be >= 1" >&2; exit 2; }
 
-PRIMARY_GEN="${PRIMARY_GEN_OPT:-${DEBATE_PRIMARY_GEN:-gemini}}"
-valid_model "$PRIMARY_GEN" || { echo "primary-gen must be gemini|codex|claude (got: $PRIMARY_GEN)" >&2; exit 2; }
+PRIMARY_GEN="${PRIMARY_GEN_OPT:-${DEBATE_PRIMARY_GEN:-agy}}"
+valid_model "$PRIMARY_GEN" || { echo "primary-gen must be agy|codex|claude (got: $PRIMARY_GEN)" >&2; exit 2; }
 
 if [ -n "$PRIMARY_CRIT_OPT" ]; then
   PRIMARY_CRIT="$PRIMARY_CRIT_OPT"
 else
   case "$PRIMARY_GEN" in
-    gemini) PRIMARY_CRIT=codex ;;
-    codex)  PRIMARY_CRIT=gemini ;;
+    agy) PRIMARY_CRIT=codex ;;
+    codex)  PRIMARY_CRIT=agy ;;
     claude) PRIMARY_CRIT=codex ;;
   esac
 fi
-valid_model "$PRIMARY_CRIT" || { echo "primary-crit must be gemini|codex|claude (got: $PRIMARY_CRIT)" >&2; exit 2; }
+valid_model "$PRIMARY_CRIT" || { echo "primary-crit must be agy|codex|claude (got: $PRIMARY_CRIT)" >&2; exit 2; }
 [ "$PRIMARY_GEN" = "$PRIMARY_CRIT" ] && { echo "primary-gen and primary-crit must differ (both = $PRIMARY_GEN)" >&2; exit 2; }
 
 # Per-round model dispatch.
@@ -275,7 +275,7 @@ else
 fi
 echo "Transcript dir: $DEBATE_DIR"
 
-gen_args() { { [ "$ROTATE" = "1" ] || [ "$1" != "gemini" ]; } && printf -- "--model %s" "$1"; }
+gen_args() { { [ "$ROTATE" = "1" ] || [ "$1" != "agy" ]; } && printf -- "--model %s" "$1"; }
 crit_args() { { [ "$ROTATE" = "1" ] || [ "$1" != "codex" ]; } && printf -- "--model %s" "$1"; }
 
 for r in $(seq "$START_ROUND" "$END_ROUND"); do

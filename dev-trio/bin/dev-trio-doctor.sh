@@ -4,12 +4,12 @@
 # Usage: dev-trio-doctor.sh
 #
 # Checks:
-#   1. Required tools on PATH: tmux, gemini, codex, jq, sha256sum/shasum.
-#   2. Plugin layout intact (ask-codex.sh / ask-gemini.sh / dashboard.sh /
+#   1. Required tools on PATH: tmux, agy, codex, jq, sha256sum/shasum.
+#   2. Plugin layout intact (ask-codex.sh / ask-agy.sh / dashboard.sh /
 #      team-layout.sh / lib/manifest.sh / lib/roles/*.md / lib/pm.md).
-#   3. Stub-CLI smoke: runs ask-gemini.sh against a tmp stub matching
-#      `gemini -p "$2"` shape, then asserts the manifest JSON is well-formed
-#      and contains variant=dev-trio-research with role[0].model=gemini.
+#   3. Stub-CLI smoke: runs ask-agy.sh against a tmp stub matching
+#      `agy -p "$2"` shape, then asserts the manifest JSON is well-formed
+#      and contains variant=dev-trio-research with role[0].model=agy.
 #
 # Stub smokes are *necessary but not sufficient* — verdict / dashboard /
 # parse-affecting changes need a real-CLI dry-run on top.
@@ -39,12 +39,12 @@ for t in tmux jq; do
   if command -v "$t" >/dev/null 2>&1; then ok "$t — $(command -v "$t")"
   else fail "$t — missing (REQUIRED)"; fi
 done
-for t in gemini codex; do
+for t in agy codex; do
   if command -v "$t" >/dev/null 2>&1; then ok "$t — $(command -v "$t")"
   else
     # Inline the env-var hint per CLI — portable case beats Bash-4-only ${t^^}.
     case "$t" in
-      gemini) env_hint="GEMINI_CLI or RESEARCHER_CLI" ;;
+      agy)    env_hint="AGY_CLI or RESEARCHER_CLI" ;;
       codex)  env_hint="CODEX_CLI or REVIEWER_CLI" ;;
       *)      env_hint="(no documented override)" ;;
     esac
@@ -57,7 +57,7 @@ else fail "neither sha256sum nor shasum found — manifest hashing will fail"; f
 
 echo
 echo "2. Plugin layout"
-for rel in bin/ask-codex.sh bin/ask-gemini.sh bin/dashboard.sh bin/team-layout.sh \
+for rel in bin/ask-codex.sh bin/ask-agy.sh bin/dashboard.sh bin/team-layout.sh \
            lib/manifest.sh lib/pm.md lib/roles/researcher.md lib/roles/reviewer.md; do
   p="$PLUGIN_ROOT/$rel"
   if [ -f "$p" ]; then ok "$rel"
@@ -65,52 +65,52 @@ for rel in bin/ask-codex.sh bin/ask-gemini.sh bin/dashboard.sh bin/team-layout.s
 done
 
 echo
-echo "3. Stub-CLI smoke (ask-gemini.sh → manifest)"
+echo "3. Stub-CLI smoke (ask-agy.sh → manifest)"
 if [ "$FAILED" = "1" ]; then
   warn "skipping smoke — prior checks failed"
 else
   TMPDIR_SMOKE=$(mktemp -d)
   trap 'rm -rf "$TMPDIR_SMOKE"' EXIT
 
-  STUB_GEM="$TMPDIR_SMOKE/stub-gemini.sh"
-  cat > "$STUB_GEM" <<'STUB'
+  STUB_AGY="$TMPDIR_SMOKE/stub-agy.sh"
+  cat > "$STUB_AGY" <<'STUB'
 #!/usr/bin/env bash
-# Stub matching `gemini -p "$2"` shape per smoke-test stub-wrapper rule.
+# Stub matching `agy -p "$2"` shape per smoke-test stub-wrapper rule.
 # Echoes a canonical-shaped lead paragraph so dashboard.sh can parse it.
-if [ "${1:-}" != "-p" ]; then echo "stub-gemini: expected -p as \$1, got: ${1:-}" >&2; exit 2; fi
+if [ "${1:-}" != "-p" ]; then echo "stub-agy: expected -p as \$1, got: ${1:-}" >&2; exit 2; fi
 cat <<'OUT'
 LangGraph 0.2 streaming API uses an async iterator returned by graph.astream(input).
 
 See https://langchain-ai.github.io/langgraph/how-tos/streaming/ for details.
 OUT
 STUB
-  chmod +x "$STUB_GEM"
+  chmod +x "$STUB_AGY"
 
   pushd "$TMPDIR_SMOKE" >/dev/null
   AGENT_TEAM="doctor-smoke" \
   DEV_TRIO_LOG_DIR="$TMPDIR_SMOKE/.dev-trio/log" \
-  GEMINI_CLI="$STUB_GEM" \
+  AGY_CLI="$STUB_AGY" \
   TMUX="" \
-    "$PLUGIN_ROOT/bin/ask-gemini.sh" "doctor smoke: what is LangGraph 0.2 streaming?" \
+    "$PLUGIN_ROOT/bin/ask-agy.sh" "doctor smoke: what is LangGraph 0.2 streaming?" \
     >"$TMPDIR_SMOKE/smoke.out" 2>"$TMPDIR_SMOKE/smoke.err"
   RC=$?
   popd >/dev/null
 
   if [ "$RC" -ne 0 ]; then
-    fail "ask-gemini.sh exited with rc=$RC"
+    fail "ask-agy.sh exited with rc=$RC"
     note "stderr: $(head -3 "$TMPDIR_SMOKE/smoke.err" 2>/dev/null)"
   else
-    ok "ask-gemini.sh stub run completed (rc=0)"
+    ok "ask-agy.sh stub run completed (rc=0)"
   fi
 
   LOG_DIR_SMOKE="$TMPDIR_SMOKE/.dev-trio/log/doctor-smoke"
-  if [ ! -L "$LOG_DIR_SMOKE/latest-gemini.log" ]; then
-    fail "latest-gemini.log symlink not created at $LOG_DIR_SMOKE"
+  if [ ! -L "$LOG_DIR_SMOKE/latest-agy.log" ]; then
+    fail "latest-agy.log symlink not created at $LOG_DIR_SMOKE"
   else
-    ok "latest-gemini.log symlink created"
+    ok "latest-agy.log symlink created"
   fi
 
-  MANIFEST=$(ls "$LOG_DIR_SMOKE"/gemini-*.manifest.json 2>/dev/null | tail -1)
+  MANIFEST=$(ls "$LOG_DIR_SMOKE"/agy-*.manifest.json 2>/dev/null | tail -1)
   if [ -z "$MANIFEST" ]; then
     fail "no manifest emitted under $LOG_DIR_SMOKE"
   elif ! jq . "$MANIFEST" >/dev/null 2>&1; then
@@ -124,10 +124,10 @@ STUB
       fail "variant mismatch: expected dev-trio-research, got: $VARIANT"
     fi
     MODEL=$(jq -r '.roles[0].model // ""' "$MANIFEST")
-    if [ "$MODEL" = "gemini" ]; then
-      ok "roles[0].model=gemini"
+    if [ "$MODEL" = "agy" ]; then
+      ok "roles[0].model=agy"
     else
-      fail "roles[0].model mismatch: expected gemini, got: $MODEL"
+      fail "roles[0].model mismatch: expected agy, got: $MODEL"
     fi
     RESOLVED=$(jq -r '.roles[0].prompt_resolved_sha256 // ""' "$MANIFEST")
     if [[ "$RESOLVED" =~ ^[0-9a-f]{64}$ ]]; then

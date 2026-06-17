@@ -6,7 +6,7 @@
 #   ask-generator.sh --model codex "research question"
 #   echo "extra context" | ask-generator.sh "research question"
 #
-# Default model is gemini. --model gemini|codex|claude selects which CLI runs
+# Default model is agy. --model agy|codex|claude selects which CLI runs
 # the role; needed for role rotation.
 #
 # Output goes to stdout AND $LOG_DIR/gen-<timestamp>.log
@@ -31,13 +31,13 @@ TEAM=$(detect_team)
 LOG_BASE="${DEBATE_LOG_DIR:-$PWD/.debate-conductor/log}"
 LOG_DIR="$LOG_BASE/$TEAM"
 
-MODEL="gemini"
+MODEL="agy"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --model)
-      MODEL="${2:?--model requires gemini|codex|claude}"; shift 2
-      case "$MODEL" in gemini|codex|claude) ;;
-        *) echo "ask-generator: unknown model '$MODEL' (expected gemini|codex|claude)" >&2; exit 2 ;;
+      MODEL="${2:?--model requires agy|codex|claude}"; shift 2
+      case "$MODEL" in agy|codex|claude) ;;
+        *) echo "ask-generator: unknown model '$MODEL' (expected agy|codex|claude)" >&2; exit 2 ;;
       esac
       ;;
     --) shift; break ;;
@@ -47,7 +47,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ "$#" -lt 1 ]; then
-  echo "usage: $0 [--model gemini|codex|claude] \"research question\"  [stdin = optional context]" >&2
+  echo "usage: $0 [--model agy|codex|claude] \"research question\"  [stdin = optional context]" >&2
   exit 2
 fi
 
@@ -107,8 +107,8 @@ LINEBUF=""
 command -v stdbuf >/dev/null 2>&1 && LINEBUF='stdbuf -oL'
 RC=0
 case "$MODEL" in
-  gemini)
-    $LINEBUF "${GENERATOR_CLI:-${GEMINI_CLI:-gemini}}" -p "$PROMPT" 2>&1 | $LINEBUF tee -a "$LOG" || RC=$?
+  agy)
+    $LINEBUF "${GENERATOR_CLI:-${AGY_CLI:-agy}}" -p "$PROMPT" 2>&1 | $LINEBUF tee -a "$LOG" || RC=$?
     ;;
   codex)
     # --skip-git-repo-check: workspace may not be a git repo; Codex's trust

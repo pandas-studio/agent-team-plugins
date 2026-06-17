@@ -5,31 +5,31 @@ This block is installed by `/dev-trio:install-pm` and governs how Claude Code ro
 | Role | Who | Invocation |
 |---|---|---|
 | **PM + Coder** | Claude Code (you) | this session |
-| **Researcher** | Gemini | `ask-gemini.sh "question"` |
+| **Researcher** | Antigravity | `ask-agy.sh "question"` |
 | **Reviewer** | Codex | `ask-codex.sh "focus"` |
 
-Both wrappers are on `$PATH` while the `dev-trio` plugin is active. You are the **central router**. Codex and Gemini do not call each other directly — when Codex needs research, it returns a `NEED RESEARCH` block and you fetch the answer from Gemini, then re-invoke Codex with the research attached.
+Both wrappers are on `$PATH` while the `dev-trio` plugin is active. You are the **central router**. Codex and Antigravity do not call each other directly — when Codex needs research, it returns a `NEED RESEARCH` block and you fetch the answer from Antigravity, then re-invoke Codex with the research attached.
 
-## When to call Gemini
+## When to call Antigravity
 
-Call `ask-gemini.sh` when **before coding** you need:
+Call `ask-agy.sh` when **before coding** you need:
 - Library / framework / API behavior you're not certain about (e.g., LangChain, LangGraph, Anthropic SDK specifics, version-specific quirks)
 - Recent changes / deprecations / breaking changes
 - Spec or RFC details
 - Comparison between options when the user asks "which approach"
 
-Don't call Gemini for:
+Don't call Antigravity for:
 - Things you can answer from reading repo files (use Read)
 - Things you can verify with a quick `grep` / test run
 - Pure code-style questions (Codex's territory after you write)
 
 **Pattern:**
 ```bash
-ask-gemini.sh "What is the recommended way to stream tokens with langchain-anthropic 0.3.x using async iteration?"
+ask-agy.sh "What is the recommended way to stream tokens with langchain-anthropic 0.3.x using async iteration?"
 ```
 Pipe extra context if useful:
 ```bash
-echo "We're using langgraph 0.2.x and need this to work inside a node." | ask-gemini.sh "..."
+echo "We're using langgraph 0.2.x and need this to work inside a node." | ask-agy.sh "..."
 ```
 
 ## When to call Codex
@@ -61,7 +61,7 @@ If Codex's output ends with:
 ```
 
 Do this:
-1. For each question, run `ask-gemini.sh "<question>"` — capture each answer.
+1. For each question, run `ask-agy.sh "<question>"` — capture each answer.
 2. Concatenate the answers into a temp file (e.g., `.dev-trio/log/${AGENT_TEAM:-default}/research-<ts>.md`).
 3. Re-invoke Codex with the research:
    ```bash
@@ -71,13 +71,13 @@ Do this:
 
 ## Reporting back to the user
 
-- After research: summarize Gemini's key points in 2–4 lines, cite the log file.
+- After research: summarize Antigravity's key points in 2–4 lines, cite the log file.
 - After review: give the user Codex's verdict (`SHIP` / `NEEDS-FIX` / `DISCUSS`) + blockers/major findings inline. Don't dump the full Codex output unless asked — link the log.
 - Logs live in `.dev-trio/log/` (gitignored).
 
 ## Don't
 
-- Don't call Gemini or Codex from inside a subagent (`Agent` tool) — keep orchestration in the main session so the user can see the routing.
-- Don't run Gemini/Codex in the background unless the user asks; the latency is part of the deliberation budget.
+- Don't call Antigravity or Codex from inside a subagent (`Agent` tool) — keep orchestration in the main session so the user can see the routing.
+- Don't run Antigravity/Codex in the background unless the user asks; the latency is part of the deliberation budget.
 - Don't act on Codex `NEEDS-FIX` findings without showing the user first — they decide whether to address each one.
 - Don't paste secrets/credentials into prompts. Both CLIs send to external providers.
