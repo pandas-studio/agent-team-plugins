@@ -14,7 +14,11 @@
 # Reviewer role override:
 #   REVIEWER_ROLE_FILE=/path/to/role.md ask-codex.sh ...
 #
-# Output goes to stdout AND $PWD/.dev-trio/log/<team>/codex-<TS>.log.
+# Output goes to stdout AND $PWD/.dev-trio/log/<team>/codex-<TS>.log (the full
+# streamed transcript). Codex's final structured review is ALSO captured verbatim
+# to codex-<TS>.final.md via `codex exec --output-last-message`, so the verdict
+# and findings can be parsed from a clean file even when the streamed stdout
+# duplicates or drops the closing block.
 # Override log root via DEV_TRIO_LOG_DIR=/abs/path.
 set -euo pipefail
 
@@ -112,7 +116,12 @@ fi
 mkdir -p "$LOG_DIR"
 TS="$(date +%Y%m%d-%H%M%S)"
 LOG="$LOG_DIR/codex-$TS.log"
+# Codex's last assistant message (the structured review) captured verbatim and
+# independent of stdout streaming/flush — this is the authoritative artifact the
+# review skill parses the verdict from. See `--output-last-message` below.
+FINAL="$LOG_DIR/codex-$TS.final.md"
 ln -sfn "codex-$TS.log" "$LOG_DIR/latest-codex.log"
+ln -sfn "codex-$TS.final.md" "$LOG_DIR/latest-codex.final.md"
 
 # Manifest lifecycle (RFC 0004 PR 10 — sha256 of post-injection prompt for
 # byte-exact replayability without writing the prompt to disk).
@@ -138,9 +147,16 @@ trap 'manifest_cleanup' INT TERM
 
 echo "[ask-codex] running — monitor: dashboard.sh codex  (raw: tail -F $LOG_DIR/latest-codex.log)" >&2
 RC=0
-"${REVIEWER_CLI:-${CODEX_CLI:-codex}}" exec "$PROMPT" 2>&1 | tee -a "$LOG" || RC=$?
+# --output-last-message writes Codex's final structured review to a dedicated
+# file regardless of how stdout is buffered/streamed; `tee` keeps the full
+# transcript in $LOG. Downstream parses the verdict from $FINAL (clean), falling
+# back to $LOG only when $FINAL is empty.
+"${REVIEWER_CLI:-${CODEX_CLI:-codex}}" exec --output-last-message "$FINAL" "$PROMPT" 2>&1 | tee -a "$LOG" || RC=$?
 printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG"
 manifest_finalize
 echo
-echo "(log: $LOG, rc=$RC)" >&2
+if [ ! -s "$FINAL" ]; then
+  echo "[ask-codex] warning: final-message file is empty ($FINAL) — Codex may have died before emitting its review; parse $LOG instead" >&2
+fi
+echo "(log: $LOG, final: $FINAL, rc=$RC)" >&2
 exit "$RC"

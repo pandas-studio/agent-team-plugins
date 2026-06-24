@@ -1,6 +1,6 @@
 {
   "name": "dev-trio",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Claude PM orchestrates a 3-vendor dev team: Antigravity (Researcher) + Codex (Reviewer). Three-pane tmux view: left=Claude PM, top-right=Antigravity dashboard, bottom-right=Codex dashboard. Skills: bootstrap, research, review, install-pm.",
   "author": { "name": "pandas-studio" },
   "homepage": "https://github.com/pandas-studio/agent-team-plugins/tree/main/dev-trio",
