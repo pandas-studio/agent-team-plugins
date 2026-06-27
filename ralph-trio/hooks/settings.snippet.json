@@ -1,0 +1,38 @@
+{
+  "_comment": [
+    "Merge this Stop-hook configuration into your .claude/settings.local.json",
+    "(or .claude/settings.json) to enable in-session Ralph for the solo variant.",
+    "",
+    "Easiest way to install: run /ralph-trio:install-stop-hook from inside Claude Code,",
+    "which merges this snippet idempotently. Manual install instructions below.",
+    "",
+    "Before starting a Claude Code session, set these env vars in the shell:",
+    "  export RALPH_PROMPT=/abs/path/to/PROMPT.md",
+    "  export RALPH_FIX_PLAN=/abs/path/to/fix_plan.md",
+    "  export RALPH_MAX_ITER=50",
+    "  export RALPH_VARIANT=solo            # only solo is supported via hook",
+    "  export AGENT_TEAM=ralph-session      # optional, for log isolation",
+    "",
+    "Then start `claude` and give it any opening message (e.g. 'begin'). The hook",
+    "will block each Stop event and re-inject PROMPT.md until the completion",
+    "marker appears in fix_plan.md, or RALPH_MAX_ITER iterations have run.",
+    "",
+    "Trio and debate variants stay on bash drivers — they orchestrate multiple",
+    "external CLIs (Codex, Antigravity) which the in-session hook cannot launch cleanly.",
+    "",
+    "stop-hook.sh is resolved from PATH while the ralph-trio plugin is active."
+  ],
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "stop-hook.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
