@@ -12,6 +12,11 @@
       "name": "debate-conductor",
       "source": "./debate-conductor",
       "description": "Claude conducts a Generator(Antigravity) vs Critic(Codex) adversarial debate over N rounds; configurable model registry. Three-pane tmux view; bootstrap + run + continue + install-pm skills."
+    },
+    {
+      "name": "ralph-trio",
+      "source": "./ralph-trio",
+      "description": "Ralph Wiggum loops — solo / trio / debate / meta variants. Iterative LLM-driven coder loop with planner+coder+reviewer (trio + meta depend on dev-trio's ask-agy.sh/ask-codex.sh; debate depends on debate-conductor). Optional Stop-hook in-session driver for solo."
     }
   ]
 }
