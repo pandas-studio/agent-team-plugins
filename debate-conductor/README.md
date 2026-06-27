@@ -65,6 +65,17 @@ claude --plugin-dir ./agent-team-plugins/debate-conductor
 
 5. Follow up in natural language: "round 3 결정타?", "5라운드로 다시 돌려줘", "rotate ON으로 토픽 2", etc.
 
+### Run until converged
+
+Instead of a fixed round count, let the debate decide its own length:
+
+```
+debate.sh --until-converged "<topic>"          # cap 6 rounds
+debate.sh --until-converged -n 8 "<topic>"     # cap 8 rounds
+```
+
+The loop stops as soon as a Critic round emits the canonical `Verdict: STRENGTHEN` line (position is sound); `-n` is the upper bound, defaulting to an even cap of 6 so a non-converging debate still ends on a Critic verdict. The empty round files past the convergence point are cleaned up. The `/debate-conductor:run` skill passes this flag when you ask to debate "합의/수렴할 때까지" / "until they agree".
+
 ## Workspace topics
 
 Place topic files at `<workspace>/topics/0N-*.txt`. Each file is a stance-driven prompt the Generator receives. The plugin ships three default examples in its own `topics/` — you can copy them into your workspace as a starting point. The skill checks workspace `topics/` first, falls back to the plugin's bundled examples if absent.
@@ -137,6 +148,7 @@ debate-conductor/
 ├── bin/                       # on PATH while plugin is active
 │   ├── debate.sh              # round orchestrator (skill calls this)
 │   ├── agent-team-models.sh   # shared model-registry CLI (vendored)
+│   ├── debate-conductor-doctor.sh  # layout probe + --until-converged stub smoke
 │   ├── team-3pane.sh          # tmux 3-pane splitter (--here mode)
 │   └── tail-role.sh           # live-tail one role's round files
 ├── lib/                       # internal — invoked by debate.sh / install-pm
@@ -155,6 +167,8 @@ debate-conductor/
 **Context scope per round.** Each round prompt only includes the *immediately preceding* generator+critic pair — not the full transcript. So round 5 sees round 3 (your last draft) and round 4 (critic feedback), but not rounds 1–2. This keeps prompts bounded as round count grows; the trade-off is that early-round consensus or discoveries fade out unless re-stated. `/continue` follows the same rule.
 
 **Live streaming quality depends on the model CLI.** The pipeline (`stdbuf -oL` on `sed`/`tee`) forces line-buffered stdio so cleaned output flows line-by-line through the viewers. But if the model CLI itself batches its stdout in user-space (some `codex` builds do this), a round may still appear in one chunk rather than streaming. That's outside this plugin's reach.
+
+**Convergence parsing is anchored, not fuzzy.** `--until-converged` only stops on a *standalone canonical* `Verdict: STRENGTHEN` line (the Critic role contract), taking the last such line in the round. A Critic round that errors out and echoes its role prompt contains the placeholders `Verdict: <STRENGTHEN | …>` and `<one of: STRENGTHEN / …>` — neither matches the anchor, so a failed round reads as not-converged and the debate keeps going rather than stopping on garbage. `debate-conductor-doctor.sh` covers all three paths (STRENGTHEN / RECONSIDER / placeholder) with stub CLIs.
 
 ## License
 
