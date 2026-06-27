@@ -5,13 +5,14 @@
 # Each iteration:
 #   1. Pop one task from BACKLOG.md
 #   2. Stage 1 (Planner)  → claude -p with lib/roles/planner.md
-#   3. Stage 2 (Coder)    → claude -p with lib/roles/worker.md + the plan
+#        Plan NEED RESEARCH → Stage 1.5: ask-agy.sh, inject into the first coder run
+#   3. Stage 2 (Coder)    → claude -p with lib/roles/worker.md + the plan (+ research)
 #   4. Stage 3 (Reviewer) → ask-codex.sh against HEAD diff
 #   5. Verdict dispatch:
 #        SHIP        → continue (Stage 2 already committed)
 #        NEEDS-FIX   → append retry to BACKLOG (with reason)
 #        DISCUSS     → log to fix_plan.md, continue
-#        NEED RESEARCH → ask-agy.sh, re-run Stage 2 once
+#        NEED RESEARCH → ask-agy.sh, re-run Stage 2 once (reviewer-driven, post-code)
 #
 # Usage:
 #   ralph-trio.sh --max-iter N --backlog PATH [--prompt PATH] [--fix-plan PATH]
@@ -83,10 +84,13 @@ BACKLOG_FILE="$(cd "$(dirname "$BACKLOG_FILE")" && pwd)/$(basename "$BACKLOG_FIL
 if [ "$DRY_RUN" != "1" ] && [ "$AUTOSHIP" != "1" ]; then
   command -v ask-codex.sh  >/dev/null 2>&1 || { echo "ERROR: ralph-trio requires the dev-trio plugin (ask-codex.sh not on PATH). Install: /plugin install dev-trio@pandas-studio" >&2; exit 2; }
 fi
-if [ "$DRY_RUN" != "1" ] && [ "$AUTOSHIP" != "1" ] && [ "$NO_RESEARCH" != "1" ]; then
-  # NEED RESEARCH can only fire after a real reviewer verdict; --autoship
-  # skips Stage 3 entirely, so ask-agy.sh is unreachable there.
-  command -v ask-agy.sh >/dev/null 2>&1 || { echo "ERROR: ralph-trio requires the dev-trio plugin (ask-agy.sh not on PATH). Install: /plugin install dev-trio@pandas-studio  (or pass --no-research / --autoship)" >&2; exit 2; }
+if [ "$DRY_RUN" != "1" ] && [ "$NO_RESEARCH" != "1" ]; then
+  # ask-agy.sh (Antigravity researcher) is reachable from BOTH research paths:
+  # planner-driven pre-coding research (Stage 1.5 — fires even under --autoship,
+  # before Stage 3 is skipped) and reviewer-driven post-coding research
+  # (Stage 3.5). Either can fire unless --no-research, so require it whenever a
+  # real run with research is possible. (--dry-run makes no model calls.)
+  command -v ask-agy.sh >/dev/null 2>&1 || { echo "ERROR: ralph-trio requires the dev-trio plugin (ask-agy.sh not on PATH). Install: /plugin install dev-trio@pandas-studio  (or pass --no-research)" >&2; exit 2; }
 fi
 
 if [ -z "$FIX_PLAN_FILE" ]; then
@@ -374,6 +378,7 @@ while :; do
   CODE_LOG="$LOG_DIR/ralph-trio-$TS-iter-$ITER-code.log"
   REVIEW_LOG="$LOG_DIR/ralph-trio-$TS-iter-$ITER-review.log"
   RESEARCH_LOG="$LOG_DIR/ralph-trio-$TS-iter-$ITER-research.log"
+  PLAN_RESEARCH_LOG="$LOG_DIR/ralph-trio-$TS-iter-$ITER-research-plan.log"
 
   # Wrapped fix_plan excerpt (optional, -literal-stripped)
   FP_EXCERPT=""
@@ -422,6 +427,33 @@ while :; do
   manifest_finalize
   PARENT_RUN_ID="$PLAN_RUN_ID"
 
+  # ---- Stage 1.5: pre-coding research (planner-requested) ----
+  # planner.md invites the planner to emit `## NEED RESEARCH` for unknowns it
+  # wants resolved BEFORE coding. Honor it: fetch the answer via Antigravity and
+  # inject it into the FIRST coder prompt, so the coder starts informed instead
+  # of discovering the gap only after a wasted code+review cycle. The
+  # reviewer-driven branch (Stage 3.5 below) still covers unknowns that surface
+  # during review. Skipped on plan-fail / --dry-run / --no-research. PRE_RESEARCH
+  # is reset every iter and threads into Stage 2's build_coder_prompt.
+  PRE_RESEARCH=""
+  if [ "$PLAN_FAILED" = "0" ] && [ "$DRY_RUN" != "1" ] && [ "$NO_RESEARCH" = "0" ]; then
+    PLAN_RESEARCH_QS=$(extract_need_research "$PLAN_LOG")
+    if [ -n "$PLAN_RESEARCH_QS" ]; then
+      ralph_log "  [stage 1.5] planner requested research → $PLAN_RESEARCH_LOG"
+      manifest_init ralph-research "$PLAN_RESEARCH_LOG"
+      PLAN_RESEARCH_RUN_ID="$MANIFEST_RUN_ID"
+      manifest_set_parent "$PARENT_RUN_ID"   # parent = planner
+      manifest_add_input kind=question value="$PLAN_RESEARCH_QS"
+      # Durable agy log under ralph's tree (survives worktree teardown); the
+      # research body is captured via the tee into $PLAN_RESEARCH_LOG.
+      ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$LOG_DIR/agy" \
+          MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-agy.sh "$PLAN_RESEARCH_QS" 2>&1 ) | tee "$PLAN_RESEARCH_LOG" >/dev/null || true
+      manifest_finalize
+      PARENT_RUN_ID="$PLAN_RESEARCH_RUN_ID"  # coder's parent becomes research
+      PRE_RESEARCH="$(cat "$PLAN_RESEARCH_LOG")"
+    fi
+  fi
+
   # Snapshot HEAD before the coder runs so we can point the reviewer at the
   # explicit diff range $PRE_CODE_REF..HEAD. Without this hint, ask-codex.sh
   # defaults to the working-tree state — and after the worker commits its work
@@ -451,6 +483,7 @@ while :; do
     manifest_set_parent "$PARENT_RUN_ID"
     manifest_add_input kind=task value="$TASK"
     manifest_add_input kind=plan path="$PLAN_LOG"
+    [ -n "$PRE_RESEARCH" ] && manifest_add_input kind=research path="$PLAN_RESEARCH_LOG"
     if [ "$DRY_RUN" = "1" ]; then
       manifest_add_input kind=skip-reason value=dry-run
       echo "[dry-run code] would implement plan for: $TASK" | tee "$CODE_LOG" >/dev/null
@@ -461,7 +494,7 @@ while :; do
         manifest_add_input kind=fix-plan path="$FIX_PLAN_FILE"
         manifest_add_input kind=fix-plan-tail value="$FIX_PLAN_TAIL"
       fi
-      CODE_PROMPT=$(build_coder_prompt "$TASK" "$PLAN" "$PROMPT_CONTEXT" "" "$FP_EXCERPT")
+      CODE_PROMPT=$(build_coder_prompt "$TASK" "$PLAN" "$PROMPT_CONTEXT" "$PRE_RESEARCH" "$FP_EXCERPT")
       ( cd "$WORK_DIR" && "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p "$CODE_PROMPT" 2>&1 ) | tee "$CODE_LOG" >/dev/null || CODE_RC=$?
     fi
     manifest_finalize

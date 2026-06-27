@@ -289,6 +289,78 @@ STUB
 fi
 
 echo
+echo "7. Stub-CLI smoke (ralph-trio Stage 1.5 — planner-driven pre-coding research)"
+# Regression guard for the planner NEED RESEARCH path: when the PLANNER emits a
+# `## NEED RESEARCH` block, ralph must fetch research via ask-agy.sh BEFORE Stage
+# 2 and graft it into the FIRST coder prompt (planner.md promises exactly this).
+# Runs under --autoship (Stage 3 skipped → no codex stub needed). PLANNER_CLI
+# emits a research-requesting plan; ask-agy.sh is stubbed to a known answer;
+# CODER_CLI captures the prompt it receives so we can assert the <research> graft.
+if [ "$FAILED" = "1" ]; then
+  warn "skipping Stage-1.5 smoke — prior REQUIRED checks failed"
+else
+  T7=$(mktemp -d)
+  trap 'rm -rf "$TMPDIR_SMOKE" "$T2" "$T7"' EXIT
+  S7="$T7/stubbin"
+  mkdir -p "$S7"
+  cat > "$S7/stub-planner.sh" <<'STUB'
+#!/usr/bin/env bash
+cat <<'PLAN'
+## Plan
+1. implement the helper in foo
+## Files
+- foo.txt — modified
+## Verify
+- grep helper foo.txt
+## NEED RESEARCH
+- What is the correct signature of the helper?
+PLAN
+STUB
+  cat > "$S7/ask-agy.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "DOCTOR-RESEARCH-ANSWER: helper(x) -> y (agy stub)"
+STUB
+  cat > "$S7/stub-coder.sh" <<'STUB'
+#!/usr/bin/env bash
+# Capture the coder prompt (arg after -p) so the harness can assert the graft.
+printf '%s' "$2" > "$CODER_CAPTURE"
+echo "coder ran (stub)"
+STUB
+  chmod +x "$S7"/*.sh
+  CWD7="$T7/run"
+  mkdir -p "$CWD7"
+  git -C "$CWD7" init -q
+  git -C "$CWD7" config user.email doctor@example.invalid
+  git -C "$CWD7" config user.name doctor
+  git -C "$CWD7" commit -q --allow-empty -m seed >/dev/null 2>&1
+  printf -- '- [ ] task that needs research\n' > "$CWD7/BACKLOG.md"
+  (
+    cd "$CWD7" && \
+    AGENT_TEAM="doctor-research" \
+    RALPH_TRIO_WORKSPACE="$CWD7/.ralph-trio" \
+    PLANNER_CLI="$S7/stub-planner.sh" \
+    CODER_CLI="$S7/stub-coder.sh" \
+    CODER_CAPTURE="$CWD7/coder-prompt.txt" \
+    TMUX="" \
+    PATH="$S7:$PATH" \
+    "$PLUGIN_ROOT/bin/ralph-trio.sh" --max-iter 1 --autoship --backlog "$CWD7/BACKLOG.md" \
+    >"$CWD7/trio.out" 2>"$CWD7/trio.err"
+  ) || { fail "Stage-1.5 smoke run exited non-zero — see $CWD7/trio.err"; note "stderr: $(tail -3 "$CWD7/trio.err" 2>/dev/null)"; }
+  RP7=$(ls "$CWD7/.ralph-trio/log/doctor-research"/ralph-trio-*-iter-1-research-plan.log 2>/dev/null | tail -1)
+  if [ -n "$RP7" ] && grep -q "DOCTOR-RESEARCH-ANSWER" "$RP7"; then
+    ok "planner NEED RESEARCH → Stage 1.5 fetched agy research pre-coding"
+  else
+    fail "Stage 1.5 did not run — no research-plan log with the agy answer (planner NEED RESEARCH ignored?)"
+  fi
+  if grep -q "DOCTOR-RESEARCH-ANSWER" "$CWD7/coder-prompt.txt" 2>/dev/null \
+     && grep -q "<research>" "$CWD7/coder-prompt.txt" 2>/dev/null; then
+    ok "pre-coding research grafted into the first coder prompt (<research> block)"
+  else
+    fail "research not grafted into coder prompt — Stage 1.5 → Stage 2 wiring broken"
+  fi
+fi
+
+echo
 if [ "$FAILED" = "1" ]; then
   printf '%sralph-trio doctor: FAILED%s — see above\n' "$RED" "$RESET"
   exit 1
