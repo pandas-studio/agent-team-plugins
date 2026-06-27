@@ -11,7 +11,7 @@
 #
 # Model selection (role rotation):
 #   ask-critic.sh --model agy "focus"       # default model is codex
-#   ask-critic.sh --model claude "focus"
+#   ask-critic.sh --model <id> "focus"      # any registered model (agent-team-models list)
 #   ask-critic.sh --model agy --with-research path "focus"
 #
 # Output goes to stdout AND $LOG_DIR/crit-<timestamp>.log
@@ -20,6 +20,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROLE_FILE="$SCRIPT_DIR/roles/critic.md"
+
+_REGISTRY_LIB="$SCRIPT_DIR/registry.sh"
+[ -f "$_REGISTRY_LIB" ] || { echo "ask-critic: registry.sh not found at $_REGISTRY_LIB" >&2; exit 1; }
+# shellcheck source=registry.sh
+. "$_REGISTRY_LIB" || { echo "ask-critic: failed to load registry.sh (jq missing?)" >&2; exit 2; }
+unset _REGISTRY_LIB
 
 detect_team() {
   if [ -n "${AGENT_TEAM:-}" ]; then echo "$AGENT_TEAM"; return; fi
@@ -43,10 +49,8 @@ while [ "$#" -gt 0 ]; do
     --with-research)
       RESEARCH_FILE="${2:?--with-research requires a file path}"; shift 2 ;;
     --model)
-      MODEL="${2:?--model requires agy|codex|claude}"; shift 2
-      case "$MODEL" in agy|codex|claude) ;;
-        *) echo "ask-critic: unknown model '$MODEL' (expected agy|codex|claude)" >&2; exit 2 ;;
-      esac
+      MODEL="${2:?--model requires a model id}"; shift 2
+      registry_model_exists "$MODEL" || { echo "ask-critic: unknown model '$MODEL' (run: agent-team-models list)" >&2; exit 2; }
       ;;
     --) shift; break ;;
     -*) echo "ask-critic: unknown flag: $1" >&2; exit 2 ;;
@@ -107,19 +111,10 @@ echo "[ask-critic] running ($MODEL) — monitor: tail -F $LOG_DIR/latest-crit.lo
 LINEBUF=""
 command -v stdbuf >/dev/null 2>&1 && LINEBUF='stdbuf -oL'
 RC=0
-case "$MODEL" in
-  codex)
-    # --skip-git-repo-check: workspace may not be a git repo (the plugin runs
-    # against arbitrary cwd) and we don't need Codex's git trust gate here.
-    $LINEBUF "${CRITIC_CLI:-${CODEX_CLI:-codex}}" exec --skip-git-repo-check "$PROMPT" 2>&1 | $LINEBUF tee -a "$LOG" || RC=$?
-    ;;
-  agy)
-    $LINEBUF "${AGY_CLI:-agy}" -p "$PROMPT" 2>&1 | $LINEBUF tee -a "$LOG" || RC=$?
-    ;;
-  claude)
-    $LINEBUF "${CLAUDE_CLI:-claude}" -p "$PROMPT" 2>&1 | $LINEBUF tee -a "$LOG" || RC=$?
-    ;;
-esac
+# The registry expands the model's argv template (codex -> `exec
+# --skip-git-repo-check {prompt}`, agy -> `-p {prompt}`) and resolves the
+# binary: CRITIC_CLI legacy override > model env_command (CODEX_CLI/...) > command.
+REGISTRY_CMD_OVERRIDE="${CRITIC_CLI:-}" registry_run "$MODEL" "$PROMPT" 2>&1 | $LINEBUF tee -a "$LOG" || RC=$?
 printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG"
 echo
 echo "(log: $LOG, rc=$RC, model=$MODEL)" >&2

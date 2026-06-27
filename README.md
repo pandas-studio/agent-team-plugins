@@ -25,6 +25,47 @@ Then install the plugins you want:
 
 More plugins (watch-pair, spec-trio, bisect-bot, ralph-trio) follow the same shape and will land here as their EPs publish.
 
+## Shared model configuration
+
+Both plugins resolve their companion-CLI roles through a **shared model registry**. A *model* is a named CLI adapter (how to spawn a CLI and feed it a prompt); a *role* (e.g. `dev-trio.researcher`) is bound to a model. Three models ship built-in — `agy`, `codex`, `claude` — and the default bindings match the role tables in each plugin, so **zero configuration is required**.
+
+To customise, use the `agent-team-models` CLI. It is on PATH whenever either plugin is active; both plugins ship an identical copy and operate on the **same** config file:
+
+```bash
+agent-team-models list                                # models + current role bindings
+agent-team-models doctor                              # validate config, check binaries on PATH
+agent-team-models preset add kimi-code                # install the Kimi Code preset
+agent-team-models set-role dev-trio.reviewer kimi-code
+agent-team-models add my-llm --command my-cli --arg -p --arg '{prompt}'
+agent-team-models remove kimi-code --force --fallback codex
+```
+
+Config lives at `$AGENT_TEAM_MODELS_CONFIG`, else `${XDG_CONFIG_HOME:-~/.config}/agent-team-plugins/models.json`.
+
+**Roles and their defaults:**
+
+| Role | Default model | Per-role model env override |
+| :--- | :--- | :--- |
+| `dev-trio.researcher` | `agy` | `DEV_TRIO_RESEARCHER_MODEL` |
+| `dev-trio.reviewer` | `codex` | `DEV_TRIO_REVIEWER_MODEL` |
+| `debate-conductor.generator` | `agy` | `DEBATE_GENERATOR_MODEL` |
+| `debate-conductor.critic` | `codex` | `DEBATE_CRITIC_MODEL` |
+
+**Resolution precedence.** Which *model* runs a role: CLI flag (`--model`, `--primary-gen`/`--primary-crit`) → per-role env var → config binding → built-in default. Which *binary* runs a model: legacy per-role `*_CLI` (`RESEARCHER_CLI`, `REVIEWER_CLI`, `GENERATOR_CLI`, `CRITIC_CLI`) → the model's own env override (`AGY_CLI`, `CODEX_CLI`, `CLAUDE_CLI`, `KIMI_CLI`) → its built-in command. All existing env overrides keep working unchanged.
+
+A model definition is a CLI adapter: a `command`, an optional `env_command` (env var that overrides the binary), an `args` argv template containing `{prompt}`, and an optional `final_args` template (with `{prompt}` and `{final}`) for CLIs that can write their last message to a file. Models without `final_args` still produce a compatible `*.final.md` — it is synthesised from the streamed transcript.
+
+### Example: route reviews through Kimi Code
+
+```bash
+agent-team-models preset add kimi-code         # model kimi-code: command=kimi, env_command=KIMI_CLI
+export KIMI_CLI=/path/to/kimi                   # only if kimi isn't already on PATH as `kimi`
+agent-team-models set-role dev-trio.reviewer kimi-code
+agent-team-models doctor                        # confirm: reviewer -> kimi-code, binary resolves
+```
+
+`jq` (1.6+) is required for the registry.
+
 ## Pattern
 
 Every plugin in this marketplace follows broadly the same layout. Skill set varies per pattern (`dev-trio` ships `bootstrap`/`research`/`review`/`install-pm`; `debate-conductor` ships `bootstrap`/`run`/`continue`), but the directory shape is stable:
@@ -43,7 +84,7 @@ Every plugin in this marketplace follows broadly the same layout. Skill set vari
 └── <topics/|tmux/|...>      # plugin-specific assets (canned topics, keybindings)
 ```
 
-`bin/` and `lib/` are bash. Roles are markdown. Skills are markdown with YAML frontmatter. No language runtime beyond bash + the third-party CLIs (`claude`, `agy`, `codex`), plus `jq` for plugins that emit RFC 0004 run manifests.
+`bin/` and `lib/` are bash. Roles are markdown. Skills are markdown with YAML frontmatter. No language runtime beyond bash + the third-party CLIs (`claude`, `agy`, `codex`), plus `jq` for the [shared model registry](#shared-model-configuration) and RFC 0004 run manifests.
 
 ## Develop locally
 

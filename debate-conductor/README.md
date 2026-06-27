@@ -16,8 +16,9 @@ Default model assignment:
 - `claude` (Claude Code)
 - `agy` (Antigravity CLI) authenticated
 - `codex` (OpenAI Codex CLI) authenticated
+- `jq` (1.6+) — required for the model registry
 
-The wrappers respect overrides via `AGY_CLI`, `CODEX_CLI`, `CLAUDE_CLI` env vars if your binaries are at non-standard paths.
+Models and CLI binaries are configurable — see [Model configuration](#model-configuration). Quick binary overrides still work: `AGY_CLI`, `CODEX_CLI`, `CLAUDE_CLI` (per model), `GENERATOR_CLI` / `CRITIC_CLI` (per role).
 
 ## Install
 
@@ -67,6 +68,23 @@ claude --plugin-dir ./agent-team-plugins/debate-conductor
 ## Workspace topics
 
 Place topic files at `<workspace>/topics/0N-*.txt`. Each file is a stance-driven prompt the Generator receives. The plugin ships three default examples in its own `topics/` — you can copy them into your workspace as a starting point. The skill checks workspace `topics/` first, falls back to the plugin's bundled examples if absent.
+
+## Model configuration
+
+Generator and Critic resolve through the shared model registry (the [marketplace README](../README.md#shared-model-configuration) covers it in full). Defaults: `agy` (generator), `codex` (critic).
+
+| Role | Default | Pick a different model | Override its binary |
+| :--- | :--- | :--- | :--- |
+| `debate-conductor.generator` | `agy` | `--primary-gen=<model>`, `DEBATE_GENERATOR_MODEL` env, or `agent-team-models set-role debate-conductor.generator <model>` | `GENERATOR_CLI` · `AGY_CLI` |
+| `debate-conductor.critic` | `codex` | `--primary-crit=<model>`, `DEBATE_CRITIC_MODEL` env, or `agent-team-models set-role debate-conductor.critic <model>` | `CRITIC_CLI` · `CODEX_CLI` |
+
+`--primary-gen` / `--primary-crit` accept any registered model id (run `agent-team-models list`); generator and critic must differ. With no critic specified, it still defaults to "the other one" (codex unless gen=codex, then agy). The legacy `DEBATE_PRIMARY_GEN` env var also keeps working.
+
+```bash
+agent-team-models preset add kimi-code
+debate.sh --primary-crit=kimi-code "your topic"                # one-off
+agent-team-models set-role debate-conductor.critic kimi-code   # persistent
+```
 
 ## Logs
 
@@ -118,11 +136,13 @@ debate-conductor/
 │   └── install-pm/SKILL.md
 ├── bin/                       # on PATH while plugin is active
 │   ├── debate.sh              # round orchestrator (skill calls this)
+│   ├── agent-team-models.sh   # shared model-registry CLI (vendored)
 │   ├── team-3pane.sh          # tmux 3-pane splitter (--here mode)
 │   └── tail-role.sh           # live-tail one role's round files
 ├── lib/                       # internal — invoked by debate.sh / install-pm
-│   ├── ask-generator.sh       # Generator wrapper (agy|codex|claude)
-│   ├── ask-critic.sh          # Critic wrapper (codex|agy|claude)
+│   ├── ask-generator.sh       # Generator wrapper (any registered model)
+│   ├── ask-critic.sh          # Critic wrapper (any registered model)
+│   ├── registry.sh            # shared model registry + runner (vendored)
 │   ├── pm.md                  # PM orchestration policy (source of truth)
 │   └── roles/
 │       ├── generator.md       # Generator role prompt
