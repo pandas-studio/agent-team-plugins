@@ -19,6 +19,18 @@ _MANIFEST_LIB="$PLUGIN_ROOT/lib/manifest.sh"
 . "$_MANIFEST_LIB" || { echo "ask-agy:failed to load manifest.sh (jq missing?)" >&2; exit 2; }
 unset _MANIFEST_LIB
 
+_REGISTRY_LIB="$PLUGIN_ROOT/lib/registry.sh"
+[ -f "$_REGISTRY_LIB" ] || { echo "ask-agy: registry.sh not found at $_REGISTRY_LIB" >&2; exit 1; }
+# shellcheck source=../lib/registry.sh
+. "$_REGISTRY_LIB" || { echo "ask-agy: failed to load registry.sh (jq missing?)" >&2; exit 2; }
+unset _REGISTRY_LIB
+
+# Researcher model — DEV_TRIO_RESEARCHER_MODEL env > config role binding >
+# built-in default (agy). ask-agy has no CLI model flag, so the flag tier is
+# empty. The legacy RESEARCHER_CLI/AGY_CLI still override the *binary* below.
+RESEARCHER_MODEL="$(registry_resolve_role dev-trio researcher "")"
+registry_model_exists "$RESEARCHER_MODEL" || { echo "ask-agy: researcher model '$RESEARCHER_MODEL' is not registered (run: agent-team-models list)" >&2; exit 2; }
+
 # Team namespace — isolates logs per tmux window/session.
 detect_team() {
   if [ -n "${AGENT_TEAM:-}" ]; then echo "$AGENT_TEAM"; return; fi
@@ -74,7 +86,7 @@ LOG="$LOG_DIR/agy-$TS.log"
 ln -sfn "agy-$TS.log" "$LOG_DIR/latest-agy.log"
 
 manifest_init dev-trio-research "$LOG"
-manifest_add_role researcher agy "$ROLE_FILE" "$(manifest_sha256_string "$PROMPT")"
+manifest_add_role researcher "$RESEARCHER_MODEL" "$ROLE_FILE" "$(manifest_sha256_string "$PROMPT")"
 manifest_add_input kind=question value="$QUERY"
 [ -n "$STDIN_CONTEXT" ] && manifest_add_input kind=context value="$STDIN_CONTEXT"
 trap 'manifest_cleanup' INT TERM
@@ -90,9 +102,11 @@ trap 'manifest_cleanup' INT TERM
   echo "=== RESPONSE ==="
 } > "$LOG"
 
-echo "[ask-agy] running — monitor: dashboard.sh agy  (raw: tail -F $LOG_DIR/latest-agy.log)" >&2
+echo "[ask-agy] running ($RESEARCHER_MODEL) — monitor: dashboard.sh agy  (raw: tail -F $LOG_DIR/latest-agy.log)" >&2
 RC=0
-"${RESEARCHER_CLI:-${AGY_CLI:-agy}}" -p "$PROMPT" 2>&1 | tee -a "$LOG" || RC=$?
+# Legacy RESEARCHER_CLI still wins as a per-role binary override; otherwise the
+# registry resolves the binary from the model's env_command/command.
+REGISTRY_CMD_OVERRIDE="${RESEARCHER_CLI:-}" registry_run "$RESEARCHER_MODEL" "$PROMPT" 2>&1 | tee -a "$LOG" || RC=$?
 printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG"
 manifest_finalize
 echo

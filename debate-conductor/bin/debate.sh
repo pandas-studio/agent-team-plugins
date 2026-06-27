@@ -14,9 +14,12 @@
 #   debate.sh --rotate "topic"                 # role rotation ON
 #
 # Model pair:
-#   --primary-gen=MODEL   generator model (default agy)        — env DEBATE_PRIMARY_GEN
-#   --primary-crit=MODEL  critic model (default = "the other one" — codex if gen∈{agy,claude}, agy if gen=codex)
-#   Both accept agy|codex|claude. Generator and critic must differ.
+#   --primary-gen=MODEL   generator model — flag > DEBATE_GENERATOR_MODEL >
+#                         DEBATE_PRIMARY_GEN (legacy) > config role > default (agy)
+#   --primary-crit=MODEL  critic model    — flag > DEBATE_CRITIC_MODEL > config role
+#                         > "the other one" (codex unless gen=codex, then agy)
+#   MODEL is any registered model id (built-ins agy|codex|claude, plus anything
+#   added via `agent-team-models`; run `agent-team-models list`). Gen ≠ crit.
 #
 # Rotation (--rotate):
 #   Round 1 gen=A, Round 2 crit=B, Round 3 gen=B, Round 4 crit=A, then repeats.
@@ -40,30 +43,36 @@ PRIMARY_GEN_OPT=""
 PRIMARY_CRIT_OPT=""
 CONTINUE_FROM=""
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_REGISTRY_LIB="$SCRIPT_DIR/../lib/registry.sh"
+[ -f "$_REGISTRY_LIB" ] || { echo "debate: registry.sh not found at $_REGISTRY_LIB" >&2; exit 1; }
+# shellcheck source=../lib/registry.sh
+. "$_REGISTRY_LIB" || { echo "debate: failed to load registry.sh (jq missing?)" >&2; exit 2; }
+unset _REGISTRY_LIB
+
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [-n ROUNDS] [--rotate] \\
-         [--primary-gen=agy|codex|claude] [--primary-crit=agy|codex|claude] \\
+         [--primary-gen=MODEL] [--primary-crit=MODEL] \\
          [--continue-from=DIR] \\
          "topic" [context-file.md]
 
 Run an N-round Generator vs Critic debate. Defaults to 3 rounds with no rotation
-(generator=agy, critic=codex). With --rotate, models alternate roles every
-two rounds. With --continue-from=<debate-TS dir>, append N more rounds to an
-existing debate (round numbering continues from last+1).
+(generator=agy, critic=codex). MODEL is any registered model id — run
+'agent-team-models list' to see them. With --rotate, models alternate roles
+every two rounds. With --continue-from=<debate-TS dir>, append N more rounds to
+an existing debate (round numbering continues from last+1).
 EOF
 }
-
-valid_model() { case "$1" in agy|codex|claude) return 0 ;; *) return 1 ;; esac; }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -n) ROUNDS="$2"; shift 2 ;;
     --rotate) ROTATE=1; shift ;;
     --primary-gen=*) PRIMARY_GEN_OPT="${1#--primary-gen=}"; shift ;;
-    --primary-gen) PRIMARY_GEN_OPT="${2:?--primary-gen requires agy|codex|claude}"; shift 2 ;;
+    --primary-gen) PRIMARY_GEN_OPT="${2:?--primary-gen requires a model id}"; shift 2 ;;
     --primary-crit=*) PRIMARY_CRIT_OPT="${1#--primary-crit=}"; shift ;;
-    --primary-crit) PRIMARY_CRIT_OPT="${2:?--primary-crit requires agy|codex|claude}"; shift 2 ;;
+    --primary-crit) PRIMARY_CRIT_OPT="${2:?--primary-crit requires a model id}"; shift 2 ;;
     --continue-from=*) CONTINUE_FROM="${1#--continue-from=}"; shift ;;
     --continue-from) CONTINUE_FROM="${2:?--continue-from requires a directory}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -82,19 +91,34 @@ case "$ROUNDS" in
 esac
 [ "$ROUNDS" -lt 1 ] && { echo "ROUNDS must be >= 1" >&2; exit 2; }
 
-PRIMARY_GEN="${PRIMARY_GEN_OPT:-${DEBATE_PRIMARY_GEN:-agy}}"
-valid_model "$PRIMARY_GEN" || { echo "primary-gen must be agy|codex|claude (got: $PRIMARY_GEN)" >&2; exit 2; }
+# Generator model: flag > DEBATE_GENERATOR_MODEL > DEBATE_PRIMARY_GEN (legacy)
+#                  > config role binding > built-in default (agy).
+if [ -n "$PRIMARY_GEN_OPT" ]; then
+  PRIMARY_GEN="$PRIMARY_GEN_OPT"
+elif [ -n "${DEBATE_GENERATOR_MODEL:-}" ]; then
+  PRIMARY_GEN="$DEBATE_GENERATOR_MODEL"
+elif [ -n "${DEBATE_PRIMARY_GEN:-}" ]; then
+  PRIMARY_GEN="$DEBATE_PRIMARY_GEN"
+else
+  PRIMARY_GEN="$(registry_resolve_role debate-conductor generator "")"
+fi
+registry_model_exists "$PRIMARY_GEN" || { echo "primary-gen: unknown model '$PRIMARY_GEN' (run: agent-team-models list)" >&2; exit 2; }
 
+# Critic model: flag > DEBATE_CRITIC_MODEL > config role binding > legacy
+# "the other one" default (codex unless gen=codex, then agy). The auto-derive
+# keeps `--primary-gen=codex` working with no critic flag, exactly as before.
 if [ -n "$PRIMARY_CRIT_OPT" ]; then
   PRIMARY_CRIT="$PRIMARY_CRIT_OPT"
+elif [ -n "${DEBATE_CRITIC_MODEL:-}" ]; then
+  PRIMARY_CRIT="$DEBATE_CRITIC_MODEL"
+elif [ -n "$(registry_config_role debate-conductor.critic)" ]; then
+  PRIMARY_CRIT="$(registry_config_role debate-conductor.critic)"
+elif [ "$PRIMARY_GEN" = "codex" ]; then
+  PRIMARY_CRIT="agy"
 else
-  case "$PRIMARY_GEN" in
-    agy) PRIMARY_CRIT=codex ;;
-    codex)  PRIMARY_CRIT=agy ;;
-    claude) PRIMARY_CRIT=codex ;;
-  esac
+  PRIMARY_CRIT="codex"
 fi
-valid_model "$PRIMARY_CRIT" || { echo "primary-crit must be agy|codex|claude (got: $PRIMARY_CRIT)" >&2; exit 2; }
+registry_model_exists "$PRIMARY_CRIT" || { echo "primary-crit: unknown model '$PRIMARY_CRIT' (run: agent-team-models list)" >&2; exit 2; }
 [ "$PRIMARY_GEN" = "$PRIMARY_CRIT" ] && { echo "primary-gen and primary-crit must differ (both = $PRIMARY_GEN)" >&2; exit 2; }
 
 # Per-round model dispatch.
@@ -121,8 +145,6 @@ round_file() {
     echo "$DEBATE_DIR/round-$r-$role.md"
   fi
 }
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Team detection (matches wrappers — for log isolation per tmux window)
 detect_team() {
@@ -275,8 +297,11 @@ else
 fi
 echo "Transcript dir: $DEBATE_DIR"
 
-gen_args() { { [ "$ROTATE" = "1" ] || [ "$1" != "agy" ]; } && printf -- "--model %s" "$1"; }
-crit_args() { { [ "$ROTATE" = "1" ] || [ "$1" != "codex" ]; } && printf -- "--model %s" "$1"; }
+# Always forward the resolved per-round model to the role dispatcher; ask-*.sh
+# validate it against the registry. (Previously --model was elided for the
+# built-in default, which only held while the defaults were literally agy/codex.)
+gen_args()  { printf -- "--model %s" "$1"; }
+crit_args() { printf -- "--model %s" "$1"; }
 
 for r in $(seq "$START_ROUND" "$END_ROUND"); do
   if [ $((r % 2)) -eq 1 ]; then

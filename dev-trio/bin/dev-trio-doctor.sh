@@ -5,11 +5,16 @@
 #
 # Checks:
 #   1. Required tools on PATH: tmux, agy, codex, jq, sha256sum/shasum.
-#   2. Plugin layout intact (ask-codex.sh / ask-agy.sh / dashboard.sh /
-#      team-layout.sh / lib/manifest.sh / lib/roles/*.md / lib/pm.md).
+#   2. Plugin layout intact (ask-codex.sh / ask-agy.sh / agent-team-models.sh /
+#      dashboard.sh / team-layout.sh / lib/manifest.sh / lib/registry.sh /
+#      lib/roles/*.md / lib/pm.md).
 #   3. Stub-CLI smoke: runs ask-agy.sh against a tmp stub matching
-#      `agy -p "$2"` shape, then asserts the manifest JSON is well-formed
-#      and contains variant=dev-trio-research with role[0].model=agy.
+#      `agy -p "$2"` shape (with an isolated empty models config so the
+#      built-in researcher=agy default applies), then asserts the manifest
+#      JSON is well-formed and contains variant=dev-trio-research with
+#      role[0].model=agy.
+#   4. Registry smoke: agent-team-models list/preset/set-role/doctor/remove
+#      against an isolated config (built-ins + kimi-code preset round-trip).
 #
 # Stub smokes are *necessary but not sufficient* — verdict / dashboard /
 # parse-affecting changes need a real-CLI dry-run on top.
@@ -57,8 +62,10 @@ else fail "neither sha256sum nor shasum found — manifest hashing will fail"; f
 
 echo
 echo "2. Plugin layout"
-for rel in bin/ask-codex.sh bin/ask-agy.sh bin/dashboard.sh bin/team-layout.sh \
-           lib/manifest.sh lib/pm.md lib/roles/researcher.md lib/roles/reviewer.md; do
+for rel in bin/ask-codex.sh bin/ask-agy.sh bin/agent-team-models.sh \
+           bin/dashboard.sh bin/team-layout.sh \
+           lib/manifest.sh lib/registry.sh lib/pm.md \
+           lib/roles/researcher.md lib/roles/reviewer.md; do
   p="$PLUGIN_ROOT/$rel"
   if [ -f "$p" ]; then ok "$rel"
   else fail "$rel — missing at $p"; fi
@@ -87,8 +94,13 @@ STUB
   chmod +x "$STUB_AGY"
 
   pushd "$TMPDIR_SMOKE" >/dev/null
+  # Isolate from the user's shared config + role/CLI envs so the built-in
+  # researcher=agy default (and the AGY_CLI stub) deterministically apply.
   AGENT_TEAM="doctor-smoke" \
   DEV_TRIO_LOG_DIR="$TMPDIR_SMOKE/.dev-trio/log" \
+  AGENT_TEAM_MODELS_CONFIG="$TMPDIR_SMOKE/models.json" \
+  DEV_TRIO_RESEARCHER_MODEL="" \
+  RESEARCHER_CLI="" \
   AGY_CLI="$STUB_AGY" \
   TMUX="" \
     "$PLUGIN_ROOT/bin/ask-agy.sh" "doctor smoke: what is LangGraph 0.2 streaming?" \
@@ -136,6 +148,73 @@ STUB
       fail "prompt_resolved_sha256 not a 64-hex string: '$RESOLVED'"
     fi
   fi
+fi
+
+echo
+echo "4. Registry smoke (agent-team-models)"
+if [ "$FAILED" = "1" ]; then
+  warn "skipping registry smoke — prior checks failed"
+else
+  # Neutralize ambient role overrides so config-binding resolution is observable.
+  unset DEV_TRIO_RESEARCHER_MODEL DEV_TRIO_REVIEWER_MODEL \
+        DEBATE_GENERATOR_MODEL DEBATE_CRITIC_MODEL 2>/dev/null || true
+  ATM="$PLUGIN_ROOT/bin/agent-team-models.sh"
+  REG_TMP=$(mktemp -d)
+  REG_CFG="$REG_TMP/models.json"
+  if [ ! -f "$ATM" ]; then
+    fail "agent-team-models.sh not found at $ATM"
+  else
+    if AGENT_TEAM_MODELS_CONFIG="$REG_CFG" "$ATM" list >"$REG_TMP/list.out" 2>"$REG_TMP/list.err"; then
+      ok "agent-team-models list ran (built-in defaults, empty config)"
+    else
+      fail "agent-team-models list failed"
+      note "stderr: $(head -3 "$REG_TMP/list.err" 2>/dev/null)"
+    fi
+    if grep -q 'dev-trio.researcher' "$REG_TMP/list.out" 2>/dev/null \
+       && grep -q 'agy' "$REG_TMP/list.out" 2>/dev/null; then
+      ok "list shows built-in role binding (dev-trio.researcher -> agy)"
+    else
+      fail "list output missing expected built-in role binding"
+    fi
+    if AGENT_TEAM_MODELS_CONFIG="$REG_CFG" "$ATM" preset add kimi-code >/dev/null 2>"$REG_TMP/preset.err"; then
+      ok "preset add kimi-code"
+    else
+      fail "preset add kimi-code failed"
+      note "stderr: $(head -3 "$REG_TMP/preset.err" 2>/dev/null)"
+    fi
+    if AGENT_TEAM_MODELS_CONFIG="$REG_CFG" "$ATM" set-role dev-trio.reviewer kimi-code >/dev/null 2>"$REG_TMP/setrole.err"; then
+      ok "set-role dev-trio.reviewer kimi-code"
+    else
+      fail "set-role failed"
+      note "stderr: $(head -3 "$REG_TMP/setrole.err" 2>/dev/null)"
+    fi
+    REG_REVIEWER=$(AGENT_TEAM_MODELS_CONFIG="$REG_CFG" "$ATM" list 2>/dev/null \
+      | awk '/^  dev-trio.reviewer/{print $3}')
+    if [ "$REG_REVIEWER" = "kimi-code" ]; then
+      ok "reviewer role resolves to config binding (kimi-code)"
+    else
+      fail "reviewer role did not pick up config binding (got: ${REG_REVIEWER:-<empty>})"
+    fi
+    # kimi binary is absent on PATH → doctor must warn, not hard-fail.
+    if AGENT_TEAM_MODELS_CONFIG="$REG_CFG" "$ATM" doctor >"$REG_TMP/doctor.out" 2>&1; then
+      ok "agent-team-models doctor passed (absent binaries warn, not fail)"
+    else
+      fail "agent-team-models doctor reported a hard failure"
+      note "$(grep -i 'FAIL' "$REG_TMP/doctor.out" 2>/dev/null | head -2)"
+    fi
+    if AGENT_TEAM_MODELS_CONFIG="$REG_CFG" "$ATM" remove kimi-code >/dev/null 2>"$REG_TMP/rm.err"; then
+      fail "remove of in-use model unexpectedly succeeded"
+    else
+      ok "remove refuses an in-use model without --force"
+    fi
+    if AGENT_TEAM_MODELS_CONFIG="$REG_CFG" "$ATM" remove kimi-code --force --fallback codex >/dev/null 2>"$REG_TMP/rmf.err"; then
+      ok "remove --force --fallback codex reassigns role then deletes"
+    else
+      fail "remove --force --fallback failed"
+      note "stderr: $(head -3 "$REG_TMP/rmf.err" 2>/dev/null)"
+    fi
+  fi
+  rm -rf "$REG_TMP"
 fi
 
 echo

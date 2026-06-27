@@ -16,9 +16,26 @@ Default model assignment:
 - `claude` (Claude Code)
 - `agy` (Antigravity CLI) authenticated
 - `codex` (OpenAI Codex CLI) authenticated
-- `jq` (1.6+) — required for RFC 0004 run manifests
+- `jq` (1.6+) — required for the model registry and RFC 0004 run manifests
 
-Override CLI binaries via `AGY_CLI` / `RESEARCHER_CLI` and `CODEX_CLI` / `REVIEWER_CLI` env vars.
+Models and CLI binaries are configurable — see [Model configuration](#model-configuration). Quick binary overrides still work: `AGY_CLI` / `RESEARCHER_CLI` (researcher), `CODEX_CLI` / `REVIEWER_CLI` (reviewer).
+
+## Model configuration
+
+The Researcher and Reviewer roles resolve through the shared model registry (the [marketplace README](../README.md#shared-model-configuration) covers it in full). Defaults are `agy` (researcher) and `codex` (reviewer) — no setup needed.
+
+| Role | Default | Pick a different model | Override its binary |
+| :--- | :--- | :--- | :--- |
+| `dev-trio.researcher` | `agy` | `DEV_TRIO_RESEARCHER_MODEL` env, or `agent-team-models set-role dev-trio.researcher <model>` | `RESEARCHER_CLI` (any model) · `AGY_CLI` (the `agy` model) |
+| `dev-trio.reviewer` | `codex` | `DEV_TRIO_REVIEWER_MODEL` env, or `agent-team-models set-role dev-trio.reviewer <model>` | `REVIEWER_CLI` (any model) · `CODEX_CLI` (the `codex` model) |
+
+```bash
+agent-team-models preset add kimi-code
+agent-team-models set-role dev-trio.reviewer kimi-code   # reviews now run through Kimi Code
+agent-team-models doctor                                  # verify binding + binary
+```
+
+The reviewer's final structured review is written to `<TS>.final.md` natively when the model supports it (codex's `--output-last-message`), and otherwise synthesised from the streamed transcript — so `/dev-trio:review` verdict parsing works regardless of which model fills the role.
 
 ## Install
 
@@ -170,11 +187,13 @@ dev-trio/
 ├── bin/                       # on plugin PATH while active
 │   ├── ask-agy.sh             # Researcher wrapper
 │   ├── ask-codex.sh           # Reviewer wrapper
+│   ├── agent-team-models.sh   # shared model-registry CLI (vendored)
 │   ├── dashboard.sh           # live dashboard (agy|codex)
 │   ├── team-layout.sh         # tmux 3-pane splitter
 │   └── dev-trio-doctor.sh     # env probe + stub-CLI smoke
 ├── lib/                       # internal
 │   ├── manifest.sh            # RFC 0004 run-manifest helper (vendored)
+│   ├── registry.sh            # shared model registry + runner (vendored)
 │   ├── pm.md                  # PM orchestration policy (source of truth)
 │   └── roles/
 │       ├── researcher.md      # Antigravity role prompt
@@ -190,7 +209,7 @@ A one-shot env probe + stub-CLI smoke is bundled:
 dev-trio-doctor.sh
 ```
 
-Checks `tmux` / `agy` / `codex` / `jq` presence and verifies that `ask-agy.sh` produces a well-formed RFC 0004 manifest under stub CLIs. **Stub smokes are necessary but not sufficient** — verdict / dashboard / parse-affecting changes need a real-CLI dry-run on top.
+Checks `tmux` / `agy` / `codex` / `jq` presence, verifies that `ask-agy.sh` produces a well-formed RFC 0004 manifest under stub CLIs, and exercises the `agent-team-models` registry CLI (list / preset / set-role / doctor / remove against an isolated config). **Stub smokes are necessary but not sufficient** — verdict / dashboard / parse-affecting changes need a real-CLI dry-run on top.
 
 ## Security model
 

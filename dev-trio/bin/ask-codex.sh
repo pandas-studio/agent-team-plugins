@@ -14,11 +14,15 @@
 # Reviewer role override:
 #   REVIEWER_ROLE_FILE=/path/to/role.md ask-codex.sh ...
 #
+# The reviewer model is resolved via the shared registry (DEV_TRIO_REVIEWER_MODEL
+# env > config role binding > built-in default codex); see lib/registry.sh.
+#
 # Output goes to stdout AND $PWD/.dev-trio/log/<team>/codex-<TS>.log (the full
-# streamed transcript). Codex's final structured review is ALSO captured verbatim
-# to codex-<TS>.final.md via `codex exec --output-last-message`, so the verdict
-# and findings can be parsed from a clean file even when the streamed stdout
-# duplicates or drops the closing block.
+# streamed transcript). The reviewer's final structured review is ALSO captured
+# verbatim to codex-<TS>.final.md — natively via `--output-last-message` for
+# models that support it (codex), otherwise synthesized from the streamed
+# transcript — so the verdict and findings can be parsed from a clean file even
+# when the streamed stdout duplicates or drops the closing block.
 # Override log root via DEV_TRIO_LOG_DIR=/abs/path.
 set -euo pipefail
 
@@ -34,6 +38,18 @@ _MANIFEST_LIB="$PLUGIN_ROOT/lib/manifest.sh"
 # shellcheck source=../lib/manifest.sh
 . "$_MANIFEST_LIB" || { echo "ask-codex: failed to load manifest.sh (jq missing?)" >&2; exit 2; }
 unset _MANIFEST_LIB
+
+_REGISTRY_LIB="$PLUGIN_ROOT/lib/registry.sh"
+[ -f "$_REGISTRY_LIB" ] || { echo "ask-codex: registry.sh not found at $_REGISTRY_LIB" >&2; exit 1; }
+# shellcheck source=../lib/registry.sh
+. "$_REGISTRY_LIB" || { echo "ask-codex: failed to load registry.sh (jq missing?)" >&2; exit 2; }
+unset _REGISTRY_LIB
+
+# Reviewer model — DEV_TRIO_REVIEWER_MODEL env > config role binding > built-in
+# default (codex). No CLI model flag here, so the flag tier is empty. The legacy
+# REVIEWER_CLI/CODEX_CLI still override the *binary* at run time below.
+REVIEWER_MODEL="$(registry_resolve_role dev-trio reviewer "")"
+registry_model_exists "$REVIEWER_MODEL" || { echo "ask-codex: reviewer model '$REVIEWER_MODEL' is not registered (run: agent-team-models list)" >&2; exit 2; }
 
 # Team namespace — isolates logs per tmux window/session.
 # Priority: $AGENT_TEAM env > tmux @team-name window option > tmux session name > "default"
@@ -126,7 +142,7 @@ ln -sfn "codex-$TS.final.md" "$LOG_DIR/latest-codex.final.md"
 # Manifest lifecycle (RFC 0004 PR 10 — sha256 of post-injection prompt for
 # byte-exact replayability without writing the prompt to disk).
 manifest_init dev-trio-review "$LOG"
-manifest_add_role reviewer codex "$ROLE_FILE" "$(manifest_sha256_string "$PROMPT")"
+manifest_add_role reviewer "$REVIEWER_MODEL" "$ROLE_FILE" "$(manifest_sha256_string "$PROMPT")"
 manifest_add_input kind=focus value="$FOCUS"
 [ -n "$RESEARCH_FILE" ] && manifest_add_input kind=research path="$RESEARCH_FILE"
 [ -n "$SPEC_FILE" ]     && manifest_add_input kind=spec     path="$SPEC_FILE"
@@ -145,18 +161,24 @@ trap 'manifest_cleanup' INT TERM
   echo "=== RESPONSE ==="
 } > "$LOG"
 
-echo "[ask-codex] running — monitor: dashboard.sh codex  (raw: tail -F $LOG_DIR/latest-codex.log)" >&2
+echo "[ask-codex] running ($REVIEWER_MODEL) — monitor: dashboard.sh codex  (raw: tail -F $LOG_DIR/latest-codex.log)" >&2
 RC=0
-# --output-last-message writes Codex's final structured review to a dedicated
-# file regardless of how stdout is buffered/streamed; `tee` keeps the full
-# transcript in $LOG. Downstream parses the verdict from $FINAL (clean), falling
-# back to $LOG only when $FINAL is empty.
-"${REVIEWER_CLI:-${CODEX_CLI:-codex}}" exec --output-last-message "$FINAL" "$PROMPT" 2>&1 | tee -a "$LOG" || RC=$?
+# For models with native final-message capture (codex's --output-last-message),
+# the registry's final_args template writes the structured review to $FINAL
+# regardless of how stdout is buffered/streamed; `tee` keeps the full transcript
+# in $LOG. Legacy REVIEWER_CLI still overrides the binary. Downstream parses the
+# verdict from $FINAL (clean), falling back to $LOG only when $FINAL is empty.
+REGISTRY_CMD_OVERRIDE="${REVIEWER_CLI:-}" registry_run "$REVIEWER_MODEL" "$PROMPT" "$FINAL" 2>&1 | tee -a "$LOG" || RC=$?
 printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG"
+# Models without native final-capture: synthesize $FINAL from the streamed
+# transcript so the verdict parser always has a clean file to read.
+if ! registry_has_final "$REVIEWER_MODEL" && [ ! -s "$FINAL" ]; then
+  registry_extract_response "$LOG" > "$FINAL" 2>/dev/null || true
+fi
 manifest_finalize
 echo
 if [ ! -s "$FINAL" ]; then
-  echo "[ask-codex] warning: final-message file is empty ($FINAL) — Codex may have died before emitting its review; parse $LOG instead" >&2
+  echo "[ask-codex] warning: final-message file is empty ($FINAL) — $REVIEWER_MODEL may have died before emitting its review; parse $LOG instead" >&2
 fi
 echo "(log: $LOG, final: $FINAL, rc=$RC)" >&2
 exit "$RC"

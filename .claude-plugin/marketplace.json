@@ -6,12 +6,12 @@
     {
       "name": "dev-trio",
       "source": "./dev-trio",
-      "description": "Claude PM orchestrates a 3-vendor dev team: Antigravity (Researcher) + Codex (Reviewer). Three-pane tmux view; bootstrap + research + review + install-pm skills."
+      "description": "Claude PM orchestrates a 3-vendor dev team: Antigravity (Researcher) + Codex (Reviewer); configurable model registry. Three-pane tmux view; bootstrap + research + review + install-pm skills."
     },
     {
       "name": "debate-conductor",
       "source": "./debate-conductor",
-      "description": "Claude conducts a Generator(Antigravity) vs Critic(Codex) adversarial debate over N rounds. Three-pane tmux view; bootstrap + run + continue + install-pm skills."
+      "description": "Claude conducts a Generator(Antigravity) vs Critic(Codex) adversarial debate over N rounds; configurable model registry. Three-pane tmux view; bootstrap + run + continue + install-pm skills."
     }
   ]
 }
