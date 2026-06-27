@@ -1,0 +1,9 @@
+{
+  "name": "spec-trio",
+  "version": "0.1.0",
+  "description": "Spec-anchored ralph-trio: an external spec.md gates planner / coder / reviewer with allowlist scope checks + §-citation coverage. Planner can request pre-coding research (Antigravity). Uses ask-codex.sh + ask-agy.sh from the dev-trio plugin on PATH.",
+  "author": { "name": "pandas-studio" },
+  "homepage": "https://github.com/pandas-studio/agent-team-plugins/tree/main/spec-trio",
+  "repository": "https://github.com/pandas-studio/agent-team-plugins",
+  "license": "MIT"
+}
