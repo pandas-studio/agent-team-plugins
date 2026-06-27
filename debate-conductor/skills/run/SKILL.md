@@ -52,6 +52,15 @@ Either form passes the topic string to `debate.sh` as a single argument — the 
 
 For role rotation experiments, add `--rotate` (model alternates each pair of rounds). For non-default model assignments, pass `--primary-gen=<model>` and/or `--primary-crit=<model>`.
 
+**Run until the debate converges** instead of a fixed count: add `--until-converged`. The debate then stops as soon as a Critic round returns `Verdict: STRENGTHEN`, and `-n` becomes the upper bound (a hard cap; default cap 6 if `-n` is omitted). Use this when the user asks to debate "합의/수렴할 때까지", "until they agree", or "keep going until the critic is satisfied". Reach for it instead of guessing a round count:
+
+```
+debate.sh --until-converged "<topic>"            # cap 6
+debate.sh --until-converged -n 8 "<topic>"       # cap 8
+```
+
+A converged run prints `✓ Converged at round N`; hitting the cap without a STRENGTHEN prints a `⚠ Reached round cap` alert — surface whichever fired when you summarise.
+
 ## 4 · Summarise after completion
 
 Transcripts live at `$PWD/.debate-conductor/log/<team>/latest-debate/round-*.md`. Use `Glob` to enumerate, `Read` to load each file. Then report:

@@ -12,6 +12,14 @@
 #   debate.sh "topic" context.md               # extra context file → round 1 gen
 #   debate.sh --primary-gen=claude "topic"     # claude as generator
 #   debate.sh --rotate "topic"                 # role rotation ON
+#   debate.sh --until-converged "topic"        # stop early when Critic verdict = STRENGTHEN
+#
+# Convergence (--until-converged):
+#   Instead of running a fixed round count, keep alternating gen/crit and stop
+#   as soon as a Critic round emits the canonical `Verdict: STRENGTHEN` line.
+#   -n becomes the *upper bound* (hard cap); without -n the cap defaults to 6
+#   (an even cap so a non-converging debate still ends on a Critic verdict).
+#   Convergence is only evaluated on Critic (even) rounds.
 #
 # Model pair:
 #   --primary-gen=MODEL   generator model — flag > DEBATE_GENERATOR_MODEL >
@@ -35,10 +43,16 @@
 set -euo pipefail
 
 DEFAULT_ROUNDS=3
+# Converge-mode cap when -n is not given. Even so a non-converging debate ends
+# on a Critic round (final verdict present) rather than a dangling Generator one.
+CONVERGE_DEFAULT_ROUNDS=6
 ROUNDS="$DEFAULT_ROUNDS"
+ROUNDS_SET=0
 TOPIC=""
 CONTEXT_FILE=""
 ROTATE=0
+UNTIL_CONVERGED=0
+CONVERGED=""
 PRIMARY_GEN_OPT=""
 PRIMARY_CRIT_OPT=""
 CONTINUE_FROM=""
@@ -52,7 +66,7 @@ unset _REGISTRY_LIB
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [-n ROUNDS] [--rotate] \\
+Usage: $(basename "$0") [-n ROUNDS] [--rotate] [--until-converged] \\
          [--primary-gen=MODEL] [--primary-crit=MODEL] \\
          [--continue-from=DIR] \\
          "topic" [context-file.md]
@@ -62,13 +76,17 @@ Run an N-round Generator vs Critic debate. Defaults to 3 rounds with no rotation
 'agent-team-models list' to see them. With --rotate, models alternate roles
 every two rounds. With --continue-from=<debate-TS dir>, append N more rounds to
 an existing debate (round numbering continues from last+1).
+
+With --until-converged (-c), stop as soon as a Critic round emits the canonical
+\`Verdict: STRENGTHEN\` line; -n is then the upper bound (default cap 6).
 EOF
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -n) ROUNDS="$2"; shift 2 ;;
+    -n) ROUNDS="$2"; ROUNDS_SET=1; shift 2 ;;
     --rotate) ROTATE=1; shift ;;
+    --until-converged|-c) UNTIL_CONVERGED=1; shift ;;
     --primary-gen=*) PRIMARY_GEN_OPT="${1#--primary-gen=}"; shift ;;
     --primary-gen) PRIMARY_GEN_OPT="${2:?--primary-gen requires a model id}"; shift 2 ;;
     --primary-crit=*) PRIMARY_CRIT_OPT="${1#--primary-crit=}"; shift ;;
@@ -90,6 +108,13 @@ case "$ROUNDS" in
   ''|*[!0-9]*) echo "ROUNDS must be a positive integer (got: $ROUNDS)" >&2; exit 2 ;;
 esac
 [ "$ROUNDS" -lt 1 ] && { echo "ROUNDS must be >= 1" >&2; exit 2; }
+
+# In converge mode without an explicit -n, raise the cap from the 3-round
+# default to an even cap so the loop has several Critic checkpoints and ends
+# on a Critic verdict if it never converges.
+if [ "$UNTIL_CONVERGED" = "1" ] && [ "$ROUNDS_SET" = "0" ]; then
+  ROUNDS="$CONVERGE_DEFAULT_ROUNDS"
+fi
 
 # Generator model: flag > DEBATE_GENERATOR_MODEL > DEBATE_PRIMARY_GEN (legacy)
 #                  > config role binding > built-in default (agy).
@@ -258,6 +283,20 @@ write_round_end() {
   touch "$dir/.${base%.md}.done"
 }
 
+# Convergence parser (--until-converged). Echoes the Critic's verdict token by
+# anchoring on the *standalone canonical line* `Verdict: TOKEN` (the critic role
+# contract — see roles/critic.md) and taking the LAST match. Anchoring + tail -1
+# is deliberate, mirroring tail-role.sh and the dev-trio reviewer parser: an
+# errored Critic round echoes the role prompt, which contains the placeholders
+# `Verdict: <STRENGTHEN | ...>` and `<one of: STRENGTHEN / ...>`. Neither matches
+# `^Verdict: (TOKEN)$`, so a failed round yields no token and is treated as
+# not-converged — the safe default that keeps the debate going on garbage rather
+# than stopping on it. Output already passed through strip_cli_banner.
+critic_verdict() {
+  grep -hE '^Verdict: (STRENGTHEN|RECONSIDER|OVERTURN)[[:space:]]*$' "$1" 2>/dev/null \
+    | tail -1 | awk '{print $2}'
+}
+
 # Drop CLI metadata noise so the transcript shows only model output.
 # Handles both legacy codex banner (workdir:/model:/...) and current codex
 # format which echoes the input prompt between `user`/`codex` markers and
@@ -295,6 +334,7 @@ if [ "$ROTATE" = "1" ]; then
 else
   echo "Rotation: OFF (gen=$PRIMARY_GEN, crit=$PRIMARY_CRIT)"
 fi
+[ "$UNTIL_CONVERGED" = "1" ] && echo "Mode: until-converged (stop on 'Verdict: STRENGTHEN', cap round $END_ROUND)"
 echo "Transcript dir: $DEBATE_DIR"
 
 # Always forward the resolved per-round model to the role dispatcher; ask-*.sh
@@ -350,8 +390,35 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
       "$SCRIPT_DIR/../lib/ask-critic.sh" $(crit_args "$CRIT_MODEL") --with-research "$PREV_GEN" "Topic: $TOPIC. Critique the latest Generator draft adversarially. Focus on weaknesses, missed cases, and better alternatives."
     } | strip_cli_banner | $LINEBUF tee "$OUT"
     write_round_end "$r" "$OUT"
+    # Convergence check runs only on Critic (even) rounds: a STRENGTHEN verdict
+    # means the position is sound, so stop before spending another gen/crit pair.
+    if [ "$UNTIL_CONVERGED" = "1" ] && [ "$(critic_verdict "$OUT")" = "STRENGTHEN" ]; then
+      CONVERGED="$r"
+      break
+    fi
   fi
 done
+
+# Converge-mode epilogue. The pre-touched-but-unused round files past the
+# convergence point have no `.done` sidecar (so /continue already ignores them),
+# but empty round-N.md files clutter the dir and the live panes — remove them.
+if [ "$UNTIL_CONVERGED" = "1" ]; then
+  if [ -n "$CONVERGED" ]; then
+    if [ "$CONVERGED" -lt "$END_ROUND" ]; then
+      for _r in $(seq $((CONVERGED + 1)) "$END_ROUND"); do
+        if [ $((_r % 2)) -eq 1 ]; then
+          _f="$(round_file "$_r" gen "$(round_model "$_r" gen)")"
+        else
+          _f="$(round_file "$_r" crit "$(round_model "$_r" crit)")"
+        fi
+        [ -e "$_f" ] && [ ! -s "$_f" ] && rm -f "$_f"
+      done
+    fi
+    printf '\n✓ Converged at round %s — Critic verdict: STRENGTHEN.\n' "$CONVERGED"
+  else
+    printf '\n⚠ Reached round cap %s without a STRENGTHEN verdict — stopping.\n' "$END_ROUND"
+  fi
+fi
 
 printf '\n────────────────────────────────────────────────────\n'
 printf '  Done — transcript:  %s\n' "$DEBATE_DIR"
