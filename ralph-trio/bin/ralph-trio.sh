@@ -332,6 +332,7 @@ while :; do
   REVIEW2_RUN_ID=""
   PLAN_FAILED=0
   PLAN_RC=0
+  RESEARCH_FAILED=0
   if ! enforce_max_iter "$ITER" "$MAX_ITER"; then
     ralph_log "max-iter cap reached ($MAX_ITER). Stopping."
     echo "=== STOP (max-iter) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
@@ -446,11 +447,24 @@ while :; do
       manifest_add_input kind=question value="$PLAN_RESEARCH_QS"
       # Durable agy log under ralph's tree (survives worktree teardown); the
       # research body is captured via the tee into $PLAN_RESEARCH_LOG.
+      RESEARCH_RC=0
       ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$LOG_DIR/agy" \
-          MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-agy.sh "$PLAN_RESEARCH_QS" 2>&1 ) | tee "$PLAN_RESEARCH_LOG" >/dev/null || true
+          MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-agy.sh "$PLAN_RESEARCH_QS" 2>&1 ) | tee "$PLAN_RESEARCH_LOG" >/dev/null || RESEARCH_RC=$?
+      [ "$RESEARCH_RC" -ne 0 ] && manifest_add_input kind=research-rc value="$RESEARCH_RC"
       manifest_finalize
       PARENT_RUN_ID="$PLAN_RESEARCH_RUN_ID"  # coder's parent becomes research
-      PRE_RESEARCH="$(cat "$PLAN_RESEARCH_LOG")"
+      if [ "$RESEARCH_RC" -ne 0 ]; then
+        # ask-agy.sh failed (auth, rate-limit, missing binary, …). $PLAN_RESEARCH_LOG
+        # now holds the error stream, NOT a real answer — do NOT inject it as
+        # "research" (the coder would treat an error trace as facts). Flag the iter
+        # so the verdict dispatch refuses to --autoship-SHIP work the planner
+        # declared dependent on this lookup (a reviewed run still lets Stage 3
+        # judge the research-less code). PRE_RESEARCH stays empty.
+        ralph_log "  [stage 1.5] ask-agy.sh failed (rc=$RESEARCH_RC) — research unavailable; not injecting error output (see $PLAN_RESEARCH_LOG)"
+        RESEARCH_FAILED=1
+      else
+        PRE_RESEARCH="$(cat "$PLAN_RESEARCH_LOG")"
+      fi
     fi
   fi
 
@@ -529,6 +543,16 @@ while :; do
     echo "AUTOSHIP=1 + coder rc=$CODE_RC — refusing to ship a failed coder run" > "$REVIEW_LOG"
     manifest_add_input kind=skip-reason value=autoship-coder-failed
     manifest_add_input kind=coder-rc value="$CODE_RC"
+    manifest_set_verdict NEEDS-FIX
+    manifest_finalize
+  elif [ "$AUTOSHIP" = "1" ] && [ "$RESEARCH_FAILED" = "1" ]; then
+    # --autoship has no reviewer to catch uninformed code. The planner declared
+    # this task depends on pre-coding research, but ask-agy.sh failed — refuse to
+    # ship work built without the research the planner required; re-queue instead.
+    VERDICT="NEEDS-FIX"
+    ralph_log "  [stage 3/3] reviewer SKIPPED (--autoship), but planner research failed — NEEDS-FIX (re-queue, refusing to ship research-dependent work without research)"
+    echo "AUTOSHIP=1 + planner research failed — refusing to ship research-dependent work" > "$REVIEW_LOG"
+    manifest_add_input kind=skip-reason value=autoship-research-failed
     manifest_set_verdict NEEDS-FIX
     manifest_finalize
   elif [ "$AUTOSHIP" = "1" ]; then
@@ -614,6 +638,14 @@ while :; do
         # Stage 5: Code2 (parent = research)
         ralph_log "  [stage 2 retry] re-running coder with research"
         RESEARCH="$(cat "$RESEARCH_LOG")"
+        # Carry the planner's pre-coding research (if any) into the retry too: the
+        # first coder built on it, so dropping it here would make the retry coder
+        # lose facts it relied on and risk undoing/misapplying the work. Stack the
+        # planner block above the reviewer block.
+        RETRY_RESEARCH="$RESEARCH"
+        [ -n "$PRE_RESEARCH" ] && RETRY_RESEARCH="$PRE_RESEARCH
+
+$RESEARCH"
         CODE2_LOG="$LOG_DIR/ralph-trio-$TS-iter-$ITER-code2.log"
         # Re-snapshot HEAD before Code2 so the post-retry reviewer gets the
         # right diff range. Use $PRE_CODE_REF (from before Stage 2) as the base
@@ -627,8 +659,9 @@ while :; do
         manifest_add_role worker claude "$ROLES_DIR/worker.md"
         manifest_add_input kind=task value="$TASK"
         manifest_add_input kind=plan path="$PLAN_LOG"
+        [ -n "$PRE_RESEARCH" ] && manifest_add_input kind=research path="$PLAN_RESEARCH_LOG"
         manifest_add_input kind=research path="$RESEARCH_LOG"
-        CODE_PROMPT2=$(build_coder_prompt "$TASK" "$PLAN" "$PROMPT_CONTEXT" "$RESEARCH" "$FP_EXCERPT")
+        CODE_PROMPT2=$(build_coder_prompt "$TASK" "$PLAN" "$PROMPT_CONTEXT" "$RETRY_RESEARCH" "$FP_EXCERPT")
         ( cd "$WORK_DIR" && "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p "$CODE_PROMPT2" 2>&1 ) | tee "$CODE2_LOG" >/dev/null || true
         manifest_finalize
         # Stage 6: Review2 (parent = code2)

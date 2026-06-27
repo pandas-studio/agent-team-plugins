@@ -358,6 +358,50 @@ STUB
   else
     fail "research not grafted into coder prompt — Stage 1.5 → Stage 2 wiring broken"
   fi
+
+  # --- Case B: research FAILS — must NOT inject the error output, and under
+  # --autoship must NOT ship (the planner declared the task depends on it).
+  # Re-point ask-agy.sh at a failing stub; reuse the research-requesting planner.
+  cat > "$S7/ask-agy.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "FATAL: agy stub failure" >&2
+exit 1
+STUB
+  chmod +x "$S7/ask-agy.sh"
+  CWD7B="$T7/run-fail"
+  mkdir -p "$CWD7B"
+  git -C "$CWD7B" init -q
+  git -C "$CWD7B" config user.email doctor@example.invalid
+  git -C "$CWD7B" config user.name doctor
+  git -C "$CWD7B" commit -q --allow-empty -m seed >/dev/null 2>&1
+  printf -- '- [ ] task that needs research\n' > "$CWD7B/BACKLOG.md"
+  (
+    cd "$CWD7B" && \
+    AGENT_TEAM="doctor-research-fail" \
+    RALPH_TRIO_WORKSPACE="$CWD7B/.ralph-trio" \
+    PLANNER_CLI="$S7/stub-planner.sh" \
+    CODER_CLI="$S7/stub-coder.sh" \
+    CODER_CAPTURE="$CWD7B/coder-prompt.txt" \
+    TMUX="" \
+    PATH="$S7:$PATH" \
+    "$PLUGIN_ROOT/bin/ralph-trio.sh" --max-iter 1 --autoship --backlog "$CWD7B/BACKLOG.md" \
+    >"$CWD7B/trio.out" 2>"$CWD7B/trio.err"
+  ) || true
+  # Check for the actual error OUTPUT, not the `<research>` tag name (the coder
+  # role's trust-boundary preamble mentions `<research>` literally, so a tag-name
+  # grep would false-positive). The failing agy stub emits "FATAL: agy stub
+  # failure"; that string must NOT have been grafted in as research.
+  if grep -q "FATAL: agy stub failure" "$CWD7B/coder-prompt.txt" 2>/dev/null; then
+    fail "failed research (error output) was injected into the coder prompt (should be suppressed)"
+  else
+    ok "failed research output not injected into coder prompt"
+  fi
+  MVB=$(ls "$CWD7B/.ralph-trio/log/doctor-research-fail"/ralph-trio-*-iter-1-review.manifest.json 2>/dev/null | tail -1)
+  if [ -n "$MVB" ] && [ "$(jq -r '.verdict' "$MVB" 2>/dev/null)" = "NEEDS-FIX" ]; then
+    ok "research-failed under --autoship → NEEDS-FIX (refused to ship research-dependent work)"
+  else
+    fail "research-failed under --autoship did not route to NEEDS-FIX (verdict: $([ -n "$MVB" ] && jq -r '.verdict' "$MVB" 2>/dev/null || echo '<no manifest>'))"
+  fi
 fi
 
 echo
