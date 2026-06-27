@@ -1,7 +1,7 @@
 {
   "name": "ralph-trio",
-  "version": "0.2.1",
-  "description": "Ralph Wiggum loops — solo / trio / debate / meta variants. Iterative LLM-driven coder loop with planner+coder+reviewer (trio uses ask-codex.sh + ask-agy.sh from dev-trio plugin; debate uses debate.sh from debate-conductor plugin). Optional Stop-hook in-session driver for solo.",
+  "version": "0.3.0",
+  "description": "Ralph Wiggum loops — solo / trio / debate / meta variants. Iterative LLM-driven coder loop with planner+coder+reviewer (trio uses ask-codex.sh + ask-agy.sh from dev-trio plugin; debate uses debate.sh from debate-conductor plugin). Planner can request pre-coding research (Antigravity). Optional Stop-hook in-session driver for solo.",
   "author": { "name": "pandas-studio" },
   "homepage": "https://github.com/pandas-studio/agent-team-plugins/tree/main/ralph-trio",
   "repository": "https://github.com/pandas-studio/agent-team-plugins",
