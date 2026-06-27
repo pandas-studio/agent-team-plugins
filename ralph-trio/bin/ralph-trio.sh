@@ -662,6 +662,14 @@ while :; do
 
   # ---- Worktree pre-merge validation + merge/discard ----
   if [ "$USE_WORKTREE" = "1" ]; then
+    # Preserve the reviewed working-tree state: when the coder leaves its changes
+    # uncommitted, commit them onto the iteration branch BEFORE validating/merging
+    # so they are validated and survive the post-merge worktree teardown. No-op
+    # when the coder already committed (clean tree). Only on a SHIP verdict — a
+    # NEEDS-FIX attempt is intentionally discarded with the worktree.
+    if [ "$PASSED" = "1" ]; then
+      commit_worktree_changes "$WT" "$ITER"
+    fi
     if [ "$PASSED" = "1" ] && [ "$NO_VALIDATE" = "0" ]; then
       VAL_LOG="$LOG_DIR/ralph-trio-$TS-iter-$ITER-validate.log"
       if ! pre_merge_validate "$WT" "$BASE_BRANCH" "ralph/${TEAM}-iter-${ITER}" "$MAX_DIFF_LINES" 2>"$VAL_LOG"; then

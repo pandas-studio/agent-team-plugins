@@ -242,17 +242,28 @@ while :; do
     # the cd) still points at $ORIGINAL_DIR/.debate-conductor/log, so the
     # subsequent latest-debate lookup would miss the just-created transcript
     # and turn every completed debate into an UNKNOWN verdict.
+    DEBATE_RC=0
     if [ -n "$PROMPT_FILE" ]; then
-      ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEBATE_LOG_DIR="$DEBATE_LOG_BASE" debate.sh -n "$ROUNDS" "$TASK" "$PROMPT_FILE" >&2 ) || true
+      ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEBATE_LOG_DIR="$DEBATE_LOG_BASE" debate.sh -n "$ROUNDS" "$TASK" "$PROMPT_FILE" >&2 ) || DEBATE_RC=$?
     else
-      ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEBATE_LOG_DIR="$DEBATE_LOG_BASE" debate.sh -n "$ROUNDS" "$TASK" >&2 ) || true
+      ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEBATE_LOG_DIR="$DEBATE_LOG_BASE" debate.sh -n "$ROUNDS" "$TASK" >&2 ) || DEBATE_RC=$?
     fi
-    # Locate the just-created debate dir via the latest-debate symlink.
-    DEBATE_DIR_NAME=$(readlink "$DEBATE_TEAM_DIR/latest-debate" 2>/dev/null || true)
-    if [ -n "$DEBATE_DIR_NAME" ] && [ -d "$DEBATE_TEAM_DIR/$DEBATE_DIR_NAME" ]; then
-      DEBATE_DIR="$DEBATE_TEAM_DIR/$DEBATE_DIR_NAME"
-    else
+    # Only trust latest-debate when THIS invocation succeeded. On failure (missing
+    # prompt file, model command error, …) debate.sh leaves no new transcript, but
+    # a `latest-debate` symlink from a PRIOR run may still resolve — parsing it
+    # would mark the current task from a stale debate. Capture the rc and skip the
+    # lookup on failure so the verdict falls through to UNKNOWN below.
+    if [ "$DEBATE_RC" -ne 0 ]; then
+      ralph_log "  WARNING: debate.sh failed (rc=$DEBATE_RC) — not parsing latest-debate (avoids reusing a stale transcript)"
       DEBATE_DIR=""
+    else
+      # Locate the just-created debate dir via the latest-debate symlink.
+      DEBATE_DIR_NAME=$(readlink "$DEBATE_TEAM_DIR/latest-debate" 2>/dev/null || true)
+      if [ -n "$DEBATE_DIR_NAME" ] && [ -d "$DEBATE_TEAM_DIR/$DEBATE_DIR_NAME" ]; then
+        DEBATE_DIR="$DEBATE_TEAM_DIR/$DEBATE_DIR_NAME"
+      else
+        DEBATE_DIR=""
+      fi
     fi
     if [ -z "$DEBATE_DIR" ]; then
       ralph_log "  WARNING: could not locate debate output dir (latest-debate symlink missing under $DEBATE_TEAM_DIR)"

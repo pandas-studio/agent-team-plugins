@@ -130,6 +130,26 @@ with_worktree() {
   echo "$wt"
 }
 
+# commit_worktree_changes WT ITER — stage+commit any uncommitted worktree edits
+# onto the current iteration branch. The coder may leave its changes uncommitted
+# in the working tree (the reviewer inspects `git diff HEAD`), so a SHIP verdict
+# approves the working-tree state, not just committed history. Committing here —
+# BEFORE pre_merge_validate and the ff-merge — ensures those reviewed changes are
+# (a) covered by validation's `base...HEAD` diff and (b) preserved by the
+# ff-merge, instead of being silently destroyed by the post-merge
+# `git worktree remove --force`. No-op when the tree is clean (coder committed
+# normally). An explicit ralph identity keeps the commit working even when git
+# user.* is unconfigured (e.g. CI / fresh checkout).
+commit_worktree_changes() {
+  local wt="$1" iter="$2"
+  [ -d "$wt" ] || return 0
+  [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ] || return 0
+  git -C "$wt" add -A >&2 || { ralph_log "warning: git add -A failed in worktree (iter $iter)"; return 0; }
+  git -C "$wt" -c user.name='ralph' -c user.email='ralph@localhost' \
+    commit --no-verify -m "ralph iter ${iter}: coder changes (auto-committed at SHIP)" >&2 \
+    || ralph_log "warning: failed to auto-commit worktree changes (iter $iter)"
+}
+
 # merge_or_discard_worktree WT ITER PASSED_FLAG ORIGINAL_DIR
 # PASSED_FLAG=1 → fast-forward merge into ORIGINAL_DIR's current HEAD; remove worktree.
 # PASSED_FLAG=0 → leave branch deleted, remove worktree.
