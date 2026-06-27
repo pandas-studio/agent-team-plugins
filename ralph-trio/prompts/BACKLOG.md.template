@@ -1,0 +1,18 @@
+# Ralph BACKLOG — used by ralph-trio.sh and ralph-debate.sh
+
+The harness reads this file each iteration, pops the **top unchecked** task, marks it done in-place, and feeds it to the variant pipeline. When all tasks are checked, the harness exits.
+
+Format: one task per line, GitHub-style task list (`- [ ] ...`). Tasks should be **scoped to one iteration** of work.
+
+## Tasks
+
+- [ ] (replace this) write a `hello()` function in `examples/hello.py` that prints "world"
+- [ ] (replace this) add a docstring to every public function in `src/utils.py`
+- [ ] (replace this) bump `requests` from 2.31 to the latest compatible version, run tests
+
+## Rules of the road
+
+- Top of list = highest priority.
+- Tasks should not depend on each other implicitly. If task B depends on task A, write that into B's text ("after A is done, ...").
+- The harness can append failed/retry tasks back to the bottom (variant trio + meta-orchestrator do this). Don't be surprised by new lines appearing during a run.
+- This file is **state**. Commit it (or not) as you see fit, but be aware overnight runs will mutate it.

@@ -8,3 +8,4 @@
 # Workspace artifacts that should never live in this repo
 .debate-conductor/log/
 .dev-trio/log/
+.ralph-trio/
