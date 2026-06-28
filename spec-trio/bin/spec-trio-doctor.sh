@@ -405,6 +405,135 @@ STUB
 fi
 
 echo
+echo "8. Stub-CLI smoke (scope-gate robustness — workspace-ignore + retry re-scope)"
+# Two regression guards for codex-review findings on the scope gate:
+#  P2 — the spec-trio workspace ($PWD/.spec-trio) lives inside the repo; its
+#       per-iter logs must NOT trip strict-scope in a repo with no .gitignore.
+#  P1 — the research-retry coder (Code2) must be re-scope-checked; a retry that
+#       strays outside the allowlist must short-circuit to OUT-OF-SCOPE, not get
+#       a SHIP from Review2.
+# Both run under default --strict-scope; the planner stub declares allowlist
+# `foo.txt`. Test artifacts (out/err/counter) live OUTSIDE the repo so they
+# don't themselves count as out-of-scope changes.
+if [ "$FAILED" = "1" ]; then
+  warn "skipping scope-gate smoke — prior REQUIRED checks failed"
+else
+  T8=$(mktemp -d)
+  trap 'rm -rf "$TMPDIR_SMOKE" "$T2" "$T7" "$T8"' EXIT
+  S8="$T8/stubbin"
+  mkdir -p "$S8"
+
+  cat > "$S8/stub-planner.sh" <<'STUB'
+#!/usr/bin/env bash
+cat <<'PLAN'
+## Plan
+1. touch the helper (spec §5.1)
+## Files
+- foo.txt — modified
+<allowed-paths>
+foo.txt
+</allowed-paths>
+## Verify
+- grep x foo.txt
+PLAN
+STUB
+  # P2 coder: only ever touches the allowed path.
+  cat > "$S8/coder-inscope.sh" <<'STUB'
+#!/usr/bin/env bash
+echo x >> foo.txt
+echo "coder (in-scope) ran"
+STUB
+  # P1 coder: 1st call (Stage 2) touches the allowed path; 2nd call (retry/Code2)
+  # strays to a NON-allowed path. Counter lives outside the repo.
+  cat > "$S8/coder-stray.sh" <<'STUB'
+#!/usr/bin/env bash
+n=$(cat "$COUNTER" 2>/dev/null || echo 0); n=$((n + 1)); printf '%s' "$n" > "$COUNTER"
+if [ "$n" = 1 ]; then echo x >> foo.txt; else echo y >> bar.txt; fi
+echo "coder (stray) ran call $n"
+STUB
+  # Codex stub: final-ship (SHIP in .final.md) or need-research (triggers retry).
+  cat > "$S8/ask-codex.sh" <<'STUB'
+#!/usr/bin/env bash
+set -uo pipefail
+TEAM="${AGENT_TEAM:-default}"
+LOG_DIR="${DEV_TRIO_LOG_DIR:-$PWD/.dev-trio/log}/$TEAM"
+mkdir -p "$LOG_DIR"
+TS=$(date +%Y%m%d-%H%M%S)
+FINAL="$LOG_DIR/codex-$TS.final.md"
+ln -sfn "codex-$TS.final.md" "$LOG_DIR/latest-codex.final.md"
+case "${STUB_MODE:-final-ship}" in
+  need-research) printf '## Verdict\nNEEDS-FIX — needs research\n## NEED RESEARCH\n- what is the helper signature?\n' > "$FINAL" ;;
+  *)             printf '## Verdict\nSHIP — stub ok\n' > "$FINAL" ;;
+esac
+printf '## Verdict\nNEEDS-FIX — decoy stream\n'
+echo "(final: $FINAL, rc=0)" >&2
+exit 0
+STUB
+  cat > "$S8/ask-agy.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "DOCTOR-RESEARCH-ANSWER: helper(x) -> y"
+STUB
+  chmod +x "$S8"/*.sh
+
+  run_scope_case() {
+    # run_scope_case CWD TEAM CODER MODE [extra spec-trio flags...]
+    local cwd="$1" team="$2" coder="$3" mode="$4"; shift 4
+    mkdir -p "$cwd"
+    git -C "$cwd" init -q
+    git -C "$cwd" config user.email doctor@example.invalid
+    git -C "$cwd" config user.name doctor
+    printf '# Spec\n## §1 Goals\nstub\n## §5 Test criteria\n### §5.1 marker\n' > "$cwd/spec.md"
+    git -C "$cwd" add -A >/dev/null 2>&1
+    git -C "$cwd" commit -qm seed >/dev/null 2>&1
+    printf -- '- [ ] (§5.1) scope task\n' > "$cwd/BACKLOG.md"
+    (
+      cd "$cwd" && \
+      AGENT_TEAM="$team" \
+      SPEC_TRIO_WORKSPACE="$cwd/.spec-trio" \
+      STUB_MODE="$mode" \
+      PLANNER_CLI="$S8/stub-planner.sh" \
+      CODER_CLI="$coder" \
+      COUNTER="$T8/counter-$team" \
+      TMUX="" \
+      PATH="$S8:$PATH" \
+      "$PLUGIN_ROOT/bin/spec-trio.sh" --spec "$cwd/spec.md" --backlog "$cwd/BACKLOG.md" \
+        --max-iter 1 "$@" \
+      >"$T8/$team.out" 2>"$T8/$team.err"
+    )
+  }
+
+  # --- P2: in-scope coder + ungitignored .spec-trio must NOT be OUT-OF-SCOPE ---
+  CASE_P2="$T8/p2"
+  run_scope_case "$CASE_P2" "scope-p2" "$S8/coder-inscope.sh" final-ship --no-research \
+    || { fail "P2 run exited non-zero — see $T8/scope-p2.err"; note "stderr: $(tail -3 "$T8/scope-p2.err" 2>/dev/null)"; }
+  RP2=$(ls "$CASE_P2/.spec-trio/log/scope-p2"/spec-trio-*-iter-1-review.manifest.json 2>/dev/null | tail -1)
+  VP2=$([ -n "$RP2" ] && jq -r '.verdict' "$RP2" 2>/dev/null)
+  if [ "$VP2" = "SHIP" ]; then
+    ok "P2: in-scope change with ungitignored .spec-trio → SHIP (workspace logs ignored by scope gate)"
+  else
+    fail "P2: expected SHIP, got ${VP2:-<no manifest>} (workspace logs tripping strict-scope?)"
+  fi
+
+  # --- P1: research-retry coder strays outside allowlist → OUT-OF-SCOPE, no Review2 ---
+  CASE_P1="$T8/p1"
+  run_scope_case "$CASE_P1" "scope-p1" "$S8/coder-stray.sh" need-research \
+    || true   # OUT-OF-SCOPE is a normal (rc=0) terminal verdict; run shouldn't error
+  S2P1=$(ls "$CASE_P1/.spec-trio/log/scope-p1"/spec-trio-*-iter-1-scope2.manifest.json 2>/dev/null | tail -1)
+  R2P1=$(ls "$CASE_P1/.spec-trio/log/scope-p1"/spec-trio-*-iter-1-review2.manifest.json 2>/dev/null | tail -1)
+  VS2=$([ -n "$S2P1" ] && jq -r '.verdict' "$S2P1" 2>/dev/null)
+  if [ "$VS2" = "OUT-OF-SCOPE" ]; then
+    ok "P1: straying retry coder caught by re-scope → OUT-OF-SCOPE (scope2 manifest)"
+  else
+    fail "P1: retry scope gate did not fire — scope2 verdict=${VS2:-<no manifest>} (retry coder bypassed the gate?)"
+  fi
+  if [ -z "$R2P1" ]; then
+    ok "P1: Review2 skipped after retry scope violation (no review2 manifest)"
+  else
+    fail "P1: Review2 ran despite retry scope violation (review2 manifest present) — gate did not short-circuit"
+  fi
+fi
+
+echo
 if [ "$FAILED" = "1" ]; then
   printf '%sspec-trio doctor: FAILED%s — see above\n' "$RED" "$RESET"
   exit 1

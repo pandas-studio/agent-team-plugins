@@ -121,14 +121,32 @@ collect_changed_paths() {
   } | awk 'NF { gsub(/^"|"$/, "", $0); if (!seen[$0]++) print }'
 }
 
+# path_is_ignored PATH IGNORE_LIST — rc=0 if PATH should be excluded from the
+# scope check. A list entry ending in `/` is a directory prefix (matches PATH if
+# PATH is at or under that directory); any other entry matches PATH exactly.
+path_is_ignored() {
+  local path="$1" list="$2" entry
+  while IFS= read -r entry; do
+    [ -z "$entry" ] && continue
+    case "$entry" in
+      */) case "$path/" in "$entry"*) return 0 ;; esac ;;
+      *)  [ "$path" = "$entry" ] && return 0 ;;
+    esac
+  done <<< "$list"
+  return 1
+}
+
 # Compare collected paths against the allowlist. Writes a scope report to
 # <scope_log>. rc=0 on full match, rc=1 on any out-of-scope path, rc=2 if
 # the allowlist is empty (planner contract failure).
 #
 # <ignore_list> (optional) is newline-separated paths the caller knows are
-# harness-managed (e.g. BACKLOG.md, fix_plan.md, spec.md) and not worker
-# output. Those paths are excluded from the change set before the allowlist
-# check, so harness bookkeeping doesn't trip the scope gate.
+# harness-managed (e.g. BACKLOG.md, fix_plan.md, spec.md, and the spec-trio
+# workspace/log tree) and not worker output. Those paths are excluded from the
+# change set before the allowlist check, so harness bookkeeping doesn't trip the
+# scope gate. An entry ending in `/` is a DIRECTORY PREFIX: it excludes every
+# path under that directory (e.g. `.spec-trio/` drops `.spec-trio/log/...`).
+# All other entries match by exact path.
 check_scope() {
   local work_dir="$1" allowlist="$2" scope_log="$3" ignore_list="${4:-}" base_ref="${5:-}"
   local changed normalized_list
@@ -140,7 +158,7 @@ check_scope() {
   if [ -n "$changed" ]; then
     while IFS= read -r path; do
       [ -z "$path" ] && continue
-      if [ -n "$ignore_list" ] && grep -qxF "$path" <<< "$ignore_list"; then
+      if [ -n "$ignore_list" ] && path_is_ignored "$path" "$ignore_list"; then
         continue
       fi
       filtered="${filtered:+$filtered$'\n'}$path"

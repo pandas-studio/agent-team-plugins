@@ -321,6 +321,69 @@ extract_need_research() {
   ' "$f" 2>/dev/null
 }
 
+# build_harness_ignore — echo the newline-separated set of paths (relative to
+# WORK_DIR) the scope gate must ignore because the harness writes them itself,
+# not the coder: the popped BACKLOG, the templated fix_plan, the spec contract,
+# AND the spec-trio workspace/log tree. The workspace defaults to $PWD/.spec-trio
+# and (without --worktree) lives inside WORK_DIR, so its per-iter logs+manifests
+# would otherwise read as untracked out-of-allowlist changes and trip
+# strict-scope in any repo that hasn't yet gitignored `.spec-trio/`. Emitted with
+# a trailing slash so check_scope treats it as a directory prefix.
+build_harness_ignore() {
+  local out="" p rel ws
+  for p in "$BACKLOG_FILE" "$FIX_PLAN_FILE" "$SPEC_FILE"; do
+    case "$p" in
+      "$WORK_DIR"/*) rel="${p#"$WORK_DIR"/}"; out="${out:+$out$'\n'}$rel" ;;
+    esac
+  done
+  ws="$(spec_workspace_root)"
+  case "$ws" in
+    "$WORK_DIR"/*) out="${out:+$out$'\n'}${ws#"$WORK_DIR"/}/" ;;
+  esac
+  printf '%s' "$out"
+}
+
+# apply_scope_gate PARENT_RUN_ID CODE_LOG SCOPE_LOG — run the deterministic scope
+# gate on WORK_DIR's changes vs the planner allowlist. On a violation under
+# --strict-scope: synthesize an OUT-OF-SCOPE spec-review manifest (parent =
+# PARENT_RUN_ID) and set globals VERDICT=OUT-OF-SCOPE / REVIEW_LOG=SCOPE_LOG /
+# SCOPE_FAIL=1, then return 1 (caller must skip the reviewer). Returns 0 when the
+# caller should proceed to the reviewer (in-scope, or violation under
+# --no-strict-scope which only warns). Callers guard on a non-empty allowlist.
+apply_scope_gate() {
+  local parent="$1" code_log="$2" scope_log="$3" hi
+  hi="$(build_harness_ignore)"
+  if check_scope "$WORK_DIR" "$ALLOWED_PATHS_LIST" "$scope_log" "$hi" "$ITER_BASE_SHA"; then
+    printf '  scope:    in-scope\n' >> "$SUMMARY_LOG"
+    return 0
+  fi
+  if [ "$STRICT_SCOPE" = "1" ]; then
+    ralph_log "  [scope-gate] OUT-OF-SCOPE: changed paths violate allowlist (strict-scope ON) — see $scope_log"
+    # RFC 0004 PR 5: synthesize spec-review manifest (parent=coder) so the
+    # OUT-OF-SCOPE verdict round-trips. Finalize before flag-set (atomicity).
+    manifest_init spec-review "$scope_log"
+    REVIEW_RUN_ID="$MANIFEST_RUN_ID"
+    manifest_set_parent "$parent"
+    manifest_add_input kind=task value="$TASK"
+    manifest_add_input kind=spec path="$SPEC_FILE"
+    manifest_add_input kind=code-log path="$code_log"
+    [ -n "$ALLOWED_JOINED" ] && manifest_add_input kind=allowed-paths value="$ALLOWED_JOINED"
+    manifest_add_input kind=scope-fail value=scope-violation
+    manifest_add_input kind=scope-log path="$scope_log"
+    manifest_add_input kind=skip-reason value=scope-gate
+    manifest_set_verdict OUT-OF-SCOPE
+    manifest_finalize
+    VERDICT="OUT-OF-SCOPE"
+    REVIEW_LOG="$scope_log"
+    SCOPE_FAIL=1
+    printf '  scope:    OUT-OF-SCOPE (skipped reviewer)\n' >> "$SUMMARY_LOG"
+    return 1
+  fi
+  ralph_log "  [scope-gate] WARNING: scope-violation (--no-strict-scope: continuing) — see $scope_log"
+  printf '  scope:    violation WARNING (--no-strict-scope, continuing)\n' >> "$SUMMARY_LOG"
+  return 0
+}
+
 ITER=0
 COMPLETED=0
 # --dry-run termination ceiling. --max-iter 0 (unlimited) combined with the
@@ -617,50 +680,11 @@ while :; do
   # ---- Scope gate 2: scope-violation check (after Stage 2, before Stage 3) ----
   # Only run if Stage 2 actually executed and we have an allowlist to enforce.
   # PLAN_FAILED short-circuits the same way --dry-run does: no coder ran, so
-  # there's nothing to scope-check against.
+  # there's nothing to scope-check against. apply_scope_gate sets VERDICT /
+  # SCOPE_FAIL / REVIEW_LOG on a strict-scope violation; the dispatch below sees
+  # SCOPE_FAIL=1 and skips the reviewer.
   if [ "$SCOPE_FAIL" = "0" ] && [ "$PLAN_FAILED" != "1" ] && [ "$DRY_RUN" != "1" ] && [ -n "$ALLOWED_PATHS_LIST" ]; then
-    # Build the harness-ignore set: paths the harness writes itself, which
-    # would otherwise trip the allowlist (BACKLOG.md gets popped, fix_plan.md
-    # is created from template, spec.md is the contract input). All three are
-    # converted to paths relative to WORK_DIR; entries outside the work dir
-    # are skipped.
-    HARNESS_IGNORE=""
-    for p in "$BACKLOG_FILE" "$FIX_PLAN_FILE" "$SPEC_FILE"; do
-      case "$p" in
-        "$WORK_DIR"/*)
-          rel="${p#"$WORK_DIR"/}"
-          HARNESS_IGNORE="${HARNESS_IGNORE:+$HARNESS_IGNORE$'\n'}$rel"
-          ;;
-      esac
-    done
-    if check_scope "$WORK_DIR" "$ALLOWED_PATHS_LIST" "$SCOPE_LOG" "$HARNESS_IGNORE" "$ITER_BASE_SHA"; then
-      printf '  scope:    in-scope\n' >> "$SUMMARY_LOG"
-    else
-      if [ "$STRICT_SCOPE" = "1" ]; then
-        ralph_log "  [scope-gate] OUT-OF-SCOPE: changed paths violate allowlist (strict-scope ON) — see $SCOPE_LOG"
-        # RFC 0004 PR 5: synthesize spec-review manifest (parent=coder) so the
-        # OUT-OF-SCOPE verdict round-trips. Finalize before flag-set (atomicity).
-        manifest_init spec-review "$SCOPE_LOG"
-        REVIEW_RUN_ID="$MANIFEST_RUN_ID"
-        manifest_set_parent "$PARENT_RUN_ID"
-        manifest_add_input kind=task value="$TASK"
-        manifest_add_input kind=spec path="$SPEC_FILE"
-        manifest_add_input kind=code-log path="$CODE_LOG"
-        [ -n "$ALLOWED_JOINED" ] && manifest_add_input kind=allowed-paths value="$ALLOWED_JOINED"
-        manifest_add_input kind=scope-fail value=scope-violation
-        manifest_add_input kind=scope-log path="$SCOPE_LOG"
-        manifest_add_input kind=skip-reason value=scope-gate
-        manifest_set_verdict OUT-OF-SCOPE
-        manifest_finalize
-        VERDICT="OUT-OF-SCOPE"
-        REVIEW_LOG="$SCOPE_LOG"
-        SCOPE_FAIL=1
-        printf '  scope:    OUT-OF-SCOPE (skipped reviewer)\n' >> "$SUMMARY_LOG"
-      else
-        ralph_log "  [scope-gate] WARNING: scope-violation (--no-strict-scope: continuing) — see $SCOPE_LOG"
-        printf '  scope:    violation WARNING (--no-strict-scope, continuing)\n' >> "$SUMMARY_LOG"
-      fi
-    fi
+    apply_scope_gate "$PARENT_RUN_ID" "$CODE_LOG" "$SCOPE_LOG" || true
   fi
 
   # ---- Stage 3: Reviewer ----
@@ -835,42 +859,56 @@ $RESEARCH"
         CODE_PROMPT2=$(build_coder_prompt "$TASK" "$SPEC_BODY" "$PLAN" "$PROMPT_CONTEXT" "$RETRY_RESEARCH" "$FP_EXCERPT")
         ( cd "$WORK_DIR" && "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p "$CODE_PROMPT2" 2>&1 ) | tee "$CODE2_LOG" >/dev/null || true
         manifest_finalize
-        # Stage 6: Review2 (parent = code2)
-        REVIEW2_LOG="$LOG_DIR/spec-trio-$TS-iter-$ITER-review2.log"
-        manifest_init spec-review "$REVIEW2_LOG"
-        REVIEW2_RUN_ID="$MANIFEST_RUN_ID"
-        manifest_set_parent "$CODE2_RUN_ID"
-        # Reviewer role recorded by ask-codex.sh via the PR 9 carve-out.
-        manifest_add_input kind=task value="$TASK"
-        manifest_add_input kind=spec path="$SPEC_FILE"
-        manifest_add_input kind=code-log path="$CODE2_LOG"
-        # Pin the durable .final.md root (see Stage-3 review above).
-        ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$CODEX_FINAL_ROOT" \
-            MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-codex.sh --with-spec "$SPEC_FILE" "Re-review the same task after research-informed retry: '$TASK'. Use the standard SHIP/NEEDS-FIX/DISCUSS/OUT-OF-SCOPE verdict format from your role prompt." 2>&1 ) | tee "$REVIEW2_LOG" >/dev/null
-        CODEX2_RC=${PIPESTATUS[0]}
-        # Verdict from the authoritative .final.md (see Stage-3 review above).
-        CODEX2_FINAL=$(resolve_codex_final "$CODEX_FINAL_ROOT" "$TEAM")
-        REVIEW2_SRC="$REVIEW2_LOG"
-        if [ -n "$CODEX2_FINAL" ]; then
-          REVIEW2_SRC="$CODEX2_FINAL"
-          { printf '\n=== AUTHORITATIVE FINAL (codex --output-last-message) ===\n'; cat "$CODEX2_FINAL"; } >> "$REVIEW2_LOG"
-          manifest_add_input kind=codex-final path="$CODEX2_FINAL"
+        # ---- Scope gate 2b: re-check the research-retry coder (Code2) ----
+        # The retry coder can stray outside the planner allowlist exactly like
+        # Stage 2's coder. Without re-checking, the retry would go straight to
+        # re-review and a SHIP could accept/merge out-of-scope changes the
+        # Stage-2 gate would have blocked. Mirror Stage 2: on a strict-scope
+        # violation, short-circuit to OUT-OF-SCOPE (apply_scope_gate sets
+        # VERDICT / SCOPE_FAIL / REVIEW_LOG) and skip Review2.
+        SCOPE2_LOG="$LOG_DIR/spec-trio-$TS-iter-$ITER-scope2.log"
+        RETRY_SCOPE_OK=1
+        if [ -n "$ALLOWED_PATHS_LIST" ]; then
+          apply_scope_gate "$CODE2_RUN_ID" "$CODE2_LOG" "$SCOPE2_LOG" || RETRY_SCOPE_OK=0
         fi
-        if [ "$CODEX2_RC" -ne 0 ]; then
-          ralph_log "  ask-codex.sh (re-review) exited rc=$CODEX2_RC — forcing UNKNOWN verdict (log: $REVIEW2_LOG)"
-          VERDICT="UNKNOWN"
-          manifest_add_input kind=codex-rc value="$CODEX2_RC"
-        else
-          VERDICT=$(parse_codex_verdict "$REVIEW2_SRC")
+        if [ "$RETRY_SCOPE_OK" = "1" ]; then
+          # Stage 6: Review2 (parent = code2)
+          REVIEW2_LOG="$LOG_DIR/spec-trio-$TS-iter-$ITER-review2.log"
+          manifest_init spec-review "$REVIEW2_LOG"
+          REVIEW2_RUN_ID="$MANIFEST_RUN_ID"
+          manifest_set_parent "$CODE2_RUN_ID"
+          # Reviewer role recorded by ask-codex.sh via the PR 9 carve-out.
+          manifest_add_input kind=task value="$TASK"
+          manifest_add_input kind=spec path="$SPEC_FILE"
+          manifest_add_input kind=code-log path="$CODE2_LOG"
+          # Pin the durable .final.md root (see Stage-3 review above).
+          ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$CODEX_FINAL_ROOT" \
+              MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-codex.sh --with-spec "$SPEC_FILE" "Re-review the same task after research-informed retry: '$TASK'. Use the standard SHIP/NEEDS-FIX/DISCUSS/OUT-OF-SCOPE verdict format from your role prompt." 2>&1 ) | tee "$REVIEW2_LOG" >/dev/null
+          CODEX2_RC=${PIPESTATUS[0]}
+          # Verdict from the authoritative .final.md (see Stage-3 review above).
+          CODEX2_FINAL=$(resolve_codex_final "$CODEX_FINAL_ROOT" "$TEAM")
+          REVIEW2_SRC="$REVIEW2_LOG"
+          if [ -n "$CODEX2_FINAL" ]; then
+            REVIEW2_SRC="$CODEX2_FINAL"
+            { printf '\n=== AUTHORITATIVE FINAL (codex --output-last-message) ===\n'; cat "$CODEX2_FINAL"; } >> "$REVIEW2_LOG"
+            manifest_add_input kind=codex-final path="$CODEX2_FINAL"
+          fi
+          if [ "$CODEX2_RC" -ne 0 ]; then
+            ralph_log "  ask-codex.sh (re-review) exited rc=$CODEX2_RC — forcing UNKNOWN verdict (log: $REVIEW2_LOG)"
+            VERDICT="UNKNOWN"
+            manifest_add_input kind=codex-rc value="$CODEX2_RC"
+          else
+            VERDICT=$(parse_codex_verdict "$REVIEW2_SRC")
+          fi
+          [ -z "$VERDICT" ] && VERDICT="UNKNOWN"
+          MV=$(to_manifest_verdict "$VERDICT")
+          if [ "$MV" = "null" ] && [ -n "$VERDICT" ]; then
+            manifest_add_input kind=raw-verdict value="$VERDICT"
+          fi
+          manifest_set_verdict "$MV"
+          manifest_finalize
+          REVIEW_LOG="$REVIEW2_LOG"
         fi
-        [ -z "$VERDICT" ] && VERDICT="UNKNOWN"
-        MV=$(to_manifest_verdict "$VERDICT")
-        if [ "$MV" = "null" ] && [ -n "$VERDICT" ]; then
-          manifest_add_input kind=raw-verdict value="$VERDICT"
-        fi
-        manifest_set_verdict "$MV"
-        manifest_finalize
-        REVIEW_LOG="$REVIEW2_LOG"
       fi
     fi
   fi
