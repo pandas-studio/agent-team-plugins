@@ -1,0 +1,84 @@
+<!-- spec.md — external contract for spec-trio iterations.
+
+     The driver injects this body verbatim into the planner, coder, and
+     reviewer prompts. Roles cite `§N` or `§N.M` when describing what they
+     did, what they rejected, and what's off-limits. Section identity is
+     therefore part of the contract: keep the numbered headings stable,
+     and add subsections (`### §3.1`, `### §5.2`) whenever you need a
+     finer citation handle.
+
+     Aim for precise, citeable, machine-checkable. Not prose. -->
+
+# Spec — <one-line feature / module / surface name>
+
+## §1 Goals
+
+<!-- What success looks like, business-readable. Each bullet is a goal
+     the planner should be able to map a task to. If a backlog task
+     can't be traced to a goal here, the planner emits SPEC-MISMATCH. -->
+
+- <bullet — what this delivers and to whom>
+- <bullet>
+
+## §2 Interfaces
+
+<!-- The external contract surface: function signatures, CLI flags,
+     HTTP endpoints, file formats. Concrete enough that a reviewer can
+     diff a change against it. -->
+
+- `function_name(arg: type) -> ReturnType` — <one-line semantics>
+- `tool --flag VALUE` — <effect>
+- <other named interface>
+
+## §3 Behavior
+
+<!-- What the system does, including edge cases. Number sub-sections
+     so a finding can cite `§3.4` rather than "the third bullet". -->
+
+### §3.1 <named scenario>
+
+1. <step>
+2. <step — include error / fallback paths inline>
+
+### §3.2 <named edge case>
+
+- <expected behavior on the boundary>
+
+## §4 Constraints
+
+<!-- Hard limits the implementation must respect. The reviewer's
+     OUT-OF-SCOPE verdict checks against this section *absolutely*:
+     touching a Constraint path/area aborts the iteration regardless
+     of intent. List off-limits paths explicitly — vague constraints
+     ("don't break anything") are not enforceable. -->
+
+- **Off-limits paths:** `vendor/`, `legacy/old_auth.py` — must not be modified.
+- **Forbidden dependencies:** must not introduce `<library>` (use existing `<alternative>`).
+- <other hard rule — performance budget, ABI stability, log redaction, etc.>
+
+## §5 Test criteria
+
+<!-- Each criterion is its own `### §5.N` subsection so plans, reviews,
+     and a future `--coverage-check` pass can cite them individually.
+     Phrase each as an *observable check* — a test command, a file or
+     log assertion, a behavior the reviewer can verify — not a
+     restatement of §3 Behavior.
+
+     Keep names stable once shipped: §5 IDs become long-lived references. -->
+
+### §5.1 <criterion name>
+
+- <command or check that demonstrates this criterion is satisfied>
+
+### §5.2 <criterion name>
+
+- <command or check>
+
+## §6 Non-goals
+
+<!-- Things this spec deliberately does NOT cover. The planner uses
+     this to decide when a backlog task is out of scope and should
+     emit SPEC-MISMATCH rather than be planned against this contract. -->
+
+- <thing this spec does not address>
+- <thing another system / future spec is responsible for>
