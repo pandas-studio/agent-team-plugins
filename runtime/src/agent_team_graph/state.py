@@ -18,6 +18,7 @@ class GraphState(TypedDict, total=False):
     task: str
     test_command: list[str]
     allowed_paths: list[str]
+    operator_excluded_paths: list[str]
     excluded_paths: list[str]
     strict_ignored: bool
     base_sha: str

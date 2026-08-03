@@ -39,6 +39,12 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="repository-relative file or directory; repeat as needed",
     )
+    run.add_argument(
+        "--exclude-path",
+        action="append",
+        default=[],
+        help="trusted repository-relative path omitted from scope checks and attestation; repeat as needed",
+    )
     run.add_argument("--max-attempts", type=int, default=2, choices=tuple(range(1, 6)))
     run.add_argument(
         "--strict-ignored",
@@ -90,6 +96,7 @@ def _view(graph: Any, thread_id: str) -> dict[str, Any]:
         "attempt": values.get("attempt"),
         "gated_change_sha256": values.get("gated_change_sha256"),
         "reviewed_change_sha256": values.get("reviewed_change_sha256"),
+        "excluded_paths_not_attested": values.get("excluded_paths", []),
         "approval": approval,
         "approval_note": approval_note,
         "next": list(snapshot.next),
@@ -141,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
                 "task": args.task,
                 "test_command": shlex.split(args.test_command),
                 "allowed_paths": args.allow_path,
+                "operator_excluded_paths": args.exclude_path,
                 "max_attempts": args.max_attempts,
                 "strict_ignored": args.strict_ignored,
                 "artifacts": [],

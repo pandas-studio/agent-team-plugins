@@ -38,13 +38,35 @@ def test_max_attempts_is_bounded_and_reports_real_choices(capsys):
     assert "range(" not in capsys.readouterr().err
 
 
+def test_exclude_path_is_repeatable():
+    args = build_parser().parse_args(
+        [
+            "run",
+            "--project-id", "p",
+            "--spec", "s",
+            "--task", "t",
+            "--test-command", "true",
+            "--allow-path", "src",
+            "--exclude-path", ".codex",
+            "--exclude-path", ".claude",
+        ]
+    )
+    assert args.exclude_path == [".codex", ".claude"]
+
+
 def test_view_distinguishes_recorded_approve_from_blocked_receipt():
     class Graph:
         def get_state(self, config):
             return SimpleNamespace(
-                values={"status": "needs-human", "approval": "approve"}, next=()
+                values={
+                    "status": "needs-human",
+                    "approval": "approve",
+                    "excluded_paths": [".reviewer-cache"],
+                },
+                next=(),
             )
 
     view = _view(Graph(), "blocked")
     assert view["approval"] == "approve"
     assert "receipt blocked" in view["approval_note"]
+    assert view["excluded_paths_not_attested"] == [".reviewer-cache"]

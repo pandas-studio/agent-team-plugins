@@ -51,15 +51,19 @@ def _git_bytes(workspace: Path, *args: str) -> bytes:
     return result.stdout
 
 
-def _normalize_allowed(paths: list[str]) -> list[str]:
+def _normalize_paths(paths: list[str], *, label: str) -> list[str]:
     normalized: list[str] = []
     for value in paths:
         candidate = value.replace("\\", "/").strip().rstrip("/")
         parts = Path(candidate).parts
         if not candidate or candidate.startswith("/") or ".." in parts or candidate == ".":
-            raise ValueError(f"unsafe allowed path: {value!r}")
+            raise ValueError(f"unsafe {label} path: {value!r}")
         normalized.append(candidate)
-    return normalized
+    return sorted(set(normalized))
+
+
+def _normalize_allowed(paths: list[str]) -> list[str]:
+    return _normalize_paths(paths, label="allowed")
 
 
 def _under(path: str, roots: list[str]) -> bool:
@@ -153,13 +157,16 @@ def _change_snapshot(
     }
 
 
-def _attestation_covers(strict_ignored: bool) -> str:
+def _attestation_covers(strict_ignored: bool, excluded: list[str]) -> str:
     content = (
         "base SHA, tracked binary diff, and untracked and ignored file content digests"
         if strict_ignored
         else "base SHA, tracked binary diff, and untracked file content digests; ignored files excluded"
     )
-    return f"{content}; HEAD SHA is informational and excluded"
+    exclusions = (
+        f"; configured excluded paths omitted: {', '.join(excluded)}" if excluded else ""
+    )
+    return f"{content}; HEAD SHA is informational and excluded{exclusions}"
 
 
 def _snapshot_error(exc: OSError | ValueError) -> str:
@@ -233,13 +240,17 @@ def build_graph(
             raise ValueError("at least one allowed path is required")
         repo_root = Path(_git(workspace, "rev-parse", "--show-toplevel")).resolve()
         base_sha = _git(repo_root, "rev-parse", "HEAD")
+        operator_excluded = _normalize_paths(
+            state.get("operator_excluded_paths", []), label="excluded"
+        )
         # The runtime's own state (checkpoint db + artifacts) is machine-written,
         # never coder-written, so it must not count against the scope gate.
-        excluded = [
+        runtime_excluded = [
             relative
             for relative in (_repo_relative(repo_root, runtime_root),)
             if relative is not None
         ]
+        excluded = sorted(set(operator_excluded) | set(runtime_excluded))
         strict_ignored = bool(state.get("strict_ignored", False))
         spec_text = spec.read_text(encoding="utf-8")
         artifact = store.write_json(
@@ -251,6 +262,7 @@ def build_graph(
                 "spec_path": str(spec),
                 "base_sha": base_sha,
                 "allowed_paths": allowed_paths,
+                "operator_excluded_paths": operator_excluded,
                 "excluded_paths": excluded,
                 "strict_ignored": strict_ignored,
             },
@@ -263,6 +275,7 @@ def build_graph(
             "spec_sha256": hashlib.sha256(spec_text.encode()).hexdigest(),
             "base_sha": base_sha,
             "allowed_paths": allowed_paths,
+            "operator_excluded_paths": operator_excluded,
             "excluded_paths": excluded,
             "strict_ignored": strict_ignored,
             "attempt": 0,
@@ -379,7 +392,7 @@ def build_graph(
             "strict_ignored": strict_ignored,
             "outside_scope": outside_scope,
             "gated_change_sha256": snapshot["change_sha256"],
-            "attestation_covers": _attestation_covers(strict_ignored),
+            "attestation_covers": _attestation_covers(strict_ignored, excluded),
             "output": output,
         }
         artifact = store.write_json(
@@ -429,6 +442,11 @@ def build_graph(
             bool(gated_digest) and before["change_sha256"] == gated_digest
         )
         if not unchanged_before_review:
+            feedback = (
+                "Deterministic harness finding: the change set drifted after the "
+                "test/scope gate and before reviewer execution. Reconcile the workspace "
+                "with the intended changes, then let the harness rerun the gate."
+            )
             artifact = store.write_json(
                 state["run_id"],
                 f"55-pre-review-drift-attempt-{state['attempt']}.json",
@@ -439,6 +457,7 @@ def build_graph(
                 },
             )
             return {
+                "review": feedback,
                 "verdict": "NEEDS-FIX",
                 "gate_passed": False,
                 "reviewed_change_sha256": None,
@@ -519,6 +538,7 @@ def build_graph(
                 "base_sha": state["base_sha"],
                 "attempt": state["attempt"],
                 "reviewed_change_sha256": state.get("reviewed_change_sha256"),
+                "excluded_paths_not_attested": state.get("excluded_paths", []),
             }
         )
         normalized = decision.get("decision") if isinstance(decision, dict) else decision
@@ -571,10 +591,30 @@ def build_graph(
                 "artifacts": [artifact],
                 "errors": ["approval blocked: change set differs from reviewed digest"],
             }
+        try:
+            head_sha = _git(repo_root, "rev-parse", "HEAD")
+        except SNAPSHOT_ERRORS as exc:
+            message = _snapshot_error(exc)
+            artifact = store.write_json(
+                state["run_id"],
+                "91-approval-head-error.json",
+                {
+                    "approved": False,
+                    "reviewed_change_sha256": expected,
+                    "change_sha256": current["change_sha256"],
+                    "head_error": message,
+                    "note": "approval blocked because informational HEAD metadata could not be read",
+                },
+            )
+            return {
+                "status": "needs-human",
+                "artifacts": [artifact],
+                "errors": [f"approval blocked: cannot read HEAD metadata: {message}"],
+            }
         receipt = {
             "approved": True,
             "base_sha": state["base_sha"],
-            "head_sha": _git(repo_root, "rev-parse", "HEAD"),
+            "head_sha": head_sha,
             "head_sha_attested": False,
             "tracked_diff_sha256": current["tracked_diff_sha256"],
             "new_files": current["new_files"],
@@ -584,7 +624,8 @@ def build_graph(
             "ignored_paths_not_attested": (
                 [] if state.get("strict_ignored") else current["ignored_paths"]
             ),
-            "covers": _attestation_covers(strict_ignored),
+            "excluded_paths_not_attested": excluded,
+            "covers": _attestation_covers(strict_ignored, excluded),
             "note": "approval receipt only; this runtime never pushes or force-merges",
         }
         artifact = store.write_json(state["run_id"], "90-approval-receipt.json", receipt)

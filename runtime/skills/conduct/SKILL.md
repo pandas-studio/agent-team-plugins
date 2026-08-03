@@ -18,7 +18,8 @@ cd <plugin-root> && uv sync --frozen --python 3.12
 
 ## Start a run
 
-Every argument below is required except `--max-attempts` and `--strict-ignored`.
+Every argument below is required except `--max-attempts`, `--strict-ignored`,
+and `--exclude-path`.
 `--allow-path` is **repository-root-relative** and repeatable; anything the
 coder changes outside it fails the gate.
 
@@ -27,7 +28,8 @@ uv run agent-team-graph run \
   --project-id demo --workspace . --spec SPEC.md \
   --task "implement the first vertical slice" \
   --test-command "pytest -q" \
-  --allow-path src --allow-path tests
+  --allow-path src --allow-path tests \
+  --exclude-path .reviewer-cache
 ```
 
 The command prints a JSON view containing the `thread_id`. Keep it — every
@@ -61,6 +63,11 @@ Branch on these rather than parsing the JSON:
 - The approval payload includes `reviewed_change_sha256`. On resume the runtime
   recomputes the current change identity and blocks approval if any attested
   tracked or untracked content changed while the graph was interrupted.
+- `--exclude-path` is a trusted, repeatable repository-root-relative exemption
+  for tool scratch. Excluded content is neither scope-checked nor attested; use
+  the narrowest path and verify `excluded_paths_not_attested` before approval.
+- `--strict-ignored` may take up to four full snapshots on a successful attempt.
+  Exclude only trusted scratch paths; do not exempt coder output.
 - `--test-command` is split as argv. Shell operators (`&&`, `|`, `>`) are not
   interpreted — wrap them in a script if you need them.
 - Artifacts under `.agent-team/artifacts/<run_id>/` are immutable. If a write

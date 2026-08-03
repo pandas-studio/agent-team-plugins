@@ -9,10 +9,15 @@ uv sync --python 3.12 --extra dev
 uv run agent-team-graph run \
   --project-id demo --workspace . --spec SPEC.md \
   --task "첫 번째 수직 슬라이스 구현" --test-command "pytest -q" \
-  --allow-path src --allow-path tests
+  --allow-path src --allow-path tests \
+  --exclude-path .reviewer-cache
 ```
 
 `--allow-path`는 **저장소 루트 기준** 경로이며 반복 지정할 수 있습니다.
+`--exclude-path`도 저장소 루트 기준·반복 지정이며, 지정한 경로를 범위 검사와 변경
+digest에서 완전히 제외합니다. 이는 신뢰할 수 있는 reviewer CLI의 in-repo scratch처럼
+증명 대상이 아닌 경로에만 사용하세요. 승인 질문과 영수증의
+`excluded_paths_not_attested`에 모든 제외 경로가 표시됩니다.
 출력된 `thread_id`는 `status`, `resume`, `approve`에서 재사용합니다.
 
 ```bash
@@ -41,9 +46,11 @@ JSON을 파싱하지 말고 종료 코드로 분기하세요.
 - `.gitignore` 대상 파일은 기본적으로 게이트를 실패시키지 않지만(테스트 명령이
   만드는 빌드 산출물과 구분할 수 없기 때문) 게이트 산출물의 `ignored_paths`에
   항상 기록됩니다. `--strict-ignored`를 주면 범위 검사와 내용 증명에 포함됩니다.
-  이 모드는 모든 ignored 파일을 매 snapshot마다 읽으므로 `.venv`, `node_modules`
-  같은 대형 트리가 있으면 비용이 파일 수에 선형으로 증가합니다. 격리된 깨끗한
-  workspace에서만 활성화하세요.
+  이 모드는 모든 ignored 파일을 매 snapshot마다 읽으며 성공 시도에는 gate,
+  pre-review, post-review, publish의 **최대 4회** snapshot이 있으므로 `.venv`,
+  `node_modules` 같은 대형 트리가 있으면 비용이 파일 수에 선형으로 증가합니다.
+  격리된 깨끗한 workspace에서 활성화하고, 신뢰할 수 있는 도구 scratch는 명시적인
+  `--exclude-path`로 제한하세요.
 - 재시도는 기본 2회, 최대 5회입니다.
 - 승인은 push/merge 권한이 아니라 로컬 승인 영수증만 생성합니다. 영수증의
   `change_sha256`은 tracked diff와 **untracked 신규 파일의 내용 해시**를 함께

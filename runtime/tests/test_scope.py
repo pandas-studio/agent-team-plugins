@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import sqlite3
 import subprocess
@@ -184,27 +185,70 @@ def test_change_before_review_skips_review_of_untested_content(tmp_path: Path, m
     workspace, spec = make_repo(tmp_path)
     runner = FakeRunner()
     real_snapshot = graph_module._change_snapshot
-    calls = 0
+    mutated = False
 
-    def mutate_before_second_snapshot(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
+    def mutate_before_reviewer_snapshot(*args, **kwargs):
+        nonlocal mutated
+        caller = inspect.currentframe().f_back
+        if caller and caller.f_code.co_name == "reviewer_node" and not mutated:
+            mutated = True
             (workspace / "README.md").write_text("changed before review\n", encoding="utf-8")
         return real_snapshot(*args, **kwargs)
 
-    monkeypatch.setattr(graph_module, "_change_snapshot", mutate_before_second_snapshot)
+    monkeypatch.setattr(graph_module, "_change_snapshot", mutate_before_reviewer_snapshot)
     state = initial(workspace, spec, "pre-review-drift")
     state["max_attempts"] = 1
     snapshot = _run(tmp_path, runner, state, "pre-review-drift")
 
+    assert mutated is True
     assert not any(role.endswith(".reviewer") for role in runner.roles)
     assert snapshot.values["verdict"] == "NEEDS-FIX"
+    assert "Reconcile the workspace" in snapshot.values["review"]
     assert snapshot.values["reviewed_change_sha256"] is None
     assert any(
         item["name"] == "55-pre-review-drift-attempt-1.json"
         for item in snapshot.values["artifacts"]
     )
+
+
+def test_pre_review_drift_feedback_reaches_retrying_coder(tmp_path: Path, monkeypatch):
+    class PromptRunner(FakeRunner):
+        def __init__(self):
+            super().__init__()
+            self.coder_prompts: list[str] = []
+
+        def run(self, role: str, prompt: str, workspace: Path):
+            if role.endswith(".coder"):
+                self.coder_prompts.append(prompt)
+            return super().run(role, prompt, workspace)
+
+    workspace, spec = make_repo(tmp_path)
+    runner = PromptRunner()
+    real_snapshot = graph_module._change_snapshot
+    mutated = False
+
+    def mutate_before_first_reviewer_snapshot(*args, **kwargs):
+        nonlocal mutated
+        caller = inspect.currentframe().f_back
+        if caller and caller.f_code.co_name == "reviewer_node" and not mutated:
+            mutated = True
+            (workspace / "README.md").write_text("external drift\n", encoding="utf-8")
+        return real_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(
+        graph_module, "_change_snapshot", mutate_before_first_reviewer_snapshot
+    )
+    snapshot = _run(
+        tmp_path,
+        runner,
+        initial(workspace, spec, "drift-feedback"),
+        "drift-feedback",
+    )
+
+    assert mutated is True
+    assert len(runner.coder_prompts) == 2
+    assert "Reconcile the workspace" in runner.coder_prompts[1]
+    assert snapshot.next == ("approval",)
 
 
 def test_reviewer_mutation_is_reported_as_reviewer_side_effect(tmp_path: Path):
@@ -301,6 +345,61 @@ def test_head_sha_is_informational_when_reviewed_content_is_committed(tmp_path: 
     assert values["status"] == "approved"
     assert receipt["change_sha256"] == reviewed
     assert receipt["head_sha_attested"] is False
+
+
+def test_head_lookup_failure_blocks_receipt(tmp_path: Path, monkeypatch):
+    workspace, spec = make_repo(tmp_path)
+    graph = _graph(tmp_path, FakeRunner(writes={"README.md": "reviewed\n"}))
+    config = {"configurable": {"thread_id": "head-error"}}
+    graph.invoke(initial(workspace, spec, "head-error"), config=config)
+    real_git = graph_module._git
+
+    def fail_head(repo_root: Path, *args: str):
+        if args == ("rev-parse", "HEAD"):
+            raise ValueError("simulated HEAD lookup failure")
+        return real_git(repo_root, *args)
+
+    monkeypatch.setattr(graph_module, "_git", fail_head)
+    graph.invoke(Command(resume="approve"), config=config)
+
+    values = graph.get_state(config).values
+    assert values["status"] == "needs-human"
+    assert Path(values["artifacts"][-1]["path"]).name == "91-approval-head-error.json"
+    assert not any(item["name"] == "90-approval-receipt.json" for item in values["artifacts"])
+
+
+def test_strict_ignored_can_exclude_trusted_reviewer_scratch(tmp_path: Path):
+    class ScratchReviewer(FakeRunner):
+        def run(self, role: str, prompt: str, workspace: Path):
+            result = super().run(role, prompt, workspace)
+            if role.endswith(".reviewer"):
+                target = workspace / "tool-cache/session.json"
+                target.parent.mkdir()
+                target.write_text("scratch\n", encoding="utf-8")
+            return result
+
+    workspace, spec = make_repo(tmp_path)
+    (workspace / ".gitignore").write_text("tool-cache/\n", encoding="utf-8")
+    subprocess.run(["git", "-C", workspace, "add", ".gitignore"], check=True)
+    subprocess.run(["git", "-C", workspace, "commit", "-qm", "ignore tool cache"], check=True)
+    graph = _graph(tmp_path, ScratchReviewer())
+    state = initial(workspace, spec, "strict-exclude")
+    state["strict_ignored"] = True
+    state["operator_excluded_paths"] = ["tool-cache"]
+    config = {"configurable": {"thread_id": "strict-exclude"}}
+    graph.invoke(state, config=config)
+
+    paused = graph.get_state(config)
+    assert paused.values["verdict"] == "SHIP"
+    assert paused.values["gate_passed"] is True
+    assert paused.values["operator_excluded_paths"] == ["tool-cache"]
+    assert paused.values["excluded_paths"] == ["tool-cache"]
+
+    graph.invoke(Command(resume="approve"), config=config)
+    values = graph.get_state(config).values
+    receipt = json.loads(Path(values["artifacts"][-1]["path"]).read_text(encoding="utf-8"))
+    assert values["status"] == "approved"
+    assert receipt["excluded_paths_not_attested"] == ["tool-cache"]
 
 
 def test_untracked_symlink_digest_does_not_follow_external_target(tmp_path: Path):
