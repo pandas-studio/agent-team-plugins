@@ -13,6 +13,9 @@ jobs:
         with:
           python-version: "3.12"
           enable-cache: true
-      - run: sudo apt-get update && sudo apt-get install -y jq
+      # jq ships on ubuntu-latest; shellcheck does not.
+      - run: sudo apt-get update && sudo apt-get install -y shellcheck
       - run: uv sync --directory runtime --frozen --python 3.12 --extra dev
       - run: bash scripts/check.sh
+        env:
+          CI: "true"

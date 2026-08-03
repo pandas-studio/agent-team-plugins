@@ -19,7 +19,9 @@
 # should write its final/last message to. Templates are expanded into an argv
 # ARRAY (no eval, no word-splitting) so a multi-line {prompt} stays one argv.
 #
-# Built-in models: agy, codex, claude. User-defined models + role bindings live
+# Built-in models: agy, codex, claude, claude-write ("claude" is read-only in
+# headless -p mode; "claude-write" adds --permission-mode acceptEdits so a coder
+# role can actually edit files). User-defined models + role bindings live
 # in the shared config file (see _registry_config_file). Presets (kimi-code)
 # can be stamped into config via `agent-team-models preset add`.
 #
@@ -58,6 +60,11 @@ _registry_builtin_models() {
     "command": "claude",
     "env_command": "CLAUDE_CLI",
     "args": ["-p", "{prompt}"]
+  },
+  "claude-write": {
+    "command": "claude",
+    "env_command": "CLAUDE_CLI",
+    "args": ["-p", "--permission-mode", "acceptEdits", "{prompt}"]
   }
 }
 JSON
@@ -71,7 +78,7 @@ _registry_builtin_roles() {
   "debate-conductor.generator": "agy",
   "debate-conductor.critic": "codex",
   "langgraph-conductor.planner": "claude",
-  "langgraph-conductor.coder": "claude",
+  "langgraph-conductor.coder": "claude-write",
   "langgraph-conductor.researcher": "agy",
   "langgraph-conductor.reviewer": "codex"
 }

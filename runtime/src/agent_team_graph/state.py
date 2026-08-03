@@ -12,11 +12,14 @@ class GraphState(TypedDict, total=False):
     run_id: str
     project_id: str
     workspace: str
+    repo_root: str
     spec_path: str
     spec_sha256: str
     task: str
     test_command: list[str]
     allowed_paths: list[str]
+    excluded_paths: list[str]
+    strict_ignored: bool
     base_sha: str
     attempt: int
     max_attempts: int

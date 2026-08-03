@@ -1,58 +1,13 @@
 from __future__ import annotations
 
 import sqlite3
-import subprocess
 from pathlib import Path
 
+from helpers import FakeRunner, initial, make_repo
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
 from agent_team_graph.graph import build_graph
-from agent_team_graph.registry import RoleResult
-
-
-class FakeRunner:
-    def __init__(self, verdicts: list[str] | None = None):
-        self.verdicts = iter(verdicts or ["SHIP"])
-        self.roles: list[str] = []
-
-    def run(self, role: str, prompt: str, workspace: Path) -> RoleResult:
-        self.roles.append(role)
-        output = f"output from {role}"
-        if role.endswith(".reviewer"):
-            output = f"review complete\nVERDICT: {next(self.verdicts)}"
-        return RoleResult("fake-id", role, "fake", output, 0, 1)
-
-
-def make_repo(tmp_path: Path) -> tuple[Path, Path]:
-    workspace = tmp_path / "repo"
-    workspace.mkdir()
-    subprocess.run(["git", "init", "-q", workspace], check=True)
-    subprocess.run(["git", "-C", workspace, "config", "user.email", "test@example.com"], check=True)
-    subprocess.run(["git", "-C", workspace, "config", "user.name", "Test"], check=True)
-    (workspace / "README.md").write_text("demo\n", encoding="utf-8")
-    subprocess.run(["git", "-C", workspace, "add", "README.md"], check=True)
-    subprocess.run(["git", "-C", workspace, "commit", "-qm", "init"], check=True)
-    spec = tmp_path / "SPEC.md"
-    spec.write_text("# bounded task\n", encoding="utf-8")
-    return workspace, spec
-
-
-def initial(workspace: Path, spec: Path, thread_id: str = "demo-thread") -> dict:
-    return {
-        "thread_id": thread_id,
-        "run_id": f"run-{thread_id}",
-        "project_id": "demo",
-        "workspace": str(workspace),
-        "spec_path": str(spec),
-        "task": "implement one vertical slice",
-        "test_command": ["git", "status", "--short"],
-        "allowed_paths": ["README.md"],
-        "max_attempts": 2,
-        "artifacts": [],
-        "usage": [],
-        "errors": [],
-    }
 
 
 def test_ship_interrupt_is_checkpointed_and_resumed(tmp_path: Path):

@@ -8,8 +8,14 @@ VERDICTS = ("SHIP", "NEEDS-FIX", "DISCUSS", "OUT-OF-SCOPE")
 
 
 def parse_verdict(text: str) -> str:
+    """Last explicitly-prefixed verdict line wins; anything else fails to DISCUSS.
+
+    The `VERDICT:` prefix is required — the reviewer prompt mandates it, and
+    accepting a bare `SHIP` line would let a fenced code block or a quoted
+    excerpt at the end of a review auto-approve the run.
+    """
     matches = re.findall(
-        r"(?im)^\s*(?:VERDICT\s*:\s*)?(SHIP|NEEDS-FIX|DISCUSS|OUT-OF-SCOPE)\s*$",
+        r"(?im)^\s*VERDICT\s*:\s*(SHIP|NEEDS-FIX|DISCUSS|OUT-OF-SCOPE)\s*$",
         text,
     )
     return matches[-1].upper() if matches else "DISCUSS"

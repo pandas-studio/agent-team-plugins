@@ -26,11 +26,19 @@ BUILTIN_MODELS: dict[str, dict[str, Any]] = {
         ],
     },
     "claude": {"command": "claude", "env_command": "CLAUDE_CLI", "args": ["-p", "{prompt}"]},
+    # Headless `claude -p` cannot write files without an explicit permission
+    # mode, so a coder bound to plain "claude" is a silent no-op. Kept as a
+    # separate model so read-only roles never inherit edit rights.
+    "claude-write": {
+        "command": "claude",
+        "env_command": "CLAUDE_CLI",
+        "args": ["-p", "--permission-mode", "acceptEdits", "{prompt}"],
+    },
 }
 
 BUILTIN_ROLES = {
     "langgraph-conductor.planner": "claude",
-    "langgraph-conductor.coder": "claude",
+    "langgraph-conductor.coder": "claude-write",
     "langgraph-conductor.researcher": "agy",
     "langgraph-conductor.reviewer": "codex",
 }
@@ -69,11 +77,15 @@ class ModelRegistry:
             raise RegistryError(f"invalid registry config {self.config_path}: {exc}") from exc
         if not isinstance(value, dict):
             raise RegistryError("registry config root must be an object")
-        return {
-            "version": value.get("version", 1),
-            "models": value.get("models", {}),
-            "roles": value.get("roles", {}),
-        }
+        models = value.get("models", {})
+        roles = value.get("roles", {})
+        for name, section in (("models", models), ("roles", roles)):
+            if not isinstance(section, dict):
+                raise RegistryError(f"registry config {name!r} must be an object")
+        for model_id, definition in models.items():
+            if not isinstance(definition, dict):
+                raise RegistryError(f"model {model_id!r} must be an object")
+        return {"version": value.get("version", 1), "models": models, "roles": roles}
 
     @property
     def models(self) -> dict[str, dict[str, Any]]:
@@ -119,7 +131,13 @@ class RoleRunner:
         final_path: Path | None = None,
     ) -> RoleResult:
         model_id, definition = self.registry.resolve_model(role)
-        command = os.environ.get(definition.get("env_command", "")) or definition.get("command")
+        # Binary precedence mirrors registry.sh: caller override, then the
+        # model's env_command, then its literal command.
+        command = (
+            os.environ.get("REGISTRY_CMD_OVERRIDE")
+            or os.environ.get(definition.get("env_command", ""))
+            or definition.get("command")
+        )
         if not command:
             raise RegistryError(f"model {model_id!r} has no command")
         field = "final_args" if final_path and definition.get("final_args") else "args"

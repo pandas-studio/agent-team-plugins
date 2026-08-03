@@ -39,7 +39,12 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="repository-relative file or directory; repeat as needed",
     )
-    run.add_argument("--max-attempts", type=int, default=2, choices=range(1, 6))
+    run.add_argument("--max-attempts", type=int, default=2, choices=tuple(range(1, 6)))
+    run.add_argument(
+        "--strict-ignored",
+        action="store_true",
+        help="fail the scope gate on .gitignore'd writes outside --allow-path too",
+    )
     run.add_argument("--thread-id")
     status = sub.add_parser("status", help="show checkpointed state")
     _common(status)
@@ -61,7 +66,11 @@ def _open_runtime(state_dir: Path) -> Iterator[Any]:
     connection = sqlite3.connect(state_dir / "runs.sqlite3", check_same_thread=False)
     try:
         saver = SqliteSaver(connection)
-        yield build_graph(checkpointer=saver, artifact_root=state_dir / "artifacts")
+        yield build_graph(
+            checkpointer=saver,
+            artifact_root=state_dir / "artifacts",
+            state_root=state_dir,
+        )
     finally:
         connection.close()
 
@@ -75,13 +84,36 @@ def _view(graph: Any, thread_id: str) -> dict[str, Any]:
         "verdict": values.get("verdict"),
         "attempt": values.get("attempt"),
         "next": list(snapshot.next),
+        "errors": values.get("errors", []),
         "artifacts": values.get("artifacts", []),
         "usage": values.get("usage", []),
     }
 
 
+# Exit codes let a wrapper branch on the outcome without parsing the JSON body:
+# 0 approved, 3 still open (parked at the ship-approval interrupt), 4 stopped
+# without approval, 5 unknown thread.
+EXIT_BY_STATUS = {
+    "approved": 0,
+    "running": 3,
+    "rejected": 4,
+    "needs-human": 4,
+    "not-found": 5,
+}
+
+
+def _exit_code(view: dict[str, Any]) -> int:
+    return EXIT_BY_STATUS.get(view["status"], 4)
+
+
 def _print(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, default=str))
+
+
+def _report(graph: Any, thread_id: str) -> int:
+    view = _view(graph, thread_id)
+    _print(view)
+    return _exit_code(view)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -101,24 +133,21 @@ def main(argv: list[str] | None = None) -> int:
                 "test_command": shlex.split(args.test_command),
                 "allowed_paths": args.allow_path,
                 "max_attempts": args.max_attempts,
+                "strict_ignored": args.strict_ignored,
                 "artifacts": [],
                 "usage": [],
                 "errors": [],
             }
             graph.invoke(initial, config=config)
-            _print(_view(graph, thread_id))
-            return 0
+            return _report(graph, thread_id)
         if args.command == "status":
-            _print(_view(graph, args.thread_id))
-            return 0
+            return _report(graph, args.thread_id)
         if args.command == "resume":
             graph.invoke(None, config=config)
-            _print(_view(graph, args.thread_id))
-            return 0
+            return _report(graph, args.thread_id)
         if args.command == "approve":
             graph.invoke(Command(resume=args.decision), config=config)
-            _print(_view(graph, args.thread_id))
-            return 0
+            return _report(graph, args.thread_id)
     return 2
 
 

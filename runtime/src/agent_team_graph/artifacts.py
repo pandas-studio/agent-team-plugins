@@ -22,7 +22,11 @@ class ArtifactStore:
         if path.exists():
             existing = path.read_text(encoding="utf-8")
             if hashlib.sha256(existing.encode()).hexdigest() != digest:
-                raise FileExistsError(f"immutable artifact already exists with different content: {path}")
+                raise FileExistsError(
+                    f"immutable artifact already exists with different content: {path}. "
+                    "A node re-executed and produced a different result; start a new "
+                    "run_id rather than overwriting the recorded history."
+                )
             created_at = datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
         else:
             path.write_text(content, encoding="utf-8")
