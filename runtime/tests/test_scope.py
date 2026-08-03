@@ -11,6 +11,7 @@ from helpers import FakeRunner, initial, make_repo
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
+from agent_team_graph import graph as graph_module
 from agent_team_graph.graph import _changed_paths, _file_digest, _ignored_paths, build_graph
 
 
@@ -154,6 +155,8 @@ def test_receipt_covers_untracked_files(tmp_path: Path):
     assert "NEW.md" in receipt["new_files"]
     assert receipt["change_sha256"] != receipt["tracked_diff_sha256"]
     assert receipt["change_sha256"] == receipt["reviewed_change_sha256"]
+    assert receipt["head_sha_attested"] is False
+    assert "HEAD SHA is informational and excluded" in receipt["covers"]
 
 
 def test_change_after_approval_interrupt_blocks_receipt(tmp_path: Path):
@@ -177,7 +180,34 @@ def test_change_after_approval_interrupt_blocks_receipt(tmp_path: Path):
     assert drift["current_change_sha256"] != reviewed
 
 
-def test_change_during_review_invalidates_gate_identity(tmp_path: Path):
+def test_change_before_review_skips_review_of_untested_content(tmp_path: Path, monkeypatch):
+    workspace, spec = make_repo(tmp_path)
+    runner = FakeRunner()
+    real_snapshot = graph_module._change_snapshot
+    calls = 0
+
+    def mutate_before_second_snapshot(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            (workspace / "README.md").write_text("changed before review\n", encoding="utf-8")
+        return real_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(graph_module, "_change_snapshot", mutate_before_second_snapshot)
+    state = initial(workspace, spec, "pre-review-drift")
+    state["max_attempts"] = 1
+    snapshot = _run(tmp_path, runner, state, "pre-review-drift")
+
+    assert not any(role.endswith(".reviewer") for role in runner.roles)
+    assert snapshot.values["verdict"] == "NEEDS-FIX"
+    assert snapshot.values["reviewed_change_sha256"] is None
+    assert any(
+        item["name"] == "55-pre-review-drift-attempt-1.json"
+        for item in snapshot.values["artifacts"]
+    )
+
+
+def test_reviewer_mutation_is_reported_as_reviewer_side_effect(tmp_path: Path):
     class MutatingReviewer(FakeRunner):
         def run(self, role: str, prompt: str, workspace: Path):
             result = super().run(role, prompt, workspace)
@@ -186,15 +216,91 @@ def test_change_during_review_invalidates_gate_identity(tmp_path: Path):
             return result
 
     workspace, spec = make_repo(tmp_path)
-    state = initial(workspace, spec, "review-drift")
+    state = initial(workspace, spec, "reviewer-mutation")
     state["max_attempts"] = 1
-    snapshot = _run(tmp_path, MutatingReviewer(), state, "review-drift")
+    snapshot = _run(tmp_path, MutatingReviewer(), state, "reviewer-mutation")
 
     assert snapshot.values["gate_passed"] is False
-    assert snapshot.values["verdict"] == "NEEDS-FIX"
+    assert snapshot.values["verdict"] == "DISCUSS"
     assert snapshot.values["reviewed_change_sha256"] is None
     assert snapshot.values["status"] == "needs-human"
-    assert any(item["name"] == "55-review-drift-attempt-1.json" for item in snapshot.values["artifacts"])
+    assert any(
+        item["name"] == "56-reviewer-mutation-attempt-1.json"
+        for item in snapshot.values["artifacts"]
+    )
+    assert any("reviewer execution mutated" in error for error in snapshot.values["errors"])
+
+
+def test_snapshot_race_is_a_recorded_gate_failure(tmp_path: Path, monkeypatch):
+    workspace, spec = make_repo(tmp_path)
+    real_digest = graph_module._file_digest
+    failed = False
+
+    def disappear_once(repo_root: Path, relative: str):
+        nonlocal failed
+        if relative == "NEW.md" and not failed:
+            failed = True
+            raise FileNotFoundError("simulated list/lstat race")
+        return real_digest(repo_root, relative)
+
+    monkeypatch.setattr(graph_module, "_file_digest", disappear_once)
+    state = initial(workspace, spec, "snapshot-race")
+    state["allowed_paths"] = ["README.md", "NEW.md"]
+    state["max_attempts"] = 1
+    snapshot = _run(
+        tmp_path,
+        FakeRunner(writes={"NEW.md": "new\n"}),
+        state,
+        "snapshot-race",
+    )
+
+    record = _gate_record(snapshot)
+    assert record["passed"] is False
+    assert "FileNotFoundError" in record["snapshot_error"]
+    assert snapshot.values["gated_change_sha256"] is None
+    assert snapshot.values["status"] == "needs-human"
+
+
+def test_publish_snapshot_race_blocks_receipt(tmp_path: Path, monkeypatch):
+    workspace, spec = make_repo(tmp_path)
+    graph = _graph(tmp_path, FakeRunner(writes={"NEW.md": "new\n"}))
+    state = initial(workspace, spec, "publish-race")
+    state["allowed_paths"] = ["README.md", "NEW.md"]
+    config = {"configurable": {"thread_id": "publish-race"}}
+    graph.invoke(state, config=config)
+
+    real_digest = graph_module._file_digest
+
+    def fail_new_file(repo_root: Path, relative: str):
+        if relative == "NEW.md":
+            raise FileNotFoundError("simulated approval snapshot race")
+        return real_digest(repo_root, relative)
+
+    monkeypatch.setattr(graph_module, "_file_digest", fail_new_file)
+    graph.invoke(Command(resume="approve"), config=config)
+
+    values = graph.get_state(config).values
+    assert values["status"] == "needs-human"
+    assert Path(values["artifacts"][-1]["path"]).name == "91-approval-snapshot-error.json"
+    assert not any(item["name"] == "90-approval-receipt.json" for item in values["artifacts"])
+
+
+def test_head_sha_is_informational_when_reviewed_content_is_committed(tmp_path: Path):
+    workspace, spec = make_repo(tmp_path)
+    graph = _graph(tmp_path, FakeRunner(writes={"README.md": "reviewed\n"}))
+    config = {"configurable": {"thread_id": "head-info"}}
+    graph.invoke(initial(workspace, spec, "head-info"), config=config)
+    reviewed = graph.get_state(config).values["reviewed_change_sha256"]
+
+    subprocess.run(["git", "-C", workspace, "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", workspace, "commit", "-qm", "reviewed change"], check=True)
+    graph.invoke(Command(resume="approve"), config=config)
+
+    values = graph.get_state(config).values
+    receipt = json.loads(Path(values["artifacts"][-1]["path"]).read_text(encoding="utf-8"))
+    assert values["status"] == "approved"
+    assert receipt["change_sha256"] == reviewed
+    assert receipt["head_sha_attested"] is False
 
 
 def test_untracked_symlink_digest_does_not_follow_external_target(tmp_path: Path):

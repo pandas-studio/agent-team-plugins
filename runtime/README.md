@@ -40,14 +40,22 @@ JSON을 파싱하지 말고 종료 코드로 분기하세요.
   workspace 밖에 생성된 파일도 게이트를 빠져나가지 못합니다.
 - `.gitignore` 대상 파일은 기본적으로 게이트를 실패시키지 않지만(테스트 명령이
   만드는 빌드 산출물과 구분할 수 없기 때문) 게이트 산출물의 `ignored_paths`에
-  항상 기록됩니다. `--strict-ignored`를 주면 범위 검사에 포함됩니다.
+  항상 기록됩니다. `--strict-ignored`를 주면 범위 검사와 내용 증명에 포함됩니다.
+  이 모드는 모든 ignored 파일을 매 snapshot마다 읽으므로 `.venv`, `node_modules`
+  같은 대형 트리가 있으면 비용이 파일 수에 선형으로 증가합니다. 격리된 깨끗한
+  workspace에서만 활성화하세요.
 - 재시도는 기본 2회, 최대 5회입니다.
 - 승인은 push/merge 권한이 아니라 로컬 승인 영수증만 생성합니다. 영수증의
   `change_sha256`은 tracked diff와 **untracked 신규 파일의 내용 해시**를 함께
   덮습니다 — `git diff`만으로는 신규 파일이 빠지기 때문입니다.
 - gate와 reviewer가 확정한 `reviewed_change_sha256`을 승인 질문에 표시하고 승인 직전
   다시 계산합니다. 승인 대기 중 파일이 바뀌면 영수증 생성을 차단하고 `needs-human`으로
-  종료합니다.
+  종료합니다. reviewer 실행 전 drift와 reviewer 자체 mutation은 별도 산출물로
+  구분하며 reviewer 역할은 read-only입니다. snapshot 도중 파일 삭제나 안전하지 않은
+  경로를 만나도 실행을 crash시키지 않고 fail-closed로 기록합니다.
+- `base_sha`와 변경 내용은 digest에 포함되지만 영수증의 `head_sha`는 실행 시점 정보일
+  뿐 증명 대상이 아닙니다. 따라서 동일한 변경 내용을 commit해 HEAD만 이동해도 digest는
+  유지되며 `head_sha_attested: false`로 명시됩니다.
 - 리뷰 판정은 `VERDICT: <값>` 형식의 줄만 인정합니다. 인용문이나 코드 블록에
   들어 있는 맨 `SHIP`으로는 승인되지 않습니다.
 - 산출물은 run별 immutable 경로에 저장하며 `latest` 링크를 만들지 않습니다.

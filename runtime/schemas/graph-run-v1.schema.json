@@ -15,7 +15,7 @@
     "allowed_paths": {"type": "array", "minItems": 1, "items": {"type": "string"}},
     "excluded_paths": {"type": "array", "items": {"type": "string"}},
     "strict_ignored": {"type": "boolean"},
-    "gated_change_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "gated_change_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
     "reviewed_change_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
     "errors": {"type": "array", "items": {"type": "string"}},
     "artifacts": {"type": "array"},

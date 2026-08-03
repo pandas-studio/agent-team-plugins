@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
-from agent_team_graph.cli import _exit_code, build_parser
+from agent_team_graph.cli import _exit_code, _view, build_parser
 
 
 @pytest.mark.parametrize(
@@ -34,3 +36,15 @@ def test_max_attempts_is_bounded_and_reports_real_choices(capsys):
         )
     # argparse renders a tuple as "1, 2, 3, 4, 5"; a bare range() leaks "range(1, 6)".
     assert "range(" not in capsys.readouterr().err
+
+
+def test_view_distinguishes_recorded_approve_from_blocked_receipt():
+    class Graph:
+        def get_state(self, config):
+            return SimpleNamespace(
+                values={"status": "needs-human", "approval": "approve"}, next=()
+            )
+
+    view = _view(Graph(), "blocked")
+    assert view["approval"] == "approve"
+    assert "receipt blocked" in view["approval_note"]

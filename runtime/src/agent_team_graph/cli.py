@@ -78,13 +78,20 @@ def _open_runtime(state_dir: Path) -> Iterator[Any]:
 def _view(graph: Any, thread_id: str) -> dict[str, Any]:
     snapshot = graph.get_state({"configurable": {"thread_id": thread_id}})
     values = dict(snapshot.values or {})
+    approval = values.get("approval")
+    status = values.get("status", "not-found")
+    approval_note = None
+    if approval == "approve" and status != "approved":
+        approval_note = "approve decision recorded; receipt blocked, see errors and artifacts"
     return {
         "thread_id": thread_id,
-        "status": values.get("status", "not-found"),
+        "status": status,
         "verdict": values.get("verdict"),
         "attempt": values.get("attempt"),
         "gated_change_sha256": values.get("gated_change_sha256"),
         "reviewed_change_sha256": values.get("reviewed_change_sha256"),
+        "approval": approval,
+        "approval_note": approval_note,
         "next": list(snapshot.next),
         "errors": values.get("errors", []),
         "artifacts": values.get("artifacts", []),

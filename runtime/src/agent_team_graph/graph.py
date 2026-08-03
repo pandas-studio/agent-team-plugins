@@ -20,6 +20,7 @@ from .registry import RoleResult, RoleRunner, usage_record
 from .state import GraphState
 
 GATE_TIMEOUT_SECONDS = 900
+SNAPSHOT_ERRORS = (OSError, ValueError)
 
 
 class Runner(Protocol):
@@ -152,6 +153,19 @@ def _change_snapshot(
     }
 
 
+def _attestation_covers(strict_ignored: bool) -> str:
+    content = (
+        "base SHA, tracked binary diff, and untracked and ignored file content digests"
+        if strict_ignored
+        else "base SHA, tracked binary diff, and untracked file content digests; ignored files excluded"
+    )
+    return f"{content}; HEAD SHA is informational and excluded"
+
+
+def _snapshot_error(exc: OSError | ValueError) -> str:
+    return f"{type(exc).__name__}: {exc}"
+
+
 def _outside_scope(changed: list[str], allowed: list[str]) -> list[str]:
     return [path for path in changed if not _under(path, allowed)]
 
@@ -189,7 +203,7 @@ def _role_prompt(state: GraphState, role: str) -> str:
         shared
         + f"Plan:\n{state['plan']}\nResearch:\n{state['research']}\n"
         + f"Coder report:\n{state['code_report']}\nGate passed: {state['gate_passed']}\n"
-        + "Review the current git diff. End with exactly one line: "
+        + "Review the current git diff. Do not edit files. End with exactly one line: "
         + "VERDICT: SHIP, VERDICT: NEEDS-FIX, VERDICT: DISCUSS, or VERDICT: OUT-OF-SCOPE."
     )
 
@@ -318,7 +332,38 @@ def build_graph(
         repo_root = Path(state["repo_root"])
         excluded = state.get("excluded_paths", [])
         strict_ignored = bool(state.get("strict_ignored", False))
-        snapshot = _change_snapshot(repo_root, state["base_sha"], excluded, strict_ignored)
+        try:
+            snapshot = _change_snapshot(
+                repo_root, state["base_sha"], excluded, strict_ignored
+            )
+        except SNAPSHOT_ERRORS as exc:
+            message = _snapshot_error(exc)
+            record = {
+                "command": command,
+                "returncode": returncode,
+                "passed": False,
+                "changed_paths": [],
+                "untracked_paths": [],
+                "ignored_paths": [],
+                "strict_ignored": strict_ignored,
+                "outside_scope": [],
+                "gated_change_sha256": None,
+                "snapshot_error": message,
+                "output": output,
+            }
+            artifact = store.write_json(
+                state["run_id"], f"40-gate-attempt-{state['attempt']}.json", record
+            )
+            return {
+                "gate_passed": False,
+                "gated_change_sha256": None,
+                "reviewed_change_sha256": None,
+                "artifacts": [artifact],
+                "errors": [
+                    *errors,
+                    f"gate attempt {state['attempt']}: cannot attest change set: {message}",
+                ],
+            }
         changed = snapshot["changed_paths"]
         ignored = snapshot["ignored_paths"]
         scoped = sorted(set(changed) | set(ignored)) if strict_ignored else changed
@@ -334,11 +379,7 @@ def build_graph(
             "strict_ignored": strict_ignored,
             "outside_scope": outside_scope,
             "gated_change_sha256": snapshot["change_sha256"],
-            "attestation_covers": (
-                "tracked binary diff plus untracked and ignored file content digests"
-                if strict_ignored
-                else "tracked binary diff plus untracked file content digests; ignored files excluded"
-            ),
+            "attestation_covers": _attestation_covers(strict_ignored),
             "output": output,
         }
         artifact = store.write_json(
@@ -355,41 +396,112 @@ def build_graph(
         return update
 
     def reviewer_node(state: GraphState) -> dict[str, Any]:
+        repo_root = Path(state["repo_root"])
+        excluded = state.get("excluded_paths", [])
+        strict_ignored = bool(state.get("strict_ignored", False))
+        gated_digest = state.get("gated_change_sha256")
+        try:
+            before = _change_snapshot(
+                repo_root, state["base_sha"], excluded, strict_ignored
+            )
+        except SNAPSHOT_ERRORS as exc:
+            message = _snapshot_error(exc)
+            artifact = store.write_json(
+                state["run_id"],
+                f"54-pre-review-snapshot-error-attempt-{state['attempt']}.json",
+                {
+                    "gated_change_sha256": gated_digest,
+                    "snapshot_error": message,
+                    "note": "review skipped because the gated change set could not be revalidated",
+                },
+            )
+            return {
+                "verdict": "DISCUSS",
+                "gate_passed": False,
+                "reviewed_change_sha256": None,
+                "artifacts": [artifact],
+                "errors": [
+                    f"review attempt {state['attempt']}: cannot attest pre-review change set: {message}"
+                ],
+            }
+
+        unchanged_before_review = (
+            bool(gated_digest) and before["change_sha256"] == gated_digest
+        )
+        if not unchanged_before_review:
+            artifact = store.write_json(
+                state["run_id"],
+                f"55-pre-review-drift-attempt-{state['attempt']}.json",
+                {
+                    "gated_change_sha256": gated_digest,
+                    "pre_review_change_sha256": before["change_sha256"],
+                    "note": "change set mutated after the test/scope gate and before reviewer execution",
+                },
+            )
+            return {
+                "verdict": "NEEDS-FIX",
+                "gate_passed": False,
+                "reviewed_change_sha256": None,
+                "artifacts": [artifact],
+                "errors": [
+                    f"review attempt {state['attempt']}: change set drifted before reviewer execution"
+                ],
+            }
+
         output, artifact, usage = invoke_role(
             state, "reviewer", f"50-review-attempt-{state['attempt']}.md"
         )
         verdict = parse_verdict(output)
-        current = _change_snapshot(
-            Path(state["repo_root"]),
-            state["base_sha"],
-            state.get("excluded_paths", []),
-            bool(state.get("strict_ignored", False)),
-        )
         artifacts = [artifact]
         errors: list[str] = []
-        gated_digest = state.get("gated_change_sha256")
-        unchanged_since_gate = bool(gated_digest) and current["change_sha256"] == gated_digest
-        if not unchanged_since_gate:
+        try:
+            after = _change_snapshot(
+                repo_root, state["base_sha"], excluded, strict_ignored
+            )
+        except SNAPSHOT_ERRORS as exc:
+            message = _snapshot_error(exc)
             drift = store.write_json(
                 state["run_id"],
-                f"55-review-drift-attempt-{state['attempt']}.json",
+                f"56-post-review-snapshot-error-attempt-{state['attempt']}.json",
                 {
                     "gated_change_sha256": gated_digest,
-                    "current_change_sha256": current["change_sha256"],
-                    "note": "change set mutated after the test/scope gate",
+                    "pre_review_change_sha256": before["change_sha256"],
+                    "snapshot_error": message,
+                    "note": "reviewer output recorded, but its post-run change set could not be attested",
                 },
             )
             artifacts.append(drift)
-            errors.append(f"review attempt {state['attempt']}: change set drifted after gate")
-            verdict = "NEEDS-FIX"
+            errors.append(
+                f"review attempt {state['attempt']}: cannot attest post-review change set: {message}"
+            )
+            verdict = "DISCUSS"
+            unchanged_during_review = False
+        else:
+            unchanged_during_review = after["change_sha256"] == before["change_sha256"]
+            if not unchanged_during_review:
+                drift = store.write_json(
+                    state["run_id"],
+                    f"56-reviewer-mutation-attempt-{state['attempt']}.json",
+                    {
+                        "gated_change_sha256": gated_digest,
+                        "pre_review_change_sha256": before["change_sha256"],
+                        "post_review_change_sha256": after["change_sha256"],
+                        "note": "reviewer execution mutated the workspace; reviewer roles are read-only",
+                    },
+                )
+                artifacts.append(drift)
+                errors.append(
+                    f"review attempt {state['attempt']}: reviewer execution mutated the workspace"
+                )
+                verdict = "DISCUSS"
         if not state["gate_passed"] and verdict == "SHIP":
             verdict = "NEEDS-FIX"
         update: dict[str, Any] = {
             "review": output,
             "verdict": verdict,
-            "gate_passed": state["gate_passed"] and unchanged_since_gate,
+            "gate_passed": state["gate_passed"] and unchanged_during_review,
             "reviewed_change_sha256": (
-                current["change_sha256"] if unchanged_since_gate else None
+                before["change_sha256"] if unchanged_during_review else None
             ),
             "artifacts": artifacts,
             "usage": [usage],
@@ -417,13 +529,29 @@ def build_graph(
     def publish_node(state: GraphState) -> dict[str, Any]:
         repo_root = Path(state["repo_root"])
         excluded = state.get("excluded_paths", [])
-        current = _change_snapshot(
-            repo_root,
-            state["base_sha"],
-            excluded,
-            bool(state.get("strict_ignored", False)),
-        )
         expected = state.get("reviewed_change_sha256", "")
+        strict_ignored = bool(state.get("strict_ignored", False))
+        try:
+            current = _change_snapshot(
+                repo_root, state["base_sha"], excluded, strict_ignored
+            )
+        except SNAPSHOT_ERRORS as exc:
+            message = _snapshot_error(exc)
+            artifact = store.write_json(
+                state["run_id"],
+                "91-approval-snapshot-error.json",
+                {
+                    "approved": False,
+                    "reviewed_change_sha256": expected,
+                    "snapshot_error": message,
+                    "note": "approval blocked because the current change set could not be attested",
+                },
+            )
+            return {
+                "status": "needs-human",
+                "artifacts": [artifact],
+                "errors": [f"approval blocked: cannot attest current change set: {message}"],
+            }
         if not expected or current["change_sha256"] != expected:
             drift = {
                 "approved": False,
@@ -447,6 +575,7 @@ def build_graph(
             "approved": True,
             "base_sha": state["base_sha"],
             "head_sha": _git(repo_root, "rev-parse", "HEAD"),
+            "head_sha_attested": False,
             "tracked_diff_sha256": current["tracked_diff_sha256"],
             "new_files": current["new_files"],
             "ignored_files": current["ignored_files"],
@@ -455,11 +584,7 @@ def build_graph(
             "ignored_paths_not_attested": (
                 [] if state.get("strict_ignored") else current["ignored_paths"]
             ),
-            "covers": (
-                "tracked binary diff plus untracked and ignored file content digests"
-                if state.get("strict_ignored")
-                else "tracked binary diff plus untracked file content digests; ignored files excluded"
-            ),
+            "covers": _attestation_covers(strict_ignored),
             "note": "approval receipt only; this runtime never pushes or force-merges",
         }
         artifact = store.write_json(state["run_id"], "90-approval-receipt.json", receipt)
