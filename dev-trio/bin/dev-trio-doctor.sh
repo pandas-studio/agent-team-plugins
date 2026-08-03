@@ -86,9 +86,9 @@ else
 # Echoes a canonical-shaped lead paragraph so dashboard.sh can parse it.
 if [ "${1:-}" != "-p" ]; then echo "stub-agy: expected -p as \$1, got: ${1:-}" >&2; exit 2; fi
 cat <<'OUT'
-LangGraph 0.2 streaming API uses an async iterator returned by graph.astream(input).
+LangGraph streaming can use the async iterator returned by graph.astream(input).
 
-See https://langchain-ai.github.io/langgraph/how-tos/streaming/ for details.
+See https://docs.langchain.com/oss/python/langgraph/streaming for details.
 OUT
 STUB
   chmod +x "$STUB_AGY"
@@ -103,7 +103,7 @@ STUB
   RESEARCHER_CLI="" \
   AGY_CLI="$STUB_AGY" \
   TMUX="" \
-    "$PLUGIN_ROOT/bin/ask-agy.sh" "doctor smoke: what is LangGraph 0.2 streaming?" \
+    "$PLUGIN_ROOT/bin/ask-agy.sh" "doctor smoke: what is LangGraph streaming?" \
     >"$TMPDIR_SMOKE/smoke.out" 2>"$TMPDIR_SMOKE/smoke.err"
   RC=$?
   popd >/dev/null

@@ -106,7 +106,7 @@ if [ "$USE_WORKTREE" = "1" ]; then
   [ -z "$BASE_BRANCH" ] && BASE_BRANCH="$(git -C "$ORIGINAL_DIR" rev-parse --abbrev-ref HEAD)"
 fi
 
-TEAM=$(detect_team)
+TEAM=$(detect_team) || exit 2
 LOG_DIR=$(init_log_dir)
 # Durable, ralph-owned root for ask-codex.sh's --output-last-message artifacts.
 # Pinned via DEV_TRIO_LOG_DIR on every reviewer call so the authoritative
@@ -728,13 +728,21 @@ $RESEARCH"
 
   # ---- Worktree pre-merge validation + merge/discard ----
   if [ "$USE_WORKTREE" = "1" ]; then
+    PRESERVE_WORKTREE=0
     # Preserve the reviewed working-tree state: when the coder leaves its changes
     # uncommitted, commit them onto the iteration branch BEFORE validating/merging
     # so they are validated and survive the post-merge worktree teardown. No-op
     # when the coder already committed (clean tree). Only on a SHIP verdict — a
     # NEEDS-FIX attempt is intentionally discarded with the worktree.
     if [ "$PASSED" = "1" ]; then
-      commit_worktree_changes "$WT" "$ITER"
+      if ! commit_worktree_changes "$WT" "$ITER"; then
+        PASSED=0
+        PRESERVE_WORKTREE=1
+        ralph_log "  worktree commit FAILED — preserving $WT for recovery"
+        printf '  worktree: PRESERVED (commit failed: %s)\n' "$WT" >> "$SUMMARY_LOG"
+        printf '## iter %d · %s · WORKTREE-COMMIT-BLOCK\nTask: %s\nPreserved worktree: %s\n\n' \
+          "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TASK" "$WT" >> "$FIX_PLAN_FILE"
+      fi
     fi
     if [ "$PASSED" = "1" ] && [ "$NO_VALIDATE" = "0" ]; then
       VAL_LOG="$LOG_DIR/ralph-trio-$TS-iter-$ITER-validate.log"
@@ -748,8 +756,10 @@ $RESEARCH"
         printf '  validate: ok\n' >> "$SUMMARY_LOG"
       fi
     fi
-    if merge_or_discard_worktree "$WT" "$ITER" "$PASSED" "$ORIGINAL_DIR"; then
-      printf '  worktree: %s\n' "$([ "$PASSED" = "1" ] && echo merged || echo discarded)" >> "$SUMMARY_LOG"
+    if [ "$PRESERVE_WORKTREE" = "0" ]; then
+      if merge_or_discard_worktree "$WT" "$ITER" "$PASSED" "$ORIGINAL_DIR"; then
+        printf '  worktree: %s\n' "$([ "$PASSED" = "1" ] && echo merged || echo discarded)" >> "$SUMMARY_LOG"
+      fi
     fi
     unset RALPH_WT_DIR
   fi

@@ -35,6 +35,12 @@
 
 set -uo pipefail
 
+_NAMESPACE_LIB="$PLUGIN_ROOT/lib/namespace.sh"
+[ -f "$_NAMESPACE_LIB" ] || { echo "spec-trio: namespace.sh not found at $_NAMESPACE_LIB" >&2; return 1 2>/dev/null || exit 1; }
+# shellcheck source=namespace.sh
+. "$_NAMESPACE_LIB"
+unset _NAMESPACE_LIB
+
 # ralph_workspace_root — resolve the workspace artifact root.
 #
 # Plugin context: the plugin itself is installed read-only (under
@@ -55,26 +61,7 @@ ralph_workspace_root() {
 # A loud stderr warning fires when the sanitize actually changes the value, so
 # typos / accidents don't fail silently.
 detect_team() {
-  local raw=""
-  if [ -n "${AGENT_TEAM:-}" ]; then
-    raw="$AGENT_TEAM"
-  elif [ -n "${TMUX:-}" ]; then
-    local n
-    n=$(tmux show-options -wqv -t "${TMUX_PANE:-}" '@team-name' 2>/dev/null) || n=""
-    if [ -n "$n" ]; then raw="$n"
-    else
-      n=$(tmux display-message -p -t "${TMUX_PANE:-}" '#{session_name}' 2>/dev/null) || n=""
-      [ -n "$n" ] && raw="$n"
-    fi
-  fi
-  [ -z "$raw" ] && raw="default"
-  # Sanitize
-  local clean="${raw//[^a-zA-Z0-9_-]/}"
-  if [ "$clean" != "$raw" ]; then
-    printf '[ralph] WARNING: AGENT_TEAM/window-name "%s" sanitized to "%s" (only [a-zA-Z0-9_-] allowed)\n' "$raw" "$clean" >&2
-  fi
-  [ -z "$clean" ] && clean="default"
-  echo "$clean"
+  agent_team_detect_team
 }
 
 # init_log_dir — requires TEAM in env. Echoes the workspace-scoped path.
@@ -158,10 +145,10 @@ commit_worktree_changes() {
   local wt="$1" iter="$2"
   [ -d "$wt" ] || return 0
   [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ] || return 0
-  git -C "$wt" add -A >&2 || { ralph_log "warning: git add -A failed in worktree (iter $iter)"; return 0; }
+  git -C "$wt" add -A >&2 || { ralph_log "ERROR: git add -A failed in worktree (iter $iter); preserving worktree"; return 1; }
   git -C "$wt" -c user.name='ralph' -c user.email='ralph@localhost' \
     commit --no-verify -m "ralph iter ${iter}: coder changes (auto-committed at SHIP)" >&2 \
-    || ralph_log "warning: failed to auto-commit worktree changes (iter $iter)"
+    || { ralph_log "ERROR: failed to auto-commit worktree changes (iter $iter); preserving worktree"; return 1; }
 }
 
 # merge_or_discard_worktree WT ITER PASSED_FLAG ORIGINAL_DIR

@@ -51,7 +51,7 @@ done
 # Cross-plugin dependency check: ask-codex.sh comes from the dev-trio plugin.
 command -v ask-codex.sh >/dev/null 2>&1 || { echo "ERROR: ralph-meta requires the dev-trio plugin (ask-codex.sh not on PATH). Install: /plugin install dev-trio@pandas-studio" >&2; exit 2; }
 
-TEAM=$(detect_team)
+TEAM=$(detect_team) || exit 2
 LOG_DIR=$(init_log_dir)
 
 # Resolve --since-latest-run

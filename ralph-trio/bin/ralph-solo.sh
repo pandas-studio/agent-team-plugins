@@ -113,7 +113,7 @@ if [ "$USE_WORKTREE" = "1" ]; then
   fi
 fi
 
-TEAM=$(detect_team)
+TEAM=$(detect_team) || exit 2
 LOG_DIR=$(init_log_dir)
 TS=$(date +%Y%m%d-%H%M%S)
 SUMMARY_LOG="$LOG_DIR/ralph-solo-$TS.log"
@@ -234,6 +234,7 @@ $FP_EXCERPT
   # Worktree merge/discard
   if [ "$USE_WORKTREE" = "1" ]; then
     PASSED=0
+    PRESERVE_WORKTREE=0
     if [ -n "$TEST_CMD" ]; then
       ralph_log "running test command in worktree: $TEST_CMD"
       if ( cd "$WT" && eval "$TEST_CMD" ) >> "$ITER_LOG" 2>&1; then
@@ -241,6 +242,20 @@ $FP_EXCERPT
       fi
     fi
     printf '  tests:    %s\n' "$([ "$PASSED" = "1" ] && echo passed || echo failed-or-skipped)" >> "$SUMMARY_LOG"
+
+    # A passing test may still leave the worker's edits uncommitted. Commit
+    # before validation/merge; if that fails, retain the worktree so no reviewed
+    # changes are destroyed by the forced teardown path.
+    if [ "$PASSED" = "1" ]; then
+      if ! commit_worktree_changes "$WT" "$ITER"; then
+        PASSED=0
+        PRESERVE_WORKTREE=1
+        ralph_log "  worktree commit FAILED — preserving $WT for recovery"
+        printf '  worktree: PRESERVED (commit failed: %s)\n' "$WT" >> "$SUMMARY_LOG"
+        printf '## iter %d · %s · WORKTREE-COMMIT-BLOCK\nIter log: %s\nPreserved worktree: %s\n\n' \
+          "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ITER_LOG" "$WT" >> "$FIX_PLAN_FILE"
+      fi
+    fi
 
     # Pre-merge sandbox validation (only if tests passed and validation enabled)
     if [ "$PASSED" = "1" ] && [ "$NO_VALIDATE" = "0" ]; then
@@ -254,8 +269,10 @@ $FP_EXCERPT
       fi
     fi
 
-    if merge_or_discard_worktree "$WT" "$ITER" "$PASSED" "$ORIGINAL_DIR"; then
-      printf '  worktree: %s\n' "$([ "$PASSED" = "1" ] && echo merged || echo discarded)" >> "$SUMMARY_LOG"
+    if [ "$PRESERVE_WORKTREE" = "0" ]; then
+      if merge_or_discard_worktree "$WT" "$ITER" "$PASSED" "$ORIGINAL_DIR"; then
+        printf '  worktree: %s\n' "$([ "$PASSED" = "1" ] && echo merged || echo discarded)" >> "$SUMMARY_LOG"
+      fi
     fi
     unset RALPH_WT_DIR
   fi

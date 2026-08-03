@@ -29,25 +29,17 @@
 set -euo pipefail
 set -m  # job control: each backgrounded pipeline gets its own process group
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/namespace.sh
+. "$SCRIPT_DIR/../lib/namespace.sh" || exit 2
+
 ROLE="${1:-}"
 case "$ROLE" in
   gen|crit) ;;
   *) echo "usage: $(basename "$0") <gen|crit>" >&2; exit 2 ;;
 esac
 
-detect_team() {
-  if [ -n "${AGENT_TEAM:-}" ]; then echo "$AGENT_TEAM"; return; fi
-  if [ -n "${TMUX:-}" ]; then
-    local n
-    n=$(tmux show-options -wqv -t "${TMUX_PANE:-}" '@team-name' 2>/dev/null) || n=""
-    [ -n "$n" ] && { echo "$n"; return; }
-    n=$(tmux display-message -p -t "${TMUX_PANE:-}" '#{session_name}' 2>/dev/null) || n=""
-    [ -n "$n" ] && { echo "$n"; return; }
-  fi
-  echo default
-}
-
-TEAM=$(detect_team)
+TEAM=$(agent_team_detect_team) || exit 2
 LOG_BASE="${DEBATE_LOG_DIR:-$PWD/.debate-conductor/log}"
 LOG_DIR="$LOG_BASE/$TEAM"
 LATEST="$LOG_DIR/latest-debate"

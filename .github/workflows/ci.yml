@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      # jq ships on ubuntu-latest; shellcheck does not.
+      - run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - run: uv sync --directory runtime --frozen --python 3.12 --extra dev
+      - run: bash scripts/check.sh
+        env:
+          CI: "true"

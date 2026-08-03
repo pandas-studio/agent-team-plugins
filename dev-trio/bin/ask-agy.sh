@@ -13,6 +13,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROLE_FILE="$PLUGIN_ROOT/lib/roles/researcher.md"
 
+_NAMESPACE_LIB="$PLUGIN_ROOT/lib/namespace.sh"
+[ -f "$_NAMESPACE_LIB" ] || { echo "ask-agy: namespace.sh not found at $_NAMESPACE_LIB" >&2; exit 1; }
+# shellcheck source=../lib/namespace.sh
+. "$_NAMESPACE_LIB"
+unset _NAMESPACE_LIB
+
 _MANIFEST_LIB="$PLUGIN_ROOT/lib/manifest.sh"
 [ -f "$_MANIFEST_LIB" ] || { echo "ask-agy:manifest.sh not found at $_MANIFEST_LIB" >&2; exit 1; }
 # shellcheck source=../lib/manifest.sh
@@ -32,18 +38,7 @@ RESEARCHER_MODEL="$(registry_resolve_role dev-trio researcher "")"
 registry_model_exists "$RESEARCHER_MODEL" || { echo "ask-agy: researcher model '$RESEARCHER_MODEL' is not registered (run: agent-team-models list)" >&2; exit 2; }
 
 # Team namespace — isolates logs per tmux window/session.
-detect_team() {
-  if [ -n "${AGENT_TEAM:-}" ]; then echo "$AGENT_TEAM"; return; fi
-  if [ -n "${TMUX:-}" ]; then
-    local n
-    n=$(tmux show-options -wqv -t "${TMUX_PANE:-}" '@team-name' 2>/dev/null) || n=""
-    [ -n "$n" ] && { echo "$n"; return; }
-    n=$(tmux display-message -p -t "${TMUX_PANE:-}" '#{session_name}' 2>/dev/null) || n=""
-    [ -n "$n" ] && { echo "$n"; return; }
-  fi
-  echo default
-}
-TEAM=$(detect_team)
+TEAM=$(agent_team_detect_team) || exit 2
 LOG_DIR="${DEV_TRIO_LOG_DIR:-$PWD/.dev-trio/log}/$TEAM"
 
 if [ "$#" -lt 1 ]; then

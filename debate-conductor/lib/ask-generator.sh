@@ -16,24 +16,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROLE_FILE="$SCRIPT_DIR/roles/generator.md"
 
+# shellcheck source=namespace.sh
+. "$SCRIPT_DIR/namespace.sh" || exit 2
+
 _REGISTRY_LIB="$SCRIPT_DIR/registry.sh"
 [ -f "$_REGISTRY_LIB" ] || { echo "ask-generator: registry.sh not found at $_REGISTRY_LIB" >&2; exit 1; }
 # shellcheck source=registry.sh
 . "$_REGISTRY_LIB" || { echo "ask-generator: failed to load registry.sh (jq missing?)" >&2; exit 2; }
 unset _REGISTRY_LIB
 
-detect_team() {
-  if [ -n "${AGENT_TEAM:-}" ]; then echo "$AGENT_TEAM"; return; fi
-  if [ -n "${TMUX:-}" ]; then
-    local n
-    n=$(tmux show-options -wqv -t "${TMUX_PANE:-}" '@team-name' 2>/dev/null) || n=""
-    [ -n "$n" ] && { echo "$n"; return; }
-    n=$(tmux display-message -p -t "${TMUX_PANE:-}" '#{session_name}' 2>/dev/null) || n=""
-    [ -n "$n" ] && { echo "$n"; return; }
-  fi
-  echo default
-}
-TEAM=$(detect_team)
+TEAM=$(agent_team_detect_team) || exit 2
 LOG_BASE="${DEBATE_LOG_DIR:-$PWD/.debate-conductor/log}"
 LOG_DIR="$LOG_BASE/$TEAM"
 

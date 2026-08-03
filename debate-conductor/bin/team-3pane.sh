@@ -19,7 +19,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAIL="$SCRIPT_DIR/tail-role.sh"
 
 SESSION="debate-conductor"
-HERE=1   # default to --here; this script primarily runs from inside Claude/tmux
 ATTACH=1
 
 usage() {
@@ -37,12 +36,13 @@ Options:
 EOF
 }
 
+# NEW_SESSION=0 is here-mode: this script primarily runs from inside Claude/tmux.
 NEW_SESSION=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -n) SESSION="$2"; shift 2 ;;
-    --here) HERE=1; shift ;;
-    --new-session) NEW_SESSION=1; HERE=0; shift ;;
+    --here) NEW_SESSION=0; shift ;;
+    --new-session) NEW_SESSION=1; shift ;;
     --no-attach) ATTACH=0; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage; exit 2 ;;
@@ -52,6 +52,7 @@ done
 command -v tmux >/dev/null 2>&1 || { echo "error: tmux not installed" >&2; exit 2; }
 [ -x "$TAIL" ] || { echo "error: $TAIL not found or not executable" >&2; exit 2; }
 
+# shellcheck disable=SC2154  # rc is assigned by the trap body itself.
 trap 'rc=$?; echo "error: tmux command failed (line $LINENO, exit $rc). Session=$SESSION may be in an inconsistent state — check with: tmux ls" >&2; exit $rc' ERR
 
 # Apply 3-pane split to a given main pane id, in a window already stamped

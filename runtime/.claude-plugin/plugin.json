@@ -1,0 +1,9 @@
+{
+  "name": "langgraph-conductor",
+  "version": "0.1.0",
+  "description": "Durable LangGraph control plane for the agent-team CLI registry: bounded retries, test gates, SQLite checkpoints, and human ship approval.",
+  "author": {"name": "pandas-studio"},
+  "homepage": "https://github.com/pandas-studio/agent-team-plugins/tree/main/runtime",
+  "repository": "https://github.com/pandas-studio/agent-team-plugins",
+  "license": "MIT"
+}

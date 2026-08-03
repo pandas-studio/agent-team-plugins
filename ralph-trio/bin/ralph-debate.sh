@@ -86,7 +86,7 @@ if [ "$USE_WORKTREE" = "1" ]; then
   [ -z "$BASE_BRANCH" ] && BASE_BRANCH="$(git -C "$ORIGINAL_DIR" rev-parse --abbrev-ref HEAD)"
 fi
 
-TEAM=$(detect_team)
+TEAM=$(detect_team) || exit 2
 LOG_DIR=$(init_log_dir)
 TS=$(date +%Y%m%d-%H%M%S)
 SUMMARY_LOG="$LOG_DIR/ralph-debate-$TS.log"

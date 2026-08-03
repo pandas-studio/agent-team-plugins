@@ -21,7 +21,7 @@ PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck disable=SC1091
 . "$PLUGIN_ROOT/lib/common.sh"
 
-TEAM=$(detect_team)
+TEAM=$(detect_team) || exit 2
 LOG_DIR="$(ralph_workspace_root)/log/$TEAM"
 
 case "$VARIANT" in

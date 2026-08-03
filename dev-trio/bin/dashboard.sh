@@ -16,6 +16,11 @@
 #   Ctrl-C  also quits
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=../lib/namespace.sh
+. "$PLUGIN_ROOT/lib/namespace.sh" || exit 2
+
 ROLE="${1:?usage: $0 agy|codex}"
 
 case "$ROLE" in
@@ -34,19 +39,7 @@ case "$ROLE" in
 esac
 
 # Team namespace — must match what wrappers use.
-# Priority: $AGENT_TEAM env > tmux @team-name window option > tmux session name > "default"
-detect_team() {
-  if [ -n "${AGENT_TEAM:-}" ]; then echo "$AGENT_TEAM"; return; fi
-  if [ -n "${TMUX:-}" ]; then
-    local n
-    n=$(tmux show-options -wqv -t "${TMUX_PANE:-}" '@team-name' 2>/dev/null) || n=""
-    [ -n "$n" ] && { echo "$n"; return; }
-    n=$(tmux display-message -p -t "${TMUX_PANE:-}" '#{session_name}' 2>/dev/null) || n=""
-    [ -n "$n" ] && { echo "$n"; return; }
-  fi
-  echo default
-}
-TEAM=$(detect_team)
+TEAM=$(agent_team_detect_team) || exit 2
 LOG_DIR="${DEV_TRIO_LOG_DIR:-$PWD/.dev-trio/log}/$TEAM"
 LATEST="$LOG_DIR/latest-$ROLE.log"
 
