@@ -11,7 +11,7 @@ from helpers import FakeRunner, initial, make_repo
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
-from agent_team_graph.graph import _changed_paths, _ignored_paths, build_graph
+from agent_team_graph.graph import _changed_paths, _file_digest, _ignored_paths, build_graph
 
 
 def _graph(tmp_path: Path, runner: FakeRunner):
@@ -140,13 +140,12 @@ def test_runtime_state_inside_the_repo_never_counts_against_the_gate(tmp_path: P
 
 def test_receipt_covers_untracked_files(tmp_path: Path):
     workspace, spec = make_repo(tmp_path)
-    runner = FakeRunner(writes={"README.md": "changed\n"})
+    runner = FakeRunner(writes={"README.md": "changed\n", "NEW.md": "brand new\n"})
     graph = _graph(tmp_path, runner)
     state = initial(workspace, spec, "receipt")
     state["allowed_paths"] = ["README.md", "NEW.md"]
     config = {"configurable": {"thread_id": "receipt"}}
     graph.invoke(state, config=config)
-    (workspace / "NEW.md").write_text("brand new\n", encoding="utf-8")
     graph.invoke(Command(resume="approve"), config=config)
 
     values = graph.get_state(config).values
@@ -154,3 +153,56 @@ def test_receipt_covers_untracked_files(tmp_path: Path):
     # `git diff` cannot see NEW.md, so a diff-only digest would silently omit it.
     assert "NEW.md" in receipt["new_files"]
     assert receipt["change_sha256"] != receipt["tracked_diff_sha256"]
+    assert receipt["change_sha256"] == receipt["reviewed_change_sha256"]
+
+
+def test_change_after_approval_interrupt_blocks_receipt(tmp_path: Path):
+    workspace, spec = make_repo(tmp_path)
+    graph = _graph(tmp_path, FakeRunner(writes={"README.md": "reviewed\n"}))
+    state = initial(workspace, spec, "approval-drift")
+    state["allowed_paths"] = ["README.md", "NEW.md"]
+    config = {"configurable": {"thread_id": "approval-drift"}}
+    graph.invoke(state, config=config)
+    reviewed = graph.get_state(config).values["reviewed_change_sha256"]
+
+    (workspace / "NEW.md").write_text("not reviewed\n", encoding="utf-8")
+    graph.invoke(Command(resume="approve"), config=config)
+
+    values = graph.get_state(config).values
+    assert values["status"] == "needs-human"
+    assert Path(values["artifacts"][-1]["path"]).name == "91-approval-change-drift.json"
+    assert not any(item["name"] == "90-approval-receipt.json" for item in values["artifacts"])
+    drift = json.loads(Path(values["artifacts"][-1]["path"]).read_text(encoding="utf-8"))
+    assert drift["reviewed_change_sha256"] == reviewed
+    assert drift["current_change_sha256"] != reviewed
+
+
+def test_change_during_review_invalidates_gate_identity(tmp_path: Path):
+    class MutatingReviewer(FakeRunner):
+        def run(self, role: str, prompt: str, workspace: Path):
+            result = super().run(role, prompt, workspace)
+            if role.endswith(".reviewer"):
+                (workspace / "README.md").write_text("changed during review\n", encoding="utf-8")
+            return result
+
+    workspace, spec = make_repo(tmp_path)
+    state = initial(workspace, spec, "review-drift")
+    state["max_attempts"] = 1
+    snapshot = _run(tmp_path, MutatingReviewer(), state, "review-drift")
+
+    assert snapshot.values["gate_passed"] is False
+    assert snapshot.values["verdict"] == "NEEDS-FIX"
+    assert snapshot.values["reviewed_change_sha256"] is None
+    assert snapshot.values["status"] == "needs-human"
+    assert any(item["name"] == "55-review-drift-attempt-1.json" for item in snapshot.values["artifacts"])
+
+
+def test_untracked_symlink_digest_does_not_follow_external_target(tmp_path: Path):
+    workspace, _ = make_repo(tmp_path)
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("first secret\n", encoding="utf-8")
+    (workspace / "link.txt").symlink_to(outside)
+    first = _file_digest(workspace, "link.txt")
+
+    outside.write_text("different secret\n", encoding="utf-8")
+    assert _file_digest(workspace, "link.txt") == first

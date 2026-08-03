@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import re
+import stat
 import subprocess
 from pathlib import Path
 from typing import Any, Protocol
@@ -33,6 +36,18 @@ def _git(workspace: Path, *args: str) -> str:
     if result.returncode:
         raise ValueError(result.stderr.strip() or f"git {' '.join(args)} failed")
     return result.stdout.strip()
+
+
+def _git_bytes(workspace: Path, *args: str) -> bytes:
+    result = subprocess.run(
+        ["git", "-C", str(workspace), *args],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode:
+        error = result.stderr.decode(errors="replace").strip()
+        raise ValueError(error or f"git {' '.join(args)} failed")
+    return result.stdout
 
 
 def _normalize_allowed(paths: list[str]) -> list[str]:
@@ -82,6 +97,59 @@ def _ignored_paths(repo_root: Path, excluded: list[str]) -> list[str]:
         repo_root, "ls-files", "--others", "--ignored", "--exclude-standard"
     ).splitlines()
     return _keep(listed, excluded)
+
+
+def _file_digest(repo_root: Path, relative: str) -> str:
+    """Hash an untracked path without following a symlink outside the repository."""
+
+    path = repo_root / relative
+    metadata = path.lstat()
+    if stat.S_ISLNK(metadata.st_mode):
+        kind = b"symlink"
+        content = os.readlink(path).encode()
+    elif stat.S_ISREG(metadata.st_mode):
+        try:
+            path.resolve(strict=True).relative_to(repo_root.resolve())
+        except ValueError as exc:
+            raise ValueError(f"untracked path resolves outside repository: {relative}") from exc
+        kind = b"file"
+        content = path.read_bytes()
+    else:
+        raise ValueError(f"cannot attest non-file untracked path: {relative}")
+    return hashlib.sha256(kind + b"\0" + content).hexdigest()
+
+
+def _change_snapshot(
+    repo_root: Path,
+    base_sha: str,
+    excluded: list[str],
+    strict_ignored: bool,
+) -> dict[str, Any]:
+    """Return a canonical identity for the exact change set covered by the gate."""
+
+    tracked_diff = _git_bytes(repo_root, "diff", "--binary", base_sha, "--")
+    tracked, untracked = _changed_paths(repo_root, base_sha, excluded)
+    ignored = _ignored_paths(repo_root, excluded)
+    new_files = {path: _file_digest(repo_root, path) for path in untracked}
+    ignored_files = (
+        {path: _file_digest(repo_root, path) for path in ignored} if strict_ignored else {}
+    )
+    document = {
+        "base_sha": base_sha,
+        "tracked_diff_sha256": hashlib.sha256(tracked_diff).hexdigest(),
+        "new_files": new_files,
+        "ignored_files": ignored_files,
+        "strict_ignored": strict_ignored,
+    }
+    encoded = json.dumps(
+        document, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode()
+    return document | {
+        "change_sha256": hashlib.sha256(encoded).hexdigest(),
+        "changed_paths": sorted(set(tracked) | set(untracked)),
+        "untracked_paths": untracked,
+        "ignored_paths": ignored,
+    }
 
 
 def _outside_scope(changed: list[str], allowed: list[str]) -> list[str]:
@@ -249,10 +317,11 @@ def build_graph(
                 output = completed.stdout + completed.stderr
         repo_root = Path(state["repo_root"])
         excluded = state.get("excluded_paths", [])
-        tracked, untracked = _changed_paths(repo_root, state["base_sha"], excluded)
-        ignored = _ignored_paths(repo_root, excluded)
-        changed = sorted(set(tracked) | set(untracked))
-        scoped = sorted(set(changed) | set(ignored)) if state.get("strict_ignored") else changed
+        strict_ignored = bool(state.get("strict_ignored", False))
+        snapshot = _change_snapshot(repo_root, state["base_sha"], excluded, strict_ignored)
+        changed = snapshot["changed_paths"]
+        ignored = snapshot["ignored_paths"]
+        scoped = sorted(set(changed) | set(ignored)) if strict_ignored else changed
         outside_scope = _outside_scope(scoped, state["allowed_paths"])
         passed = passed and not outside_scope
         record = {
@@ -260,16 +329,27 @@ def build_graph(
             "returncode": returncode,
             "passed": passed,
             "changed_paths": changed,
-            "untracked_paths": untracked,
+            "untracked_paths": snapshot["untracked_paths"],
             "ignored_paths": ignored,
-            "strict_ignored": bool(state.get("strict_ignored", False)),
+            "strict_ignored": strict_ignored,
             "outside_scope": outside_scope,
+            "gated_change_sha256": snapshot["change_sha256"],
+            "attestation_covers": (
+                "tracked binary diff plus untracked and ignored file content digests"
+                if strict_ignored
+                else "tracked binary diff plus untracked file content digests; ignored files excluded"
+            ),
             "output": output,
         }
         artifact = store.write_json(
             state["run_id"], f"40-gate-attempt-{state['attempt']}.json", record
         )
-        update: dict[str, Any] = {"gate_passed": passed, "artifacts": [artifact]}
+        update: dict[str, Any] = {
+            "gate_passed": passed,
+            "gated_change_sha256": snapshot["change_sha256"],
+            "reviewed_change_sha256": None,
+            "artifacts": [artifact],
+        }
         if errors:
             update["errors"] = errors
         return update
@@ -279,14 +359,44 @@ def build_graph(
             state, "reviewer", f"50-review-attempt-{state['attempt']}.md"
         )
         verdict = parse_verdict(output)
+        current = _change_snapshot(
+            Path(state["repo_root"]),
+            state["base_sha"],
+            state.get("excluded_paths", []),
+            bool(state.get("strict_ignored", False)),
+        )
+        artifacts = [artifact]
+        errors: list[str] = []
+        gated_digest = state.get("gated_change_sha256")
+        unchanged_since_gate = bool(gated_digest) and current["change_sha256"] == gated_digest
+        if not unchanged_since_gate:
+            drift = store.write_json(
+                state["run_id"],
+                f"55-review-drift-attempt-{state['attempt']}.json",
+                {
+                    "gated_change_sha256": gated_digest,
+                    "current_change_sha256": current["change_sha256"],
+                    "note": "change set mutated after the test/scope gate",
+                },
+            )
+            artifacts.append(drift)
+            errors.append(f"review attempt {state['attempt']}: change set drifted after gate")
+            verdict = "NEEDS-FIX"
         if not state["gate_passed"] and verdict == "SHIP":
             verdict = "NEEDS-FIX"
-        return {
+        update: dict[str, Any] = {
             "review": output,
             "verdict": verdict,
-            "artifacts": [artifact],
+            "gate_passed": state["gate_passed"] and unchanged_since_gate,
+            "reviewed_change_sha256": (
+                current["change_sha256"] if unchanged_since_gate else None
+            ),
+            "artifacts": artifacts,
             "usage": [usage],
         }
+        if errors:
+            update["errors"] = errors
+        return update
 
     def approval_node(state: GraphState) -> dict[str, Any]:
         decision = interrupt(
@@ -296,6 +406,7 @@ def build_graph(
                 "verdict": state["verdict"],
                 "base_sha": state["base_sha"],
                 "attempt": state["attempt"],
+                "reviewed_change_sha256": state.get("reviewed_change_sha256"),
             }
         )
         normalized = decision.get("decision") if isinstance(decision, dict) else decision
@@ -306,24 +417,49 @@ def build_graph(
     def publish_node(state: GraphState) -> dict[str, Any]:
         repo_root = Path(state["repo_root"])
         excluded = state.get("excluded_paths", [])
-        diff = _git(repo_root, "diff", "--binary", state["base_sha"], "--")
-        _, untracked = _changed_paths(repo_root, state["base_sha"], excluded)
-        # `git diff` cannot see files git does not track yet, so a receipt built
-        # from the diff alone would attest to an incomplete change set. Fold each
-        # new file's content digest into the receipt hash.
-        new_files = {
-            path: hashlib.sha256((repo_root / path).read_bytes()).hexdigest()
-            for path in untracked
-        }
-        manifest = diff + "".join(f"\n{path}\t{new_files[path]}" for path in sorted(new_files))
+        current = _change_snapshot(
+            repo_root,
+            state["base_sha"],
+            excluded,
+            bool(state.get("strict_ignored", False)),
+        )
+        expected = state.get("reviewed_change_sha256", "")
+        if not expected or current["change_sha256"] != expected:
+            drift = {
+                "approved": False,
+                "reviewed_change_sha256": expected,
+                "current_change_sha256": current["change_sha256"],
+                "changed_paths": current["changed_paths"],
+                "ignored_paths_not_attested": (
+                    [] if state.get("strict_ignored") else current["ignored_paths"]
+                ),
+                "note": "approval blocked because the change set drifted after review",
+            }
+            artifact = store.write_json(
+                state["run_id"], "91-approval-change-drift.json", drift
+            )
+            return {
+                "status": "needs-human",
+                "artifacts": [artifact],
+                "errors": ["approval blocked: change set differs from reviewed digest"],
+            }
         receipt = {
             "approved": True,
             "base_sha": state["base_sha"],
             "head_sha": _git(repo_root, "rev-parse", "HEAD"),
-            "tracked_diff_sha256": hashlib.sha256(diff.encode()).hexdigest(),
-            "new_files": new_files,
-            "change_sha256": hashlib.sha256(manifest.encode()).hexdigest(),
-            "covers": "tracked diff against base_sha plus a content digest per untracked file",
+            "tracked_diff_sha256": current["tracked_diff_sha256"],
+            "new_files": current["new_files"],
+            "ignored_files": current["ignored_files"],
+            "change_sha256": current["change_sha256"],
+            "reviewed_change_sha256": expected,
+            "ignored_paths_not_attested": (
+                [] if state.get("strict_ignored") else current["ignored_paths"]
+            ),
+            "covers": (
+                "tracked binary diff plus untracked and ignored file content digests"
+                if state.get("strict_ignored")
+                else "tracked binary diff plus untracked file content digests; ignored files excluded"
+            ),
             "note": "approval receipt only; this runtime never pushes or force-merges",
         }
         artifact = store.write_json(state["run_id"], "90-approval-receipt.json", receipt)

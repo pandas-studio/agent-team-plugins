@@ -29,6 +29,8 @@ class GraphState(TypedDict, total=False):
     review: str
     verdict: str
     gate_passed: bool
+    gated_change_sha256: str
+    reviewed_change_sha256: str | None
     approval: str
     status: str
     artifacts: Annotated[list[dict[str, Any]], operator.add]

@@ -83,6 +83,8 @@ def _view(graph: Any, thread_id: str) -> dict[str, Any]:
         "status": values.get("status", "not-found"),
         "verdict": values.get("verdict"),
         "attempt": values.get("attempt"),
+        "gated_change_sha256": values.get("gated_change_sha256"),
+        "reviewed_change_sha256": values.get("reviewed_change_sha256"),
         "next": list(snapshot.next),
         "errors": values.get("errors", []),
         "artifacts": values.get("artifacts", []),

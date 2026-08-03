@@ -45,6 +45,9 @@ JSON을 파싱하지 말고 종료 코드로 분기하세요.
 - 승인은 push/merge 권한이 아니라 로컬 승인 영수증만 생성합니다. 영수증의
   `change_sha256`은 tracked diff와 **untracked 신규 파일의 내용 해시**를 함께
   덮습니다 — `git diff`만으로는 신규 파일이 빠지기 때문입니다.
+- gate와 reviewer가 확정한 `reviewed_change_sha256`을 승인 질문에 표시하고 승인 직전
+  다시 계산합니다. 승인 대기 중 파일이 바뀌면 영수증 생성을 차단하고 `needs-human`으로
+  종료합니다.
 - 리뷰 판정은 `VERDICT: <값>` 형식의 줄만 인정합니다. 인용문이나 코드 블록에
   들어 있는 맨 `SHIP`으로는 승인되지 않습니다.
 - 산출물은 run별 immutable 경로에 저장하며 `latest` 링크를 만들지 않습니다.

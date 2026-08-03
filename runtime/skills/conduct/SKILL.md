@@ -58,6 +58,9 @@ Branch on these rather than parsing the JSON:
 - The approval receipt is **local only**: it records what was approved and
   never pushes, merges, or force-updates anything. Do not treat exit 0 as
   permission to push.
+- The approval payload includes `reviewed_change_sha256`. On resume the runtime
+  recomputes the current change identity and blocks approval if any attested
+  tracked or untracked content changed while the graph was interrupted.
 - `--test-command` is split as argv. Shell operators (`&&`, `|`, `>`) are not
   interpreted — wrap them in a script if you need them.
 - Artifacts under `.agent-team/artifacts/<run_id>/` are immutable. If a write
