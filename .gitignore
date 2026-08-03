@@ -10,3 +10,5 @@
 .dev-trio/log/
 .ralph-trio/
 .spec-trio/
+.agent-team/
+runtime/.venv/

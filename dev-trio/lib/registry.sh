@@ -69,7 +69,11 @@ _registry_builtin_roles() {
   "dev-trio.researcher": "agy",
   "dev-trio.reviewer": "codex",
   "debate-conductor.generator": "agy",
-  "debate-conductor.critic": "codex"
+  "debate-conductor.critic": "codex",
+  "langgraph-conductor.planner": "claude",
+  "langgraph-conductor.coder": "claude",
+  "langgraph-conductor.researcher": "agy",
+  "langgraph-conductor.reviewer": "codex"
 }
 JSON
 }
@@ -103,12 +107,16 @@ registry_known_roles() {
     dev-trio.researcher \
     dev-trio.reviewer \
     debate-conductor.generator \
-    debate-conductor.critic
+    debate-conductor.critic \
+    langgraph-conductor.planner \
+    langgraph-conductor.coder \
+    langgraph-conductor.researcher \
+    langgraph-conductor.reviewer
 }
 
 registry_role_is_known() {
   case "$1" in
-    dev-trio.researcher|dev-trio.reviewer|debate-conductor.generator|debate-conductor.critic) return 0 ;;
+    dev-trio.researcher|dev-trio.reviewer|debate-conductor.generator|debate-conductor.critic|langgraph-conductor.planner|langgraph-conductor.coder|langgraph-conductor.researcher|langgraph-conductor.reviewer) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -120,6 +128,10 @@ _registry_role_envname() {
     dev-trio.reviewer)            printf 'DEV_TRIO_REVIEWER_MODEL' ;;
     debate-conductor.generator)   printf 'DEBATE_GENERATOR_MODEL' ;;
     debate-conductor.critic)      printf 'DEBATE_CRITIC_MODEL' ;;
+    langgraph-conductor.planner)  printf 'LANGGRAPH_CONDUCTOR_PLANNER_MODEL' ;;
+    langgraph-conductor.coder)    printf 'LANGGRAPH_CONDUCTOR_CODER_MODEL' ;;
+    langgraph-conductor.researcher) printf 'LANGGRAPH_CONDUCTOR_RESEARCHER_MODEL' ;;
+    langgraph-conductor.reviewer) printf 'LANGGRAPH_CONDUCTOR_REVIEWER_MODEL' ;;
     *)                            printf '' ;;
   esac
 }

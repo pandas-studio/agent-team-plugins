@@ -141,7 +141,7 @@ The transcript becomes the rationale for the spec edit. Re-run `spec-trio.sh` af
 spec-trio-doctor.sh
 ```
 
-`tests/smoke-pr5.sh` — comprehensive 134-assertion smoke (RFC 0004 PR 5 fixtures): both scope gates, all six dispatch states, manifest schema invariants, and the coverage `--manifest-history` rollup with anchored-regex behavior (§5.3 doesn't match §5.30).
+`tests/smoke-pr5.sh` — comprehensive 232-assertion smoke (RFC 0004 fixtures): both scope gates, dispatch states, manifest schema invariants, and the coverage `--manifest-history` rollup with anchored-regex behavior (§5.3 doesn't match §5.30).
 
 ```bash
 bash $PLUGIN_ROOT/tests/smoke-pr5.sh
@@ -170,7 +170,7 @@ spec-trio/
 │   ├── BACKLOG.md.template       # task-list with §-citation examples
 │   └── fix_plan.md.template      # iteration log + completion marker
 ├── tests/
-│   └── smoke-pr5.sh              # 134-assert smoke (manifests + gates + coverage rollup)
+│   └── smoke-pr5.sh              # 232-assert smoke (manifests + gates + coverage rollup)
 ├── skills/
 │   └── bootstrap/SKILL.md        # /spec-trio:bootstrap
 └── .claude-plugin/plugin.json

@@ -29,6 +29,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+_NAMESPACE_LIB="$PLUGIN_ROOT/lib/namespace.sh"
+[ -f "$_NAMESPACE_LIB" ] || { echo "ask-codex: namespace.sh not found at $_NAMESPACE_LIB" >&2; exit 1; }
+# shellcheck source=../lib/namespace.sh
+. "$_NAMESPACE_LIB"
+unset _NAMESPACE_LIB
+
 ROLE_FILE="${REVIEWER_ROLE_FILE:-$PLUGIN_ROOT/lib/roles/reviewer.md}"
 [ -f "$ROLE_FILE" ] || { echo "error: reviewer role file not found: $ROLE_FILE" >&2; exit 2; }
 
@@ -52,19 +58,7 @@ REVIEWER_MODEL="$(registry_resolve_role dev-trio reviewer "")"
 registry_model_exists "$REVIEWER_MODEL" || { echo "ask-codex: reviewer model '$REVIEWER_MODEL' is not registered (run: agent-team-models list)" >&2; exit 2; }
 
 # Team namespace — isolates logs per tmux window/session.
-# Priority: $AGENT_TEAM env > tmux @team-name window option > tmux session name > "default"
-detect_team() {
-  if [ -n "${AGENT_TEAM:-}" ]; then echo "$AGENT_TEAM"; return; fi
-  if [ -n "${TMUX:-}" ]; then
-    local n
-    n=$(tmux show-options -wqv -t "${TMUX_PANE:-}" '@team-name' 2>/dev/null) || n=""
-    [ -n "$n" ] && { echo "$n"; return; }
-    n=$(tmux display-message -p -t "${TMUX_PANE:-}" '#{session_name}' 2>/dev/null) || n=""
-    [ -n "$n" ] && { echo "$n"; return; }
-  fi
-  echo default
-}
-TEAM=$(detect_team)
+TEAM=$(agent_team_detect_team) || exit 2
 LOG_DIR="${DEV_TRIO_LOG_DIR:-$PWD/.dev-trio/log}/$TEAM"
 
 RESEARCH_FILE=""

@@ -71,7 +71,7 @@ case "$VARIANT" in
   *)    err_allow "unknown RALPH_VARIANT=$VARIANT" ;;
 esac
 
-TEAM=$(detect_team)
+TEAM=$(detect_team) || exit 2
 STATE_DIR=$(ralph_state_dir)
 ITER_FILE="$STATE_DIR/iter"
 HASH_FILE="$STATE_DIR/prompt.sha256"

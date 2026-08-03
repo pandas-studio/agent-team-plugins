@@ -22,6 +22,11 @@
       "name": "spec-trio",
       "source": "./spec-trio",
       "description": "Spec-anchored ralph-trio: an external spec.md gates planner / coder / reviewer with allowlist scope checks + §-citation coverage. Planner can request pre-coding research (Antigravity). Depends on dev-trio's ask-agy.sh/ask-codex.sh. bootstrap + install-pm skills."
+    },
+    {
+      "name": "langgraph-conductor",
+      "source": "./runtime",
+      "description": "Durable LangGraph control plane over the shared CLI model registry: bounded retries, argv-only test gates, SQLite checkpoints, immutable artifacts, and human ship approval."
     }
   ]
 }

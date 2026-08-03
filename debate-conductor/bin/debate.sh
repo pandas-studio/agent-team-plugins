@@ -58,6 +58,11 @@ PRIMARY_CRIT_OPT=""
 CONTINUE_FROM=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_NAMESPACE_LIB="$SCRIPT_DIR/../lib/namespace.sh"
+[ -f "$_NAMESPACE_LIB" ] || { echo "debate: namespace.sh not found at $_NAMESPACE_LIB" >&2; exit 1; }
+# shellcheck source=../lib/namespace.sh
+. "$_NAMESPACE_LIB"
+unset _NAMESPACE_LIB
 _REGISTRY_LIB="$SCRIPT_DIR/../lib/registry.sh"
 [ -f "$_REGISTRY_LIB" ] || { echo "debate: registry.sh not found at $_REGISTRY_LIB" >&2; exit 1; }
 # shellcheck source=../lib/registry.sh
@@ -171,24 +176,11 @@ round_file() {
   fi
 }
 
-# Team detection (matches wrappers — for log isolation per tmux window)
-detect_team() {
-  if [ -n "${AGENT_TEAM:-}" ]; then echo "$AGENT_TEAM"; return; fi
-  if [ -n "${TMUX:-}" ]; then
-    local n
-    n=$(tmux show-options -wqv -t "${TMUX_PANE:-}" '@team-name' 2>/dev/null) || n=""
-    [ -n "$n" ] && { echo "$n"; return; }
-    n=$(tmux display-message -p -t "${TMUX_PANE:-}" '#{session_name}' 2>/dev/null) || n=""
-    [ -n "$n" ] && { echo "$n"; return; }
-  fi
-  echo default
-}
-
 if [ -n "$CONTEXT_FILE" ]; then
   [ -f "$CONTEXT_FILE" ] || { echo "context file not found: $CONTEXT_FILE" >&2; exit 2; }
 fi
 
-TEAM=$(detect_team)
+TEAM=$(agent_team_detect_team) || exit 2
 LOG_BASE="${DEBATE_LOG_DIR:-$PWD/.debate-conductor/log}"
 LOG_DIR="$LOG_BASE/$TEAM"
 

@@ -14,6 +14,9 @@ Then install the plugins you want:
 ```bash
 /plugin install dev-trio@pandas-studio
 /plugin install debate-conductor@pandas-studio
+/plugin install ralph-trio@pandas-studio
+/plugin install spec-trio@pandas-studio
+/plugin install langgraph-conductor@pandas-studio
 ```
 
 ## Plugins
@@ -22,12 +25,13 @@ Then install the plugins you want:
 | :--- | :--- | :--- | :--- |
 | [dev-trio](./dev-trio) | Claude=PM/Coder · Antigravity=Researcher · Codex=Reviewer | EP A | shipped |
 | [debate-conductor](./debate-conductor) | Claude=PM · Antigravity=Generator · Codex=Critic | EP B | shipped |
-
-More plugins (watch-pair, spec-trio, bisect-bot, ralph-trio) follow the same shape and will land here as their EPs publish.
+| [ralph-trio](./ralph-trio) | Claude=Planner/Coder · Antigravity=Researcher · Codex=Reviewer | EP C | shipped |
+| [spec-trio](./spec-trio) | Spec-gated planner/coder/reviewer loop | EP D | shipped |
+| [langgraph-conductor](./runtime) | Durable planner/researcher/coder/reviewer graph | Guide v1 | preview |
 
 ## Shared model configuration
 
-Both plugins resolve their companion-CLI roles through a **shared model registry**. A *model* is a named CLI adapter (how to spawn a CLI and feed it a prompt); a *role* (e.g. `dev-trio.researcher`) is bound to a model. Three models ship built-in — `agy`, `codex`, `claude` — and the default bindings match the role tables in each plugin, so **zero configuration is required**.
+The role-based plugins resolve their companion CLIs through a **shared model registry**. A *model* is a named CLI adapter (how to spawn a CLI and feed it a prompt); a *role* (e.g. `dev-trio.researcher`) is bound to a model. Three models ship built-in — `agy`, `codex`, `claude` — and the default bindings match the role tables, so **zero configuration is required**.
 
 To customise, use the `agent-team-models` CLI. It is on PATH whenever either plugin is active; both plugins ship an identical copy and operate on the **same** config file:
 
@@ -50,6 +54,10 @@ Config lives at `$AGENT_TEAM_MODELS_CONFIG`, else `${XDG_CONFIG_HOME:-~/.config}
 | `dev-trio.reviewer` | `codex` | `DEV_TRIO_REVIEWER_MODEL` |
 | `debate-conductor.generator` | `agy` | `DEBATE_GENERATOR_MODEL` |
 | `debate-conductor.critic` | `codex` | `DEBATE_CRITIC_MODEL` |
+| `langgraph-conductor.planner` | `claude` | `LANGGRAPH_CONDUCTOR_PLANNER_MODEL` |
+| `langgraph-conductor.coder` | `claude` | `LANGGRAPH_CONDUCTOR_CODER_MODEL` |
+| `langgraph-conductor.researcher` | `agy` | `LANGGRAPH_CONDUCTOR_RESEARCHER_MODEL` |
+| `langgraph-conductor.reviewer` | `codex` | `LANGGRAPH_CONDUCTOR_REVIEWER_MODEL` |
 
 **Resolution precedence.** Which *model* runs a role: CLI flag (`--model`, `--primary-gen`/`--primary-crit`) → per-role env var → config binding → built-in default. Which *binary* runs a model: legacy per-role `*_CLI` (`RESEARCHER_CLI`, `REVIEWER_CLI`, `GENERATOR_CLI`, `CRITIC_CLI`) → the model's own env override (`AGY_CLI`, `CODEX_CLI`, `CLAUDE_CLI`, `KIMI_CLI`) → its built-in command. All existing env overrides keep working unchanged.
 
@@ -84,7 +92,7 @@ Every plugin in this marketplace follows broadly the same layout. Skill set vari
 └── <topics/|tmux/|...>      # plugin-specific assets (canned topics, keybindings)
 ```
 
-`bin/` and `lib/` are bash. Roles are markdown. Skills are markdown with YAML frontmatter. No language runtime beyond bash + the third-party CLIs (`claude`, `agy`, `codex`), plus `jq` for the [shared model registry](#shared-model-configuration) and RFC 0004 run manifests.
+The four legacy plugins remain Bash-first. `langgraph-conductor` adds an optional Python 3.12 runtime pinned with `uv`; it orchestrates the same CLI adapters and does not call model-provider APIs directly. `jq` is required for the Bash [shared model registry](#shared-model-configuration).
 
 ## Develop locally
 
@@ -93,6 +101,12 @@ git clone git@github.com:pandas-studio/agent-team-plugins.git
 cd agent-team-plugins
 claude --plugin-dir ./dev-trio           # load one plugin
 claude --plugin-dir ./debate-conductor
+claude --plugin-dir ./ralph-trio
+claude --plugin-dir ./spec-trio
+
+cd runtime
+uv sync --frozen --python 3.12 --extra dev
+uv run pytest
 ```
 
 `/reload-plugins` picks up edits without restarting Claude Code.

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pandas-studio.github.io/agent-team-plugins/rfc0004-manifest-v1.schema.json",
+  "title": "RFC0004 Harness Receipt v1",
+  "type": "object",
+  "required": ["run_id", "role", "model", "usage_source"],
+  "properties": {
+    "run_id": {"type": "string"},
+    "role": {"type": "string"},
+    "model": {"type": "string"},
+    "usage_source": {"enum": ["reported", "estimated", "unavailable"]},
+    "input_tokens": {"type": ["integer", "null"], "minimum": 0},
+    "output_tokens": {"type": ["integer", "null"], "minimum": 0}
+  },
+  "additionalProperties": true
+}
