@@ -114,6 +114,20 @@ If `latest-codex.final.md` contains a `## NEED RESEARCH` section after the verdi
 
 Codex's NEEDS-FIX findings are **suggestions**, not fix orders. After surfacing, **wait for the user** to direct what to address. Don't open Edit calls yourself unless the user explicitly says "fix them all" / "address the blockers" / etc.
 
+## 6 · Track *where* findings land, not just how many
+
+Repeat rounds earn their keep — a second and third round routinely catch regressions the first round's fixes introduced. But watch the distribution. **When a new round lands fresh findings in the same function or file the previous round already fixed, that is a signal about whether the code should exist, not about whether it is correct.** It compounds: each fix is written on the assumption that the thing belongs there, so the surface grows.
+
+**Two rounds in the same unit is the trigger.** Before dispatching a third, stop and answer:
+
+- **Is a tested library already doing this?** Hand-rolled canonicalisation, diffing, parsing, and date handling are the usual suspects.
+- **What is the actual gap?** It is almost always *adapting the inputs* — making two things comparable — not reimplementing the algorithm.
+- **What would deleting it cost?** If the answer is "a short adapter", delete it.
+
+Codex reviews the code in front of it; it never asks whether that code should exist. That question is the PM's. Surface it to the user with the finding distribution as evidence ("rounds 1-3 produced N findings, all in `<unit>`") instead of dispatching another round.
+
+Deleting code you have already fixed three times is not waste. The fixes are the evidence that produced the decision, and the minimal reproductions they generated are the regression suite for the replacement — **replay them against the new code** and report which ones changed behaviour deliberately, so a narrowing is declared rather than implied.
+
 ## Constraints
 
 - **Do not call `codex` directly.** `ask-codex.sh` is the only entry point — it handles role-prompt loading, trust-boundary tag stripping, `codex exec --output-last-message` capture, and RFC 0004 manifest emission (`dev-trio-review` variant).
