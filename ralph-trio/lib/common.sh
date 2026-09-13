@@ -75,14 +75,32 @@ enforce_max_iter() {
 }
 
 # parse_runtime SPEC — accepts "6h", "30m", "120s", or bare integer (seconds).
+# rc=1 (with a message on stderr) for anything else — "1d", "1h30m", "90min" —
+# so callers can refuse to start instead of silently running with no deadline.
+# Callers invoke it in $(...), where an exit would only end the subshell: check
+# the rc.
 parse_runtime() {
-  local spec="$1"
+  local spec="$1" num mult=1
   case "$spec" in
-    *h) echo $(( ${spec%h} * 3600 )) ;;
-    *m) echo $(( ${spec%m} * 60 )) ;;
-    *s) echo "${spec%s}" ;;
-    *)  echo "$spec" ;;
+    *h) num="${spec%h}"; mult=3600 ;;
+    *m) num="${spec%m}"; mult=60 ;;
+    *s) num="${spec%s}" ;;
+    *)  num="$spec" ;;
   esac
+  case "$num" in
+    ''|*[!0-9]*)
+      echo "invalid --max-runtime '$spec' (expected N, Ns, Nm or Nh)" >&2
+      return 1 ;;
+  esac
+  # Strip leading zeros: $(( 08 )) is an invalid octal literal.
+  num="${num#"${num%%[!0]*}"}"
+  num="${num:-0}"
+  # 9 digits * 3600 stays far inside 64-bit arithmetic, even plus `date +%s`.
+  if [ "${#num}" -gt 9 ]; then
+    echo "invalid --max-runtime '$spec' (too large)" >&2
+    return 1
+  fi
+  echo $(( num * mult ))
 }
 
 # enforce_max_runtime DEADLINE_TS — rc=0 ok, rc=1 past deadline.
@@ -93,20 +111,37 @@ enforce_max_runtime() {
   [ "$(date +%s)" -lt "$deadline" ]
 }
 
-# with_worktree ITER BASE — creates /tmp/ralph-${TEAM}-iter-${ITER} on a new
-# branch ralph/${TEAM}-iter-${ITER} from BASE, echoes the worktree path.
-# Caller must `cd` into it.
+# with_worktree ITER BASE — creates a fresh /tmp/ralph-${TEAM}-iter-${ITER}.XXXXXX
+# on a new branch ralph/${TEAM}-iter-${ITER}-XXXXXX from BASE, echoes the
+# worktree path. rc=1 (nothing echoed) when the worktree can't be created;
+# callers must check it. Caller must `cd` into it.
+#
+# The mktemp suffix makes path and branch unique per call. Team + iter alone
+# are shared by every run in the same team (team is `default` outside tmux),
+# so an earlier version that force-removed a pre-existing path and deleted a
+# pre-existing branch could destroy another live run's work — and, when the
+# add failed, still echoed the path so this run worked inside the other one.
+# Nothing is removed here: an existing path or branch is simply never reused.
 with_worktree() {
   local iter="$1" base="$2"
   : "${TEAM:?with_worktree: TEAM not set}"
-  local wt="/tmp/ralph-${TEAM}-iter-${iter}"
-  local br="ralph/${TEAM}-iter-${iter}"
-  if [ -d "$wt" ]; then
-    git worktree remove --force "$wt" 2>/dev/null || true
+  local wt br
+  wt=$(mktemp -d "/tmp/ralph-${TEAM}-iter-${iter}.XXXXXX") \
+    || { ralph_log "ERROR: mktemp failed for iter $iter worktree"; return 1; }
+  br="ralph/${TEAM}-iter-${iter}-${wt##*.}"
+  if ! git worktree add -b "$br" "$wt" "$base" >&2; then
+    rmdir "$wt" 2>/dev/null || true
+    ralph_log "ERROR: git worktree add failed for $br (iter $iter)"
+    return 1
   fi
-  git branch -D "$br" 2>/dev/null || true
-  git worktree add -b "$br" "$wt" "$base" >&2
   echo "$wt"
+}
+
+# worktree_branch WT — echo the branch checked out in WT; rc=1 if none. The
+# single source of an iteration's branch name: callers ask the worktree rather
+# than rebuilding the name, which carries a per-call suffix.
+worktree_branch() {
+  git -C "$1" symbolic-ref --short HEAD 2>/dev/null
 }
 
 # commit_worktree_changes WT ITER — stage+commit any uncommitted worktree edits
@@ -134,8 +169,11 @@ commit_worktree_changes() {
 # PASSED_FLAG=0 → leave branch deleted, remove worktree.
 merge_or_discard_worktree() {
   local wt="$1" iter="$2" passed="$3" orig="$4"
-  : "${TEAM:?merge_or_discard_worktree: TEAM not set}"
-  local br="ralph/${TEAM}-iter-${iter}"
+  local br
+  br=$(worktree_branch "$wt") || {
+    ralph_log "cannot resolve the branch of worktree $wt (iter $iter); leaving it for inspection"
+    return 1
+  }
   if [ "$passed" = "1" ]; then
     if ! git -C "$orig" merge --ff-only "$br" >&2; then
       ralph_log "merge --ff-only failed for $br; leaving branch in place for inspection"

@@ -143,9 +143,13 @@ else
   GIT_RANGE_ARGS=()
 fi
 RALPH_COMMITS=()
+# ${arr[@]+...}: bash 3.2 treats an empty array as unbound under set -u, which
+# would kill git log inside the process substitution and report 0 commits.
+# tformat (not format) terminates the last line too; `read` drops an
+# unterminated final line, which lost the newest commit.
 while IFS= read -r line; do
   [ -n "$line" ] && RALPH_COMMITS+=("$line")
-done < <(git log "${GIT_RANGE_ARGS[@]}" --since="$SINCE" --pretty=format:'%h %s' --grep='^ralph' 2>/dev/null)
+done < <(git log ${GIT_RANGE_ARGS[@]+"${GIT_RANGE_ARGS[@]}"} --since="$SINCE" --pretty=tformat:'%h %s' --grep='^ralph' 2>/dev/null)
 
 ralph_log "scope: $TEAM, since=$SINCE, variant=${VARIANT:-any}, base-ref=${BASE_REF:-<none>}"
 ralph_log "  ralph logs found: ${#RALPH_LOGS[@]}"

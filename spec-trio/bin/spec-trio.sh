@@ -176,7 +176,8 @@ TS=$(date +%Y%m%d-%H%M%S)
 SUMMARY_LOG="$LOG_DIR/spec-trio-$TS.log"
 ln -sfn "spec-trio-$TS.log" "$LOG_DIR/latest-spec-trio.log"
 
-MAX_RUNTIME_SECS=$(parse_runtime "$MAX_RUNTIME_SPEC")
+# parse_runtime has already explained a bad spec on stderr.
+MAX_RUNTIME_SECS=$(parse_runtime "$MAX_RUNTIME_SPEC") || exit 2
 if [ "$MAX_RUNTIME_SECS" -gt 0 ]; then
   DEADLINE=$(( $(date +%s) + MAX_RUNTIME_SECS ))
 else
@@ -296,6 +297,30 @@ parse_codex_verdict() {
 # --output-last-message file (latest-codex.final.md under $ROOT/$TEAM) when it
 # exists and is non-empty; echo nothing otherwise.
 #
+# Build the explicit-diff-range hint for the reviewer (forward-ported from
+# ralph-trio.sh). The worker commits when green (roles/worker.md), and the
+# reviewer role defaults to the working tree — which is clean after a commit,
+# so without a range the reviewer would review nothing. BASE is the iter-base
+# SHA (the same anchor check_scope uses), so the Code2 re-review also covers
+# the whole iteration, not just the retry delta.
+build_range_hint() {
+  local pre_ref="$1" work_dir="$2"
+  [ -n "$pre_ref" ] || { echo ""; return 0; }
+  local post_ref
+  post_ref=$(git -C "$work_dir" rev-parse --verify -q HEAD 2>/dev/null || true)
+  if [ -z "$post_ref" ]; then
+    # Still no commit at all (the base is the empty tree): there is no HEAD to
+    # diff against, so everything is staged, unstaged, or untracked.
+    printf ' The repository has no commits yet; inspect the change via `git status --short`, `git diff --cached` and `git diff`, and read every untracked file.'
+  elif [ "$post_ref" != "$pre_ref" ]; then
+    printf ' The just-coded diff is in the range `%s..%s` (plus any uncommitted changes still in the working tree); inspect via `git diff %s..HEAD` AND `git status --short` / `git diff HEAD`, and read every untracked file.' \
+      "$pre_ref" "$post_ref" "$pre_ref"
+  else
+    printf ' The coder did NOT commit (HEAD is still at `%s`); inspect the working-tree state via `git status --short` and `git diff HEAD`, and read every untracked file.' \
+      "$pre_ref"
+  fi
+}
+
 # Why we read this file rather than the teed stdout: the dev-trio ask-codex.sh
 # contract declares the streamed transcript unreliable for the verdict — the
 # closing block (carrying the `## Verdict` token and any `## NEED RESEARCH`) may
@@ -462,7 +487,13 @@ while :; do
   WT=""
   WORK_DIR="$ORIGINAL_DIR"
   if [ "$USE_WORKTREE" = "1" ]; then
-    WT=$(with_worktree "$ITER" "$BASE_BRANCH")
+    if ! WT=$(with_worktree "$ITER" "$BASE_BRANCH"); then
+      ralph_log "could not create the iter $ITER worktree. Stopping."
+      # pop_top_task already marked the task done; put it back.
+      [ "$DRY_RUN" = "1" ] || append_to_backlog "$BACKLOG_FILE" "$TASK"
+      echo "=== STOP (worktree-failed) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
+      break
+    fi
     WORK_DIR="$WT"
     export RALPH_WT_DIR="$WT"
     printf '  worktree: %s\n' "$WT" >> "$SUMMARY_LOG"
@@ -473,7 +504,12 @@ while :; do
   # iter — without it the gate would only see HEAD~1..HEAD and miss earlier
   # commits in a multi-commit iter. Empty (e.g. unborn HEAD) → check_scope
   # falls back to its legacy HEAD~1..HEAD behavior.
-  ITER_BASE_SHA="$(git -C "$WORK_DIR" rev-parse HEAD 2>/dev/null || true)"
+  # --verify: plain `rev-parse HEAD` prints the literal "HEAD" in a repo with no
+  # commits, which after the coder's first commit names that commit — hiding it
+  # from both the scope gate and the reviewer. Anchor an unborn repo on the
+  # empty tree instead, so the first commit is diffed in full.
+  ITER_BASE_SHA="$(git -C "$WORK_DIR" rev-parse --verify -q HEAD 2>/dev/null \
+    || git -C "$WORK_DIR" hash-object -t tree /dev/null 2>/dev/null || true)"
 
   PLAN_LOG="$LOG_DIR/spec-trio-$TS-iter-$ITER-plan.log"
   CODE_LOG="$LOG_DIR/spec-trio-$TS-iter-$ITER-code.log"
@@ -781,8 +817,9 @@ while :; do
     # the PR 9 nested-write carve-out (it knows REVIEWER_ROLE_FILE; we don't).
     # DEV_TRIO_LOG_DIR pins ask-codex.sh's .final.md into spec-trio's durable
     # log tree (survives worktree teardown — see CODEX_FINAL_ROOT above).
+    RANGE_HINT=$(build_range_hint "$ITER_BASE_SHA" "$WORK_DIR")
     ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$CODEX_FINAL_ROOT" \
-        MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-codex.sh --with-spec "$SPEC_FILE" "Review uncommitted+committed changes related to this task: '$TASK'. Use the standard SHIP/NEEDS-FIX/DISCUSS/OUT-OF-SCOPE verdict format from your role prompt." 2>&1 ) | tee "$REVIEW_LOG" >/dev/null
+        MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-codex.sh --with-spec "$SPEC_FILE" "Review uncommitted+committed changes related to this task: '$TASK'.${RANGE_HINT} Use the standard SHIP/NEEDS-FIX/DISCUSS/OUT-OF-SCOPE verdict format from your role prompt." 2>&1 ) | tee "$REVIEW_LOG" >/dev/null
     # PIPESTATUS[0] = ask-codex.sh's rc (the subshell). Non-zero means codex
     # itself errored — but it often still echoes the role-prompt verdict
     # placeholder, so naive parsing would yield a bogus verdict. Force UNKNOWN
@@ -882,8 +919,9 @@ $RESEARCH"
           manifest_add_input kind=spec path="$SPEC_FILE"
           manifest_add_input kind=code-log path="$CODE2_LOG"
           # Pin the durable .final.md root (see Stage-3 review above).
+          RANGE_HINT2=$(build_range_hint "$ITER_BASE_SHA" "$WORK_DIR")
           ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$CODEX_FINAL_ROOT" \
-              MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-codex.sh --with-spec "$SPEC_FILE" "Re-review the same task after research-informed retry: '$TASK'. Use the standard SHIP/NEEDS-FIX/DISCUSS/OUT-OF-SCOPE verdict format from your role prompt." 2>&1 ) | tee "$REVIEW2_LOG" >/dev/null
+              MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-codex.sh --with-spec "$SPEC_FILE" "Re-review the same task after research-informed retry: '$TASK'.${RANGE_HINT2} Use the standard SHIP/NEEDS-FIX/DISCUSS/OUT-OF-SCOPE verdict format from your role prompt." 2>&1 ) | tee "$REVIEW2_LOG" >/dev/null
           CODEX2_RC=${PIPESTATUS[0]}
           # Verdict from the authoritative .final.md (see Stage-3 review above).
           CODEX2_FINAL=$(resolve_codex_final "$CODEX_FINAL_ROOT" "$TEAM")
@@ -958,7 +996,7 @@ $RESEARCH"
     fi
     if [ "$PASSED" = "1" ] && [ "$NO_VALIDATE" = "0" ]; then
       VAL_LOG="$LOG_DIR/spec-trio-$TS-iter-$ITER-validate.log"
-      if ! pre_merge_validate "$WT" "$BASE_BRANCH" "ralph/${TEAM}-iter-${ITER}" "$MAX_DIFF_LINES" 2>"$VAL_LOG"; then
+      if ! pre_merge_validate "$WT" "$BASE_BRANCH" "$(worktree_branch "$WT")" "$MAX_DIFF_LINES" 2>"$VAL_LOG"; then
         ralph_log "  pre_merge_validate FAILED — discarding instead of merging"
         printf '  validate: BLOCKED (see %s)\n' "$VAL_LOG" >> "$SUMMARY_LOG"
         printf '## iter %d · %s · WORKTREE-VALIDATE-BLOCK\nTask: %s\nValidate log: %s\n\n' \

@@ -122,7 +122,8 @@ ln -sfn "ralph-solo-$TS.log" "$LOG_DIR/latest-ralph-solo.log"
 ln -sfn "ralph-solo-$TS.log" "$LOG_DIR/latest-ralph.log"
 
 # Compute runtime deadline
-MAX_RUNTIME_SECS=$(parse_runtime "$MAX_RUNTIME_SPEC")
+# parse_runtime has already explained a bad spec on stderr.
+MAX_RUNTIME_SECS=$(parse_runtime "$MAX_RUNTIME_SPEC") || exit 2
 if [ "$MAX_RUNTIME_SECS" -gt 0 ]; then
   DEADLINE=$(( $(date +%s) + MAX_RUNTIME_SECS ))
 else
@@ -173,7 +174,11 @@ while :; do
   WT=""
   WORK_DIR="$ORIGINAL_DIR"
   if [ "$USE_WORKTREE" = "1" ]; then
-    WT=$(with_worktree "$ITER" "$BASE_BRANCH")
+    if ! WT=$(with_worktree "$ITER" "$BASE_BRANCH"); then
+      ralph_log "could not create the iter $ITER worktree. Stopping."
+      echo "=== STOP (worktree-failed) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
+      break
+    fi
     WORK_DIR="$WT"
     export RALPH_WT_DIR="$WT"
     printf '  worktree: %s\n' "$WT" >> "$SUMMARY_LOG"
@@ -259,7 +264,7 @@ $FP_EXCERPT
 
     # Pre-merge sandbox validation (only if tests passed and validation enabled)
     if [ "$PASSED" = "1" ] && [ "$NO_VALIDATE" = "0" ]; then
-      if ! pre_merge_validate "$WT" "$BASE_BRANCH" "ralph/${TEAM}-iter-${ITER}" "$MAX_DIFF_LINES" 2>>"$ITER_LOG"; then
+      if ! pre_merge_validate "$WT" "$BASE_BRANCH" "$(worktree_branch "$WT")" "$MAX_DIFF_LINES" 2>>"$ITER_LOG"; then
         ralph_log "  pre_merge_validate FAILED — discarding instead of merging"
         printf '  validate: BLOCKED (see %s)\n' "$ITER_LOG" >> "$SUMMARY_LOG"
         printf '## iter %d · %s · WORKTREE-VALIDATE-BLOCK\nIter log: %s\n\n' "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ITER_LOG" >> "$FIX_PLAN_FILE"

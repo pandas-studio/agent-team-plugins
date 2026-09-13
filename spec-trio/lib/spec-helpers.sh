@@ -92,33 +92,42 @@ path_in_allowlist() {
 collect_changed_paths() {
   local work_dir="$1"
   local base_ref="${2:-}"
+  local path
+  # Every listing is NUL-delimited (-z): git then prints paths verbatim instead
+  # of C-quoting non-ASCII or special characters ("docs/\355\225\234.md"),
+  # which an allowlist entry would never match. --no-renames lists a rename as
+  # its deletion plus its addition, so moving a file from outside the allowlist
+  # into it still surfaces the source path. Porcelain status is not used: its
+  # "old -> new" rename form is ambiguous for names that contain " -> ".
   {
-    # Uncommitted (staged + unstaged) via porcelain v1.
-    # Format: "XY path" where XY is two-char status, path may contain "->" for renames.
-    # --untracked-files=all expands untracked directories to their files so the
-    # scope check matches the reviewer's "read every untracked file" view.
-    git -C "$work_dir" status --porcelain=v1 --untracked-files=all 2>/dev/null | awk '
-      {
-        line = substr($0, 4)
-        idx = index(line, " -> ")
-        if (idx > 0) {
-          print substr(line, 1, idx - 1)
-          print substr(line, idx + 4)
-        } else {
-          print line
-        }
-      }
-    '
+    # Staged, then unstaged, changes to tracked files. --ignore-submodules=none
+    # (here and on the committed scan below): by default `git diff` hides a
+    # submodule whose only change is untracked content, and a
+    # submodule.<name>.ignore setting can hide a submodule change entirely.
+    git -C "$work_dir" diff --cached --no-renames --ignore-submodules=none --name-only -z 2>/dev/null
+    git -C "$work_dir" diff --no-renames --ignore-submodules=none --name-only -z 2>/dev/null
+    # Untracked-and-not-ignored files, expanded to files (not directories) so
+    # the scope check matches the reviewer's "read every untracked file" view.
+    git -C "$work_dir" ls-files --others --exclude-standard -z 2>/dev/null
     # Committed-but-not-yet-on-base. Prefer the iter-base ref so all commits
     # made during this iteration are caught; fall back to HEAD~1..HEAD only
     # when no base was supplied. Empty output is fine (e.g. no commits yet,
     # or HEAD == base_ref).
     if [ -n "$base_ref" ]; then
-      git -C "$work_dir" diff --name-only "$base_ref" HEAD 2>/dev/null
+      git -C "$work_dir" diff --no-renames --ignore-submodules=none --name-only -z "$base_ref" HEAD 2>/dev/null
     else
-      git -C "$work_dir" diff --name-only HEAD~1 HEAD 2>/dev/null
+      git -C "$work_dir" diff --no-renames --ignore-submodules=none --name-only -z HEAD~1 HEAD 2>/dev/null
     fi
-  } | awk 'NF { gsub(/^"|"$/, "", $0); if (!seen[$0]++) print }'
+  } | while IFS= read -r -d '' path; do
+    # Callers consume one path per line. A name containing a newline can't be
+    # represented, so emit it under a leading "/": allowlist and ignore entries
+    # are always relative (normalize_path rejects absolute ones), so it can
+    # never be admitted — the gate fails closed instead of splitting the name.
+    case "$path" in
+      *$'\n'*) printf '/<path containing a newline>: %s\n' "${path//$'\n'/\\n}" ;;
+      *)       printf '%s\n' "$path" ;;
+    esac
+  done | awk '!seen[$0]++'
 }
 
 # path_is_ignored PATH IGNORE_LIST — rc=0 if PATH should be excluded from the

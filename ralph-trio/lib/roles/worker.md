@@ -18,7 +18,7 @@ You are Claude Code, invoked one-shot per Ralph iteration. The harness re-runs y
 
 ## Worktree mode
 
-If `$RALPH_WT_DIR` is set, you are inside a throwaway worktree on branch `ralph/<TEAM>-iter-<N>`. Work normally; commit normally. The harness merges to base on test pass and discards on fail. Don't try to switch branches or push.
+If `$RALPH_WT_DIR` is set, you are inside a throwaway worktree on a per-iteration branch `ralph/<TEAM>-iter-<N>-<suffix>`. Work normally; commit normally. The harness merges to base on test pass and discards on fail. Don't try to switch branches or push.
 
 ## Output expectations
 

@@ -122,7 +122,8 @@ SUMMARY_LOG="$LOG_DIR/ralph-trio-$TS.log"
 ln -sfn "ralph-trio-$TS.log" "$LOG_DIR/latest-ralph-trio.log"
 ln -sfn "ralph-trio-$TS.log" "$LOG_DIR/latest-ralph.log"
 
-MAX_RUNTIME_SECS=$(parse_runtime "$MAX_RUNTIME_SPEC")
+# parse_runtime has already explained a bad spec on stderr.
+MAX_RUNTIME_SECS=$(parse_runtime "$MAX_RUNTIME_SPEC") || exit 2
 if [ "$MAX_RUNTIME_SECS" -gt 0 ]; then
   DEADLINE=$(( $(date +%s) + MAX_RUNTIME_SECS ))
 else
@@ -369,7 +370,13 @@ while :; do
   WT=""
   WORK_DIR="$ORIGINAL_DIR"
   if [ "$USE_WORKTREE" = "1" ]; then
-    WT=$(with_worktree "$ITER" "$BASE_BRANCH")
+    if ! WT=$(with_worktree "$ITER" "$BASE_BRANCH"); then
+      ralph_log "could not create the iter $ITER worktree. Stopping."
+      # pop_top_task already marked the task done; put it back.
+      [ "$DRY_RUN" = "1" ] || append_to_backlog "$BACKLOG_FILE" "$TASK"
+      echo "=== STOP (worktree-failed) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
+      break
+    fi
     WORK_DIR="$WT"
     export RALPH_WT_DIR="$WT"
     printf '  worktree: %s\n' "$WT" >> "$SUMMARY_LOG"
@@ -746,7 +753,7 @@ $RESEARCH"
     fi
     if [ "$PASSED" = "1" ] && [ "$NO_VALIDATE" = "0" ]; then
       VAL_LOG="$LOG_DIR/ralph-trio-$TS-iter-$ITER-validate.log"
-      if ! pre_merge_validate "$WT" "$BASE_BRANCH" "ralph/${TEAM}-iter-${ITER}" "$MAX_DIFF_LINES" 2>"$VAL_LOG"; then
+      if ! pre_merge_validate "$WT" "$BASE_BRANCH" "$(worktree_branch "$WT")" "$MAX_DIFF_LINES" 2>"$VAL_LOG"; then
         ralph_log "  pre_merge_validate FAILED — discarding instead of merging"
         printf '  validate: BLOCKED (see %s)\n' "$VAL_LOG" >> "$SUMMARY_LOG"
         printf '## iter %d · %s · WORKTREE-VALIDATE-BLOCK\nTask: %s\nValidate log: %s\n\n' \
