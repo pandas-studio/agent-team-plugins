@@ -144,6 +144,7 @@ run_spec_trio() {
   (
     cd "$wd"
     AGENT_TEAM="smoke-pr5-$team" \
+    DEV_TRIO_PM_HOST=claude \
     CLAUDE_CLI="$wd/wrap-claude.sh" \
     CODEX_CLI="$wd/wrap-codex.sh" \
       "$SPEC_TRIO" --spec "$wd/spec.md" --backlog "$wd/BACKLOG.md" \

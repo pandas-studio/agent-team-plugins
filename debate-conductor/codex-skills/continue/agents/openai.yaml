@@ -1,0 +1,6 @@
+interface:
+  display_name: "debate-conductor continue"
+  short_description: "Codex debate continuation workflow"
+  default_prompt: "Use $continue from debate-conductor for this workspace."
+policy:
+  allow_implicit_invocation: false

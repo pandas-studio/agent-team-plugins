@@ -1,5 +1,5 @@
 ---
-description: Run an N-round Generator(Antigravity) vs Critic(Codex) debate on a chosen topic, then summarise verdict and round-by-round moves. Topic can be a topics/ file reference OR free-form text. Use when the user wants to start, resume, or analyse a debate. Bootstrap must have run first.
+description: Run an N-round Generator vs Critic debate on a chosen topic, then summarise verdict and round-by-round moves. Topic can be a topics/ file reference OR free-form text. Use when the user wants to start, resume, or analyse a debate. Bootstrap must have run first.
 disable-model-invocation: true
 allowed-tools: Bash(debate.sh:*) Bash(ls:*) Bash(cat:*) Read Glob
 argument-hint: [topic-or-text] [rounds]
@@ -7,7 +7,7 @@ argument-hint: [topic-or-text] [rounds]
 
 # Run a debate
 
-You are the **conductor**. Generator = Antigravity (middle pane), Critic = Codex (right pane). You orchestrate; you do not generate or critique.
+You are the **conductor**. The middle pane live-tails the Generator, and the right pane live-tails the Critic. You orchestrate; you do not generate or critique.
 
 ## 1 · Resolve the topic from `$ARGUMENTS`
 
