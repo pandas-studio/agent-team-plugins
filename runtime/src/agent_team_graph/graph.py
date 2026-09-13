@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shlex
 import stat
@@ -83,7 +84,7 @@ def _exclude_pathspecs(excluded: list[str]) -> list[str]:
     """
     if not excluded:
         return []
-    if any(path in ("", ".") for path in excluded):
+    if any(not path or posixpath.normpath(path) == "." for path in excluded):
         raise ValueError("refusing to exclude the repository root from attestation")
     return [".", *(f":(exclude,literal){path}" for path in excluded)]
 
@@ -91,9 +92,14 @@ def _exclude_pathspecs(excluded: list[str]) -> list[str]:
 def _normalize_paths(paths: list[str], *, label: str) -> list[str]:
     normalized: list[str] = []
     for value in paths:
-        candidate = value.replace("\\", "/").strip().rstrip("/")
-        parts = Path(candidate).parts
-        if not candidate or candidate.startswith("/") or ".." in parts or candidate == ".":
+        candidate = value.replace("\\", "/").strip()
+        if not candidate or candidate.startswith("/") or ".." in candidate.split("/"):
+            raise ValueError(f"unsafe {label} path: {value!r}")
+        # One canonical spelling ("./src", "src//x", "src/./x" -> the form git
+        # lists): otherwise "./." would pass as an exclusion that git reads as
+        # the whole repository, and "./src" would never match a listed path.
+        candidate = posixpath.normpath(candidate)
+        if candidate == ".":
             raise ValueError(f"unsafe {label} path: {value!r}")
         normalized.append(candidate)
     return sorted(set(normalized))

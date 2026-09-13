@@ -585,3 +585,36 @@ def test_non_utf8_path_is_a_snapshot_error(tmp_path: Path, monkeypatch):
         assert "not valid UTF-8" in str(exc)
     else:
         raise AssertionError("an undecodable path was accepted")
+
+
+def test_path_spellings_are_canonical_and_root_aliases_refused(tmp_path: Path):
+    normalize = graph_module._normalize_paths
+    assert normalize(["./src", "src//x", "src/./y/", "tool-cache"], label="t") == [
+        "src",
+        "src/x",
+        "src/y",
+        "tool-cache",
+    ]
+    for root_alias in [".", "./.", ".//", "./"]:
+        try:
+            normalize([root_alias], label="excluded")
+        except ValueError:
+            continue
+        raise AssertionError(f"{root_alias!r} was accepted")
+    try:
+        graph_module._exclude_pathspecs(["./."])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('"./." was accepted as an attestation exclusion')
+
+    # End to end: a root-alias exclusion never reaches the digest.
+    workspace, spec = make_repo(tmp_path)
+    state = initial(workspace, spec, "root-alias")
+    state["operator_excluded_paths"] = ["./."]
+    try:
+        _run(tmp_path, FakeRunner(), state, "root-alias")
+    except ValueError as exc:
+        assert "unsafe excluded path" in str(exc)
+    else:
+        raise AssertionError("a root-alias exclusion was accepted by the graph")
