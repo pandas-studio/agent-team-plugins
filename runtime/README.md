@@ -63,6 +63,11 @@ JSON을 파싱하지 말고 종료 코드로 분기하세요.
 - tracked 경로에 git clean/process 필터(예: git-lfs)가 걸려 있으면 게이트와 승인이 항상
   실패합니다. 필터는 git이 파일을 비교하기 전에 실행되므로 수정 내용이 범위 검사와 digest에서
   사라질 수 있기 때문입니다. 이런 필터가 없는 workspace에서 실행하세요.
+- **신뢰 경계: coder가 `.git`에 쓸 수 있으면 안 됩니다.** 게이트와 digest는 git에게 변경 내용을
+  묻고, git은 자신의 config·index·ref를 근거로 답합니다. 알려진 은닉 경로(clean/process 필터,
+  assume-unchanged/skip-worktree 항목, replace ref, `core.worktree` 전환)는 거부하지만,
+  `.git` 쓰기 권한이 있는 역할의 변경은 승인 영수증이 증명할 수 있는 범위 밖입니다. coder는
+  `.git` 쓰기 권한이 없는 sandbox에서 실행하세요.
 - 플러그인을 업데이트하기 전에 승인 대기 중인 run을 끝내세요. 버전에 따라 digest 계산이
   달라질 수 있어, 대기 중이던 run은 `needs-human`으로 종료되고 새 run이 필요합니다.
 - 재시도는 기본 2회, 최대 5회입니다.

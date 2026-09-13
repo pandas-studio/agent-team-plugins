@@ -636,8 +636,8 @@ def test_reviewer_prompt_names_base_and_root_for_committed_work(tmp_path: Path):
     (prompt,) = runner.prompts["reviewer"]
     root = shlex.quote(str(workspace.resolve()))
     assert f"Base commit: {base}" in prompt
-    assert f"git -C {root} diff --binary --no-ext-diff --no-textconv --no-renames {base} --" in prompt
-    assert f"git -C {root} ls-files --others --exclude-standard --" in prompt
+    assert f"git --no-replace-objects -C {root} diff --binary --no-ext-diff --no-textconv --no-renames {base} --" in prompt
+    assert f"git --no-replace-objects -C {root} ls-files --others --exclude-standard --" in prompt
 
 
 def test_state_dir_at_repo_root_is_refused(tmp_path: Path):
@@ -773,3 +773,61 @@ def test_filter_added_while_parked_at_approval_blocks_the_receipt(tmp_path: Path
     assert values["status"] == "needs-human"
     assert Path(values["artifacts"][-1]["path"]).name == "91-approval-snapshot-error.json"
     assert not any(item["name"] == "90-approval-receipt.json" for item in values["artifacts"])
+
+
+def _parked_at_approval(tmp_path: Path, thread: str):
+    """Run to the approval interrupt with an in-scope README edit and a tracked secret."""
+    workspace, spec = make_repo(tmp_path)
+    (workspace / "secret.txt").write_text("original\n", encoding="utf-8")
+    _commit_all(workspace, "secret")
+    graph = _graph(tmp_path, FakeRunner(writes={"README.md": "reviewed\n"}))
+    config = {"configurable": {"thread_id": thread}}
+    graph.invoke(initial(workspace, spec, thread), config=config)
+    assert graph.get_state(config).next == ("approval",)
+    return workspace, graph, config
+
+
+def _assert_receipt_blocked(graph, config):
+    graph.invoke(Command(resume="approve"), config=config)
+    values = graph.get_state(config).values
+    assert values["status"] == "needs-human"
+    assert not any(item["name"] == "90-approval-receipt.json" for item in values["artifacts"])
+    return json.loads(Path(values["artifacts"][-1]["path"]).read_text(encoding="utf-8"))
+
+
+def test_hidden_index_entries_block_the_receipt(tmp_path: Path):
+    for flag in ("--assume-unchanged", "--skip-worktree"):
+        case = tmp_path / flag.strip("-")
+        case.mkdir()
+        workspace, graph, config = _parked_at_approval(case, flag.strip("-"))
+        subprocess.run(["git", "-C", workspace, "update-index", flag, "secret.txt"], check=True)
+        (workspace / "secret.txt").write_text("tampered while parked\n", encoding="utf-8")
+        record = _assert_receipt_blocked(graph, config)
+        assert "assume-unchanged or skip-worktree" in record["snapshot_error"]
+
+
+def test_replacement_objects_do_not_rewrite_the_base(tmp_path: Path):
+    workspace, graph, config = _parked_at_approval(tmp_path, "replace-ref")
+    original = subprocess.run(
+        ["git", "-C", workspace, "rev-parse", "HEAD:secret.txt"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    (workspace / "secret.txt").write_text("tampered while parked\n", encoding="utf-8")
+    tampered = subprocess.run(
+        ["git", "-C", workspace, "hash-object", "-w", "secret.txt"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    subprocess.run(["git", "-C", workspace, "replace", original, tampered], check=True)
+    record = _assert_receipt_blocked(graph, config)
+    assert record["note"] == "approval blocked because the change set drifted after review"
+
+
+def test_redirected_work_tree_blocks_the_receipt(tmp_path: Path):
+    workspace, graph, config = _parked_at_approval(tmp_path, "worktree-redirect")
+    decoy = tmp_path / "decoy"
+    subprocess.run(["cp", "-R", str(workspace), str(decoy)], check=True)
+    subprocess.run(["rm", "-rf", str(decoy / ".git")], check=True)
+    subprocess.run(["git", "-C", workspace, "config", "core.worktree", str(decoy)], check=True)
+    (workspace / "secret.txt").write_text("tampered while parked\n", encoding="utf-8")
+    record = _assert_receipt_blocked(graph, config)
+    assert "git work tree moved" in record["snapshot_error"]

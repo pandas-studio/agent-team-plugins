@@ -29,9 +29,14 @@ class Runner(Protocol):
     def run(self, role: str, prompt: str, workspace: Path) -> RoleResult: ...
 
 
+# Replacement refs (`git replace`) would let a rewritten object stand in for the
+# fixed base commit or its blobs, so no command here ever honours them.
+_GIT = ("git", "--no-replace-objects")
+
+
 def _git(workspace: Path, *args: str) -> str:
     result = subprocess.run(
-        ["git", "-C", str(workspace), *args],
+        [*_GIT, "-C", str(workspace), *args],
         text=True,
         capture_output=True,
         check=False,
@@ -43,7 +48,7 @@ def _git(workspace: Path, *args: str) -> str:
 
 def _git_bytes(workspace: Path, *args: str) -> bytes:
     result = subprocess.run(
-        ["git", "-C", str(workspace), *args],
+        [*_GIT, "-C", str(workspace), *args],
         capture_output=True,
         check=False,
     )
@@ -169,6 +174,37 @@ def _file_digest(repo_root: Path, relative: str) -> str:
     return hashlib.sha256(kind + b"\0" + content).hexdigest()
 
 
+def _refuse_redirected_repository(repo_root: Path) -> None:
+    """Fail closed when git no longer treats `repo_root` as the work tree it lists.
+
+    `core.worktree` (or `.git` pointing elsewhere) set after the run started would
+    make every listing and diff describe some other directory.
+    """
+
+    current = Path(_git(repo_root, "rev-parse", "--show-toplevel")).resolve()
+    if current != repo_root.resolve():
+        raise ValueError(f"git work tree moved from {repo_root} to {current}")
+
+
+def _refuse_hidden_index_entries(repo_root: Path) -> None:
+    """Fail closed on assume-unchanged / skip-worktree entries.
+
+    git skips the working-tree check for such entries, so an edit to one is
+    missing from both the scope listing and the tracked diff.
+    """
+
+    hidden: list[str] = []
+    for entry in _git_bytes(repo_root, "ls-files", "-v", "-z").split(b"\0"):
+        # "<tag> <path>": lowercase tag = assume-unchanged, "S" = skip-worktree.
+        if len(entry) > 2 and (entry[:1].islower() or entry[:1] == b"S"):
+            hidden.append(os.fsdecode(entry[2:]))
+    if hidden:
+        raise ValueError(
+            f"{len(hidden)} tracked path(s) are marked assume-unchanged or skip-worktree "
+            f"(first: {hidden[0]!r}); their content cannot be attested"
+        )
+
+
 def _refuse_filtered_tracked_paths(repo_root: Path) -> None:
     """Fail closed when a clean/process filter applies to a tracked path.
 
@@ -179,7 +215,7 @@ def _refuse_filtered_tracked_paths(repo_root: Path) -> None:
     """
 
     configured = subprocess.run(
-        ["git", "-C", str(repo_root), "config", "-z", "--name-only", "--get-regexp",
+        [*_GIT, "-C", str(repo_root), "config", "-z", "--name-only", "--get-regexp",
          r"^filter\..+\.(clean|process)$"],
         capture_output=True,
         check=False,
@@ -195,7 +231,7 @@ def _refuse_filtered_tracked_paths(repo_root: Path) -> None:
         return
     tracked = _git_bytes(repo_root, "ls-files", "-z")
     attributes = subprocess.run(
-        ["git", "-C", str(repo_root), "check-attr", "-z", "--stdin", "filter"],
+        [*_GIT, "-C", str(repo_root), "check-attr", "-z", "--stdin", "filter"],
         input=tracked,
         capture_output=True,
         check=False,
@@ -224,6 +260,11 @@ def _change_snapshot(
 ) -> dict[str, Any]:
     """Return a canonical identity for the exact change set covered by the gate."""
 
+    # git answers from state a coder can rewrite; refuse the known ways that
+    # state hides working-tree content. Writes under .git remain outside the
+    # trust boundary (see SKILL.md).
+    _refuse_redirected_repository(repo_root)
+    _refuse_hidden_index_entries(repo_root)
     _refuse_filtered_tracked_paths(repo_root)
 
     # --no-ext-diff/--no-textconv: a configured external diff or textconv
@@ -347,13 +388,13 @@ def _review_commands(state: GraphState) -> list[str]:
     root = state["repo_root"]
     pathspecs = ["--", *_exclude_pathspecs(state.get("excluded_paths", []))]
     commands = [
-        ["git", "-C", root, "diff", "--binary", "--no-ext-diff", "--no-textconv",
+        [*_GIT, "-C", root, "diff", "--binary", "--no-ext-diff", "--no-textconv",
          "--no-renames", state["base_sha"], *pathspecs],
-        ["git", "-C", root, "ls-files", "--others", "--exclude-standard", *pathspecs],
+        [*_GIT, "-C", root, "ls-files", "--others", "--exclude-standard", *pathspecs],
     ]
     if state.get("strict_ignored"):
         commands.append(
-            ["git", "-C", root, "ls-files", "--others", "--ignored", "--exclude-standard",
+            [*_GIT, "-C", root, "ls-files", "--others", "--ignored", "--exclude-standard",
              *pathspecs]
         )
     return [shlex.join(command) for command in commands]
@@ -412,6 +453,8 @@ def build_graph(
         if not allowed_paths:
             raise ValueError("at least one allowed path is required")
         repo_root = Path(_git(workspace, "rev-parse", "--show-toplevel")).resolve()
+        if repo_root != workspace and repo_root not in workspace.parents:
+            raise ValueError(f"git work tree {repo_root} does not contain workspace {workspace}")
         base_sha = _git(repo_root, "rev-parse", "HEAD")
         operator_excluded = _normalize_paths(
             state.get("operator_excluded_paths", []), label="excluded"

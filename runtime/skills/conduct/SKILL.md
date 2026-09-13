@@ -83,6 +83,13 @@ Branch on these rather than parsing the JSON:
   every gate and blocks approval: filters run before git compares files, so an
   edit could be invisible to the scope check and the digest. Use a workspace
   without such filters.
+- **Trust boundary: the coder must not be able to write `.git`.** The gate and
+  the digest ask git what changed, and git answers from its own config, index
+  and refs. The runtime refuses the known ways that state hides content
+  (clean/process filters, assume-unchanged/skip-worktree entries, replacement
+  refs, a moved `core.worktree`), but a role with write access to `.git` is
+  outside what an approval receipt can prove. Run the coder sandboxed without
+  write access to `.git`.
 - `--exclude-path` is a trusted, repeatable repository-root-relative exemption
   for tool scratch. Excluded content (tracked or untracked) is neither
   scope-checked nor attested; use
