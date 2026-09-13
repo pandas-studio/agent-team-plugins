@@ -285,7 +285,7 @@ for plugin in ralph-trio spec-trio; do
     git -c user.name=t -c user.email=t@t commit -q --allow-empty -m "base moved"
     base_head=$(git rev-parse HEAD)
     if ! merge_or_discard_worktree "$d" 4 1 "$PWD" >/dev/null 2>&1 \
-      && git worktree list --porcelain | grep -q "^worktree .*/${d##*/}$" \
+      && case "$(git worktree list --porcelain)" in *"/${d##*/}"*) true ;; *) false ;; esac \
       && [ "$(git -C "$d" symbolic-ref --short HEAD)" = "$(worktree_branch "$d" 4)" ] \
       && [ "$(git -C "$d" rev-parse HEAD)" = "$iter_commit" ] \
       && [ "$(git rev-parse HEAD)" = "$base_head" ]; then
