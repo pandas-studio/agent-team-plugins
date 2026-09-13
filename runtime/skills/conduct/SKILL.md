@@ -79,6 +79,10 @@ Branch on these rather than parsing the JSON:
   the repository root are refused, and so is a `--state-dir` at the repository
   root. A changed file whose name is not valid UTF-8 fails the gate (it cannot
   be attested).
+- A git clean/process filter (for example git-lfs) on any tracked path fails
+  every gate and blocks approval: filters run before git compares files, so an
+  edit could be invisible to the scope check and the digest. Use a workspace
+  without such filters.
 - `--exclude-path` is a trusted, repeatable repository-root-relative exemption
   for tool scratch. Excluded content (tracked or untracked) is neither
   scope-checked nor attested; use

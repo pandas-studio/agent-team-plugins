@@ -709,3 +709,67 @@ def test_path_spellings_are_canonical_and_root_aliases_refused(tmp_path: Path):
         assert "unsafe excluded path" in str(exc)
     else:
         raise AssertionError("a root-alias exclusion was accepted by the graph")
+
+
+def _lossy_filter_repo(tmp_path: Path) -> tuple[Path, Path, str]:
+    workspace, spec = make_repo(tmp_path)
+    (workspace / ".gitattributes").write_text("*.txt filter=lossy\n", encoding="utf-8")
+    (workspace / "secret.txt").write_text("canonical", encoding="utf-8")
+    base = _commit_all(workspace, "filtered file")
+    subprocess.run(
+        ["git", "-C", workspace, "config", "filter.lossy.clean", "printf canonical"], check=True
+    )
+    return workspace, spec, base
+
+
+def test_clean_filter_on_a_tracked_path_fails_closed(tmp_path: Path):
+    """A clean filter can map every edit to the committed blob, hiding it from git diff."""
+    workspace, spec, base = _lossy_filter_repo(tmp_path)
+    (workspace / "secret.txt").write_text("tampered", encoding="utf-8")
+    # Without the guard git reports no change at all.
+    assert _changed_paths(workspace, base, []) == ([], [])
+    try:
+        graph_module._change_snapshot(workspace, base, [], False)
+    except ValueError as exc:
+        assert "clean/process filter" in str(exc) and "secret.txt" in str(exc)
+    else:
+        raise AssertionError("a filtered tracked path was attested")
+
+    state = initial(workspace, spec, "clean-filter")
+    state["max_attempts"] = 1
+    snapshot = _run(tmp_path, FakeRunner(), state, "clean-filter")
+    assert "clean/process filter" in _gate_record(snapshot)["snapshot_error"]
+    assert snapshot.values["status"] == "needs-human"
+
+
+def test_configured_filter_without_tracked_matches_is_allowed(tmp_path: Path):
+    workspace, _ = make_repo(tmp_path)
+    base = subprocess.run(
+        ["git", "-C", workspace, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "-C", workspace, "config", "filter.unused.clean", "cat"], check=True
+    )
+    graph_module._change_snapshot(workspace, base, [], False)
+
+
+def test_filter_added_while_parked_at_approval_blocks_the_receipt(tmp_path: Path):
+    workspace, spec = make_repo(tmp_path)
+    (workspace / ".gitattributes").write_text("*.txt filter=lossy\n", encoding="utf-8")
+    (workspace / "secret.txt").write_text("canonical", encoding="utf-8")
+    _commit_all(workspace, "attributes")
+    graph = _graph(tmp_path, FakeRunner(writes={"README.md": "reviewed\n"}))
+    config = {"configurable": {"thread_id": "late-filter"}}
+    graph.invoke(initial(workspace, spec, "late-filter"), config=config)
+    assert graph.get_state(config).next == ("approval",)
+
+    subprocess.run(
+        ["git", "-C", workspace, "config", "filter.lossy.clean", "printf canonical"], check=True
+    )
+    (workspace / "secret.txt").write_text("tampered while parked", encoding="utf-8")
+    graph.invoke(Command(resume="approve"), config=config)
+
+    values = graph.get_state(config).values
+    assert values["status"] == "needs-human"
+    assert Path(values["artifacts"][-1]["path"]).name == "91-approval-snapshot-error.json"
+    assert not any(item["name"] == "90-approval-receipt.json" for item in values["artifacts"])

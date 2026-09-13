@@ -169,6 +169,53 @@ def _file_digest(repo_root: Path, relative: str) -> str:
     return hashlib.sha256(kind + b"\0" + content).hexdigest()
 
 
+def _refuse_filtered_tracked_paths(repo_root: Path) -> None:
+    """Fail closed when a clean/process filter applies to a tracked path.
+
+    Git runs clean filters before comparing the working tree, so no diff option
+    turns them off: a filter that maps every version of a file to the same blob
+    makes an edit invisible to both the scope check and the digest. Filters are
+    configuration (`.git/config` included), so they can't be ruled out up front.
+    """
+
+    configured = subprocess.run(
+        ["git", "-C", str(repo_root), "config", "-z", "--name-only", "--get-regexp",
+         r"^filter\..+\.(clean|process)$"],
+        capture_output=True,
+        check=False,
+    )
+    if configured.returncode not in (0, 1):
+        raise ValueError("cannot read git filter configuration")
+    names = {
+        os.fsdecode(key)[len("filter."):].rsplit(".", 1)[0]
+        for key in configured.stdout.split(b"\0")
+        if key
+    }
+    if not names:
+        return
+    tracked = _git_bytes(repo_root, "ls-files", "-z")
+    attributes = subprocess.run(
+        ["git", "-C", str(repo_root), "check-attr", "-z", "--stdin", "filter"],
+        input=tracked,
+        capture_output=True,
+        check=False,
+    )
+    if attributes.returncode:
+        raise ValueError("cannot read git filter attributes")
+    # -z output: <path> NUL <attribute> NUL <value> NUL, repeated.
+    fields = attributes.stdout.split(b"\0")
+    filtered = [
+        os.fsdecode(fields[index])
+        for index in range(0, len(fields) - 2, 3)
+        if os.fsdecode(fields[index + 2]) in names
+    ]
+    if filtered:
+        raise ValueError(
+            f"{len(filtered)} tracked path(s) use a git clean/process filter "
+            f"(first: {filtered[0]!r}); filtered content cannot be attested"
+        )
+
+
 def _change_snapshot(
     repo_root: Path,
     base_sha: str,
@@ -176,6 +223,8 @@ def _change_snapshot(
     strict_ignored: bool,
 ) -> dict[str, Any]:
     """Return a canonical identity for the exact change set covered by the gate."""
+
+    _refuse_filtered_tracked_paths(repo_root)
 
     # --no-ext-diff/--no-textconv: a configured external diff or textconv
     # filter would replace the binary patch with lossy output, so content could
