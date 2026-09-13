@@ -525,7 +525,8 @@ def test_gate_failure_reaches_retrying_coder_and_reviewer(tmp_path: Path):
     )
     summary = (
         "attempt 1: 1 changed path(s) are outside the allowed paths; "
-        f'the test command exited 1. The test output and path lists are in the JSON file at path "{record}"'
+        "the test command exited 1. The test output and path lists are in the JSON file "
+        f"at path {json.dumps(record)}"
     )
     assert f"Gate failure: {summary}" in first_review
     assert f"Previous gate failure: {summary}" in runner.prompts["coder"][1]
