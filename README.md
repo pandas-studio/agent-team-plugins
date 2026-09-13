@@ -2,7 +2,13 @@
 
 Claude Code plugin marketplace from pandas-studio's YouTube series on multi-CLI agent teams. Each plugin packages a *Claude-as-conductor* pattern: Claude orchestrates one or more companion CLIs (Antigravity, Codex) playing specialised roles, with a tmux multi-pane live view.
 
-## Install the marketplace
+`dev-trio` also supports **Codex as PM**, with Antigravity research and Claude
+Code review by default. The CLI engine is shared; each host loads its own
+skills and PM policy. See [Codex installation and usage](./dev-trio/README.md#codex-pm).
+The Codex marketplace currently exposes only `dev-trio`; the other plugins
+remain Claude-hosted in this milestone.
+
+## Install the marketplace in Claude Code
 
 ```bash
 # Inside any Claude Code session
@@ -23,7 +29,7 @@ Then install the plugins you want:
 
 | Name | Roles | Episode | Status |
 | :--- | :--- | :--- | :--- |
-| [dev-trio](./dev-trio) | Claude=PM/Coder · Antigravity=Researcher · Codex=Reviewer | EP A | shipped |
+| [dev-trio](./dev-trio) | Claude or Codex=PM/Coder · configurable research/review CLIs | EP A | shipped |
 | [debate-conductor](./debate-conductor) | Claude=PM · Antigravity=Generator · Codex=Critic | EP B | shipped |
 | [ralph-trio](./ralph-trio) | Claude=Planner/Coder · Antigravity=Researcher · Codex=Reviewer | EP C | shipped |
 | [spec-trio](./spec-trio) | Spec-gated planner/coder/reviewer loop | EP D | shipped |
@@ -106,6 +112,9 @@ Every plugin in this marketplace follows broadly the same layout. Skill set vari
 │   └── roles/*.md           # role prompts for companion CLIs
 └── <topics/|tmux/|...>      # plugin-specific assets (canned topics, keybindings)
 ```
+
+`dev-trio` uses `claude-skills/` and `codex-skills/`, selected by each host
+manifest, plus a small Python policy installer. Other plugins keep `skills/`.
 
 The four legacy plugins remain Bash-first. `langgraph-conductor` adds an optional Python 3.12 runtime pinned with `uv`; it orchestrates the same CLI adapters and does not call model-provider APIs directly. `jq` is required for the Bash [shared model registry](#shared-model-configuration).
 

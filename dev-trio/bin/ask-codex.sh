@@ -21,7 +21,7 @@
 #   REVIEWER_ROLE_FILE=/path/to/role.md ask-codex.sh ...
 #
 # The reviewer model is resolved via the shared registry (DEV_TRIO_REVIEWER_MODEL
-# env > config role binding > built-in default codex); see lib/registry.sh.
+# env > config role binding > host default); see lib/host.sh.
 #
 # Output goes to stdout AND $PWD/.dev-trio/log/<team>/codex-<TS>.log (the full
 # streamed transcript). The reviewer's final structured review is ALSO captured
@@ -57,10 +57,14 @@ _REGISTRY_LIB="$PLUGIN_ROOT/lib/registry.sh"
 . "$_REGISTRY_LIB" || { echo "ask-codex: failed to load registry.sh (jq missing?)" >&2; exit 2; }
 unset _REGISTRY_LIB
 
-# Reviewer model — DEV_TRIO_REVIEWER_MODEL env > config role binding > built-in
-# default (codex). No CLI model flag here, so the flag tier is empty. The legacy
+# shellcheck source=../lib/host.sh
+. "$PLUGIN_ROOT/lib/host.sh"
+PM_HOST="$(dev_trio_host)" || exit $?
+
+# Reviewer model — DEV_TRIO_REVIEWER_MODEL env > config role binding > host
+# default (Claude PM: codex; Codex PM: claude). The legacy
 # REVIEWER_CLI/CODEX_CLI still override the *binary* at run time below.
-REVIEWER_MODEL="$(registry_resolve_role dev-trio reviewer "")"
+REVIEWER_MODEL="$(dev_trio_resolve_role reviewer)"
 registry_model_exists "$REVIEWER_MODEL" || { echo "ask-codex: reviewer model '$REVIEWER_MODEL' is not registered (run: agent-team-models list)" >&2; exit 2; }
 
 # Team namespace — isolates logs per tmux window/session.
@@ -148,6 +152,8 @@ $SPEC
 </spec>"
 fi
 
+REGISTRY_CMD_OVERRIDE="${REVIEWER_CLI:-}" dev_trio_check_cli "$REVIEWER_MODEL" || exit $?
+
 mkdir -p "$LOG_DIR"
 TS="$(date +%Y%m%d-%H%M%S)"
 LOG="$LOG_DIR/codex-$TS.log"
@@ -177,6 +183,8 @@ trap 'manifest_cleanup' INT TERM
   if [ -n "$SPEC_FILE" ]; then
     echo "=== SPEC FILE: $SPEC_FILE ==="
   fi
+  echo "=== PM HOST: $PM_HOST ==="
+  echo "=== MODEL: $REVIEWER_MODEL ==="
   echo "=== RESPONSE ==="
 } > "$LOG"
 

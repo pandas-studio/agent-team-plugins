@@ -1,0 +1,20 @@
+{
+  "name": "pandas-studio",
+  "interface": {
+    "displayName": "pandas-studio agent teams"
+  },
+  "plugins": [
+    {
+      "name": "dev-trio",
+      "source": {
+        "source": "local",
+        "path": "./dev-trio"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

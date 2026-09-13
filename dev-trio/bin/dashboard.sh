@@ -25,12 +25,12 @@ ROLE="${1:?usage: $0 agy|codex}"
 
 case "$ROLE" in
   agy)
-    ICON="🔍"; TITLE="ANTIGRAVITY · researcher"
+    ICON="🔍"; TITLE="Researcher"
     HEADER_COLOR=$'\033[1;36m'   # bright cyan
     LABEL="Query"
     ;;
   codex)
-    ICON="🧐"; TITLE="CODEX · reviewer"
+    ICON="🧐"; TITLE="Reviewer"
     HEADER_COLOR=$'\033[1;35m'   # bright magenta
     LABEL="Focus"
     ;;
@@ -68,9 +68,13 @@ PAUSED=0
 while true; do
   if [ "$PAUSED" = "0" ]; then
     WRAP_W=$(get_wrap_width)
+    MODEL=""
+    if [ -f "$LATEST" ]; then
+      MODEL=$(sed -n 's/^=== MODEL: \(.*\) ===$/\1/p' "$LATEST" | head -1)
+    fi
     BUF=""
     BUF+="${HEADER_COLOR}═══════════════════════════════════════════════${RESET}"$'\n'
-    BUF+="${HEADER_COLOR}  ${ICON}  ${TITLE}${RESET}  ${DIM}[team: ${TEAM}]${RESET}"$'\n'
+    BUF+="${HEADER_COLOR}  ${ICON}  ${TITLE}${MODEL:+ · $MODEL}${RESET}  ${DIM}[team: ${TEAM}]${RESET}"$'\n'
     BUF+="${HEADER_COLOR}═══════════════════════════════════════════════${RESET}"$'\n\n'
 
     if [ ! -e "$LATEST" ]; then

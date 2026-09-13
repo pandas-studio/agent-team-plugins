@@ -1,4 +1,5 @@
 ---
+name: bootstrap
 description: Set up the 3-pane tmux layout for the dev-trio team (left = Claude PM, top-right = Antigravity researcher dashboard, bottom-right = Codex reviewer dashboard). Run this once after starting `claude` inside tmux. Required before `/dev-trio:research` and `/dev-trio:review`.
 disable-model-invocation: true
 allowed-tools: Bash(team-layout.sh:*) Bash(tmux:*) Bash(echo:*)

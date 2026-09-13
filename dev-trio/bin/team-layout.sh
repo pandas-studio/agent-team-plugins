@@ -15,7 +15,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/host.sh
+. "$SCRIPT_DIR/../lib/host.sh"
+PM_HOST="$(dev_trio_host)" || exit $?
 DASH="$SCRIPT_DIR/dashboard.sh"
+printf -v DASH_AGY_CMD '%q agy' "$DASH"
+printf -v DASH_CODEX_CMD '%q codex' "$DASH"
 # Panes inherit the user's workspace cwd ($PWD at invocation), not the plugin
 # install directory. Logs land in $PWD/.dev-trio/log/... that way.
 REPO_DIR="${PWD}"
@@ -28,7 +33,7 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [options]
 
-Sets up the 3-agent team tmux layout (Claude main + Antigravity/Codex dashboards).
+Sets up the 3-agent team tmux layout (${PM_HOST} PM + researcher/reviewer dashboards).
 
 Options:
   -n NAME        Session / @team-name (default: ${SESSION})
@@ -63,11 +68,11 @@ if [ "$HERE" = "1" ]; then
   tmux set-option -w '@team-name' "$SESSION"
   tmux rename-window "$SESSION"
   AGY_P=$(tmux split-window -h -c "$REPO_DIR" -P -F "#{pane_id}")
-  tmux send-keys -t "$AGY_P" "$DASH agy" Enter
+  tmux send-keys -t "$AGY_P" "$DASH_AGY_CMD" Enter
   CODEX_P=$(tmux split-window -v -t "$AGY_P" -c "$REPO_DIR" -P -F "#{pane_id}")
-  tmux send-keys -t "$CODEX_P" "$DASH codex" Enter
+  tmux send-keys -t "$CODEX_P" "$DASH_CODEX_CMD" Enter
   tmux select-pane -L 2>/dev/null || true
-  echo "✓ Layout applied to current window (team: ${SESSION}). Run 'claude' in the left pane."
+  echo "✓ Layout applied to current window (team: ${SESSION}). Run '$PM_HOST' in the left pane."
   exit 0
 fi
 
@@ -77,11 +82,11 @@ else
   MAIN_P=$(tmux new-session -d -s "$SESSION" -n "$SESSION" -c "$REPO_DIR" -P -F "#{pane_id}")
   tmux set-option -w -t "$SESSION" '@team-name' "$SESSION"
   AGY_P=$(tmux split-window -h -t "$MAIN_P" -c "$REPO_DIR" -P -F "#{pane_id}")
-  tmux send-keys -t "$AGY_P" "$DASH agy" Enter
+  tmux send-keys -t "$AGY_P" "$DASH_AGY_CMD" Enter
   CODEX_P=$(tmux split-window -v -t "$AGY_P" -c "$REPO_DIR" -P -F "#{pane_id}")
-  tmux send-keys -t "$CODEX_P" "$DASH codex" Enter
+  tmux send-keys -t "$CODEX_P" "$DASH_CODEX_CMD" Enter
   tmux select-pane -t "$MAIN_P"
-  tmux send-keys -t "$MAIN_P" "# 3-agent team ready (team: ${SESSION}). Run 'claude' to start." Enter
+  tmux send-keys -t "$MAIN_P" "# 3-agent team ready (team: ${SESSION}). Run '$PM_HOST' to start." Enter
 fi
 
 if [ "$ATTACH" = "1" ]; then
