@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import shlex
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -542,7 +543,45 @@ def test_reviewer_prompt_names_base_and_root_for_committed_work(tmp_path: Path):
     _run(tmp_path, runner, state, "review-scope")
 
     (prompt,) = runner.prompts["reviewer"]
-    root = str(workspace.resolve())
+    root = shlex.quote(str(workspace.resolve()))
     assert f"Base commit: {base}" in prompt
     assert f"git -C {root} diff {base}" in prompt
     assert f"git -C {root} ls-files --others --exclude-standard" in prompt
+
+
+def test_state_dir_at_repo_root_is_refused(tmp_path: Path):
+    """Excluding "." would drop every tracked change from the approval digest."""
+    workspace, spec = make_repo(tmp_path)
+    connection = sqlite3.connect(":memory:", check_same_thread=False)
+    graph = build_graph(
+        checkpointer=SqliteSaver(connection),
+        artifact_root=workspace / "artifacts",
+        runner=FakeRunner(),
+        state_root=workspace,
+    )
+    config = {"configurable": {"thread_id": "root-state"}}
+    try:
+        graph.invoke(initial(workspace, spec, "root-state"), config=config)
+    except ValueError as exc:
+        assert "repository root" in str(exc)
+    else:
+        raise AssertionError("a state directory at the repository root was accepted")
+
+    try:
+        graph_module._exclude_pathspecs(["."])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('"." was accepted as an attestation exclusion')
+
+
+def test_non_utf8_path_is_a_snapshot_error(tmp_path: Path, monkeypatch):
+    workspace, _ = make_repo(tmp_path)
+    monkeypatch.setattr(graph_module, "_git_bytes", lambda *args: b"ok.txt\0bad\xff.txt\0")
+    try:
+        graph_module._git_paths(workspace, "ls-files", "-z")
+    except ValueError as exc:
+        assert isinstance(exc, graph_module.SNAPSHOT_ERRORS)
+        assert "not valid UTF-8" in str(exc)
+    else:
+        raise AssertionError("an undecodable path was accepted")

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 from pathlib import Path
@@ -57,14 +58,34 @@ def _git_paths(workspace: Path, *args: str) -> list[str]:
     Newline-separated listings C-quote non-ASCII or special names
     (`"src/\\355\\225\\234.md"`), which then never match an allowed path and can't
     be opened for hashing; stripping the output would also change names with
-    leading or trailing whitespace. `os.fsdecode` round-trips non-UTF-8 bytes.
+    leading or trailing whitespace. A name that is not valid UTF-8 raises
+    ValueError (a snapshot error, so the gate fails closed): it could not be
+    matched against the allowed paths or serialized into the digest document.
     """
-    return [os.fsdecode(item) for item in _git_bytes(workspace, *args).split(b"\0") if item]
+    paths: list[str] = []
+    for item in _git_bytes(workspace, *args).split(b"\0"):
+        if not item:
+            continue
+        try:
+            paths.append(item.decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"path is not valid UTF-8: {item!r}") from exc
+    return paths
 
 
 def _exclude_pathspecs(excluded: list[str]) -> list[str]:
-    # literal: an excluded path is a name, never a glob.
-    return [f":(exclude,literal){path}" for path in excluded]
+    """Pathspecs for `git diff` that leave out `excluded` (repository-root-relative).
+
+    literal: an excluded path is a name, never a glob. The leading "." keeps the
+    include side explicit instead of relying on git's implicit match-all for an
+    exclude-only pathspec. A "." exclusion would drop every tracked change from
+    the digest, so it is refused outright.
+    """
+    if not excluded:
+        return []
+    if any(path in ("", ".") for path in excluded):
+        raise ValueError("refusing to exclude the repository root from attestation")
+    return [".", *(f":(exclude,literal){path}" for path in excluded)]
 
 
 def _normalize_paths(paths: list[str], *, label: str) -> list[str]:
@@ -129,7 +150,7 @@ def _file_digest(repo_root: Path, relative: str) -> str:
     metadata = path.lstat()
     if stat.S_ISLNK(metadata.st_mode):
         kind = b"symlink"
-        content = os.readlink(path).encode()
+        content = os.fsencode(os.readlink(path))
     elif stat.S_ISREG(metadata.st_mode):
         try:
             path.resolve(strict=True).relative_to(repo_root.resolve())
@@ -241,14 +262,14 @@ def _role_prompt(state: GraphState, role: str) -> str:
             + (f"Previous gate failure:\n{gate_feedback}\n" if gate_feedback else "")
             + "Implement the task in the workspace. Stay within the specification."
         )
-    root = state["repo_root"]
+    root = shlex.quote(state["repo_root"])
     base = state["base_sha"]
     return (
         shared
         + f"Plan:\n{state['plan']}\nResearch:\n{state['research']}\n"
         + f"Coder report:\n{state['code_report']}\nGate passed: {state['gate_passed']}\n"
         + (f"Gate failure:\n{gate_feedback}\n" if gate_feedback else "")
-        + f"Repository root: {root}\nBase commit: {base}\n"
+        + f"Repository root: {state['repo_root']}\nBase commit: {base}\n"
         # The coder may commit, stage, or leave edits unstaged, and roles run in
         # the workspace, which can be a subdirectory: name the whole change set.
         + f"Review every change since the base commit: `git -C {root} diff {base}` "
@@ -308,11 +329,11 @@ def build_graph(
         )
         # The runtime's own state (checkpoint db + artifacts) is machine-written,
         # never coder-written, so it must not count against the scope gate.
-        runtime_excluded = [
-            relative
-            for relative in (_repo_relative(repo_root, runtime_root),)
-            if relative is not None
-        ]
+        runtime_relative = _repo_relative(repo_root, runtime_root)
+        if runtime_relative == ".":
+            # Excluding it would exempt the whole repository from the digest.
+            raise ValueError("state directory must not be the repository root")
+        runtime_excluded = [runtime_relative] if runtime_relative is not None else []
         excluded = sorted(set(operator_excluded) | set(runtime_excluded))
         strict_ignored = bool(state.get("strict_ignored", False))
         spec_text = spec.read_text(encoding="utf-8")
