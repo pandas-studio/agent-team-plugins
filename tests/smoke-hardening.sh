@@ -69,7 +69,9 @@ run_ask_codex() {
     "$@" "$ROOT/dev-trio/bin/ask-codex.sh" "${ASK_ARGS[@]}" >/dev/null 2>&1)
 }
 final_path() { printf '%s/log/smoke/%s' "$TMP" "$(readlink "$TMP/log/smoke/latest-codex.final.md")"; }
-NO_MEM_ARGV="exec --skip-git-repo-check -c features.memories=false --output-last-message"
+# Compare argv slot by slot (one per line) so a merged "-c features.memories=false"
+# slot cannot pass for the two slots codex needs.
+assert_argv() { assert_eq "$(cat "$TMP/argv")" "$(printf '%s\n' "$@" "$(final_path)")"; }
 # Refusal is rc=2 and must happen before any CLI is spawned.
 assert_refused() {
   local rc=0
@@ -81,16 +83,20 @@ assert_refused() {
 
 ASK_ARGS=("focus")
 assert_ok run_ask_codex
-assert_eq "$(tr '\n' ' ' < "$TMP/argv")" \
-  "exec --skip-git-repo-check --output-last-message $(final_path) "
+assert_argv exec --skip-git-repo-check --output-last-message
 
 ASK_ARGS=("focus" --no-memories)
 assert_ok run_ask_codex
-assert_eq "$(tr '\n' ' ' < "$TMP/argv")" "$NO_MEM_ARGV $(final_path) "
+assert_argv exec --skip-git-repo-check -c features.memories=false --output-last-message
+
+# The env var alone selects the model, without the flag.
+ASK_ARGS=("focus")
+assert_ok run_ask_codex DEV_TRIO_REVIEWER_MODEL=codex-no-memories
+assert_argv exec --skip-git-repo-check -c features.memories=false --output-last-message
 
 ASK_ARGS=(--no-memories "focus")
 assert_ok run_ask_codex DEV_TRIO_REVIEWER_MODEL=codex-no-memories
-assert_eq "$(tr '\n' ' ' < "$TMP/argv")" "$NO_MEM_ARGV $(final_path) "
+assert_argv exec --skip-git-repo-check -c features.memories=false --output-last-message
 
 assert_refused DEV_TRIO_REVIEWER_MODEL=claude
 
