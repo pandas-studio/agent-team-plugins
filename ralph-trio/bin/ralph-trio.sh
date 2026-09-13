@@ -772,6 +772,12 @@ $RESEARCH"
         printf '  worktree: PRESERVED (not merged or discarded: %s)\n' "$WT" >> "$SUMMARY_LOG"
         printf '## iter %d · %s · WORKTREE-MERGE-BLOCK\nTask: %s\nPreserved worktree: %s\n\n' \
           "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TASK" "$WT" >> "$FIX_PLAN_FILE"
+        # Stop here: the next iteration would hit the same obstruction and
+        # keep one more full worktree each time.
+        ralph_log "worktree for iter $ITER was not merged or discarded. Stopping."
+        echo "=== STOP (worktree-merge-blocked) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
+        WORKTREE_FAILED=1
+        break
       fi
     fi
     unset RALPH_WT_DIR
@@ -788,5 +794,5 @@ done
 
 echo "=== ralph-trio done (completed=$COMPLETED) ===" | tee -a "$SUMMARY_LOG" >&2
 echo "summary: $SUMMARY_LOG" >&2
-# A run that could not create its worktree did no work: don't report success.
+# A worktree that could not be created, merged or discarded: don't report success.
 if [ "${WORKTREE_FAILED:-0}" = "1" ]; then exit 1; fi

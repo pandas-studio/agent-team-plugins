@@ -172,6 +172,27 @@ for driver in ralph-trio ralph-debate; do
 done
 printf -- '- [ ] task\n' > "$DRV/BACKLOG.md"
 
+# A merge that is blocked stops the loop at the first blocked iteration (exit
+# 1, one preserved worktree) instead of keeping a full worktree per iteration.
+MB="$TMP/merge-block"
+git init -q "$MB"
+git -C "$MB" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
+printf 'prompt\n' > "$MB/PROMPT.md"
+printf '#!/usr/bin/env bash\necho work >> work.txt\n' > "$TMP/mb-worker.sh"
+chmod +x "$TMP/mb-worker.sh"
+MB_RC=$(cd "$MB" && env AGENT_TEAM="mb-$$" TMUX="" RALPH_TRIO_WORKSPACE="$TMP/mb-ws" \
+  WORKER_CLI="$TMP/mb-worker.sh" "$ROOT/ralph-trio/bin/ralph-solo.sh" --prompt PROMPT.md \
+  --max-iter 3 --worktree \
+  --test-cmd "git -C '$MB' -c user.name=t -c user.email=t@t commit -q --allow-empty -m moved" \
+  >/dev/null 2>"$TMP/mb.err" </dev/null; echo "rc=$?")
+MB_WTS=$(git -C "$MB" worktree list --porcelain | grep -c '^worktree ' || true)
+git -C "$MB" worktree list --porcelain | sed -n 's/^worktree //p' | sed 1d | while IFS= read -r w; do
+  rm -rf "$w"
+done
+assert_eq "$MB_RC" "rc=1"
+assert_eq "$MB_WTS" "2"
+assert_eq "$(grep -c 'WORKTREE-MERGE-BLOCK' "$MB/fix_plan.md")" "1"
+
 # ralph-meta without --base-ref: the empty range array must not kill git log
 # under bash 3.2's set -u (it used to report 0 commits every time).
 git -C "$DRV" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "ralph iter 1: smoke"
@@ -241,8 +262,16 @@ for plugin in ralph-trio spec-trio; do
     d=$(with_worktree 4 "$base" 2>/dev/null) || exit 9
     b="$d"
     git -C "$d" -c user.name=t -c user.email=t@t commit -q --allow-empty -m iter
+    iter_commit=$(git -C "$d" rev-parse HEAD)
     git -c user.name=t -c user.email=t@t commit -q --allow-empty -m "base moved"
-    merge_or_discard_worktree "$d" 4 1 "$PWD" >/dev/null 2>&1 || { [ -d "$d" ] && echo ff-fail-kept; }
+    base_head=$(git rev-parse HEAD)
+    if ! merge_or_discard_worktree "$d" 4 1 "$PWD" >/dev/null 2>&1 \
+      && git worktree list --porcelain | grep -q "^worktree .*/${d##*/}$" \
+      && [ "$(git -C "$d" symbolic-ref --short HEAD)" = "$(worktree_branch "$d" 4)" ] \
+      && [ "$(git -C "$d" rev-parse HEAD)" = "$iter_commit" ] \
+      && [ "$(git rev-parse HEAD)" = "$base_head" ]; then
+      echo ff-fail-kept
+    fi
   ' _ "$WTREPO")" "$(printf '%s\n' distinct branches "bad-rc=1 out=" no-leftover discarded merged \
       missing-refused commit-refused validate-refused feature-untouched discard-refused feature-kept \
       ff-fail-kept)"
