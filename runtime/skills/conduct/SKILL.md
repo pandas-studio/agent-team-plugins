@@ -19,7 +19,9 @@ fails with "Failed to spawn" — `--project` is what points `uv` at the runtime.
 ## One-time setup
 
 Requires `uv`. The environment lives in the plugin install directory, so re-run
-this after a plugin update:
+this after a plugin update. Finish (approve or reject) any run parked at
+approval before updating: a newer version may compute the change digest
+differently, and the parked run then stops as `needs-human` — start a new run.
 
 ```bash
 uv sync --project "${CLAUDE_PLUGIN_ROOT}" --frozen --python 3.12
@@ -72,6 +74,11 @@ Branch on these rather than parsing the JSON:
 - The approval payload includes `reviewed_change_sha256`. On resume the runtime
   recomputes the current change identity and blocks approval if any attested
   tracked or untracked content changed while the graph was interrupted.
+- `--allow-path` / `--exclude-path` spellings are canonicalized (`./src`,
+  `src//x` → `src`, `src/x`). Absolute paths, `..`, and anything that resolves to
+  the repository root are refused, and so is a `--state-dir` at the repository
+  root. A changed file whose name is not valid UTF-8 fails the gate (it cannot
+  be attested).
 - `--exclude-path` is a trusted, repeatable repository-root-relative exemption
   for tool scratch. Excluded content (tracked or untracked) is neither
   scope-checked nor attested; use
