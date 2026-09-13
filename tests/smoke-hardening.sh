@@ -61,6 +61,9 @@ echo "VERDICT: SHIP"
 STUB
 chmod +x "$STUB_CLI"
 run_ask_codex() {
+  # Clear the previous run's artifacts so a run that spawns nothing cannot pass
+  # on them (several cases expect the same argv).
+  rm -f "$TMP/argv" "$TMP/log/smoke/latest-codex.final.md"
   (cd "$TMP/repo" && env -u REVIEWER_CLI -u DEV_TRIO_REVIEWER_MODEL \
     -u MANIFEST_PARENT_TMP -u REVIEWER_ROLE_FILE \
     CODEX_CLI="$STUB_CLI" CLAUDE_CLI="$STUB_CLI" STUB_ARGV="$TMP/argv" \
@@ -75,7 +78,6 @@ assert_argv() { assert_eq "$(cat "$TMP/argv")" "$(printf '%s\n' "$@" "$(final_pa
 # Refusal is rc=2 and must happen before any CLI is spawned.
 assert_refused() {
   local rc=0
-  rm -f "$TMP/argv"
   run_ask_codex "$@" || rc=$?
   assert_eq "$rc" 2
   assert_fail test -e "$TMP/argv"
