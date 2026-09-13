@@ -67,7 +67,15 @@ cat > "$STUB_CLI" <<'STUB'
 #!/usr/bin/env bash
 # Record every argv slot except the trailing prompt, one per line.
 printf '%s\n' "${@:1:$#-1}" > "$STUB_ARGV"
-echo "VERDICT: SHIP"
+# Honour native final capture rather than relying on the old log fallback.
+while [ $# -gt 0 ]; do
+  if [ "$1" = --output-last-message ]; then
+    printf '## Verdict\nSHIP — argv fixture\n' > "$2"
+    break
+  fi
+  shift
+done
+printf '## Verdict\nSHIP — argv fixture\n'
 STUB
 chmod +x "$STUB_CLI"
 run_ask_codex() {
@@ -75,7 +83,7 @@ run_ask_codex() {
   # on them (several cases expect the same argv).
   rm -f "$TMP/argv" "$TMP/log/smoke/latest-codex.final.md"
   (cd "$TMP/repo" && env -u REVIEWER_CLI -u DEV_TRIO_REVIEWER_MODEL \
-    -u MANIFEST_PARENT_TMP -u REVIEWER_ROLE_FILE \
+    -u MANIFEST_PARENT_TMP -u REVIEWER_ROLE_FILE -u DEV_TRIO_REVIEW_PROFILE \
     CODEX_CLI="$STUB_CLI" CLAUDE_CLI="$STUB_CLI" STUB_ARGV="$TMP/argv" \
     AGENT_TEAM=smoke TMUX="" DEV_TRIO_LOG_DIR="$TMP/log" \
     AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" \

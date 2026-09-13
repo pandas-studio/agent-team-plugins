@@ -17,6 +17,11 @@
 # codex-no-memories; rc=2 for any other model or when the models config
 # redefines codex-no-memories.
 #
+# Result: sibling *.review.json contains verdict, findings and failure status.
+# Exit: 0 parsed review (any valid verdict), 3 parse failure after a successful
+# invocation; reviewer failures keep their original nonzero exit code.
+# DEV_TRIO_REVIEW_PROFILE=spec additionally permits OUT-OF-SCOPE for spec-trio.
+#
 # Reviewer role override:
 #   REVIEWER_ROLE_FILE=/path/to/role.md ask-codex.sh ...
 #
@@ -56,6 +61,14 @@ _REGISTRY_LIB="$PLUGIN_ROOT/lib/registry.sh"
 # shellcheck source=../lib/registry.sh
 . "$_REGISTRY_LIB" || { echo "ask-codex: failed to load registry.sh (jq missing?)" >&2; exit 2; }
 unset _REGISTRY_LIB
+
+# shellcheck source=../lib/review-result.sh
+. "$PLUGIN_ROOT/lib/review-result.sh" || exit 2
+REVIEW_PROFILE="${DEV_TRIO_REVIEW_PROFILE:-default}"
+case "$REVIEW_PROFILE" in
+  default|spec) ;;
+  *) echo "error: DEV_TRIO_REVIEW_PROFILE must be default or spec" >&2; exit 2 ;;
+esac
 
 # Reviewer model — DEV_TRIO_REVIEWER_MODEL env > config role binding > built-in
 # default (codex). No CLI model flag here, so the flag tier is empty. The legacy
@@ -149,14 +162,29 @@ $SPEC
 fi
 
 mkdir -p "$LOG_DIR"
-TS="$(date +%Y%m%d-%H%M%S)"
+TS="$(date +%Y%m%d-%H%M%S)-$$"
 LOG="$LOG_DIR/codex-$TS.log"
 # Codex's last assistant message (the structured review) captured verbatim and
 # independent of stdout streaming/flush — this is the authoritative artifact the
-# review skill parses the verdict from. See `--output-last-message` below.
+# wrapper parses into the shared review result. See `--output-last-message` below.
 FINAL="$LOG_DIR/codex-$TS.final.md"
-ln -sfn "codex-$TS.log" "$LOG_DIR/latest-codex.log"
-ln -sfn "codex-$TS.final.md" "$LOG_DIR/latest-codex.final.md"
+RESULT="$LOG_DIR/codex-$TS.review.json"
+cleanup_review() {
+  [ -z "${RESULT_TMP:-}" ] || rm -f "$RESULT_TMP"
+  [ -z "${LATEST_TMP:-}" ] || rm -f "$LATEST_TMP"
+  manifest_cleanup
+}
+trap cleanup_review EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+# ln -sfn unlinks then creates and can fail under concurrent dispatch. Rename
+# a unique sibling link instead; readers see either complete target.
+LATEST_TMP="$LOG_DIR/.latest-codex-$TS"
+ln -s "codex-$TS.log" "$LATEST_TMP"
+mv -f "$LATEST_TMP" "$LOG_DIR/latest-codex.log"
+ln -s "codex-$TS.final.md" "$LATEST_TMP"
+mv -f "$LATEST_TMP" "$LOG_DIR/latest-codex.final.md"
+LATEST_TMP=""
 
 # Manifest lifecycle (RFC 0004 PR 10 — sha256 of post-injection prompt for
 # byte-exact replayability without writing the prompt to disk).
@@ -165,7 +193,6 @@ manifest_add_role reviewer "$REVIEWER_MODEL" "$ROLE_FILE" "$(manifest_sha256_str
 manifest_add_input kind=focus value="$FOCUS"
 [ -n "$RESEARCH_FILE" ] && manifest_add_input kind=research path="$RESEARCH_FILE"
 [ -n "$SPEC_FILE" ]     && manifest_add_input kind=spec     path="$SPEC_FILE"
-trap 'manifest_cleanup' INT TERM
 
 {
   echo "=== ask-codex.sh @ $TS ==="
@@ -185,19 +212,29 @@ RC=0
 # For models with native final-message capture (codex's --output-last-message),
 # the registry's final_args template writes the structured review to $FINAL
 # regardless of how stdout is buffered/streamed; `tee` keeps the full transcript
-# in $LOG. Legacy REVIEWER_CLI still overrides the binary. Downstream parses the
-# verdict from $FINAL (clean), falling back to $LOG only when $FINAL is empty.
+# in $LOG. Legacy REVIEWER_CLI still overrides the binary.
 REGISTRY_CMD_OVERRIDE="${REVIEWER_CLI:-}" registry_run "$REVIEWER_MODEL" "$PROMPT" "$FINAL" 2>&1 | tee -a "$LOG" || RC=$?
-printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG"
-# Models without native final-capture: synthesize $FINAL from the streamed
-# transcript so the verdict parser always has a clean file to read.
+# Only adapters without native final capture synthesize a final. A missing
+# native final is an error, even if stdout contains a plausible verdict.
 if ! registry_has_final "$REVIEWER_MODEL" && [ ! -s "$FINAL" ]; then
   registry_extract_response "$LOG" > "$FINAL" 2>/dev/null || true
 fi
+RESULT_TMP=$(mktemp "$RESULT.tmp.XXXXXX")
+review_result_parse "$FINAL" "$RC" "$REVIEW_PROFILE" > "$RESULT_TMP"
+mv "$RESULT_TMP" "$RESULT"
+RESULT_TMP=""
+RESULT_JSON=$(review_result_read "$RESULT")
+RC=$(printf '%s\n' "$RESULT_JSON" | jq -r '.exit_code')
+VERDICT=$(printf '%s\n' "$RESULT_JSON" | jq -r '.verdict // ""')
+manifest_add_input kind=review-result path="$RESULT"
+manifest_set_verdict "$VERDICT"
 manifest_finalize
+# Completion is published only after the final, result and manifest are ready.
+printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG"
 echo
-if [ ! -s "$FINAL" ]; then
-  echo "[ask-codex] warning: final-message file is empty ($FINAL) — $REVIEWER_MODEL may have died before emitting its review; parse $LOG instead" >&2
+if [ "$RC" -ne 0 ]; then
+  ERROR=$(printf '%s\n' "$RESULT_JSON" | jq -r '.error')
+  echo "[ask-codex] review failed: $ERROR (result: $RESULT)" >&2
 fi
-echo "(log: $LOG, final: $FINAL, rc=$RC)" >&2
+echo "(log: $LOG, final: $FINAL, result: $RESULT, rc=$RC)" >&2
 exit "$RC"

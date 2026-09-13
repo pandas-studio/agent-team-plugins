@@ -69,6 +69,8 @@ Review the target changes for **correctness, security, maintainability, repo con
 ```
 
 ## Rules
+- Start with one `## Verdict` heading and put `TOKEN — reason` on the immediately following line, using one of the four tokens above. Do not wrap the review in a code fence or repeat the verdict section.
+- Keep the Findings headings exactly as shown. For an empty section, write exactly `- None.` regardless of the language of the rest of the review.
 
 - **Cite `file:line` for every finding.** Reviews without locations are useless.
 - **Cite `§N` for spec references.** "spec violation" without the section is just an assertion.

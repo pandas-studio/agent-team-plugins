@@ -56,6 +56,8 @@ REVIEWER_ROLE_FILE="$ROLES_DIR/reviewer.md"
 [ -f "$ROLES_DIR/worker.md" ]   || { echo "ERROR: $ROLES_DIR/worker.md missing"   >&2; exit 2; }
 [ -f "$REVIEWER_ROLE_FILE" ]    || { echo "ERROR: $REVIEWER_ROLE_FILE missing"    >&2; exit 2; }
 export REVIEWER_ROLE_FILE
+# The spec reviewer has a fourth, contract-specific verdict token.
+export DEV_TRIO_REVIEW_PROFILE=spec
 # shellcheck disable=SC1091
 . "$PLUGIN_ROOT/lib/common.sh"
 # shellcheck disable=SC1091

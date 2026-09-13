@@ -23,6 +23,7 @@ else
 fi
 
 "$ROOT/tests/smoke-hardening.sh"
+"$ROOT/tests/smoke-review-results.sh"
 "$ROOT/spec-trio/tests/smoke-pr5.sh"
 
 if [ -x "$ROOT/runtime/.venv/bin/pytest" ]; then

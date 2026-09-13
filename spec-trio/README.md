@@ -39,6 +39,8 @@ The reviewer (`ask-codex.sh`) and researcher (`ask-agy.sh`) come from the **dev-
 /plugin install dev-trio@pandas-studio        # required (reviewer + researcher)
 ```
 
+The reviewer dispatcher uses `DEV_TRIO_REVIEW_PROFILE=spec` with dev-trio 0.4.3 or newer so `OUT-OF-SCOPE` remains an explicit fourth verdict. Update both plugins together. Malformed reviews return a nonzero dispatcher exit code and are handled as UNKNOWN; nested reviewer dispatches do not overwrite the parent verdict.
+
 Local development:
 
 ```
