@@ -20,6 +20,7 @@ check() {
   PASS=$((PASS + 1))
 }
 json_is() { jq -e "$2" "$1" >/dev/null; }
+no_receipt_result() { ! review_result_from_receipt "$1" "$2" >/dev/null; }
 no_match() { ! grep -q "$1" "$2"; }
 fixture() {
   printf '## Verdict\n%s\n\n## Findings\n\n### Blocker\n- 없음.\n\n### Major\n- None.\n\n### Minor / Nit\n- 없음\n' "$1" > "$TMP/review.md"
@@ -83,6 +84,25 @@ for invalid in \
   parse
   check 'invalid review fails closed' json_is "$TMP/parsed.json" '.status=="parse-failed" and .exit_code==3 and .verdict==null and (.error|length)>0'
 done
+# Every permitted fence indentation is excluded; four-space closing markers
+# are content inside an existing fence and must not expose later examples.
+for indent in '' ' ' '  ' '   '; do
+  printf '%s```markdown\n## Verdict\nSHIP — role example\n%s```\n' "$indent" "$indent" > "$TMP/review.md"
+  parse
+  check 'indented fence never supplies a verdict' json_is "$TMP/parsed.json" '.status=="parse-failed" and .verdict==null'
+done
+printf '```\n## Verdict\nSHIP — example\n    ```\n## Verdict\nNEEDS-FIX — still fenced\n' > "$TMP/review.md"
+parse
+check 'four-space closing fence stays open' json_is "$TMP/parsed.json" '.status=="parse-failed" and .verdict==null'
+# Unsupported/unclosed examples must never hide a later conflicting verdict.
+for tail in \
+  '```x` y\n## Verdict\nNEEDS-FIX — hidden' \
+  '```x` y\n## Verdict\nNEEDS-FIX — hidden\n```' \
+  '- example\n  ```\n  snippet\n     ```\n## Verdict\nNEEDS-FIX — hidden'; do
+  printf '## Verdict\nSHIP — first\n%b\n' "$tail" > "$TMP/review.md"
+  parse
+  check 'unsupported fences cannot hide competing verdict' json_is "$TMP/parsed.json" '.status=="parse-failed" and .verdict==null'
+done
 cp "$ROOT/dev-trio/lib/roles/reviewer.md" "$TMP/review.md"
 parse
 check 'echoed role template is not a review' json_is "$TMP/parsed.json" '.status=="parse-failed" and .verdict==null'
@@ -134,7 +154,7 @@ chmod +x "$TMP/reviewer"
 # Pin all model selection, role, namespace and output controls for fixtures.
 invoke() {
   env -u REVIEWER_CLI -u CODEX_CLI -u CLAUDE_CLI -u REVIEWER_ROLE_FILE \
-    -u DEV_TRIO_REVIEW_PROFILE -u MANIFEST_PARENT_TMP \
+    -u DEV_TRIO_REVIEW_PROFILE -u DEV_TRIO_REVIEW_RECEIPT -u MANIFEST_PARENT_TMP \
     -u TEST_MISSING_FINAL -u TEST_STDOUT_FILE -u TEST_REVIEW_RC \
     AGENT_TEAM=review-test TMUX='' AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" \
     DEV_TRIO_LOG_DIR="$TMP/log" DEV_TRIO_REVIEWER_MODEL=codex \
@@ -256,6 +276,28 @@ run_review 0 DEV_TRIO_REVIEW_PROFILE=spec
 check 'spec wrapper verdict preserved' json_is "$MANIFEST" '.verdict=="OUT-OF-SCOPE"'
 dashboard
 check 'spec dashboard reports contract verdict' grep -q 'OUT-OF-SCOPE. violates spec' "$TMP/dashboard.out"
+fixture 'SHIP — bound receipt'
+RECEIPT=$(review_receipt_create "$TMP/caller.log")
+run_review 0 DEV_TRIO_REVIEW_RECEIPT="$RECEIPT"
+review_result_from_receipt "$RECEIPT" 0 > "$TMP/receipt-result.json"
+check 'receipt identifies exact wrapper result' json_is "$TMP/receipt-result.json" ".result_path==\"$RESULT\" and .final_path==\"$FINAL\" and .verdict==\"SHIP\""
+check 'receipt cannot override failed wrapper rc' no_receipt_result "$RECEIPT" 2
+EMPTY_RECEIPT=$(review_receipt_create "$TMP/caller.log")
+check 'fresh empty receipt cannot reuse previous result' no_receipt_result "$EMPTY_RECEIPT" 0
+# Force an artifact failure after model success and after a failed invocation.
+for invocation_rc in 0 7; do
+  expected_rc=2
+  [ "$invocation_rc" -eq 0 ] || expected_rc="$invocation_rc"
+  actual_rc=0
+  invoke DEV_TRIO_REVIEW_RECEIPT="$TMP/missing/receipt" TEST_REVIEW_RC="$invocation_rc" > "$TMP/io.out" 2> "$TMP/io.err" || actual_rc=$?
+  check 'artifact failure preserves failed invocation rc' test "$actual_rc" -eq "$expected_rc"
+  failed_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-codex.log")"
+  check 'artifact failure completes the log' grep -q "=== END (rc=$expected_rc) ===" "$failed_log"
+  check 'artifact failure has an explicit diagnostic' grep -q 'result write failed' "$TMP/io.err"
+  check 'artifact failure leaves no successful result' test ! -f "${failed_log%.log}.review.json"
+  check 'artifact failure leaves manifest null' json_is "${failed_log%.log}.manifest.json" '.verdict==null and .ended_at!=null'
+done
+
 # A nested dispatcher adds only its role to the parent manifest.
 # shellcheck source=../dev-trio/lib/manifest.sh
 . "$ROOT/dev-trio/lib/manifest.sh"

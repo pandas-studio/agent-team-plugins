@@ -108,8 +108,6 @@ while true; do
       RESULT_JSON=""
       if [ "$ROLE" = "agy" ]; then
         RESPONSE=$(awk '/^=== RESPONSE ===$/{flag=1; next} /^=== END /{flag=0} flag' "$SOURCE" 2>/dev/null)
-      else
-        RESULT_JSON=$(review_result_read "${SOURCE%.log}.review.json") || RESULT_JSON=""
       fi
 
       # Status (END marker = done)
@@ -117,6 +115,11 @@ while true; do
       if grep -q '^=== END ' "$SOURCE" 2>/dev/null; then
         DONE=1
         RC=$(grep '^=== END ' "$SOURCE" | tail -1 | sed 's/.*rc=\([0-9]*\).*/\1/')
+        # END is published after the result; read in that order to avoid a
+        # transient missing-result frame when completion races this refresh.
+        if [ "$ROLE" = "codex" ]; then
+          RESULT_JSON=$(review_result_read "${SOURCE%.log}.review.json") || RESULT_JSON=""
+        fi
         if [ "$ROLE" = "codex" ] && [ -n "$RESULT_JSON" ]; then
           RC=$(printf '%s\n' "$RESULT_JSON" | jq -r '.exit_code')
         fi

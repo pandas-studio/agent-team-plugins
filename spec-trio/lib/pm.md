@@ -27,7 +27,7 @@ spec-trio adds three things over a bare Ralph loop:
 
 - After a run: give the per-iter **verdict tally** (SHIP / NEEDS-FIX / DISCUSS / OUT-OF-SCOPE / UNKNOWN) from the summary log, and surface anything in `fix_plan.md` marked DISCUSS or `> BLOCKER:`.
 - With `--coverage-check`, report the **§-coverage table** (COVERED / NOT-COVERED per `§5.N`) — that's the spec-conformance signal, distinct from the per-task verdict.
-- The reviewer's authoritative verdict is read from Codex's `--output-last-message` file (`latest-codex.final.md`), **not** the streamed transcript — quote it, don't re-derive it.
+- The reviewer's authoritative verdict comes from the exact `.review.json` referenced by the review manifest's `review-result` input. Use its `verdict` and `verdict_line`; never derive a verdict from streamed logs or `latest` links.
 - Logs live under `.spec-trio/log/<team>/` (gitignored); typed run manifests sit beside each stage log. Link them, don't dump them.
 
 ## Don't

@@ -191,6 +191,20 @@ else
 
   STUB_BIN="$T2/stubbin"
   mkdir -p "$STUB_BIN"
+  # Install the shared result reader alongside the fixture dispatcher, just
+  # like the dev-trio plugin layout. The model-free driver smoke above/below
+  # must exercise the same receipt contract as production.
+  REVIEW_RESULT_LIB="$PLUGIN_ROOT/../dev-trio/lib/review-result.sh"
+  if [ ! -f "$REVIEW_RESULT_LIB" ]; then
+    REVIEW_RESULT_LIB="$(dirname "$(command -v ask-codex.sh)")/../lib/review-result.sh"
+  fi
+  if [ ! -f "$REVIEW_RESULT_LIB" ]; then
+    fail "dev-trio review-result.sh missing; update/install dev-trio for reviewer smoke"
+    exit 1
+  fi
+  REVIEW_RESULT_LIB="$(cd "$(dirname "$REVIEW_RESULT_LIB")" && pwd -P)/review-result.sh"
+  mkdir -p "$T2/lib"
+  ln -s "$REVIEW_RESULT_LIB" "$T2/lib/review-result.sh"
   # Stub mimics the dev-trio ask-codex.sh output contract: authoritative review
   # in $FINAL, an unreliable/decoy transcript on stdout, the `(... rc=…)` line on
   # stderr. STUB_MODE selects the scenario. Ignores --with-spec et al.
@@ -220,8 +234,14 @@ case "${STUB_MODE:-final-ship}" in
     printf '## Verdict\n<one of: SHIP / NEEDS-FIX / DISCUSS / OUT-OF-SCOPE> — <reason>\n'
     ;;
 esac
-echo "(log: $LOG, final: $FINAL, rc=0)" >&2
-exit 0
+# shellcheck source=/dev/null
+. "$(dirname "$0")/../lib/review-result.sh"
+RESULT="${FINAL%.final.md}.review.json"
+review_result_parse "$FINAL" 0 "${DEV_TRIO_REVIEW_PROFILE:-default}" > "$RESULT"
+review_receipt_write "$DEV_TRIO_REVIEW_RECEIPT" "$RESULT" "$FINAL"
+RC=$(jq -r '.exit_code' "$RESULT")
+echo "(log: $LOG, final: $FINAL, result: $RESULT, rc=$RC)" >&2
+exit "$RC"
 STUB
   chmod +x "$STUB_BIN/ask-codex.sh"
 
@@ -423,6 +443,8 @@ else
   T8=$(mktemp -d)
   trap 'rm -rf "$TMPDIR_SMOKE" "$T2" "$T7" "$T8"' EXIT
   S8="$T8/stubbin"
+  mkdir -p "$T8/lib"
+  ln -s "$REVIEW_RESULT_LIB" "$T8/lib/review-result.sh"
   mkdir -p "$S8"
 
   cat > "$S8/stub-planner.sh" <<'STUB'
@@ -484,8 +506,14 @@ case "$MODE" in
   *)             printf '## Verdict\nSHIP — stub ok\n' > "$FINAL" ;;
 esac
 printf '## Verdict\nNEEDS-FIX — decoy stream\n'
-echo "(final: $FINAL, rc=0)" >&2
-exit 0
+# shellcheck source=/dev/null
+. "$(dirname "$0")/../lib/review-result.sh"
+RESULT="${FINAL%.final.md}.review.json"
+review_result_parse "$FINAL" 0 "${DEV_TRIO_REVIEW_PROFILE:-default}" > "$RESULT"
+review_receipt_write "$DEV_TRIO_REVIEW_RECEIPT" "$RESULT" "$FINAL"
+RC=$(jq -r '.exit_code' "$RESULT")
+echo "(final: $FINAL, result: $RESULT, rc=$RC)" >&2
+exit "$RC"
 STUB
   cat > "$S8/ask-agy.sh" <<'STUB'
 #!/usr/bin/env bash

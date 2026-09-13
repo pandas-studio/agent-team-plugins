@@ -45,7 +45,8 @@ review_result_parse() {
       # Fences may be indented up to three spaces. Only a matching closing
       # fence ends the block; quoted and indented examples are never candidates.
       if (fence != "") {
-        candidate = line; sub(/^   ? ?/, "", candidate)
+        if (line ~ /^    / || line ~ /^\t/) next
+        candidate = line; sub(/^ ? ? ?/, "", candidate)
         if (substr(candidate, 1, 1) == fence) {
           marks = candidate; sub(/[^`~].*$/, "", marks)
           rest = substr(candidate, length(marks) + 1)
@@ -57,12 +58,13 @@ review_result_parse() {
         if (pending) { pending = 0; problem = "verdict must immediately follow its heading" }
         next
       }
-      candidate = line; sub(/^   ? ?/, "", candidate)
+      candidate = line; sub(/^ ? ? ?/, "", candidate)
       if (candidate ~ /^```/ || candidate ~ /^~~~/) {
         if (pending) { pending = 0; problem = "verdict must immediately follow its heading" }
         fence = substr(candidate, 1, 1)
         marks = candidate; sub(/[^`~].*$/, "", marks)
         fence_len = length(marks)
+        if (fence == "`" && substr(candidate, fence_len + 1) ~ /`/) problem = "invalid backtick fence"
         next
       }
       # Recognize Markdown-equivalent headings when detecting ambiguity, but
@@ -91,6 +93,7 @@ review_result_parse() {
       }
     }
     END {
+      if (fence != "") problem = "unclosed code fence"
       if (headings == 0) problem = "missing Verdict heading"
       else if (headings != 1) problem = "duplicate Verdict headings"
       else if (pending) problem = "missing verdict line"
@@ -138,4 +141,41 @@ review_result_read() {
     select(all(.findings.blocker, .findings.major, .findings.minor;
       . == null or (type == "array" and all(.[]; type == "string"))))
   ' "$1" 2>/dev/null
+}
+
+# A caller reserves a fresh, absolute receipt path for each dispatch. It never
+# parses stdout or consults a latest symlink to discover this invocation.
+review_receipt_create() {
+  local directory
+  directory=$(cd "$(dirname "$1")" && pwd -P) || return 1
+  mktemp "$directory/review-receipt.XXXXXX"
+}
+
+review_receipt_write() {
+  local receipt="$1" result="$2" final="$3" temporary
+  temporary=$(mktemp "$receipt.tmp.XXXXXX") || return 1
+  if ! jq -n --arg result "$result" --arg final "$final" \
+    '{schema_version: 1, result_path: $result, final_path: $final}' > "$temporary"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  if ! mv -f "$temporary" "$receipt"; then
+    rm -f "$temporary"
+    return 1
+  fi
+}
+
+review_result_from_receipt() {
+  local receipt="$1" wrapper_rc="$2" pointers result final data
+  pointers=$(jq -sce '
+    select(length == 1) | .[0] | select(.schema_version == 1) |
+    select(.result_path | type == "string" and startswith("/")) |
+    select(.final_path | type == "string" and startswith("/"))
+  ' "$receipt" 2>/dev/null) || return 1
+  result=$(printf '%s\n' "$pointers" | jq -r '.result_path') || return 1
+  final=$(printf '%s\n' "$pointers" | jq -r '.final_path') || return 1
+  data=$(review_result_read "$result") || return 1
+  printf '%s\n' "$data" | jq -ce --argjson rc "$wrapper_rc" \
+    --arg result "$result" --arg final "$final" '
+      select(.exit_code == $rc) | . + {result_path: $result, final_path: $final}'
 }

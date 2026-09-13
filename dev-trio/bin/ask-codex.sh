@@ -21,6 +21,7 @@
 # Exit: 0 parsed review (any valid verdict), 3 parse failure after a successful
 # invocation; reviewer failures keep their original nonzero exit code.
 # DEV_TRIO_REVIEW_PROFILE=spec additionally permits OUT-OF-SCOPE for spec-trio.
+# DEV_TRIO_REVIEW_RECEIPT optionally names a fresh absolute caller receipt file.
 #
 # Reviewer role override:
 #   REVIEWER_ROLE_FILE=/path/to/role.md ask-codex.sh ...
@@ -162,6 +163,13 @@ $SPEC
 fi
 
 mkdir -p "$LOG_DIR"
+case "$LOG_DIR" in /*) ;; *) LOG_DIR="$PWD/$LOG_DIR" ;; esac
+# An optional caller-owned, fresh receipt binds the exact output paths.
+RECEIPT="${DEV_TRIO_REVIEW_RECEIPT:-}"
+case "$RECEIPT" in
+  ""|/*) ;;
+  *) echo "error: DEV_TRIO_REVIEW_RECEIPT must be absolute" >&2; exit 2 ;;
+esac
 TS="$(date +%Y%m%d-%H%M%S)-$$"
 LOG="$LOG_DIR/codex-$TS.log"
 # Codex's last assistant message (the structured review) captured verbatim and
@@ -219,16 +227,32 @@ REGISTRY_CMD_OVERRIDE="${REVIEWER_CLI:-}" registry_run "$REVIEWER_MODEL" "$PROMP
 if ! registry_has_final "$REVIEWER_MODEL" && [ ! -s "$FINAL" ]; then
   registry_extract_response "$LOG" > "$FINAL" 2>/dev/null || true
 fi
-RESULT_TMP=$(mktemp "$RESULT.tmp.XXXXXX")
-review_result_parse "$FINAL" "$RC" "$REVIEW_PROFILE" > "$RESULT_TMP"
-mv "$RESULT_TMP" "$RESULT"
+INVOCATION_RC="$RC"
+result_output_failed() {
+  # An I/O failure is not a successful review. Preserve a failed invocation's
+  # rc, otherwise use 2, and finish the log so dashboards do not stay running.
+  RC="$INVOCATION_RC"
+  [ "$RC" -ne 0 ] || RC=2
+  rm -f "$RESULT" 2>/dev/null || true
+  manifest_set_verdict "" || true
+  manifest_finalize || true
+  printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG" || true
+  echo "[ask-codex] result write failed: $1 (log: $LOG, final: $FINAL, rc=$RC)" >&2
+  exit "$RC"
+}
+RESULT_TMP=$(mktemp "$RESULT.tmp.XXXXXX") || result_output_failed 'create result temporary file'
+review_result_parse "$FINAL" "$RC" "$REVIEW_PROFILE" > "$RESULT_TMP" || result_output_failed 'parse result'
+mv "$RESULT_TMP" "$RESULT" || result_output_failed 'publish result'
 RESULT_TMP=""
-RESULT_JSON=$(review_result_read "$RESULT")
-RC=$(printf '%s\n' "$RESULT_JSON" | jq -r '.exit_code')
-VERDICT=$(printf '%s\n' "$RESULT_JSON" | jq -r '.verdict // ""')
-manifest_add_input kind=review-result path="$RESULT"
-manifest_set_verdict "$VERDICT"
-manifest_finalize
+RESULT_JSON=$(review_result_read "$RESULT") || result_output_failed 'read result'
+RC=$(printf '%s\n' "$RESULT_JSON" | jq -r '.exit_code') || result_output_failed 'read exit code'
+VERDICT=$(printf '%s\n' "$RESULT_JSON" | jq -r '.verdict // ""') || result_output_failed 'read verdict'
+manifest_add_input kind=review-result path="$RESULT" || result_output_failed 'record result'
+manifest_set_verdict "$VERDICT" || result_output_failed 'record verdict'
+if [ -n "$RECEIPT" ]; then
+  review_receipt_write "$RECEIPT" "$RESULT" "$FINAL" || result_output_failed 'publish receipt'
+fi
+manifest_finalize || result_output_failed 'finalize manifest'
 # Completion is published only after the final, result and manifest are ready.
 printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG"
 echo

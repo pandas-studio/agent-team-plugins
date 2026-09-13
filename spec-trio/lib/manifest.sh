@@ -351,7 +351,7 @@ manifest_set_verdict() {
 }
 
 # to_manifest_verdict <token>
-#   Map a verdict token (e.g. parse_codex_verdict's UNKNOWN) onto manifest's
+#   Map a caller verdict token (including UNKNOWN) onto manifest's
 #   closed vocab. Anything out-of-vocab → "null", the literal string
 #   manifest_set_verdict treats as "no verdict". Callers should record the
 #   raw out-of-vocab token separately as a kind=raw-verdict input for
