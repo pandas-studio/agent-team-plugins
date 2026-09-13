@@ -455,7 +455,7 @@ STUB
   cat > "$S8/coder-commit.sh" <<'STUB'
 #!/usr/bin/env bash
 echo x >> foo.txt
-git add foo.txt && git commit -qm "coder change"
+git add foo.txt && git -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm "coder change"
 echo "coder (commit) ran"
 STUB
   # Codex stub: final-ship (SHIP in .final.md), need-research (triggers retry),

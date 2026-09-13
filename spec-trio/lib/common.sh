@@ -158,11 +158,24 @@ with_worktree() {
   echo "$wt"
 }
 
-# worktree_branch WT — echo the branch checked out in WT; rc=1 if none. The
-# single source of an iteration's branch name: callers ask the worktree rather
-# than rebuilding the name, which carries a per-call suffix.
+# worktree_branch WT ITER — echo the branch with_worktree created for WT: the
+# name carries WT's mktemp suffix. Derived from the path, never read back from
+# the worktree, because the coder may have switched WT to another branch —
+# which must then not be merged, validated as ours, or deleted.
 worktree_branch() {
-  git -C "$1" symbolic-ref --short HEAD 2>/dev/null
+  : "${TEAM:?worktree_branch: TEAM not set}"
+  printf 'ralph/%s-iter-%s-%s\n' "$TEAM" "$2" "${1##*.}"
+}
+
+# worktree_on_own_branch WT ITER — rc=0 if WT still has its generated branch
+# checked out; otherwise logs and rc=1 (callers preserve the worktree).
+worktree_on_own_branch() {
+  local wt="$1" iter="$2" want have
+  want=$(worktree_branch "$wt" "$iter")
+  have=$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null || true)
+  [ "$have" = "$want" ] && return 0
+  ralph_log "worktree $wt is on '${have:-<no branch>}', not $want (iter $iter); leaving it for inspection"
+  return 1
 }
 
 # commit_worktree_changes WT ITER — stage+commit any uncommitted worktree edits
@@ -179,6 +192,8 @@ commit_worktree_changes() {
   local wt="$1" iter="$2"
   [ -d "$wt" ] || return 0
   [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ] || return 0
+  # Never auto-commit onto a branch the coder switched to.
+  worktree_on_own_branch "$wt" "$iter" || return 1
   git -C "$wt" add -A >&2 || { ralph_log "ERROR: git add -A failed in worktree (iter $iter); preserving worktree"; return 1; }
   git -C "$wt" -c user.name='ralph' -c user.email='ralph@localhost' \
     commit --no-verify -m "ralph iter ${iter}: coder changes (auto-committed at SHIP)" >&2 \
@@ -191,10 +206,8 @@ commit_worktree_changes() {
 merge_or_discard_worktree() {
   local wt="$1" iter="$2" passed="$3" orig="$4"
   local br
-  br=$(worktree_branch "$wt") || {
-    ralph_log "cannot resolve the branch of worktree $wt (iter $iter); leaving it for inspection"
-    return 1
-  }
+  worktree_on_own_branch "$wt" "$iter" || return 1
+  br=$(worktree_branch "$wt" "$iter")
   if [ "$passed" = "1" ]; then
     if ! git -C "$orig" merge --ff-only "$br" >&2; then
       ralph_log "merge --ff-only failed for $br; leaving branch in place for inspection"

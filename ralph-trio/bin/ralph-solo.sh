@@ -177,6 +177,7 @@ while :; do
     if ! WT=$(with_worktree "$ITER" "$BASE_BRANCH"); then
       ralph_log "could not create the iter $ITER worktree. Stopping."
       echo "=== STOP (worktree-failed) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
+      WORKTREE_FAILED=1
       break
     fi
     WORK_DIR="$WT"
@@ -264,7 +265,7 @@ $FP_EXCERPT
 
     # Pre-merge sandbox validation (only if tests passed and validation enabled)
     if [ "$PASSED" = "1" ] && [ "$NO_VALIDATE" = "0" ]; then
-      if ! pre_merge_validate "$WT" "$BASE_BRANCH" "$(worktree_branch "$WT")" "$MAX_DIFF_LINES" 2>>"$ITER_LOG"; then
+      if ! pre_merge_validate "$WT" "$BASE_BRANCH" "$(worktree_branch "$WT" "$ITER")" "$MAX_DIFF_LINES" 2>>"$ITER_LOG"; then
         ralph_log "  pre_merge_validate FAILED — discarding instead of merging"
         printf '  validate: BLOCKED (see %s)\n' "$ITER_LOG" >> "$SUMMARY_LOG"
         printf '## iter %d · %s · WORKTREE-VALIDATE-BLOCK\nIter log: %s\n\n' "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ITER_LOG" >> "$FIX_PLAN_FILE"
@@ -294,3 +295,5 @@ done
 
 echo "=== ralph-solo done (completed=$COMPLETED) ===" | tee -a "$SUMMARY_LOG" >&2
 echo "summary: $SUMMARY_LOG" >&2
+# A run that could not create its worktree did no work: don't report success.
+if [ "${WORKTREE_FAILED:-0}" = "1" ]; then exit 1; fi

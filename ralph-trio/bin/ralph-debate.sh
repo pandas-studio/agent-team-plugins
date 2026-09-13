@@ -229,6 +229,7 @@ while :; do
       # pop_top_task already marked the task done; put it back.
       [ "$DRY_RUN" = "1" ] || append_to_backlog "$BACKLOG_FILE" "$TASK"
       echo "=== STOP (worktree-failed) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
+      WORKTREE_FAILED=1
       break
     fi
     WORK_DIR="$WT"
@@ -322,7 +323,7 @@ while :; do
   if [ "$USE_WORKTREE" = "1" ]; then
     if [ "$PASSED" = "1" ] && [ "$NO_VALIDATE" = "0" ]; then
       VAL_LOG="$LOG_DIR/ralph-debate-$TS-iter-$ITER-validate.log"
-      if ! pre_merge_validate "$WT" "$BASE_BRANCH" "$(worktree_branch "$WT")" "$MAX_DIFF_LINES" 2>"$VAL_LOG"; then
+      if ! pre_merge_validate "$WT" "$BASE_BRANCH" "$(worktree_branch "$WT" "$ITER")" "$MAX_DIFF_LINES" 2>"$VAL_LOG"; then
         ralph_log "  pre_merge_validate FAILED — discarding instead of merging"
         printf '  validate: BLOCKED (see %s)\n' "$VAL_LOG" >> "$SUMMARY_LOG"
         printf '## iter %d · %s · WORKTREE-VALIDATE-BLOCK\nTopic: %s\nValidate log: %s\n\n' \
@@ -349,3 +350,5 @@ done
 
 echo "=== ralph-debate done (completed=$COMPLETED) ===" | tee -a "$SUMMARY_LOG" >&2
 echo "summary: $SUMMARY_LOG" >&2
+# A run that could not create its worktree did no work: don't report success.
+if [ "${WORKTREE_FAILED:-0}" = "1" ]; then exit 1; fi

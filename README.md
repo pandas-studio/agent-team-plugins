@@ -44,7 +44,7 @@ agent-team-models add my-llm --command my-cli --arg -p --arg '{prompt}'
 agent-team-models remove kimi-code --force --fallback codex
 ```
 
-Config lives at `$AGENT_TEAM_MODELS_CONFIG`, else `${XDG_CONFIG_HOME:-~/.config}/agent-team-plugins/models.json`.
+Config lives at `$AGENT_TEAM_MODELS_CONFIG`, else `${XDG_CONFIG_HOME:-~/.config}/agent-team-plugins/models.json`. If the file is not valid JSON, the plugins ignore it with a warning (built-in defaults apply) and every command that would change it (`preset add`, `add`, `edit`, `remove`, `set-role`) exits 2 without writing — fix or move the file first; `agent-team-models doctor` shows the problem.
 
 **Roles and their defaults:**
 

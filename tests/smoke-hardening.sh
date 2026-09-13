@@ -32,23 +32,33 @@ for plugin in dev-trio debate-conductor ralph-trio spec-trio; do
   assert_eq "$(AGENT_TEAM='' TMUX='' agent_team_detect_team)" "default"
 done
 
+# Fixture repos must not pick up the contributor's git setup (signing, hooks).
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+LOCKWT=""
+# with_worktree creates worktrees under /tmp, outside $TMP.
+trap '[ -n "$LOCKWT" ] && rm -rf "$LOCKWT"; rm -rf "$TMP"' EXIT
 git init -q "$TMP/repo"
 git -C "$TMP/repo" config user.email test@example.com
 git -C "$TMP/repo" config user.name Test
 printf 'base\n' > "$TMP/repo/file.txt"
 git -C "$TMP/repo" add file.txt
 git -C "$TMP/repo" commit -qm init
-printf 'changed\n' > "$TMP/repo/file.txt"
-touch "$TMP/repo/.git/index.lock"
 
 PLUGIN_ROOT="$ROOT/ralph-trio"
 # shellcheck source=/dev/null
 . "$PLUGIN_ROOT/lib/common.sh"
-assert_fail commit_worktree_changes "$TMP/repo" 1
-assert_ok test -d "$TMP/repo"
-assert_ok test -n "$(git -C "$TMP/repo" status --porcelain)"
+# A failed auto-commit must leave the worktree and its changes in place.
+TEAM="smoke-$$"
+LOCKWT="$(cd "$TMP/repo" && with_worktree 1 "$(git symbolic-ref --short HEAD)" 2>/dev/null)"
+printf 'changed\n' > "$LOCKWT/file.txt"
+touch "$(git -C "$LOCKWT" rev-parse --absolute-git-dir)/index.lock"
+assert_fail commit_worktree_changes "$LOCKWT" 1
+assert_ok test -d "$LOCKWT"
+assert_ok test -n "$(git -C "$LOCKWT" status --porcelain)"
+rm -f "$(git -C "$LOCKWT" rev-parse --absolute-git-dir)/index.lock"
+unset TEAM
 
 # ask-codex.sh --no-memories must reach codex as a config override, and must be
 # refused for a model that has no equivalent switch (before anything is spawned).
@@ -143,6 +153,13 @@ assert_driver_refuses_runtime "$ROOT/ralph-trio/bin/ralph-debate.sh" --backlog B
 assert_driver_refuses_runtime "$ROOT/spec-trio/bin/spec-trio.sh" --spec spec.md --backlog BACKLOG.md
 # ...while a valid spec still runs (dry-run: no model calls).
 assert_eq "$(run_driver "$ROOT/ralph-trio/bin/ralph-solo.sh" --prompt PROMPT.md --max-iter 1 --dry-run --max-runtime 1h)" "rc=0"
+# A worktree that can't be created stops the run with a failure status.
+assert_eq "$(run_driver "$ROOT/ralph-trio/bin/ralph-solo.sh" --prompt PROMPT.md --max-iter 1 --dry-run \
+  --worktree --base-branch no-such-ref)" "rc=1"
+assert_eq "$(run_driver "$ROOT/spec-trio/bin/spec-trio.sh" --spec spec.md --backlog BACKLOG.md --max-iter 1 \
+  --dry-run --no-research --worktree --base-branch no-such-ref)" "rc=1"
+assert_ok grep -q 'could not create the iter 1 worktree' "$TMP/drv.err"
+assert_eq "$(grep -c '^- \[ \] task$' "$DRV/BACKLOG.md")" "1"
 
 # ralph-meta without --base-ref: the empty range array must not kill git log
 # under bash 3.2's set -u (it used to report 0 commits every time).
@@ -190,13 +207,25 @@ for plugin in ralph-trio spec-trio; do
     git -C "$a" add a.txt && git -C "$a" -c user.name=t -c user.email=t@t commit -qm a
     b=$(with_worktree 1 "$base" 2>/dev/null) || exit 9
     [ "$a" != "$b" ] && [ -f "$a/a.txt" ] && echo distinct
-    [ "$(worktree_branch "$a")" != "$(worktree_branch "$b")" ] && echo branches
+    [ "$(worktree_branch "$a" 1)" != "$(worktree_branch "$b" 1)" ] && echo branches
     x=$(with_worktree 2 no-such-ref 2>/dev/null); echo "bad-rc=$? out=$x"
     ls -d "/tmp/ralph-$TEAM-iter-2."* >/dev/null 2>&1 || echo no-leftover
     merge_or_discard_worktree "$b" 1 0 "$PWD" >/dev/null 2>&1 && [ ! -d "$b" ] && echo discarded
     merge_or_discard_worktree "$a" 1 1 "$PWD" >/dev/null 2>&1 && [ -f a.txt ] && echo merged
     merge_or_discard_worktree "$PWD/nope" 1 1 "$PWD" >/dev/null 2>&1 || echo missing-refused
-  ' _ "$WTREPO")" "$(printf '%s\n' distinct branches "bad-rc=1 out=" no-leftover discarded merged missing-refused)"
+    # A coder that switches the worktree to another branch: nothing is
+    # auto-committed onto it, merged from it, or deleted.
+    git branch feature
+    c=$(with_worktree 3 "$base" 2>/dev/null) || exit 9
+    a="$c"
+    git -C "$c" switch -q feature
+    printf "c\n" > "$c/c.txt"
+    commit_worktree_changes "$c" 3 >/dev/null 2>&1 || echo commit-refused
+    [ "$(git rev-parse feature)" = "$(git rev-parse "$base")" ] && echo feature-untouched
+    merge_or_discard_worktree "$c" 3 0 "$PWD" >/dev/null 2>&1 || echo discard-refused
+    git rev-parse -q --verify refs/heads/feature >/dev/null && [ -d "$c" ] && echo feature-kept
+  ' _ "$WTREPO")" "$(printf '%s\n' distinct branches "bad-rc=1 out=" no-leftover discarded merged \
+      missing-refused commit-refused feature-untouched discard-refused feature-kept)"
 done
 
 # spec-trio scope gate: paths are listed verbatim (non-ASCII names match the

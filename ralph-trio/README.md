@@ -59,6 +59,8 @@ ralph-solo.sh --max-iter 50 --max-runtime 6h
 
 Each iteration runs `claude -p "$(cat PROMPT.md)"` in your cwd. The loop exits when `fix_plan.md` contains `<promise>COMPLETE</promise>`, or `--max-iter` / `--max-runtime` is reached, or you Ctrl-C.
 
+`--max-runtime` accepts `N` (seconds), `Ns`, `Nm` or `Nh` — e.g. `6h`, `90m`. Anything else (`1d`, `1h30m`, `90min`) is refused with exit 2 rather than silently running with no deadline.
+
 **In-session driver** (Stop-hook, solo only):
 
 ```
@@ -102,7 +104,7 @@ Verdict dispatch:
 | `DISCUSS` | Log to fix_plan.md and continue (human attention). |
 | `UNKNOWN` | Log to fix_plan.md (codex output unparseable). |
 
-Useful flags: `--worktree` (run each iter in a throwaway git worktree, fast-forward merge on SHIP), `--autoship` (skip review — useful for trivial mechanical refactors), `--dry-run` (no model calls; manifest emission only), `--no-research` (skip the NEED RESEARCH branch).
+Useful flags: `--worktree` (run each iter in a throwaway git worktree at `/tmp/ralph-<team>-iter-<N>.<random>` on branch `ralph/<team>-iter-<N>-<random>`, fast-forward merge on SHIP; an existing worktree or branch is never reused or removed, a worktree that can't be created stops the run with exit 1 and re-queues the task, and a worktree the coder switched to another branch is left for inspection), `--autoship` (skip review — useful for trivial mechanical refactors), `--dry-run` (no model calls; manifest emission only), `--no-research` (skip the NEED RESEARCH branch).
 
 ### Debate (per-topic debate outer loop)
 

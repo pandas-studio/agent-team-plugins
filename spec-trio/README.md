@@ -61,8 +61,8 @@ Per backlog task, each iteration runs:
 2. **Scope gate 1** — if `<allowed-paths>` is missing or empty under `--strict-scope` (default), the iteration short-circuits to `OUT-OF-SCOPE` (no coder, no reviewer).
 3. **Stage 1.5 — Pre-coding research** — if the plan emits `## NEED RESEARCH`, `ask-agy.sh` (Antigravity) answers it **before** coding and the answer is grafted into the first coder prompt. Fires even under `--autoship`; skipped with `--no-research`.
 4. **Stage 2 — Coder** (`claude -p` with `lib/roles/worker.md` + `<spec>` + plan + any pre-coding research).
-5. **Scope gate 2** — every uncommitted/committed/untracked path that the coder produced is compared against the allowlist. If any path is outside, the iteration short-circuits to `OUT-OF-SCOPE` (no reviewer).
-6. **Stage 3 — Reviewer** (`ask-codex.sh --with-spec spec.md` against HEAD diff) → verdict: `SHIP / NEEDS-FIX / DISCUSS / OUT-OF-SCOPE`. The verdict is read from codex's `--output-last-message` file (`latest-codex.final.md`), not the streamed transcript, so it survives worktree teardown and stdout buffering.
+5. **Scope gate 2** — every uncommitted/committed/untracked path that the coder produced is compared against the allowlist. Paths are listed verbatim (non-ASCII names match as written), a rename counts as both its source and its destination, a submodule with any change counts as its path, and a name containing a newline always fails. If any path is outside, the iteration short-circuits to `OUT-OF-SCOPE` (no reviewer).
+6. **Stage 3 — Reviewer** (`ask-codex.sh --with-spec spec.md`, pointed at the iteration's commit range from the iter-base commit plus any uncommitted/untracked changes — the same range for the post-research re-review) → verdict: `SHIP / NEEDS-FIX / DISCUSS / OUT-OF-SCOPE`. The verdict is read from codex's `--output-last-message` file (`latest-codex.final.md`), not the streamed transcript, so it survives worktree teardown and stdout buffering.
 7. If codex emits `## NEED RESEARCH`: invoke `ask-agy.sh`, re-run Stage 2 with research context (stacked above any pre-coding research), re-review.
 
 Verdict dispatch:
