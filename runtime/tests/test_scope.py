@@ -525,7 +525,7 @@ def test_gate_failure_reaches_retrying_coder_and_reviewer(tmp_path: Path):
     )
     summary = (
         "attempt 1: 1 changed path(s) are outside the allowed paths; "
-        f"the test command exited 1. The test output and path lists are in {record}"
+        f'the test command exited 1. The test output and path lists are in the JSON file at path "{record}"'
     )
     assert f"Gate failure: {summary}" in first_review
     assert f"Previous gate failure: {summary}" in runner.prompts["coder"][1]
@@ -536,6 +536,47 @@ def test_gate_failure_reaches_retrying_coder_and_reviewer(tmp_path: Path):
     # The retry still strays, so the second attempt fails on scope alone.
     assert "the test command exited" not in second_review
     assert snapshot.values["gate_passed"] is False
+
+
+def test_passing_retry_clears_gate_feedback(tmp_path: Path):
+    workspace, spec = make_repo(tmp_path)
+    marker = tmp_path / "gate-ran-once"
+    script = tmp_path / "flaky-test.sh"
+    script.write_text(
+        f'#!/bin/sh\nif [ -e "{marker}" ]; then exit 0; fi\ntouch "{marker}"\nexit 1\n',
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    runner = PromptCapture(writes={"README.md": "implemented\n"})
+    state = initial(workspace, spec, "gate-clears")
+    state["test_command"] = [str(script)]
+    snapshot = _run(tmp_path, runner, state, "gate-clears")
+
+    first_review, second_review = runner.prompts["reviewer"]
+    assert "Gate failure: attempt 1: the test command exited 1." in first_review
+    assert "Gate failure:" not in second_review
+    assert snapshot.values["gate_feedback"] == ""
+    assert snapshot.next == ("approval",)
+
+
+def test_gate_artifact_path_is_absolute_for_a_relative_artifact_root(tmp_path: Path, monkeypatch):
+    workspace, spec = make_repo(tmp_path)
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    monkeypatch.chdir(caller)
+    connection = sqlite3.connect(":memory:", check_same_thread=False)
+    graph = build_graph(
+        checkpointer=SqliteSaver(connection), artifact_root=Path("rel-artifacts"), runner=FakeRunner()
+    )
+    state = initial(workspace, spec, "relative-root")
+    state["test_command"] = ["false"]
+    state["max_attempts"] = 1
+    config = {"configurable": {"thread_id": "relative-root"}}
+    graph.invoke(state, config=config)
+    feedback = graph.get_state(config).values["gate_feedback"]
+    quoted = feedback.split("at path ", 1)[1].split(" (tool output", 1)[0]
+    assert Path(json.loads(quoted)).is_absolute()
+    assert Path(json.loads(quoted)).is_file()
 
 
 def test_review_commands_show_exactly_the_attested_change_set(tmp_path: Path):
@@ -550,6 +591,8 @@ def test_review_commands_show_exactly_the_attested_change_set(tmp_path: Path):
     )
     (workspace / "tool-cache/new.txt").write_text("excluded\n", encoding="utf-8")
     (workspace / "new file.txt").write_text("attested\n", encoding="utf-8")
+    (workspace / "data.bin").write_bytes(b"\x00\x01binary")
+    subprocess.run(["git", "-C", workspace, "add", "data.bin"], check=True)
     (workspace / "build").mkdir()
     (workspace / "build/out.bin").write_text("ignored\n", encoding="utf-8")
     state = {
@@ -569,6 +612,7 @@ def test_review_commands_show_exactly_the_attested_change_set(tmp_path: Path):
     # No rename detection: the moved file is a full addition, and the excluded
     # source is left out exactly as the digest leaves it out.
     assert "new file mode" in patch and "b/README-moved.txt" in patch
+    assert "GIT binary patch" in patch
     assert "tool-cache" not in patch
     assert "rename from" not in patch
     _, untracked = _changed_paths(workspace, base, ["tool-cache"])
@@ -591,7 +635,7 @@ def test_reviewer_prompt_names_base_and_root_for_committed_work(tmp_path: Path):
     (prompt,) = runner.prompts["reviewer"]
     root = shlex.quote(str(workspace.resolve()))
     assert f"Base commit: {base}" in prompt
-    assert f"git -C {root} diff --no-ext-diff --no-textconv --no-renames {base} --" in prompt
+    assert f"git -C {root} diff --binary --no-ext-diff --no-textconv --no-renames {base} --" in prompt
     assert f"git -C {root} ls-files --others --exclude-standard --" in prompt
 
 
