@@ -1,0 +1,6 @@
+interface:
+  display_name: "debate-conductor install-pm"
+  short_description: "Codex debate-conductor install-pm workflow"
+  default_prompt: "Use $install-pm from debate-conductor for this workspace."
+policy:
+  allow_implicit_invocation: false

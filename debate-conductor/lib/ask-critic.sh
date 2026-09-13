@@ -29,26 +29,30 @@ _REGISTRY_LIB="$SCRIPT_DIR/registry.sh"
 # shellcheck source=registry.sh
 . "$_REGISTRY_LIB" || { echo "ask-critic: failed to load registry.sh (jq missing?)" >&2; exit 2; }
 unset _REGISTRY_LIB
+# shellcheck source=host.sh
+. "$SCRIPT_DIR/host.sh"
 
 TEAM=$(agent_team_detect_team) || exit 2
 LOG_BASE="${DEBATE_LOG_DIR:-$PWD/.debate-conductor/log}"
 LOG_DIR="$LOG_BASE/$TEAM"
 
 RESEARCH_FILE=""
-MODEL="codex"
+MODEL_OPT=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --with-research)
       RESEARCH_FILE="${2:?--with-research requires a file path}"; shift 2 ;;
     --model)
-      MODEL="${2:?--model requires a model id}"; shift 2
-      registry_model_exists "$MODEL" || { echo "ask-critic: unknown model '$MODEL' (run: agent-team-models list)" >&2; exit 2; }
+      MODEL_OPT="${2:?--model requires a model id}"; shift 2
       ;;
     --) shift; break ;;
     -*) echo "ask-critic: unknown flag: $1" >&2; exit 2 ;;
     *)  break ;;
   esac
 done
+
+MODEL="$(debate_conductor_resolve_role critic "$MODEL_OPT")" || exit $?
+registry_model_exists "$MODEL" || { echo "ask-critic: unknown model '$MODEL' (run: agent-team-models list)" >&2; exit 2; }
 
 FOCUS="${1:-Review the full working-tree state in this repo (see role instructions for the inspection checklist — start with \`git status --short\`, then cover both tracked diffs AND untracked files).}"
 FOCUS="${FOCUS//<\/review_target>/[STRIPPED-CLOSING-TAG]}"
@@ -78,6 +82,8 @@ if [ -n "$RESEARCH_FILE" ]; then
 $RESEARCH
 </research_context>"
 fi
+
+REGISTRY_CMD_OVERRIDE="${CRITIC_CLI:-}" debate_conductor_check_cli "$MODEL" || exit $?
 
 mkdir -p "$LOG_DIR"
 # PID suffix avoids log collisions when two same-role rounds run within the

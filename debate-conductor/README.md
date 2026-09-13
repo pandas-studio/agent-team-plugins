@@ -1,14 +1,14 @@
 # debate-conductor
 
-Claude conducts a Generator vs Critic adversarial debate over N rounds. Three-pane tmux layout: left = Claude (PM), middle = Generator transcript live tail, right = Critic transcript live tail.
+Claude or Codex conducts a Generator vs Critic adversarial debate over N rounds. Three-pane tmux layout: left = PM, middle = Generator transcript live tail, right = Critic transcript live tail.
 
 Default model assignment:
 
 | Pane | Role | CLI |
 | :--- | :--- | :--- |
-| Left | Conductor / PM | Claude Code (this session) |
+| Left | Conductor / PM | Claude Code or Codex (this session) |
 | Middle | Generator | `agy` |
-| Right | Critic | `codex` |
+| Right | Critic | `codex` from Claude PM, `claude` from Codex PM |
 
 ## Prerequisites
 
@@ -22,18 +22,41 @@ Models and CLI binaries are configurable — see [Model configuration](#model-co
 
 ## Install
 
-Via the marketplace:
+Via the Claude Code marketplace:
 
 ```
 /plugin marketplace add pandas-studio/agent-team-plugins
 /plugin install debate-conductor@pandas-studio
 ```
 
+### Codex PM
+
+Codex can load the same engine through the repo's Codex marketplace:
+
+```bash
+codex plugin marketplace add /absolute/path/to/agent-team-plugins
+codex plugin add debate-conductor@pandas-studio
+```
+
+Use `$debate-conductor:run`, `$debate-conductor:continue`,
+`$debate-conductor:bootstrap`, and `$debate-conductor:install-pm`. The Codex
+`install-pm` skill installs persistent routing instructions into `AGENTS.md`;
+it does not change `CLAUDE.md`.
+
+In Codex host mode, the default Critic is Claude Code so Codex does not call
+itself as the external critic. Explicit model settings still win.
+
 For local development on this plugin:
 
 ```
 git clone git@github.com:pandas-studio/agent-team-plugins.git
+
+# Claude Code
 claude --plugin-dir ./agent-team-plugins/debate-conductor
+
+# Codex
+codex plugin marketplace add /absolute/path/to/agent-team-plugins
+codex plugin add debate-conductor@pandas-studio
 ```
 
 ## Use
@@ -82,14 +105,26 @@ Place topic files at `<workspace>/topics/0N-*.txt`. Each file is a stance-driven
 
 ## Model configuration
 
-Generator and Critic resolve through the shared model registry (the [marketplace README](../README.md#shared-model-configuration) covers it in full). Defaults: `agy` (generator), `codex` (critic).
+Generator and Critic resolve through the shared model registry (the [marketplace README](../README.md#shared-model-configuration) covers it in full). Claude host defaults: `agy` (generator), `codex` (critic). Codex host defaults: `agy` (generator), `claude` (critic).
 
 | Role | Default | Pick a different model | Override its binary |
 | :--- | :--- | :--- | :--- |
 | `debate-conductor.generator` | `agy` | `--primary-gen=<model>`, `DEBATE_GENERATOR_MODEL` env, or `agent-team-models set-role debate-conductor.generator <model>` | `GENERATOR_CLI` · `AGY_CLI` |
-| `debate-conductor.critic` | `codex` | `--primary-crit=<model>`, `DEBATE_CRITIC_MODEL` env, or `agent-team-models set-role debate-conductor.critic <model>` | `CRITIC_CLI` · `CODEX_CLI` |
+| `debate-conductor.critic` | `codex` from Claude, `claude` from Codex | `--primary-crit=<model>`, `DEBATE_CRITIC_MODEL` env, or `agent-team-models set-role debate-conductor.critic <model>` | `CRITIC_CLI` · `CODEX_CLI` · `CLAUDE_CLI` |
 
-`--primary-gen` / `--primary-crit` accept any registered model id (run `agent-team-models list`); generator and critic must differ. With no critic specified, it still defaults to "the other one" (codex unless gen=codex, then agy). The legacy `DEBATE_PRIMARY_GEN` env var also keeps working.
+`--primary-gen` / `--primary-crit` accept any registered model id (run `agent-team-models list`); generator and critic must differ. With no critic specified, Claude host still defaults to "the other one" (codex unless gen=codex, then agy). Codex host defaults to Claude unless that would duplicate the generator. The legacy `DEBATE_PRIMARY_GEN` env var also keeps working.
+
+When a `GENERATOR_CLI` or `CRITIC_CLI` wrapper is used with the `claude` model,
+it must handle `auth status --json`; Codex host mode probes that command before
+creating or retargeting a debate log.
+
+New debates honor persistent `agent-team-models set-role` bindings. Continued
+debates reuse the transcript's saved model pair and any saved rotation unless
+this invocation passes `--primary-gen`, `--primary-crit`,
+`DEBATE_GENERATOR_MODEL`, `DEBATE_CRITIC_MODEL`, or `DEBATE_PRIMARY_GEN`.
+For rotated transcripts, continue also keeps the original model pair because
+prior round filenames encode the pair. Start a fresh debate to change model pairs
+inside rotation or to change whether rotation is enabled.
 
 ```bash
 agent-team-models preset add kimi-code
@@ -106,6 +141,7 @@ $PWD/.debate-conductor/log/<team>/
 ├── latest-debate -> debate-<TS>
 ├── debate-<TS>/
 │   ├── topic.txt              # original topic — read by /continue
+│   ├── models.json            # model pair, source, and rotation reused by /continue
 │   ├── round-1-gen.md
 │   ├── round-2-crit.md
 │   └── round-3-gen.md
@@ -123,10 +159,11 @@ Override the log location with `DEBATE_LOG_DIR=/path/to/logs`.
 | :--- | :--- |
 | `/debate-conductor:bootstrap` | One-time per session: splits the current tmux pane into 3 and starts role tails. |
 | `/debate-conductor:run [N] [rounds]` | Resolves topic N, runs `debate.sh`, summarises verdict + moves. |
-| `/debate-conductor:continue [extra-rounds]` | Append N more rounds (default 2) to the most recent debate in the same `debate-<TS>/`. Round numbering continues; tail panes pick up new rounds without retarget. |
-| `/debate-conductor:install-pm` | Writes/upgrades the PM orchestration policy in the workspace's `CLAUDE.md` (idempotent, marker-guarded). Tells Claude when to dispatch a debate vs answer directly. |
+| `/debate-conductor:continue [extra-rounds]` | Append N more rounds (default 2) to the most recent debate in the same `debate-<TS>/`. Round numbering continues; the saved model pair and rotation are reused unless explicitly overridden; tail panes pick up new rounds without retarget. |
+| `/debate-conductor:install-pm` | Writes/upgrades the PM orchestration policy in the workspace's `CLAUDE.md` from Claude or `AGENTS.md` from Codex (idempotent, marker-guarded). Tells the PM when to dispatch a debate vs answer directly. |
 
-All skills have `disable-model-invocation: true` — Claude won't trigger them implicitly. You always invoke explicitly via `/`.
+Claude skills have `disable-model-invocation: true`; Codex skill metadata sets
+`allow_implicit_invocation: false`. Invoke the skills explicitly.
 
 Example:
 
@@ -140,7 +177,13 @@ Example:
 ```
 debate-conductor/
 ├── .claude-plugin/plugin.json
-├── skills/
+├── .codex-plugin/plugin.json
+├── claude-skills/
+│   ├── bootstrap/SKILL.md
+│   ├── run/SKILL.md
+│   ├── continue/SKILL.md
+│   └── install-pm/SKILL.md
+├── codex-skills/
 │   ├── bootstrap/SKILL.md
 │   ├── run/SKILL.md
 │   ├── continue/SKILL.md
@@ -155,7 +198,9 @@ debate-conductor/
 │   ├── ask-generator.sh       # Generator wrapper (any registered model)
 │   ├── ask-critic.sh          # Critic wrapper (any registered model)
 │   ├── registry.sh            # shared model registry + runner (vendored)
-│   ├── pm.md                  # PM orchestration policy (source of truth)
+│   ├── host.sh                # Claude/Codex PM defaults and CLI checks
+│   ├── pm.md                  # Claude PM orchestration policy
+│   ├── pm-codex.md            # Codex PM orchestration policy
 │   └── roles/
 │       ├── generator.md       # Generator role prompt
 │       └── critic.md          # Critic role prompt

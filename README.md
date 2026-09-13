@@ -2,11 +2,10 @@
 
 Claude Code plugin marketplace from pandas-studio's YouTube series on multi-CLI agent teams. Each plugin packages a *Claude-as-conductor* pattern: Claude orchestrates one or more companion CLIs (Antigravity, Codex) playing specialised roles, with a tmux multi-pane live view.
 
-`dev-trio` also supports **Codex as PM**, with Antigravity research and Claude
-Code review by default. The CLI engine is shared; each host loads its own
-skills and PM policy. See [Codex installation and usage](./dev-trio/README.md#codex-pm).
-The Codex marketplace currently exposes only `dev-trio`; the other plugins
-remain Claude-hosted in this milestone.
+`dev-trio` and `debate-conductor` also support **Codex as PM**. The CLI engine
+is shared; each host loads its own skills and PM policy. See
+[dev-trio Codex usage](./dev-trio/README.md#codex-pm) and
+[debate-conductor Codex usage](./debate-conductor/README.md#codex-pm).
 
 ## Install the marketplace in Claude Code
 
@@ -25,12 +24,20 @@ Then install the plugins you want:
 /plugin install langgraph-conductor@pandas-studio
 ```
 
+## Install the marketplace in Codex
+
+```bash
+codex plugin marketplace add /absolute/path/to/agent-team-plugins
+codex plugin add dev-trio@pandas-studio
+codex plugin add debate-conductor@pandas-studio
+```
+
 ## Plugins
 
 | Name | Roles | Episode | Status |
 | :--- | :--- | :--- | :--- |
 | [dev-trio](./dev-trio) | Claude or Codex=PM/Coder · configurable research/review CLIs | EP A | shipped |
-| [debate-conductor](./debate-conductor) | Claude=PM · Antigravity=Generator · Codex=Critic | EP B | shipped |
+| [debate-conductor](./debate-conductor) | Claude or Codex=PM · configurable generator/critic CLIs | EP B | shipped |
 | [ralph-trio](./ralph-trio) | Claude=Planner/Coder · Antigravity=Researcher · Codex=Reviewer | EP C | shipped |
 | [spec-trio](./spec-trio) | Spec-gated planner/coder/reviewer loop | EP D | shipped |
 | [langgraph-conductor](./runtime) | Durable planner/researcher/coder/reviewer graph | Guide v1 | preview |
@@ -59,7 +66,7 @@ Config lives at `$AGENT_TEAM_MODELS_CONFIG`, else `${XDG_CONFIG_HOME:-~/.config}
 | `dev-trio.researcher` | `agy` | `DEV_TRIO_RESEARCHER_MODEL` |
 | `dev-trio.reviewer` | `codex` | `DEV_TRIO_REVIEWER_MODEL` |
 | `debate-conductor.generator` | `agy` | `DEBATE_GENERATOR_MODEL` |
-| `debate-conductor.critic` | `codex` | `DEBATE_CRITIC_MODEL` |
+| `debate-conductor.critic` | `codex` from Claude, `claude` from Codex | `DEBATE_CRITIC_MODEL` |
 | `langgraph-conductor.planner` | `claude` | `LANGGRAPH_CONDUCTOR_PLANNER_MODEL` |
 | `langgraph-conductor.coder` | `claude-write` | `LANGGRAPH_CONDUCTOR_CODER_MODEL` |
 | `langgraph-conductor.researcher` | `agy` | `LANGGRAPH_CONDUCTOR_RESEARCHER_MODEL` |
@@ -80,7 +87,7 @@ The two sources are treated differently on purpose:
   component, and names like `my project` or `feat/x` are ordinary. These are
   sanitized to the allowed character set with a warning on stderr.
 
-**Resolution precedence.** Which *model* runs a role: CLI flag (`--model`, `--primary-gen`/`--primary-crit`) → per-role env var → config binding → built-in default. Which *binary* runs a model: legacy per-role `*_CLI` (`RESEARCHER_CLI`, `REVIEWER_CLI`, `GENERATOR_CLI`, `CRITIC_CLI`) → the model's own env override (`AGY_CLI`, `CODEX_CLI`, `CLAUDE_CLI`, `KIMI_CLI`) → its built-in command. All existing env overrides keep working unchanged.
+**Resolution precedence.** Which *model* runs a role: CLI flag (`--model`, `--primary-gen`/`--primary-crit`) → per-role env var → continued debate metadata where applicable → config binding → built-in default. Which *binary* runs a model: legacy per-role `*_CLI` (`RESEARCHER_CLI`, `REVIEWER_CLI`, `GENERATOR_CLI`, `CRITIC_CLI`) → the model's own env override (`AGY_CLI`, `CODEX_CLI`, `CLAUDE_CLI`, `KIMI_CLI`) → its built-in command. All existing env overrides keep working unchanged.
 
 A model definition is a CLI adapter: a `command`, an optional `env_command` (env var that overrides the binary), an `args` argv template containing `{prompt}`, and an optional `final_args` template (with `{prompt}` and `{final}`) for CLIs that can write their last message to a file. Models without `final_args` still produce a compatible `*.final.md` — it is synthesised from the streamed transcript.
 
@@ -113,8 +120,9 @@ Every plugin in this marketplace follows broadly the same layout. Skill set vari
 └── <topics/|tmux/|...>      # plugin-specific assets (canned topics, keybindings)
 ```
 
-`dev-trio` uses `claude-skills/` and `codex-skills/`, selected by each host
-manifest, plus a small Python policy installer. Other plugins keep `skills/`.
+`dev-trio` and `debate-conductor` use `claude-skills/` and `codex-skills/`,
+selected by each host manifest, plus a small Python policy installer. Other
+plugins keep `skills/`.
 
 The four legacy plugins remain Bash-first. `langgraph-conductor` adds an optional Python 3.12 runtime pinned with `uv`; it orchestrates the same CLI adapters and does not call model-provider APIs directly. `jq` is required for the Bash [shared model registry](#shared-model-configuration).
 
@@ -127,6 +135,9 @@ claude --plugin-dir ./dev-trio           # load one plugin
 claude --plugin-dir ./debate-conductor
 claude --plugin-dir ./ralph-trio
 claude --plugin-dir ./spec-trio
+
+codex plugin marketplace add "$(pwd)"
+codex plugin add debate-conductor@pandas-studio
 
 cd runtime
 uv sync --frozen --python 3.12 --extra dev

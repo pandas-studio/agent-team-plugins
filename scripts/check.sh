@@ -22,7 +22,7 @@ else
   echo "shellcheck not installed; skipping (install it to match CI)" >&2
 fi
 
-python3 -m unittest discover -s "$ROOT/tests" -p 'test_dev_trio*.py'
+python3 -m unittest discover -s "$ROOT/tests" -p 'test_*.py'
 
 "$ROOT/tests/smoke-hardening.sh"
 "$ROOT/tests/smoke-review-results.sh"

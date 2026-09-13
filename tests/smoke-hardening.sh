@@ -83,6 +83,7 @@ run_ask_codex() {
   # on them (several cases expect the same argv).
   rm -f "$TMP/argv" "$TMP/log/smoke/latest-codex.final.md"
   (cd "$TMP/repo" && env -u REVIEWER_CLI -u DEV_TRIO_REVIEWER_MODEL \
+    -u DEV_TRIO_PM_HOST \
     -u MANIFEST_PARENT_TMP -u REVIEWER_ROLE_FILE -u DEV_TRIO_REVIEW_PROFILE \
     CODEX_CLI="$STUB_CLI" CLAUDE_CLI="$STUB_CLI" STUB_ARGV="$TMP/argv" \
     AGENT_TEAM=smoke TMUX="" DEV_TRIO_LOG_DIR="$TMP/log" \

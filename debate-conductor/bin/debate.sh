@@ -23,9 +23,10 @@
 #
 # Model pair:
 #   --primary-gen=MODEL   generator model — flag > DEBATE_GENERATOR_MODEL >
-#                         DEBATE_PRIMARY_GEN (legacy) > config role > default (agy)
-#   --primary-crit=MODEL  critic model    — flag > DEBATE_CRITIC_MODEL > config role
-#                         > "the other one" (codex unless gen=codex, then agy)
+#                         DEBATE_PRIMARY_GEN (legacy) >
+#                         continued debate metadata > config role > host default
+#   --primary-crit=MODEL  critic model    — flag > DEBATE_CRITIC_MODEL >
+#                         continued debate metadata > config role > host default
 #   MODEL is any registered model id (built-ins agy|codex|claude, plus anything
 #   added via `agent-team-models`; run `agent-team-models list`). Gen ≠ crit.
 #
@@ -51,6 +52,7 @@ ROUNDS_SET=0
 TOPIC=""
 CONTEXT_FILE=""
 ROTATE=0
+ROTATE_SET=0
 UNTIL_CONVERGED=0
 CONVERGED=""
 PRIMARY_GEN_OPT=""
@@ -68,6 +70,8 @@ _REGISTRY_LIB="$SCRIPT_DIR/../lib/registry.sh"
 # shellcheck source=../lib/registry.sh
 . "$_REGISTRY_LIB" || { echo "debate: failed to load registry.sh (jq missing?)" >&2; exit 2; }
 unset _REGISTRY_LIB
+# shellcheck source=../lib/host.sh
+. "$SCRIPT_DIR/../lib/host.sh"
 
 usage() {
   cat <<EOF
@@ -76,11 +80,13 @@ Usage: $(basename "$0") [-n ROUNDS] [--rotate] [--until-converged] \\
          [--continue-from=DIR] \\
          "topic" [context-file.md]
 
-Run an N-round Generator vs Critic debate. Defaults to 3 rounds with no rotation
-(generator=agy, critic=codex). MODEL is any registered model id — run
+Run an N-round Generator vs Critic debate. Defaults to 3 rounds with no rotation.
+Claude PM defaults to generator=agy, critic=codex; Codex PM defaults to
+generator=agy, critic=claude. MODEL is any registered model id — run
 'agent-team-models list' to see them. With --rotate, models alternate roles
 every two rounds. With --continue-from=<debate-TS dir>, append N more rounds to
-an existing debate (round numbering continues from last+1).
+an existing debate (round numbering continues from last+1) and reuse its model
+pair/rotation unless this invocation explicitly overrides them.
 
 With --until-converged (-c), stop as soon as a Critic round emits the canonical
 \`Verdict: STRENGTHEN\` line; -n is then the upper bound (default cap 6).
@@ -90,7 +96,7 @@ EOF
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -n) ROUNDS="$2"; ROUNDS_SET=1; shift 2 ;;
-    --rotate) ROTATE=1; shift ;;
+    --rotate) ROTATE=1; ROTATE_SET=1; shift ;;
     --until-converged|-c) UNTIL_CONVERGED=1; shift ;;
     --primary-gen=*) PRIMARY_GEN_OPT="${1#--primary-gen=}"; shift ;;
     --primary-gen) PRIMARY_GEN_OPT="${2:?--primary-gen requires a model id}"; shift 2 ;;
@@ -109,6 +115,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -z "$TOPIC" ] && { usage >&2; exit 2; }
+PM_HOST="$(debate_conductor_host)" || exit $?
 case "$ROUNDS" in
   ''|*[!0-9]*) echo "ROUNDS must be a positive integer (got: $ROUNDS)" >&2; exit 2 ;;
 esac
@@ -120,36 +127,6 @@ esac
 if [ "$UNTIL_CONVERGED" = "1" ] && [ "$ROUNDS_SET" = "0" ]; then
   ROUNDS="$CONVERGE_DEFAULT_ROUNDS"
 fi
-
-# Generator model: flag > DEBATE_GENERATOR_MODEL > DEBATE_PRIMARY_GEN (legacy)
-#                  > config role binding > built-in default (agy).
-if [ -n "$PRIMARY_GEN_OPT" ]; then
-  PRIMARY_GEN="$PRIMARY_GEN_OPT"
-elif [ -n "${DEBATE_GENERATOR_MODEL:-}" ]; then
-  PRIMARY_GEN="$DEBATE_GENERATOR_MODEL"
-elif [ -n "${DEBATE_PRIMARY_GEN:-}" ]; then
-  PRIMARY_GEN="$DEBATE_PRIMARY_GEN"
-else
-  PRIMARY_GEN="$(registry_resolve_role debate-conductor generator "")"
-fi
-registry_model_exists "$PRIMARY_GEN" || { echo "primary-gen: unknown model '$PRIMARY_GEN' (run: agent-team-models list)" >&2; exit 2; }
-
-# Critic model: flag > DEBATE_CRITIC_MODEL > config role binding > legacy
-# "the other one" default (codex unless gen=codex, then agy). The auto-derive
-# keeps `--primary-gen=codex` working with no critic flag, exactly as before.
-if [ -n "$PRIMARY_CRIT_OPT" ]; then
-  PRIMARY_CRIT="$PRIMARY_CRIT_OPT"
-elif [ -n "${DEBATE_CRITIC_MODEL:-}" ]; then
-  PRIMARY_CRIT="$DEBATE_CRITIC_MODEL"
-elif [ -n "$(registry_config_role debate-conductor.critic)" ]; then
-  PRIMARY_CRIT="$(registry_config_role debate-conductor.critic)"
-elif [ "$PRIMARY_GEN" = "codex" ]; then
-  PRIMARY_CRIT="agy"
-else
-  PRIMARY_CRIT="codex"
-fi
-registry_model_exists "$PRIMARY_CRIT" || { echo "primary-crit: unknown model '$PRIMARY_CRIT' (run: agent-team-models list)" >&2; exit 2; }
-[ "$PRIMARY_GEN" = "$PRIMARY_CRIT" ] && { echo "primary-gen and primary-crit must differ (both = $PRIMARY_GEN)" >&2; exit 2; }
 
 # Per-round model dispatch.
 round_model() {
@@ -212,19 +189,266 @@ if [ -n "$CONTINUE_FROM" ]; then
   [ -z "$LAST_ROUND" ] && { echo "no completed round in $DEBATE_DIR — start a fresh debate with /run instead of /continue" >&2; exit 2; }
   START_ROUND=$((LAST_ROUND + 1))
   END_ROUND=$((LAST_ROUND + ROUNDS))
-  # Re-affirm latest-debate symlink (idempotent — same dir, no retarget).
-  ln -sfn "debate-$TS" "$LOG_DIR/latest-debate"
 else
   TS=$(date +%Y%m%d-%H%M%S)
   DEBATE_DIR="$LOG_DIR/debate-$TS"
-  mkdir -p "$DEBATE_DIR"
-  ln -sfn "debate-$TS" "$LOG_DIR/latest-debate"
   START_ROUND=1
   END_ROUND="$ROUNDS"
 fi
 
+# Continue must keep the original model pair unless this invocation explicitly
+# selects a replacement through flags or per-role env vars. Global config still
+# applies to fresh debates, but it should not silently rewrite an existing
+# transcript when the PM host changes.
+role_has_invocation_model() {
+  local role="$1" cli="$2"
+  [ -n "$cli" ] && return 0
+  case "$role" in
+    generator)
+      [ -n "${DEBATE_GENERATOR_MODEL:-}" ] && return 0
+      [ -n "${DEBATE_PRIMARY_GEN:-}" ] && return 0
+      ;;
+    critic)
+      [ -n "${DEBATE_CRITIC_MODEL:-}" ] && return 0
+      ;;
+    *) echo "debate: unknown role '$role'" >&2; exit 2 ;;
+  esac
+  return 1
+}
+
+infer_marker_model() {
+  local role="$1" file base rest file_round file_model first marker_body marker_round marker_role marker_model marker_extra
+  local candidate_model best_round="" best_model=""
+  for file in "$DEBATE_DIR"/round-*-"$role".md "$DEBATE_DIR"/round-*-"$role"-*.md; do
+    [ -e "$file" ] || continue
+    base="${file##*/}"
+    rest="${base#round-}"
+    file_round="${rest%%-*}"
+    case "$file_round" in
+      ""|*[!0-9]*) continue ;;
+    esac
+    file_model=""
+    case "$base" in
+      round-*-"$role"-*.md)
+        file_model="${base#"round-$file_round-$role-"}"
+        file_model="${file_model%.md}"
+        ;;
+    esac
+    candidate_model=""
+    IFS= read -r first < "$file" || first=""
+    case "$first" in
+      "<!-- debate-round: "*)
+        marker_body="${first#<!-- debate-round: }"
+        case "$marker_body" in
+          *" -->") marker_body="${marker_body% -->}" ;;
+          *) marker_body="" ;;
+        esac
+        IFS=' ' read -r marker_round marker_role marker_model marker_extra <<< "$marker_body"
+        if [ "$marker_round" = "$file_round" ] && [ "$marker_role" = "$role" ] && [ -n "$marker_model" ] && [ -z "$marker_extra" ]; then
+          candidate_model="$marker_model"
+        fi
+        ;;
+    esac
+    [ -z "$candidate_model" ] && candidate_model="$file_model"
+    if [ -n "$candidate_model" ] && { [ -z "$best_round" ] || [ "$file_round" -lt "$best_round" ]; }; then
+      best_round="$file_round"
+      best_model="$candidate_model"
+    fi
+  done
+  [ -n "$best_model" ] && printf '%s\n' "$best_model"
+  return 0
+}
+
+infer_rotation_from_files() {
+  local file base rest file_round
+  for file in "$DEBATE_DIR"/round-*-gen-*.md "$DEBATE_DIR"/round-*-crit-*.md; do
+    [ -e "$file" ] || continue
+    base="${file##*/}"
+    rest="${base#round-}"
+    file_round="${rest%%-*}"
+    case "$file_round" in
+      ""|*[!0-9]*) continue ;;
+    esac
+    printf 'true\n'
+    return
+  done
+  return 0
+}
+
+metadata_value() {
+  local file="$1" key="$2"
+  [ -f "$file" ] || return 0
+  jq -r --arg key "$key" '
+    if $key == "rotate" then
+      if (.[$key] | type) == "boolean" then (.[$key] | tostring) else "" end
+    elif (.[$key] | type) == "string" then
+      .[$key]
+    else
+      ""
+    end
+  ' "$file" 2>/dev/null || true
+}
+
+metadata_source_value() {
+  local file="$1" key="$2"
+  [ -f "$file" ] || return 0
+  jq -r --arg key "$key" '
+    if (.sources[$key] | type) == "string" then .sources[$key] else "" end
+  ' "$file" 2>/dev/null || true
+}
+
+write_model_metadata() {
+  local tmp
+  tmp="$DEBATE_DIR/.models.json.$$"
+  jq -n \
+    --arg pm_host "$PM_HOST" \
+    --arg generator "$PRIMARY_GEN" \
+    --arg critic "$PRIMARY_CRIT" \
+    --arg generator_source "$PRIMARY_GEN_SOURCE" \
+    --arg critic_source "$PRIMARY_CRIT_SOURCE" \
+    --arg rotate_source "$ROTATE_SOURCE" \
+    --argjson rotate "$ROTATE" \
+    '{version: 1, pm_host: $pm_host, generator: $generator, critic: $critic, rotate: ($rotate == 1),
+      sources: {generator: $generator_source, critic: $critic_source, rotate: $rotate_source}}' \
+    > "$tmp"
+  mv "$tmp" "$DEBATE_DIR/models.json"
+}
+
+PERSISTED_GEN=""
+PERSISTED_CRIT=""
+PERSISTED_ROTATE=""
+PERSISTED_GEN_SOURCE=""
+PERSISTED_CRIT_SOURCE=""
+PERSISTED_ROTATE_SOURCE=""
+if [ -n "$CONTINUE_FROM" ] && [ -f "$DEBATE_DIR/models.json" ]; then
+  PERSISTED_GEN="$(metadata_value "$DEBATE_DIR/models.json" generator)"
+  PERSISTED_CRIT="$(metadata_value "$DEBATE_DIR/models.json" critic)"
+  PERSISTED_ROTATE="$(metadata_value "$DEBATE_DIR/models.json" rotate)"
+  if [ -n "$PERSISTED_GEN" ]; then
+    PERSISTED_GEN_SOURCE="$(metadata_source_value "$DEBATE_DIR/models.json" generator)"
+    [ -n "$PERSISTED_GEN_SOURCE" ] || PERSISTED_GEN_SOURCE="metadata"
+  fi
+  if [ -n "$PERSISTED_CRIT" ]; then
+    PERSISTED_CRIT_SOURCE="$(metadata_source_value "$DEBATE_DIR/models.json" critic)"
+    [ -n "$PERSISTED_CRIT_SOURCE" ] || PERSISTED_CRIT_SOURCE="metadata"
+  fi
+  if [ -n "$PERSISTED_ROTATE" ]; then
+    PERSISTED_ROTATE_SOURCE="$(metadata_source_value "$DEBATE_DIR/models.json" rotate)"
+    [ -n "$PERSISTED_ROTATE_SOURCE" ] || PERSISTED_ROTATE_SOURCE="metadata"
+  fi
+  case "$PERSISTED_ROTATE" in
+    true|false|"") ;;
+    *) PERSISTED_ROTATE=""; PERSISTED_ROTATE_SOURCE="" ;;
+  esac
+fi
+if [ -n "$CONTINUE_FROM" ] && { [ -z "$PERSISTED_GEN" ] || [ -z "$PERSISTED_CRIT" ]; }; then
+  if [ -z "$PERSISTED_GEN" ]; then
+    PERSISTED_GEN="$(infer_marker_model gen)"
+    [ -n "$PERSISTED_GEN" ] && PERSISTED_GEN_SOURCE="rounds"
+  fi
+  if [ -z "$PERSISTED_CRIT" ]; then
+    PERSISTED_CRIT="$(infer_marker_model crit)"
+    [ -n "$PERSISTED_CRIT" ] && PERSISTED_CRIT_SOURCE="rounds"
+  fi
+  if [ -n "$PERSISTED_GEN" ] && [ -n "$PERSISTED_CRIT" ]; then
+    echo "debate: no complete models.json; inferred continue models from round markers" >&2
+  elif [ -n "$PERSISTED_GEN$PERSISTED_CRIT" ]; then
+    echo "debate: no complete models.json; partial continue models available (generator=${PERSISTED_GEN:-default}, critic=${PERSISTED_CRIT:-default}); unresolved roles use current model defaults" >&2
+  else
+    echo "debate: no models.json or readable round markers; using current model defaults" >&2
+  fi
+fi
+if [ -n "$CONTINUE_FROM" ] && [ -z "$PERSISTED_ROTATE" ]; then
+  PERSISTED_ROTATE="$(infer_rotation_from_files)"
+  [ -n "$PERSISTED_ROTATE" ] && PERSISTED_ROTATE_SOURCE="round-files"
+fi
+if [ -n "$CONTINUE_FROM" ] && [ "$ROTATE_SET" = "1" ] && [ "$PERSISTED_ROTATE" != "true" ]; then
+  echo "debate: --rotate cannot be added while continuing a non-rotated debate; start a fresh debate instead" >&2
+  exit 2
+fi
+if [ "$ROTATE_SET" = "0" ] && [ "$PERSISTED_ROTATE" = "true" ]; then
+  ROTATE=1
+fi
+if [ "$ROTATE_SET" = "1" ]; then
+  ROTATE_SOURCE="invocation"
+elif [ -n "$PERSISTED_ROTATE_SOURCE" ]; then
+  ROTATE_SOURCE="$PERSISTED_ROTATE_SOURCE"
+else
+  ROTATE_SOURCE="current-resolution"
+fi
+
+# Generator model: flag > DEBATE_GENERATOR_MODEL > DEBATE_PRIMARY_GEN (legacy)
+#                  > persisted continue metadata > config role binding
+#                  > host default.
+GEN_INVOCATION_MODEL=0
+if role_has_invocation_model generator "$PRIMARY_GEN_OPT"; then GEN_INVOCATION_MODEL=1; fi
+if [ "$GEN_INVOCATION_MODEL" = "0" ] && [ -n "$PERSISTED_GEN" ]; then
+  PRIMARY_GEN="$PERSISTED_GEN"
+  PRIMARY_GEN_SOURCE="$PERSISTED_GEN_SOURCE"
+else
+  PRIMARY_GEN="$(debate_conductor_resolve_role generator "$PRIMARY_GEN_OPT")"
+  [ "$GEN_INVOCATION_MODEL" = "1" ] && PRIMARY_GEN_SOURCE="invocation" || PRIMARY_GEN_SOURCE="current-resolution"
+fi
+registry_model_exists "$PRIMARY_GEN" || { echo "primary-gen: unknown model '$PRIMARY_GEN' (run: agent-team-models list)" >&2; exit 2; }
+
+# Critic model: flag > DEBATE_CRITIC_MODEL > persisted continue metadata
+#               > config role binding > host default.
+# Claude host preserves the legacy "other one" default. Codex host defaults to
+# Claude so Codex does not call itself as an external Critic unless configured.
+CRIT_INVOCATION_MODEL=0
+if role_has_invocation_model critic "$PRIMARY_CRIT_OPT"; then CRIT_INVOCATION_MODEL=1; fi
+if [ "$CRIT_INVOCATION_MODEL" = "0" ] && [ -n "$PERSISTED_CRIT" ]; then
+  PRIMARY_CRIT="$PERSISTED_CRIT"
+  PRIMARY_CRIT_SOURCE="$PERSISTED_CRIT_SOURCE"
+else
+  PRIMARY_CRIT="$(debate_conductor_resolve_role critic "$PRIMARY_CRIT_OPT" "$PRIMARY_GEN")"
+  [ "$CRIT_INVOCATION_MODEL" = "1" ] && PRIMARY_CRIT_SOURCE="invocation" || PRIMARY_CRIT_SOURCE="current-resolution"
+fi
+registry_model_exists "$PRIMARY_CRIT" || { echo "primary-crit: unknown model '$PRIMARY_CRIT' (run: agent-team-models list)" >&2; exit 2; }
+[ "$PRIMARY_GEN" = "$PRIMARY_CRIT" ] && { echo "primary-gen and primary-crit must differ (both = $PRIMARY_GEN)" >&2; exit 2; }
+if [ -n "$CONTINUE_FROM" ] && [ "$ROTATE" = "1" ] \
+   && { { [ -n "$PERSISTED_GEN" ] && [ "$PRIMARY_GEN" != "$PERSISTED_GEN" ]; } \
+        || { [ -n "$PERSISTED_CRIT" ] && [ "$PRIMARY_CRIT" != "$PERSISTED_CRIT" ]; }; }; then
+  echo "debate: cannot change model pair while continuing a rotated debate; start a fresh debate instead" >&2
+  exit 2
+fi
+
+# Refuse missing CLIs or Codex-host Claude login before creating/retargeting the
+# transcript directory, so a failed preflight cannot steal latest-debate. Limit
+# the probe to role/model pairs that will actually run in START_ROUND..END_ROUND.
+scheduled_uses() {
+  local role="$1" model="$2" r
+  for r in $(seq "$START_ROUND" "$END_ROUND"); do
+    if [ $((r % 2)) -eq 1 ]; then
+      [ "$role" = "gen" ] && [ "$(round_model "$r" gen)" = "$model" ] && return 0
+    else
+      [ "$role" = "crit" ] && [ "$(round_model "$r" crit)" = "$model" ] && return 0
+    fi
+  done
+  return 1
+}
+
+if scheduled_uses gen "$PRIMARY_GEN"; then
+  REGISTRY_CMD_OVERRIDE="${GENERATOR_CLI:-}" debate_conductor_check_cli "$PRIMARY_GEN" || exit $?
+fi
+if scheduled_uses crit "$PRIMARY_CRIT"; then
+  REGISTRY_CMD_OVERRIDE="${CRITIC_CLI:-}" debate_conductor_check_cli "$PRIMARY_CRIT" || exit $?
+fi
+if [ "$ROTATE" = "1" ]; then
+  if scheduled_uses gen "$PRIMARY_CRIT"; then
+    REGISTRY_CMD_OVERRIDE="${GENERATOR_CLI:-}" debate_conductor_check_cli "$PRIMARY_CRIT" || exit $?
+  fi
+  if scheduled_uses crit "$PRIMARY_GEN"; then
+    REGISTRY_CMD_OVERRIDE="${CRITIC_CLI:-}" debate_conductor_check_cli "$PRIMARY_GEN" || exit $?
+  fi
+fi
+
+mkdir -p "$DEBATE_DIR"
+ln -sfn "debate-$TS" "$LOG_DIR/latest-debate"
+
 # Persist topic for /continue. Don't overwrite on resume — original wins.
 [ ! -f "$DEBATE_DIR/topic.txt" ] && printf '%s\n' "$TOPIC" > "$DEBATE_DIR/topic.txt"
+write_model_metadata
 
 CONTEXT_BLOCK=""
 [ -n "$CONTEXT_FILE" ] && CONTEXT_BLOCK="$(cat "$CONTEXT_FILE")"
@@ -326,6 +550,7 @@ if [ "$ROTATE" = "1" ]; then
 else
   echo "Rotation: OFF (gen=$PRIMARY_GEN, crit=$PRIMARY_CRIT)"
 fi
+[ "$PM_HOST" = "codex" ] && echo "PM host: Codex"
 [ "$UNTIL_CONVERGED" = "1" ] && echo "Mode: until-converged (stop on 'Verdict: STRENGTHEN', cap round $END_ROUND)"
 echo "Transcript dir: $DEBATE_DIR"
 

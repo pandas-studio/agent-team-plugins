@@ -24,23 +24,27 @@ _REGISTRY_LIB="$SCRIPT_DIR/registry.sh"
 # shellcheck source=registry.sh
 . "$_REGISTRY_LIB" || { echo "ask-generator: failed to load registry.sh (jq missing?)" >&2; exit 2; }
 unset _REGISTRY_LIB
+# shellcheck source=host.sh
+. "$SCRIPT_DIR/host.sh"
 
 TEAM=$(agent_team_detect_team) || exit 2
 LOG_BASE="${DEBATE_LOG_DIR:-$PWD/.debate-conductor/log}"
 LOG_DIR="$LOG_BASE/$TEAM"
 
-MODEL="agy"
+MODEL_OPT=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --model)
-      MODEL="${2:?--model requires a model id}"; shift 2
-      registry_model_exists "$MODEL" || { echo "ask-generator: unknown model '$MODEL' (run: agent-team-models list)" >&2; exit 2; }
+      MODEL_OPT="${2:?--model requires a model id}"; shift 2
       ;;
     --) shift; break ;;
     -*) echo "ask-generator: unknown flag: $1" >&2; exit 2 ;;
     *)  break ;;
   esac
 done
+
+MODEL="$(debate_conductor_resolve_role generator "$MODEL_OPT")" || exit $?
+registry_model_exists "$MODEL" || { echo "ask-generator: unknown model '$MODEL' (run: agent-team-models list)" >&2; exit 2; }
 
 if [ "$#" -lt 1 ]; then
   echo "usage: $0 [--model <id>] \"research question\"  [stdin = optional context]" >&2
@@ -75,6 +79,8 @@ if [ -n "$STDIN_CONTEXT" ]; then
 $STDIN_CONTEXT
 </user_context>"
 fi
+
+REGISTRY_CMD_OVERRIDE="${GENERATOR_CLI:-}" debate_conductor_check_cli "$MODEL" || exit $?
 
 mkdir -p "$LOG_DIR"
 # PID suffix avoids log collisions when two same-role rounds run within the

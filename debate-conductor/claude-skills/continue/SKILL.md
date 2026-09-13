@@ -36,6 +36,9 @@ REAL=$(cd "$LATEST" && pwd -P)
 ## 4 · Run the extension
 
 Single Bash call, blocking. `debate.sh` is on PATH while the plugin is active.
+It reuses the debate directory's saved model pair and any saved rotation unless
+this invocation passes explicit model flags/env vars. Start a fresh debate to
+change model pairs inside rotation or to change whether rotation is enabled.
 
 ```
 debate.sh --continue-from <real-dir> -n <EXTRA> "<topic>"

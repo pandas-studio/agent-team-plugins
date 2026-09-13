@@ -49,6 +49,12 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+case "${DEBATE_CONDUCTOR_PM_HOST:-claude}" in
+  claude) PM_LABEL="Claude"; RUN_HINT="/debate-conductor:run" ;;
+  codex)  PM_LABEL="Codex";  RUN_HINT="\$debate-conductor:run" ;;
+  *) echo "error: DEBATE_CONDUCTOR_PM_HOST must be claude or codex" >&2; exit 2 ;;
+esac
+
 command -v tmux >/dev/null 2>&1 || { echo "error: tmux not installed" >&2; exit 2; }
 [ -x "$TAIL" ] || { echo "error: $TAIL not found or not executable" >&2; exit 2; }
 
@@ -65,8 +71,11 @@ apply_3pane_split() {
   local RIGHT
   RIGHT=$(tmux split-window -h -t "$MID" -P -F "#{pane_id}")
   tmux select-layout -t "$MAIN" even-horizontal
-  tmux send-keys -t "$MID"   "$TAIL gen"  Enter
-  tmux send-keys -t "$RIGHT" "$TAIL crit" Enter
+  local gen_cmd crit_cmd
+  printf -v gen_cmd '%q %q' "$TAIL" gen
+  printf -v crit_cmd '%q %q' "$TAIL" crit
+  tmux send-keys -t "$MID"   "$gen_cmd"  Enter
+  tmux send-keys -t "$RIGHT" "$crit_cmd" Enter
   tmux select-pane -t "$MAIN"
 }
 
@@ -93,7 +102,7 @@ EOF
   tmux rename-window "$SESSION"
   MAIN_P=$(tmux display-message -p '#{pane_id}')
   apply_3pane_split "$MAIN_P"
-  echo "✓ 3-pane split applied (team: ${SESSION}). Run /debate-conductor:run in the left pane."
+  echo "✓ 3-pane split applied (team: ${SESSION}). Run ${RUN_HINT} in the ${PM_LABEL} pane."
   exit 0
 fi
 
@@ -104,7 +113,7 @@ else
   MAIN_P=$(tmux new-session -d -s "$SESSION" -n "$SESSION" -P -F "#{pane_id}")
   tmux set-option -w -t "$SESSION" '@team-name' "$SESSION"
   apply_3pane_split "$MAIN_P"
-  tmux send-keys -t "$MAIN_P" "# debate-conductor ready (team: ${SESSION}). Start: claude --plugin-dir <path-to-plugin>" Enter
+  tmux send-keys -t "$MAIN_P" "# debate-conductor ready for ${PM_LABEL} (team: ${SESSION}). Run ${RUN_HINT} to start." Enter
 fi
 
 if [ "$ATTACH" = "1" ]; then
