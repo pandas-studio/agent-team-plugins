@@ -165,7 +165,10 @@ for driver in ralph-trio ralph-debate; do
   printf -- '- [ ] task\n' > "$DRV/BACKLOG.md"
   assert_eq "$(run_driver "$ROOT/ralph-trio/bin/$driver.sh" --backlog BACKLOG.md --max-iter 1 \
     --worktree --base-branch no-such-ref)" "rc=1"
+  # Popped (checked off) and re-queued (pending again), not left untouched.
+  assert_eq "$(grep -c '^- \[x\] task$' "$DRV/BACKLOG.md")" "1"
   assert_eq "$(grep -c '^- \[ \] task$' "$DRV/BACKLOG.md")" "1"
+  assert_ok grep -q 'could not create the iter 1 worktree' "$TMP/drv.err"
 done
 printf -- '- [ ] task\n' > "$DRV/BACKLOG.md"
 
@@ -234,8 +237,15 @@ for plugin in ralph-trio spec-trio; do
     [ "$(git rev-parse feature)" = "$(git rev-parse "$base")" ] && echo feature-untouched
     merge_or_discard_worktree "$c" 3 0 "$PWD" >/dev/null 2>&1 || echo discard-refused
     git rev-parse -q --verify refs/heads/feature >/dev/null && [ -d "$c" ] && echo feature-kept
+    # A fast-forward that fails (base moved on) keeps the worktree to recover from.
+    d=$(with_worktree 4 "$base" 2>/dev/null) || exit 9
+    b="$d"
+    git -C "$d" -c user.name=t -c user.email=t@t commit -q --allow-empty -m iter
+    git -c user.name=t -c user.email=t@t commit -q --allow-empty -m "base moved"
+    merge_or_discard_worktree "$d" 4 1 "$PWD" >/dev/null 2>&1 || { [ -d "$d" ] && echo ff-fail-kept; }
   ' _ "$WTREPO")" "$(printf '%s\n' distinct branches "bad-rc=1 out=" no-leftover discarded merged \
-      missing-refused commit-refused validate-refused feature-untouched discard-refused feature-kept)"
+      missing-refused commit-refused validate-refused feature-untouched discard-refused feature-kept \
+      ff-fail-kept)"
 done
 
 # spec-trio scope gate: paths are listed verbatim (non-ASCII names match the

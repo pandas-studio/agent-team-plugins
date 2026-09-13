@@ -210,8 +210,8 @@ merge_or_discard_worktree() {
   br=$(worktree_branch "$wt" "$iter")
   if [ "$passed" = "1" ]; then
     if ! git -C "$orig" merge --ff-only "$br" >&2; then
-      ralph_log "merge --ff-only failed for $br; leaving branch in place for inspection"
-      git worktree remove --force "$wt" 2>/dev/null || true
+      # Keep the worktree too: callers record it as the recovery location.
+      ralph_log "merge --ff-only failed for $br; leaving worktree $wt and its branch for inspection"
       return 1
     fi
   fi
