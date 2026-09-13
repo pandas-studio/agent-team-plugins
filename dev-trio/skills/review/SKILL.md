@@ -58,29 +58,22 @@ Worked example — if `$ARGUMENTS = "focus on src/agent.py concurrency --with-sp
 
 ## 3 · Surface the verdict after completion
 
-The wrapper writes two artifacts per run:
+The wrapper reports exact paths for this invocation in its final stderr line:
 
-```
-$PWD/.dev-trio/log/<team>/codex-<TS>.final.md   ← Codex's final structured review (authoritative)
-$PWD/.dev-trio/log/<team>/latest-codex.final.md → symlink to the above
-$PWD/.dev-trio/log/<team>/codex-<TS>.log        ← full streamed transcript
-$PWD/.dev-trio/log/<team>/latest-codex.log      → symlink to the above
+```text
+(log: .../codex-<TS>-<PID>.log, final: .../codex-<TS>-<PID>.final.md, result: .../codex-<TS>-<PID>.review.json, rc=...)
 ```
 
-**Parse the verdict and findings from `latest-codex.final.md`, not the streamed log.** That file is `codex exec --output-last-message` output — Codex's last assistant message captured verbatim, so it always contains the complete `## Verdict` / `## Findings` block. The streamed `.log` is the full transcript and a fallback only: depending on the execution path its tail can duplicate or drop the closing block (the original failure mode this skill hit), which is exactly why verdict extraction moved off it.
+**Read that exact `.review.json` result.** It is the common parsed result used by the wrapper, manifest and dashboard. Do not independently parse verdicts or count bullets in Markdown. Do not resolve `latest` links after completion: another invocation may already have retargeted them.
 
-**Verdict line** — Codex emits a canonical 3-token verdict per the role spec (`## Verdict`, then `<SHIP|NEEDS-FIX|DISCUSS> — reason` on the next line). Anchor on the canonical-token line:
+- `status: "ok"`, `invocation_rc: 0`, `exit_code: 0`: use `verdict` (`SHIP`, `NEEDS-FIX`, `DISCUSS`) and quote `verdict_line` verbatim. The canonical `TOKEN — reason` and observed `TOKEN. reason` forms share the same normalized token.
+- `findings.blocker`, `.major`, `.minor`: arrays of real finding bullets; count their entries. `null` means that section is missing, so report its count as **unknown**, not zero. Exact `- None.` / `- none` placeholders (case-insensitive, optional final period) and exact Korean `- 없음` / `- 없음.` placeholders have already been excluded.
+- `status: "parse-failed"`: the reviewer process succeeded but its final response could not be parsed. The wrapper exits **3**. Report `error` and the artifact paths; the manifest verdict remains `null`.
+- `status: "invocation-failed"`: the reviewer invocation failed. The wrapper preserves its nonzero exit code and records no verdict, even if its output contains a plausible one.
 
-```bash
-grep -A 1 '^## Verdict$' .dev-trio/log/<team>/latest-codex.final.md \
-  | grep -hE '^(SHIP|NEEDS-FIX|DISCUSS)( |—|$)' | tail -1
-```
+If the result is missing or unreadable, report the verdict and findings as unavailable. The raw `.log` is diagnostic evidence, never a fallback source of a verdict. The `.final.md` stays unchanged: native final capture is used when available; only adapters without it synthesize a final from this invocation's output.
 
-If `latest-codex.final.md` is empty or missing — Codex died before emitting its review; the wrapper prints a `final-message file is empty` warning to stderr in that case — fall back to the `=== RESPONSE ===` section of `latest-codex.log` and say so when you surface the result.
-
-Quote the verdict line verbatim. Color the framing — 🟢 SHIP / 🔴 NEEDS-FIX / 🟡 DISCUSS — matches what the dashboard renders.
-
-**Findings counts** — from the same `latest-codex.final.md`, count `^- ` bullets under each `### Blocker` / `### Major` / `### Minor` heading, skipping `- none` placeholders.
+Color the framing — 🟢 SHIP / 🔴 NEEDS-FIX / 🟡 DISCUSS — to match the dashboard. On either failure status, surface the failure instead of the success summary below.
 
 **Surface to user** in chat (≤200 words):
 - Verdict line (quoted, with color emoji)
@@ -91,7 +84,7 @@ Quote the verdict line verbatim. Color the framing — 🟢 SHIP / 🔴 NEEDS-FI
 
 ## 4 · Handle `## NEED RESEARCH` blocks
 
-If `latest-codex.final.md` contains a `## NEED RESEARCH` section after the verdict, Codex needs Antigravity's help before the review can finalize. Do this:
+If the exact `.final.md` path reported by the same successful invocation contains a `## NEED RESEARCH` section after the verdict, Codex needs Antigravity's help before the review can finalize. Do this:
 
 1. Surface the questions to the user. Confirm before fetching (research costs latency and tokens).
 2. On confirmation, run each question through `ask-agy.sh` and concatenate the answers into a temp file. `ask-agy.sh` prints only the answer on stdout (the `=== RESPONSE ===` markers go to its log file), and exits with the researcher's rc:
@@ -137,6 +130,6 @@ If the user approves a replacement: deleting code you have already fixed round a
 ## Constraints
 
 - **Do not call `codex` directly.** `ask-codex.sh` is the only entry point — it handles role-prompt loading, trust-boundary tag stripping, `codex exec --output-last-message` capture, and RFC 0004 manifest emission (`dev-trio-review` variant).
-- **Parse from `latest-codex.final.md`, not the streamed `.log`.** The `.final.md` is `--output-last-message` output (Codex's final message verbatim); the streamed `.log` can duplicate or truncate the closing block. Fall back to the `.log` only when the `.final.md` is empty/missing, and flag the degraded path when you do.
-- **Verdict extraction must anchor on the canonical token regex** above. Codex echoes the role-prompt's `<one of: SHIP / NEEDS-FIX / DISCUSS>` placeholder when the run errors before emitting `tokens used` — un-anchored matchers will surface the placeholder as a real verdict.
+- **Use the exact `.review.json` result path printed by this invocation.** The wrapper, manifest and dashboard share this parsed result. Missing/failed results mean the verdict is unavailable; never infer it from raw logs, prompt examples or `latest` artifacts.
+- **Only an `ok` result carries a verdict.** Invocation and parse failures retain `null`; a token found in prose or a role-prompt example is not a review result.
 - **Do not paste the full Codex output back to chat.** Verdict line + Blocker/Major bullets only. The full text is in the pane and on disk.

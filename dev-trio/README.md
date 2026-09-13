@@ -37,6 +37,18 @@ agent-team-models doctor                                  # verify binding + bin
 
 The reviewer's final structured review is written to `<TS>.final.md` natively when the model supports it (codex's `--output-last-message`), and otherwise synthesised from the streamed transcript — so `/dev-trio:review` verdict parsing works regardless of which model fills the role.
 
+**Review results.** Each invocation writes an atomic `codex-<TS>-<PID>.review.json` beside its unchanged `.final.md` and raw `.log`. The wrapper prints all three exact paths. The dashboard and review skill consume this result; the standalone manifest stores its normalized verdict and a hashed `review-result` input reference. Use the reported paths for automation: `latest` links can move during another invocation.
+
+The result contains `schema_version: 1`, `profile`, `status`, `invocation_rc`, `exit_code`, `error`, `verdict`, `verdict_line`, and `findings` (`blocker`, `major`, `minor` arrays). Missing findings sections are `null` (unknown); empty sections are empty arrays. A successful review accepts one unfenced `## Verdict` immediately followed by `TOKEN — reason` or `TOKEN. reason`, with `TOKEN` in `SHIP`, `NEEDS-FIX`, `DISCUSS`. Duplicate headings, unclosed/unsupported code fences, missing/empty native finals, and unknown verdicts fail parsing. Raw logs and earlier runs never supply a fallback verdict.
+
+A parsed review exits **0**, including `NEEDS-FIX` or `DISCUSS`; inspect `verdict` to decide the next action. A parse failure after a successful invocation exits **3** (`status: "parse-failed"`). An invocation failure preserves its original nonzero exit code (`status: "invocation-failed"`). Both failure statuses leave `verdict: null`. `error` explains the failure. The reviewer requests `- None.` for empty sections in every language; the parser also accepts exact `- none` (case-insensitive, optional period) and Korean `- 없음` / `- 없음.`. Other short bullets remain findings.
+
+**Loop callers.** ralph-trio and spec-trio reserve a fresh absolute receipt file for each review and re-review, and pass it as `DEV_TRIO_REVIEW_RECEIPT`. The wrapper atomically writes `{schema_version: 1, result_path, final_path}` after publishing its result. Callers load that result with the shared reader, bind its exit code to the actual wrapper exit code, and link it into their parent manifest. Receipts are retained beside the logs as per-dispatch audit artifacts. They use the exact final only for supporting text and research requests. Missing receipts or failed reviews never fall back to `latest` links or a second Markdown verdict parser.
+
+A result/receipt I/O failure prints a diagnostic and completes the log with a nonzero rc: **2** after model success, or the original nonzero invocation rc. No successful result is retained. An invocation that itself exits **3** is distinguished from a parse failure by the result's `status`, when a result is available.
+
+`DEV_TRIO_REVIEW_PROFILE=spec` explicitly adds `OUT-OF-SCOPE` to the vocabulary. The spec-trio driver sets this profile; update spec-trio alongside dev-trio when using the two plugins together. Other role overrides must follow the selected profile's output contract. Nested dispatches still leave verdict ownership to the parent manifest.
+
 **Reviewing without Codex memories.** With Codex's memories feature enabled in `~/.codex/config.toml`, `codex exec` adds the memory summary from earlier Codex sessions to the review prompt. Pass `--no-memories` (`ask-codex.sh --no-memories "focus"` or `/dev-trio:review --no-memories ...`) to run the built-in `codex-no-memories` model instead, which adds `-c features.memories=false`. Setting `DEV_TRIO_REVIEWER_MODEL=codex-no-memories` selects the same model without the flag (and without the checks below). With the flag, `ask-codex.sh` exits with rc=2 before starting any CLI when the reviewer role resolves to a model other than `codex` / `codex-no-memories`, or when the models config defines its own `codex-no-memories`.
 
 ## Install
@@ -101,7 +113,9 @@ Per-team log namespace. Each invocation writes to:
 ```
 $PWD/.dev-trio/log/<team>/
 ├── agy-<TS>.log            # raw Antigravity output + framing
-├── codex-<TS>.log          # raw Codex output + framing
+├── codex-<TS>-<PID>.log    # raw reviewer output + framing
+├── codex-<TS>-<PID>.final.md    # unchanged final response
+├── codex-<TS>-<PID>.review.json # common parsed review result
 ├── latest-agy.log          # symlink to most recent agy run
 ├── latest-codex.log        # symlink to most recent codex run
 └── <name>-<TS>.manifest.json   # RFC 0004 typed run manifest

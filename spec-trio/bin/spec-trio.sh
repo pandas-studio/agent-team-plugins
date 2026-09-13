@@ -129,6 +129,12 @@ BACKLOG_FILE="$(cd "$(dirname "$BACKLOG_FILE")" && pwd)/$(basename "$BACKLOG_FIL
 # whenever research is possible (anything but --dry-run / --no-research).
 if [ "$DRY_RUN" != "1" ] && [ "$AUTOSHIP" != "1" ]; then
   command -v ask-codex.sh  >/dev/null 2>&1 || { echo "ERROR: spec-trio requires the dev-trio plugin (ask-codex.sh not on PATH). Install: /plugin install dev-trio@pandas-studio" >&2; exit 2; }
+  REVIEWER_BIN_DIR=$(dirname "$(command -v ask-codex.sh)")
+  # shellcheck source=/dev/null
+  . "$REVIEWER_BIN_DIR/../lib/review-result.sh" || {
+    echo "ERROR: update dev-trio; shared review-result.sh is required" >&2
+    exit 2
+  }
 fi
 if [ "$DRY_RUN" != "1" ] && [ "$NO_RESEARCH" != "1" ]; then
   command -v ask-agy.sh >/dev/null 2>&1 || { echo "ERROR: spec-trio requires the dev-trio plugin (ask-agy.sh not on PATH). Install: /plugin install dev-trio@pandas-studio  (or pass --no-research)" >&2; exit 2; }
@@ -170,7 +176,7 @@ LOG_DIR=$(spec_init_log_dir)
 # log root to $PWD/.dev-trio — i.e. inside the worktree that Stage-3 dispatch
 # tears down. LOG_DIR is computed here at top level (PWD = ORIGINAL_DIR, the
 # main repo), so this absolute path is unaffected by the later cd. ask-codex.sh
-# appends /$TEAM and maintains a latest-codex.final.md symlink we read back.
+# appends /$TEAM and returns exact artifact paths through a fresh receipt.
 CODEX_FINAL_ROOT="$LOG_DIR/codex"
 TS=$(date +%Y%m%d-%H%M%S)
 SUMMARY_LOG="$LOG_DIR/spec-trio-$TS.log"
@@ -250,53 +256,9 @@ build_coder_prompt() {
   if [ -n "$fix_plan_excerpt" ];  then printf '\n<fix_plan_md>\n%s\n</fix_plan_md>\n' "$fix_plan_excerpt"; fi
 }
 
-# Returns: SHIP / NEEDS-FIX / DISCUSS / OUT-OF-SCOPE  (echoed to stdout; empty
-# when nothing matches — the caller maps empty → UNKNOWN). Hardened parse
-# (adopted from ralph-trio): we now read codex's authoritative --output-last-
-# message file, so the matcher must reject the role-prompt placeholder
-# (`<one of: SHIP / NEEDS-FIX / DISCUSS / OUT-OF-SCOPE>`) — naive substring
-# matching would parse that as a bogus SHIP. Two anchored forms:
-#   1. canonical `Verdict: TOKEN` (line on its own), or
-#   2. a `## Verdict` section line that STARTS with a TOKEN followed by a
-#      non-token boundary (rejects "SHIPPING", the `<one of: …>` placeholder).
-# OUT-OF-SCOPE is matched before NEEDS-FIX/SHIP so a line like
-# "OUT-OF-SCOPE — spec §4 constraint touched" routes correctly.
-parse_codex_verdict() {
-  local f="$1"
-  awk '
-    # 1. Canonical: `Verdict: TOKEN` / `**Verdict:** TOKEN` (line on its own).
-    tolower($0) ~ /^[[:space:]]*\**[[:space:]]*verdict[[:space:]]*:[[:space:]]*\**[[:space:]]*(ship|needs-fix|discuss|out-of-scope)[[:space:]]*\**[[:space:]]*$/ {
-      v = toupper($0)
-      sub(/.*VERDICT[[:space:]]*:[[:space:]]*\**[[:space:]]*/, "", v)
-      sub(/[[:space:]]*\**[[:space:]]*$/, "", v)
-      canonical = v
-      next
-    }
-    # 2. Section: line starts with a TOKEN, followed by a non-token boundary.
-    #    Boundary `[^A-Z-]` rejects "SHIPPING" / "NEEDS-FIX-MORE"; accepts
-    #    space, em-dash bytes, asterisk, punctuation, EOL.
-    /^#+[[:space:]]*Verdict/ { in_v = 1; next }
-    in_v && /^#+[[:space:]]/ { in_v = 0 }
-    in_v && !section_hit {
-      up = toupper($0)
-      if      (match(up, /^[[:space:]]*\**[[:space:]]*OUT-OF-SCOPE([^A-Z-]|$)/)) section_hit = "OUT-OF-SCOPE"
-      else if (match(up, /^[[:space:]]*\**[[:space:]]*NEEDS-FIX([^A-Z-]|$)/))    section_hit = "NEEDS-FIX"
-      else if (match(up, /^[[:space:]]*\**[[:space:]]*DISCUSS([^A-Z-]|$)/))      section_hit = "DISCUSS"
-      else if (match(up, /^[[:space:]]*\**[[:space:]]*SHIP([^A-Z-]|$)/))         section_hit = "SHIP"
-    }
-    END {
-      if (canonical)        { print canonical }
-      else if (section_hit) { print section_hit }
-    }
-  ' "$f" 2>/dev/null
-}
 
 # to_manifest_verdict provided by lib/manifest.sh (sourced above).
 
-# resolve_codex_final ROOT TEAM — echo the path to ask-codex.sh's authoritative
-# --output-last-message file (latest-codex.final.md under $ROOT/$TEAM) when it
-# exists and is non-empty; echo nothing otherwise.
-#
 # Build the explicit-diff-range hint for the reviewer (forward-ported from
 # ralph-trio.sh). The worker commits when green (roles/worker.md), and the
 # reviewer role defaults to the working tree — which is clean after a commit,
@@ -321,20 +283,6 @@ build_range_hint() {
   fi
 }
 
-# Why we read this file rather than the teed stdout: the dev-trio ask-codex.sh
-# contract declares the streamed transcript unreliable for the verdict — the
-# closing block (carrying the `## Verdict` token and any `## NEED RESEARCH`) may
-# be dropped or duplicated depending on how codex buffers stdout. The
-# `--output-last-message` file is the clean, byte-exact final review. We pin
-# DEV_TRIO_LOG_DIR=$ROOT on the reviewer call so this file lands in spec-trio's
-# own (main-repo) log tree and survives `git worktree remove`. The symlink is
-# refreshed per ask-codex.sh invocation, and spec-trio's stages run strictly
-# sequentially, so reading it immediately after the call is unambiguous.
-resolve_codex_final() {
-  local root="$1" team="$2"
-  local f="$root/$team/latest-codex.final.md"
-  [ -s "$f" ] && printf '%s' "$f"
-}
 
 # Extract the NEED RESEARCH question(s) if present
 extract_need_research() {
@@ -819,30 +767,32 @@ while :; do
     # DEV_TRIO_LOG_DIR pins ask-codex.sh's .final.md into spec-trio's durable
     # log tree (survives worktree teardown — see CODEX_FINAL_ROOT above).
     RANGE_HINT=$(build_range_hint "$ITER_BASE_SHA" "$WORK_DIR")
+    REVIEW_RECEIPT=$(review_receipt_create "$REVIEW_LOG") || exit 2
     ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$CODEX_FINAL_ROOT" \
-        MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-codex.sh --with-spec "$SPEC_FILE" "Review uncommitted+committed changes related to this task: '$TASK'.${RANGE_HINT} Use the standard SHIP/NEEDS-FIX/DISCUSS/OUT-OF-SCOPE verdict format from your role prompt." 2>&1 ) | tee "$REVIEW_LOG" >/dev/null
+        DEV_TRIO_REVIEW_PROFILE=spec DEV_TRIO_REVIEW_RECEIPT="$REVIEW_RECEIPT" MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-codex.sh --with-spec "$SPEC_FILE" "Review uncommitted+committed changes related to this task: '$TASK'.${RANGE_HINT} Use the standard SHIP/NEEDS-FIX/DISCUSS/OUT-OF-SCOPE verdict format from your role prompt." 2>&1 ) | tee "$REVIEW_LOG" >/dev/null
     # PIPESTATUS[0] = ask-codex.sh's rc (the subshell). Non-zero means codex
-    # itself errored — but it often still echoes the role-prompt verdict
+    # invocation or result processing failed — even if it echoes the verdict
     # placeholder, so naive parsing would yield a bogus verdict. Force UNKNOWN
     # whenever codex didn't cleanly exit.
     CODEX_RC=${PIPESTATUS[0]}
-    # Authoritative verdict + NEED RESEARCH come from the .final.md, not the
-    # teed stream. Append the final to $REVIEW_LOG so the on-disk record (and
-    # the dispatch's "Review: $REVIEW_LOG" pointer) is self-contained; fall
-    # back to the stream only when the final is empty (codex died mid-review).
-    CODEX_FINAL=$(resolve_codex_final "$CODEX_FINAL_ROOT" "$TEAM")
-    REVIEW_SRC="$REVIEW_LOG"
-    if [ -n "$CODEX_FINAL" ]; then
-      REVIEW_SRC="$CODEX_FINAL"
-      { printf '\n=== AUTHORITATIVE FINAL (codex --output-last-message) ===\n'; cat "$CODEX_FINAL"; } >> "$REVIEW_LOG"
-      manifest_add_input kind=codex-final path="$CODEX_FINAL"
+    REVIEW_DATA=$(review_result_from_receipt "$REVIEW_RECEIPT" "$CODEX_RC") || REVIEW_DATA=""
+    VERDICT="UNKNOWN"
+    REVIEW_SRC=""
+    if [ -n "$REVIEW_DATA" ]; then
+      REVIEW_RESULT_PATH=$(printf '%s\n' "$REVIEW_DATA" | jq -r '.result_path')
+      manifest_add_input kind=review-result path="$REVIEW_RESULT_PATH"
+      if [ "$CODEX_RC" -eq 0 ]; then
+        VERDICT=$(printf '%s\n' "$REVIEW_DATA" | jq -r '.verdict')
+        REVIEW_SRC=$(printf '%s\n' "$REVIEW_DATA" | jq -r '.final_path')
+        { printf '\n=== AUTHORITATIVE FINAL ===\n'; cat "$REVIEW_SRC"; } >> "$REVIEW_LOG"
+        manifest_add_input kind=codex-final path="$REVIEW_SRC"
+      fi
+    else
+      ralph_log "  review result unavailable — forcing UNKNOWN verdict (receipt: $REVIEW_RECEIPT)"
     fi
     if [ "$CODEX_RC" -ne 0 ]; then
       ralph_log "  ask-codex.sh exited rc=$CODEX_RC — forcing UNKNOWN verdict (review log: $REVIEW_LOG)"
-      VERDICT="UNKNOWN"
       manifest_add_input kind=codex-rc value="$CODEX_RC"
-    else
-      VERDICT=$(parse_codex_verdict "$REVIEW_SRC")
     fi
     [ -z "$VERDICT" ] && VERDICT="UNKNOWN"
     MV=$(to_manifest_verdict "$VERDICT")
@@ -921,23 +871,28 @@ $RESEARCH"
           manifest_add_input kind=code-log path="$CODE2_LOG"
           # Pin the durable .final.md root (see Stage-3 review above).
           RANGE_HINT2=$(build_range_hint "$ITER_BASE_SHA" "$WORK_DIR")
+          REVIEW_RECEIPT=$(review_receipt_create "$REVIEW2_LOG") || exit 2
           ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$CODEX_FINAL_ROOT" \
-              MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-codex.sh --with-spec "$SPEC_FILE" "Re-review the same task after research-informed retry: '$TASK'.${RANGE_HINT2} Use the standard SHIP/NEEDS-FIX/DISCUSS/OUT-OF-SCOPE verdict format from your role prompt." 2>&1 ) | tee "$REVIEW2_LOG" >/dev/null
+              DEV_TRIO_REVIEW_PROFILE=spec DEV_TRIO_REVIEW_RECEIPT="$REVIEW_RECEIPT" MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-codex.sh --with-spec "$SPEC_FILE" "Re-review the same task after research-informed retry: '$TASK'.${RANGE_HINT2} Use the standard SHIP/NEEDS-FIX/DISCUSS/OUT-OF-SCOPE verdict format from your role prompt." 2>&1 ) | tee "$REVIEW2_LOG" >/dev/null
           CODEX2_RC=${PIPESTATUS[0]}
-          # Verdict from the authoritative .final.md (see Stage-3 review above).
-          CODEX2_FINAL=$(resolve_codex_final "$CODEX_FINAL_ROOT" "$TEAM")
-          REVIEW2_SRC="$REVIEW2_LOG"
-          if [ -n "$CODEX2_FINAL" ]; then
-            REVIEW2_SRC="$CODEX2_FINAL"
-            { printf '\n=== AUTHORITATIVE FINAL (codex --output-last-message) ===\n'; cat "$CODEX2_FINAL"; } >> "$REVIEW2_LOG"
-            manifest_add_input kind=codex-final path="$CODEX2_FINAL"
+          REVIEW_DATA=$(review_result_from_receipt "$REVIEW_RECEIPT" "$CODEX2_RC") || REVIEW_DATA=""
+          VERDICT="UNKNOWN"
+          REVIEW2_SRC=""
+          if [ -n "$REVIEW_DATA" ]; then
+            REVIEW_RESULT_PATH=$(printf '%s\n' "$REVIEW_DATA" | jq -r '.result_path')
+            manifest_add_input kind=review-result path="$REVIEW_RESULT_PATH"
+            if [ "$CODEX2_RC" -eq 0 ]; then
+              VERDICT=$(printf '%s\n' "$REVIEW_DATA" | jq -r '.verdict')
+              REVIEW2_SRC=$(printf '%s\n' "$REVIEW_DATA" | jq -r '.final_path')
+              { printf '\n=== AUTHORITATIVE FINAL ===\n'; cat "$REVIEW2_SRC"; } >> "$REVIEW2_LOG"
+              manifest_add_input kind=codex-final path="$REVIEW2_SRC"
+            fi
+          else
+            ralph_log "  review result unavailable — forcing UNKNOWN verdict (receipt: $REVIEW_RECEIPT)"
           fi
           if [ "$CODEX2_RC" -ne 0 ]; then
-            ralph_log "  ask-codex.sh (re-review) exited rc=$CODEX2_RC — forcing UNKNOWN verdict (log: $REVIEW2_LOG)"
-            VERDICT="UNKNOWN"
+            ralph_log "  ask-codex.sh exited rc=$CODEX2_RC — forcing UNKNOWN verdict (review log: $REVIEW2_LOG)"
             manifest_add_input kind=codex-rc value="$CODEX2_RC"
-          else
-            VERDICT=$(parse_codex_verdict "$REVIEW2_SRC")
           fi
           [ -z "$VERDICT" ] && VERDICT="UNKNOWN"
           MV=$(to_manifest_verdict "$VERDICT")

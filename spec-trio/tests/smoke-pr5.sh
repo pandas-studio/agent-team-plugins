@@ -126,10 +126,16 @@ EOF
 # The trailing argv slot is the reviewer prompt; keep it when asked so a case
 # can check what scope the reviewer was pointed at.
 [ -n "\${CODEX_PROMPT_CAPTURE:-}" ] && printf '%s' "\${@: -1}" > "\$CODEX_PROMPT_CAPTURE"
-cat <<'VERDICT'
+FINAL=""
+while [ \$# -gt 0 ]; do
+  if [ "\$1" = --output-last-message ]; then FINAL="\$2"; break; fi
+  shift
+done
+cat > "\$FINAL" <<'VERDICT'
 ## Verdict
 ${verdict_out}
 VERDICT
+cat "\$FINAL"
 EOF
   chmod +x wrap-claude.sh wrap-codex.sh
 
@@ -202,6 +208,19 @@ assert_cmd "no .tmp leaks (case1)"      "[ -z \"\$(ls $LD1/*.tmp 2>/dev/null)\" 
 CASE1_HEAD="$(git -C "$WD1" rev-parse HEAD)"
 assert_eq  "coder committed (case1)"    "yes" "$([ "$CASE1_HEAD" != "$CASE1_BASE" ] && echo yes)"
 assert_eq  "reviewer given iter range"  "yes" "$(grep -qF "range \`$CASE1_BASE..$CASE1_HEAD\`" "$CASE1_PROMPT" 2>/dev/null && echo yes)"
+
+# --------------------------------------------------------------------------
+section "Case 1b: spec profile preserves the reviewer OUT-OF-SCOPE verdict"
+WD1b="$(make_workspace \
+  '<allowed-paths>foo.py</allowed-paths>' \
+  'foo.py' \
+  'OUT-OF-SCOPE. purpose violates the spec' \
+  '- [ ] §5.1 add foo()')"
+run_spec_trio case1b "$WD1b" --max-iter 1
+LD1b="$(case_log_dir case1b)"
+R1b="$LD1b/spec-trio-*-iter-1-review.manifest.json"
+assert_eq "spec reviewer verdict remains OUT-OF-SCOPE" "OUT-OF-SCOPE" "$(manifest_field "$R1b" '.verdict')"
+assert_cmd "spec violation routes to human attention" "grep -q 'human attention — spec violation' '$WD1b/fix_plan.md'"
 
 # --------------------------------------------------------------------------
 section "Case 2: gate 1 round-trip (planner emits no allowlist)"
@@ -387,8 +406,14 @@ fi
 CLAUDE_EOF
   cat > wrap-codex.sh <<'CODEX_EOF'
 #!/usr/bin/env bash
-echo "## Verdict"
-echo "SHIP — fine"
+while [ $# -gt 0 ]; do
+  if [ "$1" = --output-last-message ]; then
+    printf '## Verdict\nSHIP — fine\n' > "$2"
+    break
+  fi
+  shift
+done
+printf '## Verdict\nSHIP — fine\n'
 CODEX_EOF
   chmod +x wrap-claude.sh wrap-codex.sh
   git add spec.md BACKLOG.md wrap-claude.sh wrap-codex.sh

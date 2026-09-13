@@ -49,6 +49,8 @@ Review the target changes for **correctness, security, maintainability, and adhe
 ```
 
 ## Rules
+- Start with one `## Verdict` heading and put `SHIP — reason`, `NEEDS-FIX — reason`, or `DISCUSS — reason` on the immediately following line. Do not wrap the review in a code fence or repeat the verdict section.
+- Keep the Findings headings exactly as shown. For an empty section, write exactly `- None.` regardless of the language of the rest of the review.
 - **This is a read-only review — prefer reading code over executing it.** If you genuinely need to run something to confirm a finding, use the project's documented command runner (check `CLAUDE.md` / `README` for the exact wrapper — e.g. `uv run pytest …`, `npm test`, `make check`) rather than assuming bare binaries (`pytest`, `node`, `python`) are on `$PATH`. A PATH miss burns your budget and proves nothing; if you can't run the right command, record the gap as a finding instead of guessing.
 - **Cite `file:line` for every finding.** Reviews without locations are useless.
 - If you'd need outside info (library behavior, API spec, recent deprecation, version-specific quirk) to be sure, put the question in **NEED RESEARCH** instead of guessing. The PM will fetch the answer via Antigravity and re-invoke you with the research appended.

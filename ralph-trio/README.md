@@ -27,6 +27,8 @@ CODER_CLI=...                   # overrides for the coder stage
 WORKER_CLI=...                  # overrides for solo's single stage
 ```
 
+The trio reviewer and re-reviewer require dev-trio 0.4.3 or newer. Each dispatch returns a fresh receipt identifying its exact `.review.json` and `.final.md`. The parent manifest links the JSON and uses its verdict; `latest` artifacts and legacy `Verdict:` prose are not parsed. Malformed reviews (including blank lines before the token, bold tokens, or hyphen/colon separators) deliberately become UNKNOWN. Update both plugins together.
+
 ## Install
 
 ```

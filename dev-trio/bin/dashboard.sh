@@ -20,6 +20,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=../lib/namespace.sh
 . "$PLUGIN_ROOT/lib/namespace.sh" || exit 2
+# shellcheck source=../lib/review-result.sh
+. "$PLUGIN_ROOT/lib/review-result.sh" || exit 2
 
 ROLE="${1:?usage: $0 agy|codex}"
 
@@ -49,7 +51,6 @@ BOLD=$'\033[1m'
 GREEN=$'\033[1;32m'
 YELLOW=$'\033[1;33m'
 RED=$'\033[1;31m'
-CYAN=$'\033[1;36m'
 
 cleanup() { printf '\033[?25h\033[H\033[2J'; exit 0; }   # show cursor + clear
 trap cleanup INT TERM
@@ -73,18 +74,28 @@ while true; do
     BUF+="${HEADER_COLOR}  ${ICON}  ${TITLE}${RESET}  ${DIM}[team: ${TEAM}]${RESET}"$'\n'
     BUF+="${HEADER_COLOR}═══════════════════════════════════════════════${RESET}"$'\n\n'
 
-    if [ ! -e "$LATEST" ]; then
+    # Freeze the latest log target for this frame. Every sibling artifact is
+    # resolved from this path, never from an independently changing latest link.
+    SOURCE="$LATEST"
+    if [ -L "$LATEST" ]; then
+      TARGET=$(readlink "$LATEST" 2>/dev/null) || TARGET=""
+      case "$TARGET" in
+        /*) SOURCE="$TARGET" ;;
+        *) SOURCE="$LOG_DIR/$TARGET" ;;
+      esac
+    fi
+    if [ ! -e "$SOURCE" ]; then
       BUF+="  ${DIM}(no runs yet — waiting for first call)${RESET}"$'\n'
       BUF+="  ${DIM}path: $LATEST${RESET}"$'\n\n'
     else
-      TS=$(grep "^=== ask-${ROLE}.sh @ " "$LATEST" 2>/dev/null | tail -1 | awk '{print $4}')
+      TS=$(grep "^=== ask-${ROLE}.sh @ " "$SOURCE" 2>/dev/null | tail -1 | awk '{print $4}')
       BUF+="  ${BOLD}Started:${RESET} ${TS:-unknown}"$'\n\n'
 
       # Query/Focus body
       if [ "$ROLE" = "agy" ]; then
-        BODY=$(awk '/^=== QUERY ===$/{flag=1; next} /^=== /{flag=0} flag' "$LATEST" 2>/dev/null)
+        BODY=$(awk '/^=== QUERY ===$/{flag=1; next} /^=== /{flag=0} flag' "$SOURCE" 2>/dev/null)
       else
-        BODY=$(awk '/^=== FOCUS ===$/{flag=1; next} /^=== /{flag=0} flag' "$LATEST" 2>/dev/null)
+        BODY=$(awk '/^=== FOCUS ===$/{flag=1; next} /^=== /{flag=0} flag' "$SOURCE" 2>/dev/null)
       fi
       BUF+="  ${BOLD}${LABEL}:${RESET}"$'\n'
       if [ -n "$BODY" ]; then
@@ -93,21 +104,25 @@ while true; do
       fi
       BUF+=$'\n'
 
-      # Extract real response (codex echoes its prompt + duplicates final
-      # response after "tokens used"; agy doesn't have such framing).
       RESPONSE=""
-      if [ "$ROLE" = "codex" ]; then
-        RESPONSE=$(awk '/^tokens used/{flag=1; next} /^=== END /{flag=0} flag' "$LATEST" 2>/dev/null)
-      fi
-      if [ -z "$RESPONSE" ]; then
-        RESPONSE=$(awk '/^=== RESPONSE ===$/{flag=1; next} /^=== END /{flag=0} flag' "$LATEST" 2>/dev/null)
+      RESULT_JSON=""
+      if [ "$ROLE" = "agy" ]; then
+        RESPONSE=$(awk '/^=== RESPONSE ===$/{flag=1; next} /^=== END /{flag=0} flag' "$SOURCE" 2>/dev/null)
       fi
 
       # Status (END marker = done)
       DONE=0; RC=""
-      if grep -q '^=== END ' "$LATEST" 2>/dev/null; then
+      if grep -q '^=== END ' "$SOURCE" 2>/dev/null; then
         DONE=1
-        RC=$(grep '^=== END ' "$LATEST" | tail -1 | sed 's/.*rc=\([0-9]*\).*/\1/')
+        RC=$(grep '^=== END ' "$SOURCE" | tail -1 | sed 's/.*rc=\([0-9]*\).*/\1/')
+        # END is published after the result; read in that order to avoid a
+        # transient missing-result frame when completion races this refresh.
+        if [ "$ROLE" = "codex" ]; then
+          RESULT_JSON=$(review_result_read "${SOURCE%.log}.review.json") || RESULT_JSON=""
+        fi
+        if [ "$ROLE" = "codex" ] && [ -n "$RESULT_JSON" ]; then
+          RC=$(printf '%s\n' "$RESULT_JSON" | jq -r '.exit_code')
+        fi
         if [ "$RC" = "0" ]; then
           BUF+="  ${BOLD}Status:${RESET} ${GREEN}✓ done${RESET}"$'\n\n'
         else
@@ -144,23 +159,20 @@ while true; do
         BUF+="  ${BOLD}Sources cited:${RESET} ${SRC_COUNT}"$'\n\n'
 
       elif [ "$ROLE" = "codex" ] && [ "$DONE" = "1" ]; then
-        # Anchor on canonical tokens — codex echoes the role prompt's
-        # `<one of: SHIP / NEEDS-FIX / DISCUSS>` placeholder when the run
-        # errors before emitting `tokens used` and the prompt-echo becomes
-        # the whole RESPONSE.
-        VERDICT_LINE=$(echo "$RESPONSE" \
-          | grep -A 1 '^## Verdict$' 2>/dev/null \
-          | grep -hE "^(SHIP|NEEDS-FIX|DISCUSS)( |$)" 2>/dev/null \
-          | tail -1)
-        if [ -n "$VERDICT_LINE" ]; then
-          VERB=$(echo "$VERDICT_LINE" | awk '{print $1}')
+        if [ -z "$RESULT_JSON" ]; then
+          BUF+="  ${YELLOW}Review result unavailable — verdict and findings unknown.${RESET}"$'\n'
+        elif [ "$(printf '%s\n' "$RESULT_JSON" | jq -r '.status')" != "ok" ]; then
+          ERROR=$(printf '%s\n' "$RESULT_JSON" | jq -r '.error')
+          BUF+="  ${RED}Review failed: $ERROR${RESET}"$'\n'
+        else
+          VERDICT_LINE=$(printf '%s\n' "$RESULT_JSON" | jq -r '.verdict_line')
+          VERB=$(printf '%s\n' "$RESULT_JSON" | jq -r '.verdict')
           case "$VERB" in
-            SHIP)      VC="$GREEN" ;;
-            NEEDS-FIX) VC="$RED" ;;
-            DISCUSS)   VC="$YELLOW" ;;
-            *)         VC="$CYAN" ;;
+            SHIP) VC="$GREEN" ;;
+            NEEDS-FIX|OUT-OF-SCOPE) VC="$RED" ;;
+            DISCUSS) VC="$YELLOW" ;;
           esac
-          VWRAP=$(echo "$VERDICT_LINE" | fold -s -w $((WRAP_W - 8)))
+          VWRAP=$(printf '%s\n' "$VERDICT_LINE" | fold -s -w $((WRAP_W - 8)))
           FIRST=1
           while IFS= read -r line; do
             if [ "$FIRST" = "1" ]; then
@@ -171,36 +183,26 @@ while true; do
             fi
           done <<< "$VWRAP"
           BUF+=$'\n'
-        fi
-
-        # Section-aware findings extraction
-        SECS=$(echo "$RESPONSE" | awk '
-          /^### Blocker/ { sec="bl"; next }
-          /^### Major/   { sec="mj"; next }
-          /^### Minor/   { sec="mn"; next }
-          /^## /         { sec=""; next }
-          sec=="bl" && /^- / && tolower($0) !~ /^- none/ { print "BL:" $0; next }
-          sec=="mj" && /^- / && tolower($0) !~ /^- none/ { print "MJ:" $0; next }
-          sec=="mn" && /^- / && tolower($0) !~ /^- none/ { print "MN:" $0; next }
-        ' 2>/dev/null)
-        BL=$(echo "$SECS" | grep -c '^BL:' 2>/dev/null || true); BL=${BL//[^0-9]/}; BL=${BL:-0}
-        MJ=$(echo "$SECS" | grep -c '^MJ:' 2>/dev/null || true); MJ=${MJ//[^0-9]/}; MJ=${MJ:-0}
-        MN=$(echo "$SECS" | grep -c '^MN:' 2>/dev/null || true); MN=${MN//[^0-9]/}; MN=${MN:-0}
-
-        BUF+="  ${BOLD}Findings:${RESET} ${RED}${BL} blocker${RESET} · ${YELLOW}${MJ} major${RESET} · ${DIM}${MN} minor${RESET}"$'\n\n'
-
-        if [ "$BL" -gt 0 ] || [ "$MJ" -gt 0 ]; then
-          BUF+="  ${BOLD}${RED}Blockers + Major:${RESET}"$'\n'
-          BLMJ=$(echo "$SECS" | grep -E '^(BL|MJ):' | sed 's/^BL://; s/^MJ://')
-          WRAPPED=$(echo "$BLMJ" | fold -s -w "$WRAP_W")
-          while IFS= read -r line; do
-            [ -n "$line" ] && BUF+="    $line"$'\n'
-          done <<< "$WRAPPED"
-          BUF+=$'\n'
+          BL=$(printf '%s\n' "$RESULT_JSON" | jq -r '.findings.blocker | if . == null then "?" else length end')
+          MJ=$(printf '%s\n' "$RESULT_JSON" | jq -r '.findings.major | if . == null then "?" else length end')
+          MN=$(printf '%s\n' "$RESULT_JSON" | jq -r '.findings.minor | if . == null then "?" else length end')
+          BUF+="  ${BOLD}Findings:${RESET} ${RED}${BL} blocker${RESET} · ${YELLOW}${MJ} major${RESET} · ${DIM}${MN} minor${RESET}"$'\n\n'
+          if [ "$BL" = "?" ] || [ "$MJ" = "?" ] || [ "$MN" = "?" ]; then
+            BUF+="  ${DIM}? = section missing; count unknown${RESET}"$'\n'
+          fi
+          BLMJ=$(printf '%s\n' "$RESULT_JSON" | jq -r '((.findings.blocker // []) + (.findings.major // []))[]')
+          if [ -n "$BLMJ" ]; then
+            BUF+="  ${BOLD}${RED}Blockers + Major:${RESET}"$'\n'
+            WRAPPED=$(printf '%s\n' "$BLMJ" | fold -s -w "$WRAP_W")
+            while IFS= read -r line; do
+              [ -n "$line" ] && BUF+="    $line"$'\n'
+            done <<< "$WRAPPED"
+            BUF+=$'\n'
+          fi
         fi
       fi
 
-      REAL=$(readlink "$LATEST" 2>/dev/null || basename "$LATEST")
+      REAL=$(basename "$SOURCE")
       BUF+="  ${DIM}log: $REAL${RESET}"$'\n'
     fi
 
