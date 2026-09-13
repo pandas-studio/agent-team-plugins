@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import shlex
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -411,3 +412,422 @@ def test_untracked_symlink_digest_does_not_follow_external_target(tmp_path: Path
 
     outside.write_text("different secret\n", encoding="utf-8")
     assert _file_digest(workspace, "link.txt") == first
+
+
+class PromptCapture(FakeRunner):
+    """FakeRunner that records every prompt, per role."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.prompts: dict[str, list[str]] = {}
+
+    def run(self, role: str, prompt: str, workspace: Path):
+        self.prompts.setdefault(role.rsplit(".", 1)[-1], []).append(prompt)
+        return super().run(role, prompt, workspace)
+
+
+def _commit_all(workspace: Path, message: str) -> str:
+    subprocess.run(["git", "-C", workspace, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", workspace, "commit", "-qm", message], check=True)
+    return subprocess.run(
+        ["git", "-C", workspace, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def test_rename_into_allowed_path_still_reports_the_source(tmp_path: Path):
+    """Rename detection prints only the new name, hiding an out-of-scope deletion."""
+    workspace, _ = make_repo(tmp_path)
+    (workspace / "config").mkdir()
+    (workspace / "config/prod.yaml").write_text("secret: 1\n", encoding="utf-8")
+    base = _commit_all(workspace, "config")
+    (workspace / "src").mkdir()
+    subprocess.run(["git", "-C", workspace, "mv", "config/prod.yaml", "src/prod.yaml"], check=True)
+
+    tracked, _ = _changed_paths(workspace, base, [])
+    assert tracked == ["config/prod.yaml", "src/prod.yaml"]
+    assert graph_module._outside_scope(tracked, ["src"]) == ["config/prod.yaml"]
+
+
+def test_paths_are_listed_verbatim(tmp_path: Path):
+    """Quoted (non-ASCII) or stripped (edge whitespace) names would mis-scope or mis-hash."""
+    workspace, spec = make_repo(tmp_path)
+    base = subprocess.run(
+        ["git", "-C", workspace, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    (workspace / "docs").mkdir()
+    (workspace / "docs/한글.md").write_text("k\n", encoding="utf-8")
+    (workspace / " README.md").write_text("not the tracked README\n", encoding="utf-8")
+
+    _, untracked = _changed_paths(workspace, base, [])
+    assert untracked == [" README.md", "docs/한글.md"]
+    assert _file_digest(workspace, " README.md") != _file_digest(workspace, "README.md")
+
+    state = initial(workspace, spec, "verbatim")
+    state["allowed_paths"] = ["docs"]
+    snapshot = _run(tmp_path, FakeRunner(), state, "verbatim")
+    # The non-ASCII name matches its allowed directory; the edge-space name is
+    # reported as itself, not as the tracked README.md.
+    assert _gate_record(snapshot)["outside_scope"] == [" README.md"]
+
+
+def test_digest_ignores_configured_external_diff_and_textconv(tmp_path: Path):
+    workspace, _ = make_repo(tmp_path)
+    (workspace / ".gitattributes").write_text("*.bin diff=lossy\n", encoding="utf-8")
+    (workspace / "data.bin").write_bytes(b"\x00first")
+    base = _commit_all(workspace, "binary")
+    lossy = tmp_path / "lossy.sh"
+    lossy.write_text("#!/bin/sh\necho same\n", encoding="utf-8")
+    lossy.chmod(0o755)
+    subprocess.run(["git", "-C", workspace, "config", "diff.external", str(lossy)], check=True)
+    subprocess.run(["git", "-C", workspace, "config", "diff.lossy.textconv", str(lossy)], check=True)
+
+    (workspace / "data.bin").write_bytes(b"\x00second")
+    first = graph_module._change_snapshot(workspace, base, [], False)["change_sha256"]
+    (workspace / "data.bin").write_bytes(b"\x00third")
+    second = graph_module._change_snapshot(workspace, base, [], False)["change_sha256"]
+    assert first != second
+
+
+def test_excluded_tracked_paths_are_not_attested(tmp_path: Path):
+    workspace, _ = make_repo(tmp_path)
+    (workspace / "tool-cache").mkdir()
+    (workspace / "tool-cache/state.json").write_text("{}\n", encoding="utf-8")
+    base = _commit_all(workspace, "tracked scratch")
+
+    def digest() -> str:
+        return graph_module._change_snapshot(workspace, base, ["tool-cache"], False)["change_sha256"]
+
+    before = digest()
+    (workspace / "tool-cache/state.json").write_text('{"touched": true}\n', encoding="utf-8")
+    assert digest() == before
+    (workspace / "README.md").write_text("attested change\n", encoding="utf-8")
+    assert digest() != before
+
+
+def test_gate_failure_reaches_retrying_coder_and_reviewer(tmp_path: Path):
+    workspace, spec = make_repo(tmp_path)
+    marker = tmp_path / "gate-ran-once"
+    script = tmp_path / "flaky-test.sh"
+    script.write_text(
+        f'#!/bin/sh\nif [ -e "{marker}" ]; then exit 0; fi\n'
+        f'touch "{marker}"\necho "GATE-OUTPUT-MARKER"\nexit 1\n',
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    runner = PromptCapture(writes={"README.md": "implemented\n", "stray.txt": "x\n"})
+    state = initial(workspace, spec, "gate-feedback")
+    state["test_command"] = [str(script)]
+    snapshot = _run(tmp_path, runner, state, "gate-feedback")
+
+    first_review, second_review = runner.prompts["reviewer"]
+    record = next(
+        a["path"] for a in snapshot.values["artifacts"] if a["name"] == "40-gate-attempt-1.json"
+    )
+    summary = (
+        "attempt 1: 1 changed path(s) are outside the allowed paths; "
+        "the test command exited 1. The test output and path lists are in the JSON file "
+        f"at path {json.dumps(record)}"
+    )
+    assert f"Gate failure: {summary}" in first_review
+    assert f"Previous gate failure: {summary}" in runner.prompts["coder"][1]
+    # Test output and file names stay in the artifact, not the prompt.
+    for prompt in (first_review, runner.prompts["coder"][1]):
+        assert "stray.txt" not in prompt
+        assert "GATE-OUTPUT-MARKER" not in prompt
+    # The retry still strays, so the second attempt fails on scope alone.
+    assert "the test command exited" not in second_review
+    assert snapshot.values["gate_passed"] is False
+
+
+def test_passing_retry_clears_gate_feedback(tmp_path: Path):
+    workspace, spec = make_repo(tmp_path)
+    marker = tmp_path / "gate-ran-once"
+    script = tmp_path / "flaky-test.sh"
+    script.write_text(
+        f'#!/bin/sh\nif [ -e "{marker}" ]; then exit 0; fi\ntouch "{marker}"\nexit 1\n',
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    runner = PromptCapture(writes={"README.md": "implemented\n"})
+    state = initial(workspace, spec, "gate-clears")
+    state["test_command"] = [str(script)]
+    snapshot = _run(tmp_path, runner, state, "gate-clears")
+
+    first_review, second_review = runner.prompts["reviewer"]
+    assert "Gate failure: attempt 1: the test command exited 1." in first_review
+    assert "Gate failure:" not in second_review
+    assert snapshot.values["gate_feedback"] == ""
+    assert snapshot.next == ("approval",)
+
+
+def test_gate_artifact_path_is_absolute_for_a_relative_artifact_root(tmp_path: Path, monkeypatch):
+    workspace, spec = make_repo(tmp_path)
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    monkeypatch.chdir(caller)
+    connection = sqlite3.connect(":memory:", check_same_thread=False)
+    graph = build_graph(
+        checkpointer=SqliteSaver(connection), artifact_root=Path("rel-artifacts"), runner=FakeRunner()
+    )
+    state = initial(workspace, spec, "relative-root")
+    state["test_command"] = ["false"]
+    state["max_attempts"] = 1
+    config = {"configurable": {"thread_id": "relative-root"}}
+    graph.invoke(state, config=config)
+    feedback = graph.get_state(config).values["gate_feedback"]
+    quoted = feedback.split("at path ", 1)[1].split(" (tool output", 1)[0]
+    assert Path(json.loads(quoted)).is_absolute()
+    assert Path(json.loads(quoted)).is_file()
+
+
+def test_review_commands_show_exactly_the_attested_change_set(tmp_path: Path):
+    """Run the reviewer's commands and compare them with what the snapshot attests."""
+    workspace, _ = make_repo(tmp_path)
+    (workspace / ".gitignore").write_text("build/\n", encoding="utf-8")
+    (workspace / "tool-cache").mkdir()
+    (workspace / "tool-cache/moved.txt").write_text("scratch\n", encoding="utf-8")
+    base = _commit_all(workspace, "fixtures")
+    subprocess.run(
+        ["git", "-C", workspace, "mv", "tool-cache/moved.txt", "README-moved.txt"], check=True
+    )
+    (workspace / "tool-cache/new.txt").write_text("excluded\n", encoding="utf-8")
+    (workspace / "new file.txt").write_text("attested\n", encoding="utf-8")
+    (workspace / "data.bin").write_bytes(b"\x00\x01binary")
+    subprocess.run(["git", "-C", workspace, "add", "data.bin"], check=True)
+    (workspace / "build").mkdir()
+    (workspace / "build/out.bin").write_text("ignored\n", encoding="utf-8")
+    state = {
+        "repo_root": str(workspace),
+        "base_sha": base,
+        "excluded_paths": ["tool-cache"],
+        "strict_ignored": True,
+    }
+
+    def run(command: str) -> str:
+        return subprocess.run(
+            shlex.split(command), capture_output=True, text=True, check=True
+        ).stdout
+
+    diff_command, untracked_command, ignored_command = graph_module._review_commands(state)
+    patch = run(diff_command)
+    # No rename detection: the moved file is a full addition, and the excluded
+    # source is left out exactly as the digest leaves it out.
+    assert "new file mode" in patch and "b/README-moved.txt" in patch
+    assert "GIT binary patch" in patch
+    assert "tool-cache" not in patch
+    assert "rename from" not in patch
+    _, untracked = _changed_paths(workspace, base, ["tool-cache"])
+    assert run(untracked_command).splitlines() == untracked == ["new file.txt"]
+    assert run(ignored_command).splitlines() == ["build/out.bin"]
+
+
+def test_reviewer_prompt_names_base_and_root_for_committed_work(tmp_path: Path):
+    workspace, spec = make_repo(tmp_path)
+    base = subprocess.run(
+        ["git", "-C", workspace, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    sub = workspace / "sub"
+    sub.mkdir()
+    runner = PromptCapture()
+    state = initial(workspace, spec, "review-scope")
+    state["workspace"] = str(sub)
+    _run(tmp_path, runner, state, "review-scope")
+
+    (prompt,) = runner.prompts["reviewer"]
+    root = shlex.quote(str(workspace.resolve()))
+    assert f"Base commit: {base}" in prompt
+    assert f"git --no-replace-objects -C {root} diff --binary --no-ext-diff --no-textconv --no-renames {base} --" in prompt
+    assert f"git --no-replace-objects -C {root} ls-files --others --exclude-standard --" in prompt
+
+
+def test_state_dir_at_repo_root_is_refused(tmp_path: Path):
+    """Excluding "." would drop every tracked change from the approval digest."""
+    workspace, spec = make_repo(tmp_path)
+    connection = sqlite3.connect(":memory:", check_same_thread=False)
+    graph = build_graph(
+        checkpointer=SqliteSaver(connection),
+        artifact_root=workspace / "artifacts",
+        runner=FakeRunner(),
+        state_root=workspace,
+    )
+    config = {"configurable": {"thread_id": "root-state"}}
+    try:
+        graph.invoke(initial(workspace, spec, "root-state"), config=config)
+    except ValueError as exc:
+        assert "repository root" in str(exc)
+    else:
+        raise AssertionError("a state directory at the repository root was accepted")
+
+    try:
+        graph_module._exclude_pathspecs(["."])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('"." was accepted as an attestation exclusion')
+
+
+def test_non_utf8_path_is_a_snapshot_error(tmp_path: Path, monkeypatch):
+    workspace, _ = make_repo(tmp_path)
+    monkeypatch.setattr(graph_module, "_git_bytes", lambda *args: b"ok.txt\0bad\xff.txt\0")
+    try:
+        graph_module._git_paths(workspace, "ls-files", "-z")
+    except ValueError as exc:
+        assert isinstance(exc, graph_module.SNAPSHOT_ERRORS)
+        assert "not valid UTF-8" in str(exc)
+    else:
+        raise AssertionError("an undecodable path was accepted")
+
+
+def test_path_spellings_are_canonical_and_root_aliases_refused(tmp_path: Path):
+    normalize = graph_module._normalize_paths
+    assert normalize(["./src", "src//x", "src/./y/", "tool-cache"], label="t") == [
+        "src",
+        "src/x",
+        "src/y",
+        "tool-cache",
+    ]
+    for root_alias in [".", "./.", ".//", "./"]:
+        try:
+            normalize([root_alias], label="excluded")
+        except ValueError:
+            continue
+        raise AssertionError(f"{root_alias!r} was accepted")
+    try:
+        graph_module._exclude_pathspecs(["./."])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('"./." was accepted as an attestation exclusion')
+
+    # End to end: a root-alias exclusion never reaches the digest.
+    workspace, spec = make_repo(tmp_path)
+    state = initial(workspace, spec, "root-alias")
+    state["operator_excluded_paths"] = ["./."]
+    try:
+        _run(tmp_path, FakeRunner(), state, "root-alias")
+    except ValueError as exc:
+        assert "unsafe excluded path" in str(exc)
+    else:
+        raise AssertionError("a root-alias exclusion was accepted by the graph")
+
+
+def _lossy_filter_repo(tmp_path: Path) -> tuple[Path, Path, str]:
+    workspace, spec = make_repo(tmp_path)
+    (workspace / ".gitattributes").write_text("*.txt filter=lossy\n", encoding="utf-8")
+    (workspace / "secret.txt").write_text("canonical", encoding="utf-8")
+    base = _commit_all(workspace, "filtered file")
+    subprocess.run(
+        ["git", "-C", workspace, "config", "filter.lossy.clean", "printf canonical"], check=True
+    )
+    return workspace, spec, base
+
+
+def test_clean_filter_on_a_tracked_path_fails_closed(tmp_path: Path):
+    """A clean filter can map every edit to the committed blob, hiding it from git diff."""
+    workspace, spec, base = _lossy_filter_repo(tmp_path)
+    (workspace / "secret.txt").write_text("tampered", encoding="utf-8")
+    # Without the guard git reports no change at all.
+    assert _changed_paths(workspace, base, []) == ([], [])
+    try:
+        graph_module._change_snapshot(workspace, base, [], False)
+    except ValueError as exc:
+        assert "clean/process filter" in str(exc) and "secret.txt" in str(exc)
+    else:
+        raise AssertionError("a filtered tracked path was attested")
+
+    state = initial(workspace, spec, "clean-filter")
+    state["max_attempts"] = 1
+    snapshot = _run(tmp_path, FakeRunner(), state, "clean-filter")
+    assert "clean/process filter" in _gate_record(snapshot)["snapshot_error"]
+    assert snapshot.values["status"] == "needs-human"
+
+
+def test_configured_filter_without_tracked_matches_is_allowed(tmp_path: Path):
+    workspace, _ = make_repo(tmp_path)
+    base = subprocess.run(
+        ["git", "-C", workspace, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "-C", workspace, "config", "filter.unused.clean", "cat"], check=True
+    )
+    graph_module._change_snapshot(workspace, base, [], False)
+
+
+def test_filter_added_while_parked_at_approval_blocks_the_receipt(tmp_path: Path):
+    workspace, spec = make_repo(tmp_path)
+    (workspace / ".gitattributes").write_text("*.txt filter=lossy\n", encoding="utf-8")
+    (workspace / "secret.txt").write_text("canonical", encoding="utf-8")
+    _commit_all(workspace, "attributes")
+    graph = _graph(tmp_path, FakeRunner(writes={"README.md": "reviewed\n"}))
+    config = {"configurable": {"thread_id": "late-filter"}}
+    graph.invoke(initial(workspace, spec, "late-filter"), config=config)
+    assert graph.get_state(config).next == ("approval",)
+
+    subprocess.run(
+        ["git", "-C", workspace, "config", "filter.lossy.clean", "printf canonical"], check=True
+    )
+    (workspace / "secret.txt").write_text("tampered while parked", encoding="utf-8")
+    graph.invoke(Command(resume="approve"), config=config)
+
+    values = graph.get_state(config).values
+    assert values["status"] == "needs-human"
+    assert Path(values["artifacts"][-1]["path"]).name == "91-approval-snapshot-error.json"
+    assert not any(item["name"] == "90-approval-receipt.json" for item in values["artifacts"])
+
+
+def _parked_at_approval(tmp_path: Path, thread: str):
+    """Run to the approval interrupt with an in-scope README edit and a tracked secret."""
+    workspace, spec = make_repo(tmp_path)
+    (workspace / "secret.txt").write_text("original\n", encoding="utf-8")
+    _commit_all(workspace, "secret")
+    graph = _graph(tmp_path, FakeRunner(writes={"README.md": "reviewed\n"}))
+    config = {"configurable": {"thread_id": thread}}
+    graph.invoke(initial(workspace, spec, thread), config=config)
+    assert graph.get_state(config).next == ("approval",)
+    return workspace, graph, config
+
+
+def _assert_receipt_blocked(graph, config):
+    graph.invoke(Command(resume="approve"), config=config)
+    values = graph.get_state(config).values
+    assert values["status"] == "needs-human"
+    assert not any(item["name"] == "90-approval-receipt.json" for item in values["artifacts"])
+    return json.loads(Path(values["artifacts"][-1]["path"]).read_text(encoding="utf-8"))
+
+
+def test_hidden_index_entries_block_the_receipt(tmp_path: Path):
+    for flag in ("--assume-unchanged", "--skip-worktree"):
+        case = tmp_path / flag.strip("-")
+        case.mkdir()
+        workspace, graph, config = _parked_at_approval(case, flag.strip("-"))
+        subprocess.run(["git", "-C", workspace, "update-index", flag, "secret.txt"], check=True)
+        (workspace / "secret.txt").write_text("tampered while parked\n", encoding="utf-8")
+        record = _assert_receipt_blocked(graph, config)
+        assert "assume-unchanged or skip-worktree" in record["snapshot_error"]
+
+
+def test_replacement_objects_do_not_rewrite_the_base(tmp_path: Path):
+    workspace, graph, config = _parked_at_approval(tmp_path, "replace-ref")
+    original = subprocess.run(
+        ["git", "-C", workspace, "rev-parse", "HEAD:secret.txt"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    (workspace / "secret.txt").write_text("tampered while parked\n", encoding="utf-8")
+    tampered = subprocess.run(
+        ["git", "-C", workspace, "hash-object", "-w", "secret.txt"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    subprocess.run(["git", "-C", workspace, "replace", original, tampered], check=True)
+    record = _assert_receipt_blocked(graph, config)
+    assert record["note"] == "approval blocked because the change set drifted after review"
+
+
+def test_redirected_work_tree_blocks_the_receipt(tmp_path: Path):
+    workspace, graph, config = _parked_at_approval(tmp_path, "worktree-redirect")
+    decoy = tmp_path / "decoy"
+    subprocess.run(["cp", "-R", str(workspace), str(decoy)], check=True)
+    subprocess.run(["rm", "-rf", str(decoy / ".git")], check=True)
+    subprocess.run(["git", "-C", workspace, "config", "core.worktree", str(decoy)], check=True)
+    (workspace / "secret.txt").write_text("tampered while parked\n", encoding="utf-8")
+    record = _assert_receipt_blocked(graph, config)
+    assert "git work tree moved" in record["snapshot_error"]

@@ -160,12 +160,10 @@ class RoleRunner:
         template = definition.get(field)
         if not isinstance(template, list) or not all(isinstance(item, str) for item in template):
             raise RegistryError(f"model {model_id!r} has an invalid {field} template")
+        # Whole-argument placeholders, as in registry.sh: substring replacement
+        # would also rewrite a literal "{final}" inside the inserted prompt.
         replacements = {"{prompt}": prompt, "{final}": str(final_path or "")}
-        argv = [command]
-        for item in template:
-            for marker, value in replacements.items():
-                item = item.replace(marker, value)
-            argv.append(item)
+        argv = [command, *(replacements.get(item, item) for item in template)]
         started = time.monotonic()
         completed = subprocess.run(
             argv,

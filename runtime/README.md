@@ -4,9 +4,15 @@
 제한된 재시도, 테스트 게이트, 사람 승인을 추가하는 실행 계층입니다. 공급자 API를 직접
 호출하지 않으며 공용 `models.json` registry의 모델 믹싱 규칙을 따릅니다.
 
+이 디렉터리(플러그인 설치 시에는 플러그인 루트)가 `uv` 프로젝트입니다. 명령은 작업할
+저장소에서 `--project`로 이 디렉터리를 지정해 실행하세요. `--workspace .`와 기본
+`--state-dir .agent-team`이 현재 디렉터리 기준이므로 `status`/`resume`/`approve`도
+`run`과 같은 디렉터리에서 실행해야 합니다.
+
 ```bash
-uv sync --python 3.12 --extra dev
-uv run agent-team-graph run \
+RUNTIME=/path/to/agent-team-plugins/runtime   # 플러그인 설치 시: ${CLAUDE_PLUGIN_ROOT}
+uv sync --project "$RUNTIME" --frozen --python 3.12
+uv run --project "$RUNTIME" agent-team-graph run \
   --project-id demo --workspace . --spec SPEC.md \
   --task "첫 번째 수직 슬라이스 구현" --test-command "pytest -q" \
   --allow-path src --allow-path tests \
@@ -15,14 +21,14 @@ uv run agent-team-graph run \
 
 `--allow-path`는 **저장소 루트 기준** 경로이며 반복 지정할 수 있습니다.
 `--exclude-path`도 저장소 루트 기준·반복 지정이며, 지정한 경로를 범위 검사와 변경
-digest에서 완전히 제외합니다. 이는 신뢰할 수 있는 reviewer CLI의 in-repo scratch처럼
+digest에서 완전히 제외합니다(tracked·untracked 모두). 이는 신뢰할 수 있는 reviewer CLI의 in-repo scratch처럼
 증명 대상이 아닌 경로에만 사용하세요. 승인 질문과 영수증의
 `excluded_paths_not_attested`에 모든 제외 경로가 표시됩니다.
 출력된 `thread_id`는 `status`, `resume`, `approve`에서 재사용합니다.
 
 ```bash
-uv run agent-team-graph status --thread-id demo-abc123
-uv run agent-team-graph approve --thread-id demo-abc123 --decision approve
+uv run --project "$RUNTIME" agent-team-graph status --thread-id demo-abc123
+uv run --project "$RUNTIME" agent-team-graph approve --thread-id demo-abc123 --decision approve
 ```
 
 ## 종료 코드
@@ -51,6 +57,19 @@ JSON을 파싱하지 말고 종료 코드로 분기하세요.
   `node_modules` 같은 대형 트리가 있으면 비용이 파일 수에 선형으로 증가합니다.
   격리된 깨끗한 workspace에서 활성화하고, 신뢰할 수 있는 도구 scratch는 명시적인
   `--exclude-path`로 제한하세요.
+- `--allow-path`/`--exclude-path`는 정규화됩니다(`./src` → `src`). 절대 경로, `..`, 저장소
+  루트로 해석되는 경로(`.`, `./.`)와 저장소 루트를 가리키는 `--state-dir`는 거부합니다.
+  이름이 UTF-8이 아닌 변경 파일은 증명할 수 없으므로 게이트 실패로 처리합니다.
+- tracked 경로에 git clean/process 필터(예: git-lfs)가 걸려 있으면 게이트와 승인이 항상
+  실패합니다. 필터는 git이 파일을 비교하기 전에 실행되므로 수정 내용이 범위 검사와 digest에서
+  사라질 수 있기 때문입니다. 이런 필터가 없는 workspace에서 실행하세요.
+- **신뢰 경계: coder가 `.git`에 쓸 수 있으면 안 됩니다.** 게이트와 digest는 git에게 변경 내용을
+  묻고, git은 자신의 config·index·ref를 근거로 답합니다. 알려진 은닉 경로(clean/process 필터,
+  assume-unchanged/skip-worktree 항목, replace ref, `core.worktree` 전환)는 거부하지만,
+  `.git` 쓰기 권한이 있는 역할의 변경은 승인 영수증이 증명할 수 있는 범위 밖입니다. coder는
+  `.git` 쓰기 권한이 없는 sandbox에서 실행하세요.
+- 플러그인을 업데이트하기 전에 승인 대기 중인 run을 끝내세요. 버전에 따라 digest 계산이
+  달라질 수 있어, 대기 중이던 run은 `needs-human`으로 종료되고 새 run이 필요합니다.
 - 재시도는 기본 2회, 최대 5회입니다.
 - 승인은 push/merge 권한이 아니라 로컬 승인 영수증만 생성합니다. 영수증의
   `change_sha256`은 tracked diff와 **untracked 신규 파일의 내용 해시**를 함께

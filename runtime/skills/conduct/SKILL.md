@@ -6,14 +6,25 @@ allowed-tools: Bash(uv:*) Bash(agent-team-graph:*) Read
 
 # Drive a langgraph-conductor run
 
-The runtime lives in the plugin's `runtime/` directory and is invoked through
-`uv`. It never calls a provider API directly — every role goes through the
-shared `models.json` registry, same as the bash plugins.
+The runtime is this plugin's own root (`${CLAUDE_PLUGIN_ROOT}`), a `uv` project
+invoked with `uv run --project`. It never calls a provider API directly — every
+role goes through the shared `models.json` registry, same as the bash plugins.
+
+Run every command below **from the user's project directory**, not from the
+plugin root: `--workspace .` and the default `--state-dir .agent-team` are
+resolved against the current directory, so `status`/`resume`/`approve` must
+run from the same directory as `run`. A bare `uv run agent-team-graph` there
+fails with "Failed to spawn" — `--project` is what points `uv` at the runtime.
 
 ## One-time setup
 
+Requires `uv`. The environment lives in the plugin install directory, so re-run
+this after a plugin update. Finish (approve or reject) any run parked at
+approval before updating: a newer version may compute the change digest
+differently, and the parked run then stops as `needs-human` — start a new run.
+
 ```bash
-cd <plugin-root> && uv sync --frozen --python 3.12
+uv sync --project "${CLAUDE_PLUGIN_ROOT}" --frozen --python 3.12
 ```
 
 ## Start a run
@@ -24,7 +35,7 @@ and `--exclude-path`.
 coder changes outside it fails the gate.
 
 ```bash
-uv run agent-team-graph run \
+uv run --project "${CLAUDE_PLUGIN_ROOT}" agent-team-graph run \
   --project-id demo --workspace . --spec SPEC.md \
   --task "implement the first vertical slice" \
   --test-command "pytest -q" \
@@ -38,10 +49,10 @@ other subcommand takes it.
 ## Inspect, resume, approve
 
 ```bash
-uv run agent-team-graph status  --thread-id <id>
-uv run agent-team-graph resume  --thread-id <id>              # continue after a crash
-uv run agent-team-graph approve --thread-id <id> --decision approve
-uv run agent-team-graph approve --thread-id <id> --decision reject
+uv run --project "${CLAUDE_PLUGIN_ROOT}" agent-team-graph status  --thread-id <id>
+uv run --project "${CLAUDE_PLUGIN_ROOT}" agent-team-graph resume  --thread-id <id>   # continue after a crash
+uv run --project "${CLAUDE_PLUGIN_ROOT}" agent-team-graph approve --thread-id <id> --decision approve
+uv run --project "${CLAUDE_PLUGIN_ROOT}" agent-team-graph approve --thread-id <id> --decision reject
 ```
 
 ## Exit codes
@@ -63,8 +74,25 @@ Branch on these rather than parsing the JSON:
 - The approval payload includes `reviewed_change_sha256`. On resume the runtime
   recomputes the current change identity and blocks approval if any attested
   tracked or untracked content changed while the graph was interrupted.
+- `--allow-path` / `--exclude-path` spellings are canonicalized (`./src`,
+  `src//x` → `src`, `src/x`). Absolute paths, `..`, and anything that resolves to
+  the repository root are refused, and so is a `--state-dir` at the repository
+  root. A changed file whose name is not valid UTF-8 fails the gate (it cannot
+  be attested).
+- A git clean/process filter (for example git-lfs) on any tracked path fails
+  every gate and blocks approval: filters run before git compares files, so an
+  edit could be invisible to the scope check and the digest. Use a workspace
+  without such filters.
+- **Trust boundary: the coder must not be able to write `.git`.** The gate and
+  the digest ask git what changed, and git answers from its own config, index
+  and refs. The runtime refuses the known ways that state hides content
+  (clean/process filters, assume-unchanged/skip-worktree entries, replacement
+  refs, a moved `core.worktree`), but a role with write access to `.git` is
+  outside what an approval receipt can prove. Run the coder sandboxed without
+  write access to `.git`.
 - `--exclude-path` is a trusted, repeatable repository-root-relative exemption
-  for tool scratch. Excluded content is neither scope-checked nor attested; use
+  for tool scratch. Excluded content (tracked or untracked) is neither
+  scope-checked nor attested; use
   the narrowest path and verify `excluded_paths_not_attested` before approval.
 - `--strict-ignored` may take up to four full snapshots on a successful attempt.
   Exclude only trusted scratch paths; do not exempt coder output.
