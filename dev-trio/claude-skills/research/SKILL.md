@@ -1,4 +1,5 @@
 ---
+name: research
 description: One-shot Antigravity research call. Use when before coding you need library/API behavior, recent changes, spec details, or option comparisons. Streaming output lands in the top-right dashboard pane; chat-side surfaces the lead paragraph + cited URL count.
 disable-model-invocation: true
 allowed-tools: Bash(ask-agy.sh:*) Bash(cat:*) Bash(ls:*) Read

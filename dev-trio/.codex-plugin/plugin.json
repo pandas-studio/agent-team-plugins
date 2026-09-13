@@ -1,0 +1,27 @@
+{
+  "name": "dev-trio",
+  "version": "0.5.0",
+  "description": "Codex PM and coder coordinates CLI research and authenticated Claude Code review.",
+  "author": {
+    "name": "pandas-studio"
+  },
+  "homepage": "https://github.com/pandas-studio/agent-team-plugins/tree/main/dev-trio",
+  "repository": "https://github.com/pandas-studio/agent-team-plugins",
+  "license": "MIT",
+  "skills": "./codex-skills/",
+  "interface": {
+    "displayName": "dev-trio",
+    "shortDescription": "Codex PM with research and Claude review",
+    "longDescription": "Coordinate research and code review with local CLI adapters, team logs, and optional tmux dashboards.",
+    "developerName": "pandas-studio",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use dev-trio to research and review this task."
+    ]
+  }
+}
