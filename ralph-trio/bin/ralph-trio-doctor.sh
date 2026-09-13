@@ -228,7 +228,8 @@ STUB
     git -C "$cwd" config user.name doctor
     echo seed > "$cwd/seed.txt"
     git -C "$cwd" add -A >/dev/null 2>&1
-    git -C "$cwd" commit -qm seed >/dev/null 2>&1
+    git -C "$cwd" -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm seed >/dev/null 2>&1 \
+      || { fail "fixture seed commit failed in $cwd"; return 1; }
     printf -- '- [ ] stub smoke task\n' > "$cwd/BACKLOG.md"
     (
       cd "$cwd" && \

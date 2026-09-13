@@ -237,7 +237,8 @@ STUB
     printf '# Spec\n## §1 Goals\nstub\n## §5 Test criteria\n### §5.1 marker\n' > "$cwd/spec.md"
     echo seed > "$cwd/seed.txt"
     git -C "$cwd" add -A >/dev/null 2>&1
-    git -C "$cwd" commit -qm seed >/dev/null 2>&1
+    git -C "$cwd" -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm seed >/dev/null 2>&1 \
+      || { fail "fixture seed commit failed in $cwd"; return 1; }
     printf -- '- [ ] (§5.1) stub smoke task\n' > "$cwd/BACKLOG.md"
     (
       cd "$cwd" && \
@@ -346,7 +347,8 @@ STUB
     git -C "$cwd" config user.name doctor
     printf '# Spec\n## §1 Goals\nstub\n## §5 Test criteria\n### §5.1 marker\n' > "$cwd/spec.md"
     git -C "$cwd" add -A >/dev/null 2>&1
-    git -C "$cwd" commit -qm seed >/dev/null 2>&1
+    git -C "$cwd" -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm seed >/dev/null 2>&1 \
+      || { fail "fixture seed commit failed in $cwd"; return 1; }
     printf -- '- [ ] (§5.1) task that needs research\n' > "$cwd/BACKLOG.md"
     (
       cd "$cwd" && \
@@ -500,7 +502,8 @@ STUB
     git -C "$cwd" config user.name doctor
     printf '# Spec\n## §1 Goals\nstub\n## §5 Test criteria\n### §5.1 marker\n' > "$cwd/spec.md"
     git -C "$cwd" add -A >/dev/null 2>&1
-    git -C "$cwd" commit -qm seed >/dev/null 2>&1
+    git -C "$cwd" -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm seed >/dev/null 2>&1 \
+      || { fail "fixture seed commit failed in $cwd"; return 1; }
     printf -- '- [ ] (§5.1) scope task\n' > "$cwd/BACKLOG.md"
     (
       cd "$cwd" && \

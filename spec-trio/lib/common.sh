@@ -203,6 +203,9 @@ commit_worktree_changes() {
 # merge_or_discard_worktree WT ITER PASSED_FLAG ORIGINAL_DIR
 # PASSED_FLAG=1 → fast-forward merge into ORIGINAL_DIR's current HEAD; remove worktree.
 # PASSED_FLAG=0 → leave branch deleted, remove worktree.
+# rc=0 merged (PASSED_FLAG=1) or discarded, and cleaned up; rc=1 nothing landed
+# (worktree off its branch, or the fast-forward failed) and the worktree is kept;
+# rc=2 merged or discarded, but removing the worktree or branch failed.
 merge_or_discard_worktree() {
   local wt="$1" iter="$2" passed="$3" orig="$4"
   local br
@@ -215,9 +218,13 @@ merge_or_discard_worktree() {
       return 1
     fi
   fi
-  git worktree remove --force "$wt" 2>/dev/null || true
-  if [ "$passed" != "1" ]; then
-    git -C "$orig" branch -D "$br" 2>/dev/null || true
+  if ! git -C "$orig" worktree remove --force "$wt" >/dev/null 2>&1; then
+    ralph_log "could not remove worktree $wt (iter $iter); it is left on disk"
+    return 2
+  fi
+  if [ "$passed" != "1" ] && ! git -C "$orig" branch -D "$br" >/dev/null 2>&1; then
+    ralph_log "could not delete branch $br (iter $iter)"
+    return 2
   fi
 }
 

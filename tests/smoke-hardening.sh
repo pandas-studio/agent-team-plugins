@@ -193,6 +193,27 @@ assert_eq "$MB_RC" "rc=1"
 assert_eq "$MB_WTS" "2"
 assert_eq "$(grep -c 'WORKTREE-MERGE-BLOCK' "$MB/fix_plan.md")" "1"
 
+# Same for a coder that switches the worktree to another branch and leaves
+# edits: the auto-commit is refused, and the loop stops there.
+CB="$TMP/commit-block"
+git init -q "$CB"
+git -C "$CB" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
+git -C "$CB" branch feature
+printf 'prompt\n' > "$CB/PROMPT.md"
+printf '#!/usr/bin/env bash\ngit switch -q feature\necho work >> work.txt\n' > "$TMP/cb-worker.sh"
+chmod +x "$TMP/cb-worker.sh"
+CB_RC=$(cd "$CB" && env AGENT_TEAM="cb-$$" TMUX="" RALPH_TRIO_WORKSPACE="$TMP/cb-ws" \
+  WORKER_CLI="$TMP/cb-worker.sh" "$ROOT/ralph-trio/bin/ralph-solo.sh" --prompt PROMPT.md \
+  --max-iter 3 --worktree --test-cmd true >/dev/null 2>"$TMP/cb.err" </dev/null; echo "rc=$?")
+CB_WTS=$(git -C "$CB" worktree list --porcelain | grep -c '^worktree ' || true)
+git -C "$CB" worktree list --porcelain | sed -n 's/^worktree //p' | sed 1d | while IFS= read -r w; do
+  rm -rf "$w"
+done
+assert_eq "$CB_RC" "rc=1"
+assert_eq "$CB_WTS" "2"
+assert_eq "$(grep -c 'WORKTREE-COMMIT-BLOCK' "$CB/fix_plan.md")" "1"
+assert_eq "$(git -C "$CB" log --oneline feature | wc -l | tr -d ' ')" "1"
+
 # ralph-meta without --base-ref: the empty range array must not kill git log
 # under bash 3.2's set -u (it used to report 0 commits every time).
 git -C "$DRV" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "ralph iter 1: smoke"
@@ -232,8 +253,8 @@ for plugin in ralph-trio spec-trio; do
     cd "$1" || exit 9
     base=$(git symbolic-ref --short HEAD)
     # The worktrees live under /tmp, outside $TMP: remove them even on failure.
-    a="" b=""
-    trap '\''for w in "$a" "$b"; do [ -n "$w" ] && git worktree remove --force "$w" 2>/dev/null; [ -n "$w" ] && rm -rf "$w"; done; true'\'' EXIT
+    a="" b="" c="" d="" e=""
+    trap '\''for w in "$a" "$b" "$c" "$d" "$e"; do [ -n "$w" ] && git worktree remove --force "$w" 2>/dev/null; [ -n "$w" ] && rm -rf "$w"; done; true'\'' EXIT
     a=$(with_worktree 1 "$base" 2>/dev/null) || exit 9
     printf "a\n" > "$a/a.txt"
     git -C "$a" add a.txt && git -C "$a" -c user.name=t -c user.email=t@t commit -qm a
@@ -249,7 +270,6 @@ for plugin in ralph-trio spec-trio; do
     # auto-committed onto it, merged from it, or deleted.
     git branch feature
     c=$(with_worktree 3 "$base" 2>/dev/null) || exit 9
-    a="$c"
     git -C "$c" switch -q feature
     printf "c\n" > "$c/c.txt"
     commit_worktree_changes "$c" 3 >/dev/null 2>&1 || echo commit-refused
@@ -260,7 +280,6 @@ for plugin in ralph-trio spec-trio; do
     git rev-parse -q --verify refs/heads/feature >/dev/null && [ -d "$c" ] && echo feature-kept
     # A fast-forward that fails (base moved on) keeps the worktree to recover from.
     d=$(with_worktree 4 "$base" 2>/dev/null) || exit 9
-    b="$d"
     git -C "$d" -c user.name=t -c user.email=t@t commit -q --allow-empty -m iter
     iter_commit=$(git -C "$d" rev-parse HEAD)
     git -c user.name=t -c user.email=t@t commit -q --allow-empty -m "base moved"
@@ -272,9 +291,15 @@ for plugin in ralph-trio spec-trio; do
       && [ "$(git rev-parse HEAD)" = "$base_head" ]; then
       echo ff-fail-kept
     fi
+    # Cleanup that fails (a locked worktree) is rc=2, not a silent success.
+    e=$(with_worktree 5 "$base" 2>/dev/null) || exit 9
+    git worktree lock "$e"
+    merge_or_discard_worktree "$e" 5 0 "$PWD" >/dev/null 2>&1
+    [ "$?" = 2 ] && [ -d "$e" ] && echo cleanup-fail-rc2
+    git worktree unlock "$e"
   ' _ "$WTREPO")" "$(printf '%s\n' distinct branches "bad-rc=1 out=" no-leftover discarded merged \
       missing-refused commit-refused validate-refused feature-untouched discard-refused feature-kept \
-      ff-fail-kept)"
+      ff-fail-kept cleanup-fail-rc2)"
 done
 
 # spec-trio scope gate: paths are listed verbatim (non-ASCII names match the

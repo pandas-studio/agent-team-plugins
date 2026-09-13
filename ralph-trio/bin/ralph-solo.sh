@@ -260,6 +260,11 @@ $FP_EXCERPT
         printf '  worktree: PRESERVED (commit failed: %s)\n' "$WT" >> "$SUMMARY_LOG"
         printf '## iter %d · %s · WORKTREE-COMMIT-BLOCK\nIter log: %s\nPreserved worktree: %s\n\n' \
           "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ITER_LOG" "$WT" >> "$FIX_PLAN_FILE"
+        # Stop: a preserved worktree per iteration would pile up.
+        ralph_log "worktree for iter $ITER needs attention (commit-blocked). Stopping."
+        echo "=== STOP (worktree-commit-blocked) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
+        WORKTREE_FAILED=1
+        break
       fi
     fi
 
@@ -276,17 +281,27 @@ $FP_EXCERPT
     fi
 
     if [ "$PRESERVE_WORKTREE" = "0" ]; then
-      if merge_or_discard_worktree "$WT" "$ITER" "$PASSED" "$ORIGINAL_DIR"; then
-        printf '  worktree: %s\n' "$([ "$PASSED" = "1" ] && echo merged || echo discarded)" >> "$SUMMARY_LOG"
+      merge_or_discard_worktree "$WT" "$ITER" "$PASSED" "$ORIGINAL_DIR"
+      MERGE_RC=$?
+      OUTCOME=$([ "$PASSED" = "1" ] && echo merged || echo discarded)
+      if [ "$MERGE_RC" = "0" ]; then
+        printf '  worktree: %s\n' "$OUTCOME" >> "$SUMMARY_LOG"
       else
-        # Refused (worktree off its branch) or ff-merge failed: nothing landed.
-        printf '  worktree: PRESERVED (not merged or discarded: %s)\n' "$WT" >> "$SUMMARY_LOG"
-        printf '## iter %d · %s · WORKTREE-MERGE-BLOCK\nIter log: %s\nPreserved worktree: %s\n\n' \
-          "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ITER_LOG" "$WT" >> "$FIX_PLAN_FILE"
+        if [ "$MERGE_RC" = "2" ]; then
+          # The change landed (or was dropped); only the cleanup failed.
+          BLOCK=WORKTREE-CLEANUP-BLOCK
+          printf '  worktree: %s, but cleanup failed: %s\n' "$OUTCOME" "$WT" >> "$SUMMARY_LOG"
+        else
+          # Refused (worktree off its branch) or ff-merge failed: nothing landed.
+          BLOCK=WORKTREE-MERGE-BLOCK
+          printf '  worktree: PRESERVED (not merged or discarded: %s)\n' "$WT" >> "$SUMMARY_LOG"
+        fi
+        printf '## iter %d · %s · %s\nIter log: %s\nWorktree: %s\n\n' \
+          "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BLOCK" "$ITER_LOG" "$WT" >> "$FIX_PLAN_FILE"
         # Stop here: the next iteration would hit the same obstruction and
         # keep one more full worktree each time.
-        ralph_log "worktree for iter $ITER was not merged or discarded. Stopping."
-        echo "=== STOP (worktree-merge-blocked) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
+        ralph_log "worktree for iter $ITER needs attention (blocked). Stopping."
+        echo "=== STOP (worktree-blocked) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
         WORKTREE_FAILED=1
         break
       fi
