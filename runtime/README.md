@@ -4,9 +4,15 @@
 제한된 재시도, 테스트 게이트, 사람 승인을 추가하는 실행 계층입니다. 공급자 API를 직접
 호출하지 않으며 공용 `models.json` registry의 모델 믹싱 규칙을 따릅니다.
 
+이 디렉터리(플러그인 설치 시에는 플러그인 루트)가 `uv` 프로젝트입니다. 명령은 작업할
+저장소에서 `--project`로 이 디렉터리를 지정해 실행하세요. `--workspace .`와 기본
+`--state-dir .agent-team`이 현재 디렉터리 기준이므로 `status`/`resume`/`approve`도
+`run`과 같은 디렉터리에서 실행해야 합니다.
+
 ```bash
-uv sync --python 3.12 --extra dev
-uv run agent-team-graph run \
+RUNTIME=/path/to/agent-team-plugins/runtime   # 플러그인 설치 시: ${CLAUDE_PLUGIN_ROOT}
+uv sync --project "$RUNTIME" --frozen --python 3.12
+uv run --project "$RUNTIME" agent-team-graph run \
   --project-id demo --workspace . --spec SPEC.md \
   --task "첫 번째 수직 슬라이스 구현" --test-command "pytest -q" \
   --allow-path src --allow-path tests \
@@ -15,14 +21,14 @@ uv run agent-team-graph run \
 
 `--allow-path`는 **저장소 루트 기준** 경로이며 반복 지정할 수 있습니다.
 `--exclude-path`도 저장소 루트 기준·반복 지정이며, 지정한 경로를 범위 검사와 변경
-digest에서 완전히 제외합니다. 이는 신뢰할 수 있는 reviewer CLI의 in-repo scratch처럼
+digest에서 완전히 제외합니다(tracked·untracked 모두). 이는 신뢰할 수 있는 reviewer CLI의 in-repo scratch처럼
 증명 대상이 아닌 경로에만 사용하세요. 승인 질문과 영수증의
 `excluded_paths_not_attested`에 모든 제외 경로가 표시됩니다.
 출력된 `thread_id`는 `status`, `resume`, `approve`에서 재사용합니다.
 
 ```bash
-uv run agent-team-graph status --thread-id demo-abc123
-uv run agent-team-graph approve --thread-id demo-abc123 --decision approve
+uv run --project "$RUNTIME" agent-team-graph status --thread-id demo-abc123
+uv run --project "$RUNTIME" agent-team-graph approve --thread-id demo-abc123 --decision approve
 ```
 
 ## 종료 코드

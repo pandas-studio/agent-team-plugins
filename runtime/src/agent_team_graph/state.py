@@ -30,6 +30,7 @@ class GraphState(TypedDict, total=False):
     review: str
     verdict: str
     gate_passed: bool
+    gate_feedback: str
     gated_change_sha256: str | None
     reviewed_change_sha256: str | None
     approval: str

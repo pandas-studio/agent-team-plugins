@@ -51,6 +51,22 @@ def _git_bytes(workspace: Path, *args: str) -> bytes:
     return result.stdout
 
 
+def _git_paths(workspace: Path, *args: str) -> list[str]:
+    """Run a NUL-delimited (`-z`) git path listing and return the paths verbatim.
+
+    Newline-separated listings C-quote non-ASCII or special names
+    (`"src/\\355\\225\\234.md"`), which then never match an allowed path and can't
+    be opened for hashing; stripping the output would also change names with
+    leading or trailing whitespace. `os.fsdecode` round-trips non-UTF-8 bytes.
+    """
+    return [os.fsdecode(item) for item in _git_bytes(workspace, *args).split(b"\0") if item]
+
+
+def _exclude_pathspecs(excluded: list[str]) -> list[str]:
+    # literal: an excluded path is a name, never a glob.
+    return [f":(exclude,literal){path}" for path in excluded]
+
+
 def _normalize_paths(paths: list[str], *, label: str) -> list[str]:
     normalized: list[str] = []
     for value in paths:
@@ -85,8 +101,10 @@ def _changed_paths(
     anywhere but the root would both mislabel paths and hide files created
     outside that subtree.
     """
-    tracked = _git(repo_root, "diff", "--name-only", base_sha, "--").splitlines()
-    untracked = _git(repo_root, "ls-files", "--others", "--exclude-standard").splitlines()
+    # --no-renames: with rename detection `--name-only` prints only the new name,
+    # so moving a file from outside the allowed paths into them would pass.
+    tracked = _git_paths(repo_root, "diff", "--no-renames", "--name-only", "-z", base_sha, "--")
+    untracked = _git_paths(repo_root, "ls-files", "-z", "--others", "--exclude-standard")
     return _keep(tracked, excluded), _keep(untracked, excluded)
 
 
@@ -98,9 +116,9 @@ def _ignored_paths(repo_root: Path, excluded: list[str]) -> list[str]:
     a test command routinely creates ignored build output (`__pycache__`,
     `.venv`) before the gate ever looks.
     """
-    listed = _git(
-        repo_root, "ls-files", "--others", "--ignored", "--exclude-standard"
-    ).splitlines()
+    listed = _git_paths(
+        repo_root, "ls-files", "-z", "--others", "--ignored", "--exclude-standard"
+    )
     return _keep(listed, excluded)
 
 
@@ -132,7 +150,22 @@ def _change_snapshot(
 ) -> dict[str, Any]:
     """Return a canonical identity for the exact change set covered by the gate."""
 
-    tracked_diff = _git_bytes(repo_root, "diff", "--binary", base_sha, "--")
+    # --no-ext-diff/--no-textconv: a configured external diff or textconv
+    # filter would replace the binary patch with lossy output, so content could
+    # change without changing the digest. --no-renames keeps the patch
+    # independent of diff.renames. Exclusions apply here too: excluded content
+    # is neither scope-checked nor attested.
+    tracked_diff = _git_bytes(
+        repo_root,
+        "diff",
+        "--binary",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        base_sha,
+        "--",
+        *_exclude_pathspecs(excluded),
+    )
     tracked, untracked = _changed_paths(repo_root, base_sha, excluded)
     ignored = _ignored_paths(repo_root, excluded)
     new_files = {path: _file_digest(repo_root, path) for path in untracked}
@@ -199,20 +232,50 @@ def _role_prompt(state: GraphState, role: str) -> str:
             shared
             + f"Plan:\n{state['plan']}\nIdentify relevant evidence and risks. Do not edit files."
         )
+    gate_feedback = state.get("gate_feedback") or ""
     if role == "coder":
         return (
             shared
             + f"Plan:\n{state['plan']}\nResearch:\n{state['research']}\n"
             + f"Previous review:\n{state.get('review', '(none)')}\n"
+            + (f"Previous gate failure:\n{gate_feedback}\n" if gate_feedback else "")
             + "Implement the task in the workspace. Stay within the specification."
         )
+    root = state["repo_root"]
+    base = state["base_sha"]
     return (
         shared
         + f"Plan:\n{state['plan']}\nResearch:\n{state['research']}\n"
         + f"Coder report:\n{state['code_report']}\nGate passed: {state['gate_passed']}\n"
-        + "Review the current git diff. Do not edit files. End with exactly one line: "
+        + (f"Gate failure:\n{gate_feedback}\n" if gate_feedback else "")
+        + f"Repository root: {root}\nBase commit: {base}\n"
+        # The coder may commit, stage, or leave edits unstaged, and roles run in
+        # the workspace, which can be a subdirectory: name the whole change set.
+        + f"Review every change since the base commit: `git -C {root} diff {base}` "
+        + "(committed, staged and unstaged changes to tracked files), plus every file "
+        + f"listed by `git -C {root} ls-files --others --exclude-standard` (new files). "
+        + "Do not edit files. End with exactly one line: "
         + "VERDICT: SHIP, VERDICT: NEEDS-FIX, VERDICT: DISCUSS, or VERDICT: OUT-OF-SCOPE."
     )
+
+
+GATE_FEEDBACK_OUTPUT_CHARS = 4000
+
+
+def _gate_feedback(
+    returncode: int, output: str, outside_scope: list[str], snapshot_error: str | None
+) -> str:
+    """Summarize why the gate failed, for the retrying coder and the reviewer."""
+
+    lines: list[str] = []
+    if snapshot_error:
+        lines.append(f"The change set could not be attested: {snapshot_error}")
+    if outside_scope:
+        lines.append("Changed paths outside the allowed paths: " + ", ".join(outside_scope))
+    if returncode:
+        tail = output[-GATE_FEEDBACK_OUTPUT_CHARS:]
+        lines.append(f"Test command exited {returncode}. Output (last {len(tail)} chars):\n{tail}")
+    return "\n".join(lines)
 
 
 def build_graph(
@@ -371,6 +434,7 @@ def build_graph(
                 "gate_passed": False,
                 "gated_change_sha256": None,
                 "reviewed_change_sha256": None,
+                "gate_feedback": _gate_feedback(returncode, output, [], message),
                 "artifacts": [artifact],
                 "errors": [
                     *errors,
@@ -402,6 +466,10 @@ def build_graph(
             "gate_passed": passed,
             "gated_change_sha256": snapshot["change_sha256"],
             "reviewed_change_sha256": None,
+            # Empty on a passing attempt, so an earlier failure isn't carried over.
+            "gate_feedback": (
+                "" if passed else _gate_feedback(returncode, output, outside_scope, None)
+            ),
             "artifacts": [artifact],
         }
         if errors:

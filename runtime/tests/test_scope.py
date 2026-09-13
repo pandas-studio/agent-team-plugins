@@ -411,3 +411,138 @@ def test_untracked_symlink_digest_does_not_follow_external_target(tmp_path: Path
 
     outside.write_text("different secret\n", encoding="utf-8")
     assert _file_digest(workspace, "link.txt") == first
+
+
+class PromptCapture(FakeRunner):
+    """FakeRunner that records every prompt, per role."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.prompts: dict[str, list[str]] = {}
+
+    def run(self, role: str, prompt: str, workspace: Path):
+        self.prompts.setdefault(role.rsplit(".", 1)[-1], []).append(prompt)
+        return super().run(role, prompt, workspace)
+
+
+def _commit_all(workspace: Path, message: str) -> str:
+    subprocess.run(["git", "-C", workspace, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", workspace, "commit", "-qm", message], check=True)
+    return subprocess.run(
+        ["git", "-C", workspace, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def test_rename_into_allowed_path_still_reports_the_source(tmp_path: Path):
+    """Rename detection prints only the new name, hiding an out-of-scope deletion."""
+    workspace, _ = make_repo(tmp_path)
+    (workspace / "config").mkdir()
+    (workspace / "config/prod.yaml").write_text("secret: 1\n", encoding="utf-8")
+    base = _commit_all(workspace, "config")
+    (workspace / "src").mkdir()
+    subprocess.run(["git", "-C", workspace, "mv", "config/prod.yaml", "src/prod.yaml"], check=True)
+
+    tracked, _ = _changed_paths(workspace, base, [])
+    assert tracked == ["config/prod.yaml", "src/prod.yaml"]
+    assert graph_module._outside_scope(tracked, ["src"]) == ["config/prod.yaml"]
+
+
+def test_paths_are_listed_verbatim(tmp_path: Path):
+    """Quoted (non-ASCII) or stripped (edge whitespace) names would mis-scope or mis-hash."""
+    workspace, spec = make_repo(tmp_path)
+    base = subprocess.run(
+        ["git", "-C", workspace, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    (workspace / "docs").mkdir()
+    (workspace / "docs/한글.md").write_text("k\n", encoding="utf-8")
+    (workspace / " README.md").write_text("not the tracked README\n", encoding="utf-8")
+
+    _, untracked = _changed_paths(workspace, base, [])
+    assert untracked == [" README.md", "docs/한글.md"]
+    assert _file_digest(workspace, " README.md") != _file_digest(workspace, "README.md")
+
+    state = initial(workspace, spec, "verbatim")
+    state["allowed_paths"] = ["docs"]
+    snapshot = _run(tmp_path, FakeRunner(), state, "verbatim")
+    # The non-ASCII name matches its allowed directory; the edge-space name is
+    # reported as itself, not as the tracked README.md.
+    assert _gate_record(snapshot)["outside_scope"] == [" README.md"]
+
+
+def test_digest_ignores_configured_external_diff_and_textconv(tmp_path: Path):
+    workspace, _ = make_repo(tmp_path)
+    (workspace / ".gitattributes").write_text("*.bin diff=lossy\n", encoding="utf-8")
+    (workspace / "data.bin").write_bytes(b"\x00first")
+    base = _commit_all(workspace, "binary")
+    lossy = tmp_path / "lossy.sh"
+    lossy.write_text("#!/bin/sh\necho same\n", encoding="utf-8")
+    lossy.chmod(0o755)
+    subprocess.run(["git", "-C", workspace, "config", "diff.external", str(lossy)], check=True)
+    subprocess.run(["git", "-C", workspace, "config", "diff.lossy.textconv", str(lossy)], check=True)
+
+    (workspace / "data.bin").write_bytes(b"\x00second")
+    first = graph_module._change_snapshot(workspace, base, [], False)["change_sha256"]
+    (workspace / "data.bin").write_bytes(b"\x00third")
+    second = graph_module._change_snapshot(workspace, base, [], False)["change_sha256"]
+    assert first != second
+
+
+def test_excluded_tracked_paths_are_not_attested(tmp_path: Path):
+    workspace, _ = make_repo(tmp_path)
+    (workspace / "tool-cache").mkdir()
+    (workspace / "tool-cache/state.json").write_text("{}\n", encoding="utf-8")
+    base = _commit_all(workspace, "tracked scratch")
+
+    def digest() -> str:
+        return graph_module._change_snapshot(workspace, base, ["tool-cache"], False)["change_sha256"]
+
+    before = digest()
+    (workspace / "tool-cache/state.json").write_text('{"touched": true}\n', encoding="utf-8")
+    assert digest() == before
+    (workspace / "README.md").write_text("attested change\n", encoding="utf-8")
+    assert digest() != before
+
+
+def test_gate_failure_reaches_retrying_coder_and_reviewer(tmp_path: Path):
+    workspace, spec = make_repo(tmp_path)
+    marker = tmp_path / "gate-ran-once"
+    script = tmp_path / "flaky-test.sh"
+    script.write_text(
+        f'#!/bin/sh\nif [ -e "{marker}" ]; then exit 0; fi\n'
+        f'touch "{marker}"\necho "assertion failed: expected 42"\nexit 1\n',
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    runner = PromptCapture(writes={"README.md": "implemented\n"})
+    state = initial(workspace, spec, "gate-feedback")
+    state["test_command"] = [str(script)]
+    snapshot = _run(tmp_path, runner, state, "gate-feedback")
+
+    first_review, second_review = runner.prompts["reviewer"]
+    assert "Gate failure:" in first_review
+    assert "assertion failed: expected 42" in first_review
+    assert "Test command exited 1" in runner.prompts["coder"][1]
+    assert "assertion failed: expected 42" in runner.prompts["coder"][1]
+    # The passing second attempt clears the feedback.
+    assert "Gate failure:" not in second_review
+    assert snapshot.values["gate_feedback"] == ""
+    assert snapshot.next == ("approval",)
+
+
+def test_reviewer_prompt_names_base_and_root_for_committed_work(tmp_path: Path):
+    workspace, spec = make_repo(tmp_path)
+    base = subprocess.run(
+        ["git", "-C", workspace, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    sub = workspace / "sub"
+    sub.mkdir()
+    runner = PromptCapture()
+    state = initial(workspace, spec, "review-scope")
+    state["workspace"] = str(sub)
+    _run(tmp_path, runner, state, "review-scope")
+
+    (prompt,) = runner.prompts["reviewer"]
+    root = str(workspace.resolve())
+    assert f"Base commit: {base}" in prompt
+    assert f"git -C {root} diff {base}" in prompt
+    assert f"git -C {root} ls-files --others --exclude-standard" in prompt
