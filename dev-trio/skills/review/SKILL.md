@@ -94,19 +94,25 @@ Quote the verdict line verbatim. Color the framing — 🟢 SHIP / 🔴 NEEDS-FI
 If `latest-codex.final.md` contains a `## NEED RESEARCH` section after the verdict, Codex needs Antigravity's help before the review can finalize. Do this:
 
 1. Surface the questions to the user. Confirm before fetching (research costs latency and tokens).
-2. On confirmation, run each question through `ask-agy.sh` and concatenate the answers into a temp file:
+2. On confirmation, run each question through `ask-agy.sh` and concatenate the answers into a temp file. `ask-agy.sh` prints only the answer on stdout (the `=== RESPONSE ===` markers go to its log file), and exits with the researcher's rc:
    ```bash
    RTS=$(date +%Y%m%d-%H%M%S)
    RFILE="$PWD/.dev-trio/log/${AGENT_TEAM:-default}/research-$RTS.md"
    mkdir -p "$(dirname "$RFILE")"
+   RESEARCH_FAILED=0
    {
      echo "# Research for codex review @ $RTS"
      for q in "<question 1>" "<question 2>"; do
        echo; echo "## Q: $q"; echo
-       ask-agy.sh "$q" | sed -n '/^=== RESPONSE ===/,/^=== END /p' | sed '1d;$d'
+       # </dev/null: ask-agy.sh reads a non-terminal stdin as extra context.
+       if ! ask-agy.sh "$q" </dev/null; then
+         RESEARCH_FAILED=1
+         echo "(research failed for this question — see the ask-agy log; do not treat the text above as findings)"
+       fi
      done
    } > "$RFILE"
    ```
+   If `RESEARCH_FAILED=1`, tell the user which question failed before re-reviewing; don't present the failed output to Codex as evidence (drop that section or re-run it).
 3. Re-invoke `ask-codex.sh --with-research <RFILE>` with the **same focus** as the original call, plus `--no-memories` if the original call had it.
 4. Use the second verdict as the actionable one. Mention the round-trip to the user (Antigravity → Codex re-review) so they understand why latency was higher.
 

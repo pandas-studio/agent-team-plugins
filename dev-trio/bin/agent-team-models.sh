@@ -61,6 +61,16 @@ _cfg_save() {
   mv "$tmp" "$CONFIG"
 }
 
+# Refuse to mutate a config that exists but is not valid JSON. Reads fall back
+# to the empty config (so a broken hand edit never aborts a live run), but a
+# write built from that fallback would replace the user's file and silently
+# drop every custom model and role binding.
+_cfg_require_valid() {
+  [ -f "$CONFIG" ] || return 0
+  jq -e . "$CONFIG" >/dev/null 2>&1 \
+    || die "config is not valid JSON; fix or move it before changing it: $CONFIG"
+}
+
 # Echo a JSON array built from the given argv (empty -> []), set -u safe.
 # Built element-by-element rather than via `jq --args` because jq still parses
 # a positional that looks like an option (e.g. an "--output-last-message" arg)
@@ -336,11 +346,11 @@ main() {
     list)      cmd_list "$@" ;;
     show)      cmd_show "$@" ;;
     doctor)    cmd_doctor "$@" ;;
-    preset)    cmd_preset "$@" ;;
-    add)       cmd_add "$@" ;;
-    edit)      cmd_edit "$@" ;;
-    remove)    cmd_remove "$@" ;;
-    set-role)  cmd_set_role "$@" ;;
+    preset)    _cfg_require_valid; cmd_preset "$@" ;;
+    add)       _cfg_require_valid; cmd_add "$@" ;;
+    edit)      _cfg_require_valid; cmd_edit "$@" ;;
+    remove)    _cfg_require_valid; cmd_remove "$@" ;;
+    set-role)  _cfg_require_valid; cmd_set_role "$@" ;;
     ""|-h|--help|help) usage ;;
     *) echo "$PROG: unknown command '$cmd'" >&2; echo >&2; usage >&2; exit 2 ;;
   esac

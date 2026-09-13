@@ -123,6 +123,9 @@ EOF
 
   cat > wrap-codex.sh <<EOF
 #!/usr/bin/env bash
+# The trailing argv slot is the reviewer prompt; keep it when asked so a case
+# can check what scope the reviewer was pointed at.
+[ -n "\${CODEX_PROMPT_CAPTURE:-}" ] && printf '%s' "\${@: -1}" > "\$CODEX_PROMPT_CAPTURE"
 cat <<'VERDICT'
 ## Verdict
 ${verdict_out}
@@ -172,7 +175,10 @@ WD1="$(make_workspace \
   'foo.py' \
   'SHIP — looks good' \
   '- [ ] §5.1 add foo()')"
-run_spec_trio case1 "$WD1" --max-iter 1
+CASE1_BASE="$(git -C "$WD1" rev-parse HEAD)"
+CASE1_PROMPT="$SPEC_TRIO_WORKSPACE/case1-review-prompt.txt"
+CODEX_PROMPT_CAPTURE="$CASE1_PROMPT" \
+  run_spec_trio case1 "$WD1" --max-iter 1
 LD1="$(case_log_dir case1)"
 P1="$LD1/spec-trio-*-iter-1-plan.manifest.json"
 C1="$LD1/spec-trio-*-iter-1-code.manifest.json"
@@ -191,6 +197,11 @@ assert_eq  "plan has kind=spec"   "1" "$(manifest_field "$P1" '[.inputs[]?|selec
 assert_eq  "code has kind=spec"   "1" "$(manifest_field "$C1" '[.inputs[]?|select(.kind=="spec")] | length')"
 assert_eq  "review has kind=spec" "1" "$(manifest_field "$R1" '[.inputs[]?|select(.kind=="spec")] | length')"
 assert_cmd "no .tmp leaks (case1)"      "[ -z \"\$(ls $LD1/*.tmp 2>/dev/null)\" ]"
+# The coder commits, leaving a clean tree: the reviewer must be given the
+# iteration's commit range, or it reviews nothing.
+CASE1_HEAD="$(git -C "$WD1" rev-parse HEAD)"
+assert_eq  "coder committed (case1)"    "yes" "$([ "$CASE1_HEAD" != "$CASE1_BASE" ] && echo yes)"
+assert_eq  "reviewer given iter range"  "yes" "$(grep -qF "range \`$CASE1_BASE..$CASE1_HEAD\`" "$CASE1_PROMPT" 2>/dev/null && echo yes)"
 
 # --------------------------------------------------------------------------
 section "Case 2: gate 1 round-trip (planner emits no allowlist)"

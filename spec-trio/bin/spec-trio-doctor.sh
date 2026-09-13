@@ -237,7 +237,8 @@ STUB
     printf '# Spec\n## §1 Goals\nstub\n## §5 Test criteria\n### §5.1 marker\n' > "$cwd/spec.md"
     echo seed > "$cwd/seed.txt"
     git -C "$cwd" add -A >/dev/null 2>&1
-    git -C "$cwd" commit -qm seed >/dev/null 2>&1
+    git -C "$cwd" -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm seed >/dev/null 2>&1 \
+      || { fail "fixture seed commit failed in $cwd"; return 1; }
     printf -- '- [ ] (§5.1) stub smoke task\n' > "$cwd/BACKLOG.md"
     (
       cd "$cwd" && \
@@ -346,7 +347,8 @@ STUB
     git -C "$cwd" config user.name doctor
     printf '# Spec\n## §1 Goals\nstub\n## §5 Test criteria\n### §5.1 marker\n' > "$cwd/spec.md"
     git -C "$cwd" add -A >/dev/null 2>&1
-    git -C "$cwd" commit -qm seed >/dev/null 2>&1
+    git -C "$cwd" -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm seed >/dev/null 2>&1 \
+      || { fail "fixture seed commit failed in $cwd"; return 1; }
     printf -- '- [ ] (§5.1) task that needs research\n' > "$cwd/BACKLOG.md"
     (
       cd "$cwd" && \
@@ -451,17 +453,33 @@ n=$(cat "$COUNTER" 2>/dev/null || echo 0); n=$((n + 1)); printf '%s' "$n" > "$CO
 if [ "$n" = 1 ]; then echo x >> foo.txt; else echo y >> bar.txt; fi
 echo "coder (stray) ran call $n"
 STUB
-  # Codex stub: final-ship (SHIP in .final.md) or need-research (triggers retry).
+  # P3 coder: commits every call, so the tree is clean when the reviewer runs.
+  cat > "$S8/coder-commit.sh" <<'STUB'
+#!/usr/bin/env bash
+echo x >> foo.txt
+git add foo.txt && git -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm "coder change"
+echo "coder (commit) ran"
+STUB
+  # Codex stub: final-ship (SHIP in .final.md), need-research (triggers retry),
+  # or research-then-ship (first call asks for research, later calls SHIP).
+  # FOCUS_CAPTURE (optional) records each call's focus (the last argv slot).
   cat > "$S8/ask-codex.sh" <<'STUB'
 #!/usr/bin/env bash
 set -uo pipefail
+if [ -n "${FOCUS_CAPTURE:-}" ]; then
+  printf '%s\n' "${@: -1}" >> "$FOCUS_CAPTURE"
+fi
+MODE="${STUB_MODE:-final-ship}"
+if [ "$MODE" = research-then-ship ]; then
+  if [ -e "$FOCUS_CAPTURE.asked" ]; then MODE=final-ship; else MODE=need-research; : > "$FOCUS_CAPTURE.asked"; fi
+fi
 TEAM="${AGENT_TEAM:-default}"
 LOG_DIR="${DEV_TRIO_LOG_DIR:-$PWD/.dev-trio/log}/$TEAM"
 mkdir -p "$LOG_DIR"
 TS=$(date +%Y%m%d-%H%M%S)
 FINAL="$LOG_DIR/codex-$TS.final.md"
 ln -sfn "codex-$TS.final.md" "$LOG_DIR/latest-codex.final.md"
-case "${STUB_MODE:-final-ship}" in
+case "$MODE" in
   need-research) printf '## Verdict\nNEEDS-FIX — needs research\n## NEED RESEARCH\n- what is the helper signature?\n' > "$FINAL" ;;
   *)             printf '## Verdict\nSHIP — stub ok\n' > "$FINAL" ;;
 esac
@@ -484,7 +502,8 @@ STUB
     git -C "$cwd" config user.name doctor
     printf '# Spec\n## §1 Goals\nstub\n## §5 Test criteria\n### §5.1 marker\n' > "$cwd/spec.md"
     git -C "$cwd" add -A >/dev/null 2>&1
-    git -C "$cwd" commit -qm seed >/dev/null 2>&1
+    git -C "$cwd" -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm seed >/dev/null 2>&1 \
+      || { fail "fixture seed commit failed in $cwd"; return 1; }
     printf -- '- [ ] (§5.1) scope task\n' > "$cwd/BACKLOG.md"
     (
       cd "$cwd" && \
@@ -494,6 +513,7 @@ STUB
       PLANNER_CLI="$S8/stub-planner.sh" \
       CODER_CLI="$coder" \
       COUNTER="$T8/counter-$team" \
+      FOCUS_CAPTURE="$T8/focus-$team" \
       TMUX="" \
       PATH="$S8:$PATH" \
       "$PLUGIN_ROOT/bin/spec-trio.sh" --spec "$cwd/spec.md" --backlog "$cwd/BACKLOG.md" \
@@ -530,6 +550,18 @@ STUB
     ok "P1: Review2 skipped after retry scope violation (no review2 manifest)"
   else
     fail "P1: Review2 ran despite retry scope violation (review2 manifest present) — gate did not short-circuit"
+  fi
+
+  # --- P3: a committing coder leaves a clean tree; both reviews must still be
+  # pointed at the iteration's commit range, anchored at the iter-base commit ---
+  CASE_P3="$T8/p3"
+  run_scope_case "$CASE_P3" "scope-p3" "$S8/coder-commit.sh" research-then-ship || true
+  P3_BASE=$(git -C "$CASE_P3" rev-list --max-parents=0 HEAD 2>/dev/null)
+  P3_HINTS=$(grep -c "range \`$P3_BASE\.\." "$T8/focus-scope-p3" 2>/dev/null)
+  if [ "${P3_HINTS:-0}" = "2" ]; then
+    ok "P3: Review and Review2 both got the commit range from the iter base"
+  else
+    fail "P3: expected 2 reviewer focuses with range \`$P3_BASE..\`, got ${P3_HINTS:-0} (see $T8/focus-scope-p3)"
   fi
 fi
 

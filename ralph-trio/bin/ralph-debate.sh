@@ -93,7 +93,8 @@ SUMMARY_LOG="$LOG_DIR/ralph-debate-$TS.log"
 ln -sfn "ralph-debate-$TS.log" "$LOG_DIR/latest-ralph-debate.log"
 ln -sfn "ralph-debate-$TS.log" "$LOG_DIR/latest-ralph.log"
 
-MAX_RUNTIME_SECS=$(parse_runtime "$MAX_RUNTIME_SPEC")
+# parse_runtime has already explained a bad spec on stderr.
+MAX_RUNTIME_SECS=$(parse_runtime "$MAX_RUNTIME_SPEC") || exit 2
 DEADLINE=$([ "$MAX_RUNTIME_SECS" -gt 0 ] && echo $(( $(date +%s) + MAX_RUNTIME_SECS )) || echo 0)
 
 # debate.sh from the debate-conductor plugin writes to its own log root:
@@ -223,7 +224,14 @@ while :; do
   WT=""
   WORK_DIR="$ORIGINAL_DIR"
   if [ "$USE_WORKTREE" = "1" ]; then
-    WT=$(with_worktree "$ITER" "$BASE_BRANCH")
+    if ! WT=$(with_worktree "$ITER" "$BASE_BRANCH"); then
+      ralph_log "could not create the iter $ITER worktree. Stopping."
+      # pop_top_task already marked the task done; put it back.
+      [ "$DRY_RUN" = "1" ] || append_to_backlog "$BACKLOG_FILE" "$TASK"
+      echo "=== STOP (worktree-failed) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
+      WORKTREE_FAILED=1
+      break
+    fi
     WORK_DIR="$WT"
     export RALPH_WT_DIR="$WT"
     printf '  worktree: %s\n' "$WT" >> "$SUMMARY_LOG"
@@ -315,7 +323,7 @@ while :; do
   if [ "$USE_WORKTREE" = "1" ]; then
     if [ "$PASSED" = "1" ] && [ "$NO_VALIDATE" = "0" ]; then
       VAL_LOG="$LOG_DIR/ralph-debate-$TS-iter-$ITER-validate.log"
-      if ! pre_merge_validate "$WT" "$BASE_BRANCH" "ralph/${TEAM}-iter-${ITER}" "$MAX_DIFF_LINES" 2>"$VAL_LOG"; then
+      if ! pre_merge_validate "$WT" "$BASE_BRANCH" "$(worktree_branch "$WT" "$ITER")" "$MAX_DIFF_LINES" 2>"$VAL_LOG"; then
         ralph_log "  pre_merge_validate FAILED — discarding instead of merging"
         printf '  validate: BLOCKED (see %s)\n' "$VAL_LOG" >> "$SUMMARY_LOG"
         printf '## iter %d · %s · WORKTREE-VALIDATE-BLOCK\nTopic: %s\nValidate log: %s\n\n' \
@@ -325,8 +333,29 @@ while :; do
         printf '  validate: ok\n' >> "$SUMMARY_LOG"
       fi
     fi
-    if merge_or_discard_worktree "$WT" "$ITER" "$PASSED" "$ORIGINAL_DIR"; then
-      printf '  worktree: %s\n' "$([ "$PASSED" = "1" ] && echo merged || echo discarded)" >> "$SUMMARY_LOG"
+    merge_or_discard_worktree "$WT" "$ITER" "$PASSED" "$ORIGINAL_DIR"
+    MERGE_RC=$?
+    OUTCOME=$([ "$PASSED" = "1" ] && echo merged || echo discarded)
+    if [ "$MERGE_RC" = "0" ]; then
+      printf '  worktree: %s\n' "$OUTCOME" >> "$SUMMARY_LOG"
+    else
+      if [ "$MERGE_RC" = "2" ]; then
+        # The change landed (or was dropped); only the cleanup failed.
+        BLOCK=WORKTREE-CLEANUP-BLOCK
+        printf '  worktree: %s, but cleanup failed: %s\n' "$OUTCOME" "$WT" >> "$SUMMARY_LOG"
+      else
+        # Refused (worktree off its branch) or ff-merge failed: nothing landed.
+        BLOCK=WORKTREE-MERGE-BLOCK
+        printf '  worktree: PRESERVED (not merged or discarded: %s)\n' "$WT" >> "$SUMMARY_LOG"
+      fi
+      printf '## iter %d · %s · %s\nTask: %s\nWorktree: %s\n\n' \
+        "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BLOCK" "$TASK" "$WT" >> "$FIX_PLAN_FILE"
+      # Stop here: the next iteration would hit the same obstruction and
+      # keep one more full worktree each time.
+      ralph_log "worktree for iter $ITER needs attention (blocked). Stopping."
+      echo "=== STOP (worktree-blocked) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
+      WORKTREE_FAILED=1
+      break
     fi
     unset RALPH_WT_DIR
   fi
@@ -342,3 +371,5 @@ done
 
 echo "=== ralph-debate done (completed=$COMPLETED) ===" | tee -a "$SUMMARY_LOG" >&2
 echo "summary: $SUMMARY_LOG" >&2
+# A worktree that could not be created, merged or discarded: don't report success.
+if [ "${WORKTREE_FAILED:-0}" = "1" ]; then exit 1; fi

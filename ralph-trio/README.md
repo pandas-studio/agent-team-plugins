@@ -59,6 +59,8 @@ ralph-solo.sh --max-iter 50 --max-runtime 6h
 
 Each iteration runs `claude -p "$(cat PROMPT.md)"` in your cwd. The loop exits when `fix_plan.md` contains `<promise>COMPLETE</promise>`, or `--max-iter` / `--max-runtime` is reached, or you Ctrl-C.
 
+`--max-runtime` accepts `N` (seconds), `Ns`, `Nm` or `Nh` — e.g. `6h`, `90m`. Anything else (`1d`, `1h30m`, `90min`) is refused with exit 2 rather than silently running with no deadline.
+
 **In-session driver** (Stop-hook, solo only):
 
 ```
@@ -102,7 +104,7 @@ Verdict dispatch:
 | `DISCUSS` | Log to fix_plan.md and continue (human attention). |
 | `UNKNOWN` | Log to fix_plan.md (codex output unparseable). |
 
-Useful flags: `--worktree` (run each iter in a throwaway git worktree, fast-forward merge on SHIP), `--autoship` (skip review — useful for trivial mechanical refactors), `--dry-run` (no model calls; manifest emission only), `--no-research` (skip the NEED RESEARCH branch).
+Useful flags: `--worktree` (run each iter in a throwaway git worktree at `/tmp/ralph-<team>-iter-<N>.<random>` on branch `ralph/<team>-iter-<N>-<random>`, fast-forward merge on SHIP; an existing worktree or branch is never reused or removed, a worktree that can't be created stops the run with exit 1 and re-queues the task, and a worktree the coder switched to another branch is left for inspection), `--autoship` (skip review — useful for trivial mechanical refactors), `--dry-run` (no model calls; manifest emission only), `--no-research` (skip the NEED RESEARCH branch).
 
 ### Debate (per-topic debate outer loop)
 
@@ -211,7 +213,7 @@ Ralph runs untrusted LLM output in a loop. Defenses:
 
 - **Trust boundary in role prompts.** Untrusted data (task text, plan, prior fix_plan excerpts, research, prompt context) is always wrapped in named XML tags (`<task>`, `<plan>`, `<fix_plan_md>`, `<research>`, `<prompt_md>`). The role prompts (`lib/roles/{planner,worker}.md`) instruct the model to treat tag contents as data, not instructions.
 - **Literal-string tag stripping.** Before injection, the driver strips literal closing tags from untrusted strings (`</task>` → `[STRIPPED-CLOSING-TAG]`) so untrusted content cannot escape its boundary.
-- **Team-name sanitization.** `$AGENT_TEAM` / tmux window names flow into filesystem paths. We strip everything except `[a-zA-Z0-9_-]` and warn loudly when sanitization changes the value.
+- **Team-name validation.** `$AGENT_TEAM` / tmux window names flow into filesystem paths and branch names. An explicit `$AGENT_TEAM` must match `[A-Za-z0-9][A-Za-z0-9._-]*` (max 48 chars) or the run exits with an error; a tmux-derived name is sanitized to that set with a loud warning.
 - **Pre-merge validation** (worktree mode): `git diff --check` (whitespace, conflict markers) + secret-pattern scan on added lines + diff-size cap (default 10,000 lines). Failure → discard the iteration's branch instead of merging.
 - **Stop-hook tamper detection.** First invocation records SHA-256 of `PROMPT.md`; subsequent invocations compare. On mismatch, hook allows the stop and resets the iter counter so the operator can consciously restart.
 - **Fail-safe defaults.** Worktree without `--test-cmd` discards every iteration. Hook setup errors allow the stop rather than block forever.

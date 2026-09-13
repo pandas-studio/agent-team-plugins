@@ -75,14 +75,32 @@ enforce_max_iter() {
 }
 
 # parse_runtime SPEC — accepts "6h", "30m", "120s", or bare integer (seconds).
+# rc=1 (with a message on stderr) for anything else — "1d", "1h30m", "90min" —
+# so callers can refuse to start instead of silently running with no deadline.
+# Callers invoke it in $(...), where an exit would only end the subshell: check
+# the rc.
 parse_runtime() {
-  local spec="$1"
+  local spec="$1" num mult=1
   case "$spec" in
-    *h) echo $(( ${spec%h} * 3600 )) ;;
-    *m) echo $(( ${spec%m} * 60 )) ;;
-    *s) echo "${spec%s}" ;;
-    *)  echo "$spec" ;;
+    *h) num="${spec%h}"; mult=3600 ;;
+    *m) num="${spec%m}"; mult=60 ;;
+    *s) num="${spec%s}" ;;
+    *)  num="$spec" ;;
   esac
+  case "$num" in
+    ''|*[!0-9]*)
+      echo "invalid --max-runtime '$spec' (expected N, Ns, Nm or Nh)" >&2
+      return 1 ;;
+  esac
+  # Strip leading zeros: $(( 08 )) is an invalid octal literal.
+  num="${num#"${num%%[!0]*}"}"
+  num="${num:-0}"
+  # 9 digits * 3600 stays far inside 64-bit arithmetic, even plus `date +%s`.
+  if [ "${#num}" -gt 9 ]; then
+    echo "invalid --max-runtime '$spec' (too large)" >&2
+    return 1
+  fi
+  echo $(( num * mult ))
 }
 
 # enforce_max_runtime DEADLINE_TS — rc=0 ok, rc=1 past deadline.
@@ -93,20 +111,50 @@ enforce_max_runtime() {
   [ "$(date +%s)" -lt "$deadline" ]
 }
 
-# with_worktree ITER BASE — creates /tmp/ralph-${TEAM}-iter-${ITER} on a new
-# branch ralph/${TEAM}-iter-${ITER} from BASE, echoes the worktree path.
-# Caller must `cd` into it.
+# with_worktree ITER BASE — creates a fresh /tmp/ralph-${TEAM}-iter-${ITER}.XXXXXX
+# on a new branch ralph/${TEAM}-iter-${ITER}-XXXXXX from BASE, echoes the
+# worktree path. rc=1 (nothing echoed) when the worktree can't be created;
+# callers must check it. Caller must `cd` into it.
+#
+# The mktemp suffix makes path and branch unique per call. Team + iter alone
+# are shared by every run in the same team (team is `default` outside tmux),
+# so an earlier version that force-removed a pre-existing path and deleted a
+# pre-existing branch could destroy another live run's work — and, when the
+# add failed, still echoed the path so this run worked inside the other one.
+# Nothing is removed here: an existing path or branch is simply never reused.
 with_worktree() {
   local iter="$1" base="$2"
   : "${TEAM:?with_worktree: TEAM not set}"
-  local wt="/tmp/ralph-${TEAM}-iter-${iter}"
-  local br="ralph/${TEAM}-iter-${iter}"
-  if [ -d "$wt" ]; then
-    git worktree remove --force "$wt" 2>/dev/null || true
+  local wt br
+  wt=$(mktemp -d "/tmp/ralph-${TEAM}-iter-${iter}.XXXXXX") \
+    || { ralph_log "ERROR: mktemp failed for iter $iter worktree"; return 1; }
+  br="ralph/${TEAM}-iter-${iter}-${wt##*.}"
+  if ! git worktree add -b "$br" "$wt" "$base" >&2; then
+    rmdir "$wt" 2>/dev/null || true
+    ralph_log "ERROR: git worktree add failed for $br (iter $iter)"
+    return 1
   fi
-  git branch -D "$br" 2>/dev/null || true
-  git worktree add -b "$br" "$wt" "$base" >&2
   echo "$wt"
+}
+
+# worktree_branch WT ITER — echo the branch with_worktree created for WT: the
+# name carries WT's mktemp suffix. Derived from the path, never read back from
+# the worktree, because the coder may have switched WT to another branch —
+# which must then not be merged, validated as ours, or deleted.
+worktree_branch() {
+  : "${TEAM:?worktree_branch: TEAM not set}"
+  printf 'ralph/%s-iter-%s-%s\n' "$TEAM" "$2" "${1##*.}"
+}
+
+# worktree_on_own_branch WT ITER — rc=0 if WT still has its generated branch
+# checked out; otherwise logs and rc=1 (callers preserve the worktree).
+worktree_on_own_branch() {
+  local wt="$1" iter="$2" want have
+  want=$(worktree_branch "$wt" "$iter")
+  have=$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null || true)
+  [ "$have" = "$want" ] && return 0
+  ralph_log "worktree $wt is on '${have:-<no branch>}', not $want (iter $iter); leaving it for inspection"
+  return 1
 }
 
 # commit_worktree_changes WT ITER — stage+commit any uncommitted worktree edits
@@ -123,6 +171,8 @@ commit_worktree_changes() {
   local wt="$1" iter="$2"
   [ -d "$wt" ] || return 0
   [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ] || return 0
+  # Never auto-commit onto a branch the coder switched to.
+  worktree_on_own_branch "$wt" "$iter" || return 1
   git -C "$wt" add -A >&2 || { ralph_log "ERROR: git add -A failed in worktree (iter $iter); preserving worktree"; return 1; }
   git -C "$wt" -c user.name='ralph' -c user.email='ralph@localhost' \
     commit --no-verify -m "ralph iter ${iter}: coder changes (auto-committed at SHIP)" >&2 \
@@ -132,20 +182,28 @@ commit_worktree_changes() {
 # merge_or_discard_worktree WT ITER PASSED_FLAG ORIGINAL_DIR
 # PASSED_FLAG=1 → fast-forward merge into ORIGINAL_DIR's current HEAD; remove worktree.
 # PASSED_FLAG=0 → leave branch deleted, remove worktree.
+# rc=0 merged (PASSED_FLAG=1) or discarded, and cleaned up; rc=1 nothing landed
+# (worktree off its branch, or the fast-forward failed) and the worktree is kept;
+# rc=2 merged or discarded, but removing the worktree or branch failed.
 merge_or_discard_worktree() {
   local wt="$1" iter="$2" passed="$3" orig="$4"
-  : "${TEAM:?merge_or_discard_worktree: TEAM not set}"
-  local br="ralph/${TEAM}-iter-${iter}"
+  local br
+  worktree_on_own_branch "$wt" "$iter" || return 1
+  br=$(worktree_branch "$wt" "$iter")
   if [ "$passed" = "1" ]; then
     if ! git -C "$orig" merge --ff-only "$br" >&2; then
-      ralph_log "merge --ff-only failed for $br; leaving branch in place for inspection"
-      git worktree remove --force "$wt" 2>/dev/null || true
+      # Keep the worktree too: callers record it as the recovery location.
+      ralph_log "merge --ff-only failed for $br; leaving worktree $wt and its branch for inspection"
       return 1
     fi
   fi
-  git worktree remove --force "$wt" 2>/dev/null || true
-  if [ "$passed" != "1" ]; then
-    git -C "$orig" branch -D "$br" 2>/dev/null || true
+  if ! git -C "$orig" worktree remove --force "$wt" >/dev/null 2>&1; then
+    ralph_log "could not remove worktree $wt (iter $iter); it is left on disk"
+    return 2
+  fi
+  if [ "$passed" != "1" ] && ! git -C "$orig" branch -D "$br" >/dev/null 2>&1; then
+    ralph_log "could not delete branch $br (iter $iter)"
+    return 2
   fi
 }
 
@@ -206,7 +264,15 @@ build_fix_plan_excerpt() {
 #   3. diff line count cap      (default MAX_DIFF_LINES=10000; override per call)
 pre_merge_validate() {
   local wt="$1" base="$2" iter_branch="$3" max_lines="${4:-10000}"
-  local fail=0
+  local fail=0 have
+
+  # 0. the worktree must still be on its iteration branch — otherwise the
+  # checks below would validate whatever history the coder switched to.
+  have=$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null || true)
+  if [ "$have" != "$iter_branch" ]; then
+    ralph_log "  validate FAIL: worktree is on '${have:-<no branch>}', not $iter_branch"
+    return 1
+  fi
 
   # 1. whitespace / conflict marker check
   if ! git -C "$wt" diff --check "$base"...HEAD >/dev/null 2>&1; then
