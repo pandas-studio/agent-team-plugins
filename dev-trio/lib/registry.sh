@@ -19,9 +19,11 @@
 # should write its final/last message to. Templates are expanded into an argv
 # ARRAY (no eval, no word-splitting) so a multi-line {prompt} stays one argv.
 #
-# Built-in models: agy, codex, claude, claude-write ("claude" is read-only in
-# headless -p mode; "claude-write" adds --permission-mode acceptEdits so a coder
-# role can actually edit files). User-defined models + role bindings live
+# Built-in models: agy, codex, codex-no-memories, claude, claude-write ("claude"
+# is read-only in headless -p mode; "claude-write" adds --permission-mode
+# acceptEdits so a coder role can actually edit files; "codex-no-memories" turns
+# off Codex's memories feature so a review is not primed by earlier Codex
+# sessions). User-defined models + role bindings live
 # in the shared config file (see _registry_config_file). Presets (kimi-code)
 # can be stamped into config via `agent-team-models preset add`.
 #
@@ -55,6 +57,12 @@ _registry_builtin_models() {
     "env_command": "CODEX_CLI",
     "args": ["exec", "--skip-git-repo-check", "{prompt}"],
     "final_args": ["exec", "--skip-git-repo-check", "--output-last-message", "{final}", "{prompt}"]
+  },
+  "codex-no-memories": {
+    "command": "codex",
+    "env_command": "CODEX_CLI",
+    "args": ["exec", "--skip-git-repo-check", "-c", "features.memories=false", "{prompt}"],
+    "final_args": ["exec", "--skip-git-repo-check", "-c", "features.memories=false", "--output-last-message", "{final}", "{prompt}"]
   },
   "claude": {
     "command": "claude",

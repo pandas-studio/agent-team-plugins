@@ -25,6 +25,22 @@ BUILTIN_MODELS: dict[str, dict[str, Any]] = {
             "{prompt}",
         ],
     },
+    # Codex injects its memory summary into every `exec` prompt while the
+    # memories feature is on, so a review would carry earlier sessions' context.
+    "codex-no-memories": {
+        "command": "codex",
+        "env_command": "CODEX_CLI",
+        "args": ["exec", "--skip-git-repo-check", "-c", "features.memories=false", "{prompt}"],
+        "final_args": [
+            "exec",
+            "--skip-git-repo-check",
+            "-c",
+            "features.memories=false",
+            "--output-last-message",
+            "{final}",
+            "{prompt}",
+        ],
+    },
     "claude": {"command": "claude", "env_command": "CLAUDE_CLI", "args": ["-p", "{prompt}"]},
     # Headless `claude -p` cannot write files without an explicit permission
     # mode, so a coder bound to plain "claude" is a silent no-op. Kept as a
