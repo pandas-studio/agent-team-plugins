@@ -11,6 +11,12 @@
 #   ask-codex.sh --with-spec     path/to/spec.md     "review against contract"
 #   ask-codex.sh --with-spec spec.md --with-research research.md "focus"
 #
+# Review without Codex's memories (no memory summary injected into the prompt):
+#   ask-codex.sh --no-memories "focus"
+# Runs the built-in codex-no-memories model when the reviewer resolves to codex or
+# codex-no-memories; rc=2 for any other model or when the models config
+# redefines codex-no-memories.
+#
 # Reviewer role override:
 #   REVIEWER_ROLE_FILE=/path/to/role.md ask-codex.sh ...
 #
@@ -64,12 +70,14 @@ LOG_DIR="${DEV_TRIO_LOG_DIR:-$PWD/.dev-trio/log}/$TEAM"
 RESEARCH_FILE=""
 SPEC_FILE=""
 FOCUS=""
+NO_MEMORIES=0
 # Scan all args so --with-research / --with-spec work in any position relative
 # to the focus (matches the README contract "any combination, in any order").
 while [ $# -gt 0 ]; do
   case "$1" in
     --with-research) RESEARCH_FILE="${2:?--with-research requires a file path}"; shift 2 ;;
     --with-spec)     SPEC_FILE="${2:?--with-spec requires a file path}";         shift 2 ;;
+    --no-memories)   NO_MEMORIES=1; shift ;;
     --) shift; [ "$#" -gt 0 ] && FOCUS="$1"; break ;;
     *)
       if [ -z "$FOCUS" ]; then FOCUS="$1"; shift
@@ -77,6 +85,23 @@ while [ $# -gt 0 ]; do
       fi ;;
   esac
 done
+
+# --no-memories swaps codex for the built-in variant that disables Codex's
+# memories feature. Other models have no such switch, so refuse rather than
+# silently run a review the caller believes is unprimed.
+if [ "$NO_MEMORIES" = 1 ]; then
+  case "$REVIEWER_MODEL" in
+    codex) REVIEWER_MODEL="codex-no-memories" ;;
+    codex-no-memories) ;;
+    *) echo "error: --no-memories only applies to the codex reviewer; resolved model is '$REVIEWER_MODEL'" >&2; exit 2 ;;
+  esac
+  # Config models shadow built-ins. `agent-team-models add` refuses built-in ids,
+  # so a redefinition is a hand edit; refuse it rather than parse its argv.
+  if _registry_config_json | jq -e '.models | has("codex-no-memories")' >/dev/null; then
+    echo "error: --no-memories needs the built-in codex-no-memories model, but $(registry_config_file) redefines it" >&2
+    exit 2
+  fi
+fi
 
 FOCUS="${FOCUS:-Review the full working-tree state in this repo (see role instructions for the inspection checklist — start with \`git status --short\`, then cover both tracked diffs AND untracked files).}"
 # Defense-in-depth: strip our own closing fence from untrusted input so it

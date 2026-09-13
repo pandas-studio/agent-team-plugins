@@ -2,7 +2,7 @@
 description: One-shot Codex review. Default scope = uncommitted working-tree changes. Optional --with-research <file> and --with-spec <file> for context injection. Streaming output lands in the bottom-right dashboard pane; chat-side surfaces the verdict (SHIP/NEEDS-FIX/DISCUSS) + Blocker/Major counts and handles NEED RESEARCH blocks.
 disable-model-invocation: true
 allowed-tools: Bash(ask-codex.sh:*) Bash(ask-agy.sh:*) Bash(git:*) Bash(cat:*) Bash(ls:*) Bash(date:*) Bash(mkdir:*) Bash(echo:*) Bash(sed:*) Read
-argument-hint: [focus] [--with-research <file>] [--with-spec <file>]
+argument-hint: [focus] [--with-research <file>] [--with-spec <file>] [--no-memories]
 ---
 
 # Review (Codex, one-shot)
@@ -11,10 +11,11 @@ You are the **PM**. Codex is the reviewer (bottom-right pane). You dispatch one 
 
 ## 1 · Parse `$ARGUMENTS` and build the dispatch command
 
-`$ARGUMENTS` is a single string that may interleave three pieces in any order:
+`$ARGUMENTS` is a single string that may interleave four pieces in any order:
 
 - **Optional `--with-research <file>`** — research context from a previous Antigravity call (typically `latest-agy.log` or a curated `research-<TS>.md`).
 - **Optional `--with-spec <file>`** — spec/contract the changes are expected to satisfy.
+- **Optional `--no-memories`** — bare flag; Codex runs without its memory summary from earlier sessions.
 - **Optional free-form focus** — review scope, possibly multi-word. Examples:
   - `focus on the new retry logic in src/agent.py — concurrency safety`
   - `review HEAD~2..HEAD`
@@ -27,8 +28,9 @@ Algorithm:
 1. Tokenise `$ARGUMENTS` on whitespace, walk left-to-right.
 2. If a token is `--with-research`, the next token is `<research-file>`; consume both.
 3. If a token is `--with-spec`, the next token is `<spec-file>`; consume both.
-4. Every remaining token belongs to the focus; join them with a single space into one FOCUS string.
-5. If `$ARGUMENTS` is empty, omit the focus entirely (the wrapper falls back to the default working-tree scope).
+4. If a token is `--no-memories`, pass it through as its own argv slot; consume only it.
+5. Every remaining token belongs to the focus; join them with a single space into one FOCUS string.
+6. If `$ARGUMENTS` is empty, omit the focus entirely (the wrapper falls back to the default working-tree scope).
 
 ## 2 · Dispatch
 
@@ -42,6 +44,7 @@ ask-codex.sh "focus on src/agent.py concurrency"          # focus only
 ask-codex.sh --with-research notes.md "concurrency focus" # flag before focus
 ask-codex.sh "focus on auth flow" --with-spec docs/auth.md  # flag after focus
 ask-codex.sh --with-spec docs/rfcs/0004.md --with-research notes.md "review against the spec"
+ask-codex.sh --no-memories "fresh-eyes pass over the branch"   # no Codex memory summary
 ```
 
 Worked example — if `$ARGUMENTS = "focus on src/agent.py concurrency --with-spec docs/agent.md"`:
@@ -104,7 +107,7 @@ If `latest-codex.final.md` contains a `## NEED RESEARCH` section after the verdi
      done
    } > "$RFILE"
    ```
-3. Re-invoke `ask-codex.sh --with-research <RFILE>` with the **same focus** as the original call.
+3. Re-invoke `ask-codex.sh --with-research <RFILE>` with the **same focus** as the original call, plus `--no-memories` if the original call had it.
 4. Use the second verdict as the actionable one. Mention the round-trip to the user (Antigravity → Codex re-review) so they understand why latency was higher.
 
 ## 5 · Don't auto-fix

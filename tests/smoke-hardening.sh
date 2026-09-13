@@ -50,6 +50,57 @@ assert_fail commit_worktree_changes "$TMP/repo" 1
 assert_ok test -d "$TMP/repo"
 assert_ok test -n "$(git -C "$TMP/repo" status --porcelain)"
 
+# ask-codex.sh --no-memories must reach codex as a config override, and must be
+# refused for a model that has no equivalent switch (before anything is spawned).
+STUB_CLI="$TMP/stub-cli"
+cat > "$STUB_CLI" <<'STUB'
+#!/usr/bin/env bash
+# Record every argv slot except the trailing prompt, one per line.
+printf '%s\n' "${@:1:$#-1}" > "$STUB_ARGV"
+echo "VERDICT: SHIP"
+STUB
+chmod +x "$STUB_CLI"
+run_ask_codex() {
+  (cd "$TMP/repo" && env -u REVIEWER_CLI -u DEV_TRIO_REVIEWER_MODEL \
+    -u MANIFEST_PARENT_TMP -u REVIEWER_ROLE_FILE \
+    CODEX_CLI="$STUB_CLI" CLAUDE_CLI="$STUB_CLI" STUB_ARGV="$TMP/argv" \
+    AGENT_TEAM=smoke TMUX="" DEV_TRIO_LOG_DIR="$TMP/log" \
+    AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" \
+    "$@" "$ROOT/dev-trio/bin/ask-codex.sh" "${ASK_ARGS[@]}" >/dev/null 2>&1)
+}
+final_path() { printf '%s/log/smoke/%s' "$TMP" "$(readlink "$TMP/log/smoke/latest-codex.final.md")"; }
+NO_MEM_ARGV="exec --skip-git-repo-check -c features.memories=false --output-last-message"
+# Refusal is rc=2 and must happen before any CLI is spawned.
+assert_refused() {
+  local rc=0
+  rm -f "$TMP/argv"
+  run_ask_codex "$@" || rc=$?
+  assert_eq "$rc" 2
+  assert_fail test -e "$TMP/argv"
+}
+
+ASK_ARGS=("focus")
+assert_ok run_ask_codex
+assert_eq "$(tr '\n' ' ' < "$TMP/argv")" \
+  "exec --skip-git-repo-check --output-last-message $(final_path) "
+
+ASK_ARGS=("focus" --no-memories)
+assert_ok run_ask_codex
+assert_eq "$(tr '\n' ' ' < "$TMP/argv")" "$NO_MEM_ARGV $(final_path) "
+
+ASK_ARGS=(--no-memories "focus")
+assert_ok run_ask_codex DEV_TRIO_REVIEWER_MODEL=codex-no-memories
+assert_eq "$(tr '\n' ' ' < "$TMP/argv")" "$NO_MEM_ARGV $(final_path) "
+
+assert_refused DEV_TRIO_REVIEWER_MODEL=claude
+
+# Config models shadow built-ins: a hand-edited codex-no-memories (here one that
+# dropped the override) must not run under a flag that promises the built-in.
+printf '%s\n' '{"models":{"codex-no-memories":{"command":"codex","env_command":"CODEX_CLI",
+  "args":["exec","{prompt}"],"final_args":["exec","--output-last-message","{final}","{prompt}"]}}}' \
+  > "$TMP/shadow-models.json"
+assert_refused AGENT_TEAM_MODELS_CONFIG="$TMP/shadow-models.json"
+
 cmp "$ROOT/dev-trio/lib/registry.sh" "$ROOT/debate-conductor/lib/registry.sh"
 PASS=$((PASS + 1))
 

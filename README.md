@@ -31,7 +31,7 @@ Then install the plugins you want:
 
 ## Shared model configuration
 
-The role-based plugins resolve their companion CLIs through a **shared model registry**. A *model* is a named CLI adapter (how to spawn a CLI and feed it a prompt); a *role* (e.g. `dev-trio.researcher`) is bound to a model. Four models ship built-in — `agy`, `codex`, `claude`, `claude-write` — and the default bindings match the role tables, so **zero configuration is required**. `claude-write` is `claude` plus `--permission-mode acceptEdits`: headless `claude -p` cannot edit files without it, so only roles meant to write are bound to it.
+The role-based plugins resolve their companion CLIs through a **shared model registry**. A *model* is a named CLI adapter (how to spawn a CLI and feed it a prompt); a *role* (e.g. `dev-trio.researcher`) is bound to a model. Five models ship built-in — `agy`, `codex`, `codex-no-memories`, `claude`, `claude-write` — and the default bindings match the role tables, so **zero configuration is required**. `claude-write` is `claude` plus `--permission-mode acceptEdits`: headless `claude -p` cannot edit files without it, so only roles meant to write are bound to it. `codex-no-memories` is `codex` plus `-c features.memories=false`, for reviews that should not receive the memory summary from earlier Codex sessions.
 
 To customise, use the `agent-team-models` CLI. It is on PATH whenever either plugin is active; both plugins ship an identical copy and operate on the **same** config file:
 
