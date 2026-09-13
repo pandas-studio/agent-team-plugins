@@ -278,6 +278,11 @@ $FP_EXCERPT
     if [ "$PRESERVE_WORKTREE" = "0" ]; then
       if merge_or_discard_worktree "$WT" "$ITER" "$PASSED" "$ORIGINAL_DIR"; then
         printf '  worktree: %s\n' "$([ "$PASSED" = "1" ] && echo merged || echo discarded)" >> "$SUMMARY_LOG"
+      else
+        # Refused (worktree off its branch) or ff-merge failed: nothing landed.
+        printf '  worktree: PRESERVED (not merged or discarded: %s)\n' "$WT" >> "$SUMMARY_LOG"
+        printf '## iter %d · %s · WORKTREE-MERGE-BLOCK\nIter log: %s\nPreserved worktree: %s\n\n' \
+          "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ITER_LOG" "$WT" >> "$FIX_PLAN_FILE"
       fi
     fi
     unset RALPH_WT_DIR

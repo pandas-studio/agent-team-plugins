@@ -278,7 +278,15 @@ build_fix_plan_excerpt() {
 #   3. diff line count cap      (default MAX_DIFF_LINES=10000; override per call)
 pre_merge_validate() {
   local wt="$1" base="$2" iter_branch="$3" max_lines="${4:-10000}"
-  local fail=0
+  local fail=0 have
+
+  # 0. the worktree must still be on its iteration branch — otherwise the
+  # checks below would validate whatever history the coder switched to.
+  have=$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null || true)
+  if [ "$have" != "$iter_branch" ]; then
+    ralph_log "  validate FAIL: worktree is on '${have:-<no branch>}', not $iter_branch"
+    return 1
+  fi
 
   # 1. whitespace / conflict marker check
   if ! git -C "$wt" diff --check "$base"...HEAD >/dev/null 2>&1; then

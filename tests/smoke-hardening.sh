@@ -159,7 +159,15 @@ assert_eq "$(run_driver "$ROOT/ralph-trio/bin/ralph-solo.sh" --prompt PROMPT.md 
 assert_eq "$(run_driver "$ROOT/spec-trio/bin/spec-trio.sh" --spec spec.md --backlog BACKLOG.md --max-iter 1 \
   --dry-run --no-research --worktree --base-branch no-such-ref)" "rc=1"
 assert_ok grep -q 'could not create the iter 1 worktree' "$TMP/drv.err"
-assert_eq "$(grep -c '^- \[ \] task$' "$DRV/BACKLOG.md")" "1"
+# Without --dry-run the task was popped before the failure: it must be pending
+# again. (Worktree creation precedes every model call, so nothing is spawned.)
+for driver in ralph-trio ralph-debate; do
+  printf -- '- [ ] task\n' > "$DRV/BACKLOG.md"
+  assert_eq "$(run_driver "$ROOT/ralph-trio/bin/$driver.sh" --backlog BACKLOG.md --max-iter 1 \
+    --worktree --base-branch no-such-ref)" "rc=1"
+  assert_eq "$(grep -c '^- \[ \] task$' "$DRV/BACKLOG.md")" "1"
+done
+printf -- '- [ ] task\n' > "$DRV/BACKLOG.md"
 
 # ralph-meta without --base-ref: the empty range array must not kill git log
 # under bash 3.2's set -u (it used to report 0 commits every time).
@@ -221,11 +229,13 @@ for plugin in ralph-trio spec-trio; do
     git -C "$c" switch -q feature
     printf "c\n" > "$c/c.txt"
     commit_worktree_changes "$c" 3 >/dev/null 2>&1 || echo commit-refused
+    git -C "$c" stash -q -u
+    pre_merge_validate "$c" "$base" "$(worktree_branch "$c" 3)" >/dev/null 2>&1 || echo validate-refused
     [ "$(git rev-parse feature)" = "$(git rev-parse "$base")" ] && echo feature-untouched
     merge_or_discard_worktree "$c" 3 0 "$PWD" >/dev/null 2>&1 || echo discard-refused
     git rev-parse -q --verify refs/heads/feature >/dev/null && [ -d "$c" ] && echo feature-kept
   ' _ "$WTREPO")" "$(printf '%s\n' distinct branches "bad-rc=1 out=" no-leftover discarded merged \
-      missing-refused commit-refused feature-untouched discard-refused feature-kept)"
+      missing-refused commit-refused validate-refused feature-untouched discard-refused feature-kept)"
 done
 
 # spec-trio scope gate: paths are listed verbatim (non-ASCII names match the
