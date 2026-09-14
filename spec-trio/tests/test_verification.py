@@ -39,8 +39,6 @@ if mutate == role + '-worktree':
 if mutate == role + '-backlog':
     Path('BACKLOG.md').write_text('- [x] falsely completed\n')
 if role == 'planner':
-    if os.environ.get('SLOW_PLANNER'):
-        time.sleep(2)
     if os.environ.get('PLANNER_FAIL'):
         sys.exit(7)
     paths = 'file.txt,retained.txt' if os.environ.get('COMMIT_RETRY') and not (os.environ.get('NARROW_RETRY') and n > 1) else 'file.txt'
@@ -220,7 +218,18 @@ class VerificationTests(unittest.TestCase):
         self.assertEqual((self.state / "coder.count").read_text(), "2")
 
     def test_runtime_cap_retains_pending_work(self):
-        self.env.update(PLANNER_FAIL="1", SLOW_PLANNER="1")
+        # Advance the deadline clock only after the first planner attempt;
+        # runner startup speed must not determine whether that attempt runs.
+        real_date = shutil.which("date")
+        (self.bin / "date").write_text(
+            "#!/usr/bin/env python3\nimport os,sys\nfrom pathlib import Path\n"
+            + "if sys.argv[1:] == ['+%s']:\n"
+            + "    print(1002 if (Path(os.environ['FIXTURE_STATE']) / 'planner.count').exists() else 1000)\n"
+            + "else:\n"
+            + f"    os.execv({real_date!r}, ['date'] + sys.argv[1:])\n"
+        )
+        (self.bin / "date").chmod(0o755)
+        self.env["PLANNER_FAIL"] = "1"
         self.run_driver("--max-iter", "5", "--max-runtime", "1s")
         self.rc(3)
         self.pending()
