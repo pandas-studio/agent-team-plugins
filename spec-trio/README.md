@@ -88,7 +88,9 @@ Verdict dispatch:
 
 The source spec, frozen snapshot and backlog are checked before and after each
 external stage and before completion. A worktree's spec/backlog copies are also
-protected against changes from their starting state. This detects changes at
+protected against changes from their starting state. Guard stamps include the
+resolved destination, so retargeting an intermediate symlink is detected even
+when the destination files contain identical bytes. This detects changes at
 stage boundaries; it is not an OS-level write sandbox.
 
 ### Exit status and migration
@@ -109,6 +111,12 @@ The final summary records `status`, `completed`, `pending`, `reason` and `exit`.
 A successful merge followed by cleanup failure counts the task completed but
 exits 1; a failed merge leaves the task pending. A coverage gap alone remains
 advisory, but `--coverage-requeue` creates pending work and therefore exits 3.
+
+Coverage classification never edits the live backlog. The driver stages requeue
+additions separately, checks the original backlog and resolved symlink destination,
+then publishes the prepared contents atomically. Concurrent edits block the run;
+persistence failures exit 1. Standalone `spec-coverage.sh --requeue` also exits 1
+on append failure, retaining any rows successfully appended before the error.
 
 Useful flags:
 

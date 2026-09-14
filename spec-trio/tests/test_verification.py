@@ -456,6 +456,194 @@ class VerificationTests(unittest.TestCase):
         self.assertFalse((self.state / "planner.count").exists())
         self.assertIn("status=dry-run completed=0", self.result.stderr)
 
+    def coverage_hook(self, body):
+        # Run a deterministic concurrent-edit fixture during classification,
+        # without replacing the actual coverage helper or production driver.
+        git = shutil.which("git")
+        marker = self.state / "coverage-hook-fired"
+        (self.bin / "git").write_text(
+            "#!/usr/bin/env python3\nimport os,sys\nfrom pathlib import Path\n"
+            + f"marker=Path({str(marker)!r})\n"
+            + 'if "log" in sys.argv[1:] and not marker.exists():\n'
+            + "    marker.touch()\n"
+            + "\n".join("    " + line for line in body.splitlines())
+            + f'\nos.execv({git!r}, ["git"] + sys.argv[1:])\n'
+        )
+        (self.bin / "git").chmod(0o755)
+
+    def check_coverage_backlog_conflict(self, flag):
+        backlog = self.repo / "BACKLOG.md"
+        backlog.write_text("- [ ] §5.1 one\n- [ ] §5.1 two\n")
+        self.coverage_hook(
+            f"p=Path({str(backlog)!r})\np.write_text(p.read_text().replace('[ ]', '[x]'))"
+        )
+        self.run_driver(flag)
+        self.rc(4)
+        self.assertEqual((self.state / "coder.count").read_text(), "1")
+        self.assertIn("status=blocked completed=1", self.result.stderr)
+        self.assertEqual(backlog.read_text(), "- [x] §5.1 one\n- [x] §5.1 two\n")
+        self.assertNotIn("spec coverage gap", backlog.read_text())
+
+    def test_read_only_coverage_rejects_backlog_changes(self):
+        self.check_coverage_backlog_conflict("--coverage-check")
+
+    def test_requeue_rejects_backlog_changes_before_applying_additions(self):
+        self.check_coverage_backlog_conflict("--coverage-requeue")
+
+    def test_coverage_requeue_persistence_failure(self):
+        backlog = self.repo / "BACKLOG.md"
+        backlog.write_text("- [x] already complete\n")
+        backlog.chmod(0o444)
+        self.addCleanup(backlog.chmod, 0o644)
+        if os.access(backlog, os.W_OK):
+            self.skipTest("requires a user without write access to a read-only file")
+        self.run_driver("--coverage-requeue")
+        self.rc(1)
+        self.assertIn("reason=coverage-persistence-failed", self.result.stderr)
+        self.assertEqual(backlog.read_text(), "- [x] already complete\n")
+        self.assertNotIn("status=completed", self.result.stderr)
+
+    def test_standalone_coverage_propagates_append_failure(self):
+        destination = self.base / "read-only-backlog"
+        destination.write_text("- [x] already complete\n")
+        destination.chmod(0o444)
+        self.addCleanup(destination.chmod, 0o644)
+        if os.access(destination, os.W_OK):
+            self.skipTest("requires a user without write access to a read-only file")
+        result = subprocess.run(
+            [
+                "bash",
+                str(ROOT / "spec-trio/bin/spec-coverage.sh"),
+                "--spec",
+                str(self.repo / "spec.md"),
+                "--no-partial",
+                "--requeue",
+                str(destination),
+            ],
+            cwd=self.repo,
+            env=self.env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("0 additions written", result.stderr)
+        self.assertNotIn("appended 1", result.stderr)
+        self.assertEqual(destination.read_text(), "- [x] already complete\n")
+
+    def test_requeue_uses_guarded_atomic_publication(self):
+        backlog = self.repo / "BACKLOG.md"
+        backlog.write_text("- [x] already complete")
+        self.run_driver("--coverage-requeue")
+        self.rc(3)
+        self.assertEqual(
+            backlog.read_text(),
+            "- [x] already complete\n- [ ] (spec coverage gap §5.1) valid value\n",
+        )
+        self.assertFalse((self.state / "coder.count").exists())
+
+    def check_intermediate_symlink_retarget(self, name):
+        original = self.repo / name
+        old = self.base / ("old-" + name)
+        new = self.base / ("new-" + name)
+        chain = self.base / ("middle-" + name)
+        content = original.read_text()
+        old.write_text(content)
+        new.write_text(content)
+        chain.symlink_to(old)
+        original.unlink()
+        original.symlink_to(chain)
+        self.git("add", name)
+        self.git("commit", "-qm", "chain fixture")
+        self.env.update(FIXTURE_CHAIN=str(chain), FIXTURE_NEW=str(new))
+        self.command = 'ln -sfn "$FIXTURE_NEW" "$FIXTURE_CHAIN"; ' + self.command
+        self.run_driver()
+        self.rc(4)
+        self.assertEqual(old.read_text(), content)
+        self.assertEqual(new.read_text(), content)
+        self.assertEqual(original.resolve(), new)
+        self.assertFalse((self.state / "reviewer.count").exists())
+        self.assertIn("completed=0", self.result.stderr)
+
+    def test_backlog_chain_retarget_cannot_complete_old_destination(self):
+        self.check_intermediate_symlink_retarget("BACKLOG.md")
+
+    def test_spec_chain_retarget_is_a_contract_change(self):
+        self.check_intermediate_symlink_retarget("spec.md")
+
+    def physical_parent_fixture(self, name, *, direct=False):
+        local = self.base / "local"
+        remote = self.base / "remote"
+        local.mkdir()
+        (remote / "child").mkdir(parents=True)
+        content = (self.repo / name).read_text()
+        actual = remote / name
+        decoy = local / name
+        actual.write_text(content)
+        decoy.write_text(content)
+        (local / "dirlink").symlink_to(remote / "child")
+        if direct:
+            supplied = local / "dirlink" / ".." / name
+        else:
+            supplied = local / "input"
+            supplied.symlink_to("dirlink/../" + name)
+        self.assertEqual(supplied.read_text(), content)
+        return supplied, actual, decoy, content
+
+    def test_physical_parent_spec_guard(self):
+        supplied, actual, decoy, content = self.physical_parent_fixture("spec.md")
+        self.env.update(MUTATE="coder", FIXTURE_SPEC=str(actual))
+        self.run_driver("--spec", str(supplied))
+        self.rc(4)
+        self.assertEqual(decoy.read_text(), content)
+        self.pending()
+        self.assertFalse((self.state / "reviewer.count").exists())
+
+    def test_physical_parent_completion(self):
+        supplied, actual, decoy, content = self.physical_parent_fixture("BACKLOG.md")
+        self.run_driver("--backlog", str(supplied))
+        self.rc(0)
+        self.assertEqual(actual.read_text(), content.replace("[ ]", "[x]"))
+        self.assertEqual(decoy.read_text(), content)
+        self.assertTrue(supplied.is_symlink())
+
+    def test_physical_parent_requeue(self):
+        supplied, actual, decoy, content = self.physical_parent_fixture("BACKLOG.md")
+        actual.write_text("- [x] already complete\n")
+        self.run_driver("--backlog", str(supplied), "--coverage-requeue")
+        self.rc(3)
+        self.assertEqual(
+            actual.read_text(),
+            "- [x] already complete\n- [ ] (spec coverage gap §5.1) valid value\n",
+        )
+        self.assertEqual(decoy.read_text(), content)
+        self.assertFalse((self.state / "coder.count").exists())
+
+    def test_direct_physical_parent_backlog_path(self):
+        supplied, actual, decoy, content = self.physical_parent_fixture(
+            "BACKLOG.md", direct=True
+        )
+        self.run_driver("--backlog", str(supplied))
+        self.rc(0)
+        self.assertEqual(actual.read_text(), content.replace("[ ]", "[x]"))
+        self.assertEqual(decoy.read_text(), content)
+
+    def test_post_publication_edit_is_not_adopted_as_expected_content(self):
+        real_mv = shutil.which("mv")
+        (self.bin / "mv").write_text(
+            "#!/usr/bin/env python3\nimport sys,subprocess\nfrom pathlib import Path\n"
+            + f"subprocess.run([{real_mv!r}] + sys.argv[1:], check=True)\n"
+            + 'if any(".spec-trio." in a for a in sys.argv[1:]):\n'
+            + '    Path(sys.argv[-1]).write_text("external replacement\\n")\n'
+        )
+        (self.bin / "mv").chmod(0o755)
+        self.run_driver("--autoship")
+        self.rc(4)
+        self.assertEqual(
+            (self.repo / "BACKLOG.md").read_text(), "external replacement\n"
+        )
+        self.assertNotIn("status=completed", self.result.stderr)
+
     def test_coverage_requeue_makes_run_pending(self):
         self.run_driver("--coverage-requeue")
         self.rc(3)

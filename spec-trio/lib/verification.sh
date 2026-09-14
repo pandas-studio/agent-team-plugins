@@ -3,11 +3,12 @@
 # intentionally retain their existing semantics.
 
 spec_stamp() {
-  local path="$1" digest
+  local path="$1" digest target
   if [ -f "$path" ] && [ -r "$path" ]; then
-    digest=$(_manifest_sha256 "$path") || return 1
+    target=$(spec_resolve_target "$path") || return 1
+    digest=$(_manifest_sha256 "$target") || return 1
     [ -n "$digest" ] || return 1
-    printf '%s:%s\n' "$(readlink "$path" 2>/dev/null || true)" "$digest"
+    printf '%s:%s:%s\n' "$(readlink "$path" 2>/dev/null || true)" "$target" "$digest"
   elif [ ! -e "$path" ] && [ ! -L "$path" ]; then
     printf 'missing\n'
   else
@@ -83,15 +84,18 @@ spec_select_task() {
 }
 
 spec_resolve_target() {
-  local target="$1" link
+  local target="$1" link hops=0 parent
   while [ -L "$target" ]; do
+    hops=$((hops + 1))
+    [ "$hops" -le 40 ] || return 1
     link=$(readlink "$target") || return 1
     case "$link" in
       /*) target="$link" ;;
       *) target="$(dirname "$target")/$link" ;;
     esac
   done
-  printf '%s/%s\n' "$(cd "$(dirname "$target")" && pwd -P)" "$(basename "$target")"
+  parent=$(cd -P "$(dirname "$target")" && pwd -P) || return 1
+  printf '%s/%s\n' "$parent" "$(basename "$target")"
 }
 
 spec_complete_task() {
@@ -102,13 +106,38 @@ spec_complete_task() {
   tmp=$(mktemp "$target.spec-trio.XXXXXX") || return 1
   cp -p "$target" "$tmp" || return 1
   awk -v ln="$TASK_LINE" 'NR == ln { sub(/\[ \]/, "[x]") } { print }' "$BACKLOG_FILE" > "$tmp" || return 1
-  # Check again before replacing the user's backlog, including duplicate rows.
-  spec_check_or_stop
-  mv -f "$tmp" "$target" || return 1
-  BACKLOG_STAMP=$(spec_stamp "$BACKLOG_FILE") || return 1
-  GUARD_STAMPS[2]="$BACKLOG_STAMP"
+  spec_publish_backlog "$tmp" || return 1
   COMPLETED=$((COMPLETED + 1))
   printf '## iter %d · SHIP (completed)\nTask: %s\nReview: %s\n\n' "$ITER" "$TASK" "$REVIEW_LOG" >> "$FIX_PLAN_FILE" || return 1
+}
+
+# Both completion and coverage requeue publish an exact prepared payload.
+# Never learn a new expected stamp by rereading mutable live data after a write.
+spec_publish_backlog() {
+  local tmp="$1" digest expected
+  digest=$(_manifest_sha256 "$tmp") || return 1
+  expected="${BACKLOG_STAMP%:*}:$digest"
+  spec_check_or_stop
+  [ "$(spec_resolve_target "$BACKLOG_FILE")" = "$BACKLOG_TARGET" ] || return 1
+  [ -w "$BACKLOG_TARGET" ] || { echo "backlog is not writable: $BACKLOG_FILE" >&2; return 1; }
+  mv -f "$tmp" "$BACKLOG_TARGET" || return 1
+  BACKLOG_STAMP="$expected"
+  GUARD_STAMPS[2]="$BACKLOG_STAMP"
+  spec_check_or_stop
+}
+
+spec_append_coverage() {
+  local additions="$1" tmp
+  spec_check_or_stop
+  [ -s "$additions" ] || return 0
+  tmp=$(mktemp "$BACKLOG_TARGET.spec-trio.XXXXXX") || return 1
+  cp -p "$BACKLOG_TARGET" "$tmp" || return 1
+  # Separate additions from a final line lacking a newline.
+  if [ -s "$tmp" ] && [ -n "$(tail -c 1 "$tmp")" ]; then
+    printf '\n' >> "$tmp" || return 1
+  fi
+  cat "$additions" >> "$tmp" || return 1
+  spec_publish_backlog "$tmp"
 }
 
 # Called while the coder manifest is open. Scope failure remains the existing

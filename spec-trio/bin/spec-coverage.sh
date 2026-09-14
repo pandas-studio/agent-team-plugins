@@ -29,6 +29,7 @@
 #
 # Exit codes:
 #   0  ok (regardless of coverage outcome — coverage gaps don't fail the run)
+#   1  requeue persistence failure (earlier successfully appended rows remain)
 #   2  usage error / missing spec / invalid since-ref / no §5.N criteria
 #
 # Standalone use:
@@ -248,7 +249,10 @@ if [ -n "$REQUEUE" ] && [ "$COUNT_MISSING" -gt 0 ]; then
   while IFS=$'\t' read -r id name status shas; do
     [ "$status" = "NOT-COVERED" ] || continue
     [ -z "$id" ] && continue
-    printf -- '- [ ] (spec coverage gap %s) %s\n' "$id" "$name" >> "$REQUEUE"
+    if ! printf -- '- [ ] (spec coverage gap %s) %s\n' "$id" "$name" >> "$REQUEUE"; then
+      echo "ERROR: failed to append coverage task $id to $REQUEUE ($appended additions written)" >&2
+      exit 1
+    fi
     appended=$((appended + 1))
   done <<< "$RESULTS"
   log

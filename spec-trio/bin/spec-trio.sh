@@ -29,8 +29,8 @@
 
 set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_ROOT="$(cd -P "$SCRIPT_DIR/.." && pwd)"
 ROLES_DIR="$PLUGIN_ROOT/lib/roles"
 REVIEWER_ROLE_FILE="$ROLES_DIR/reviewer.md"
 [ -f "$ROLES_DIR/planner.md" ]  || { echo "ERROR: $ROLES_DIR/planner.md missing"  >&2; exit 2; }
@@ -102,14 +102,14 @@ fi
 
 [ -z "$SPEC_FILE" ]    && { echo "--spec is required (RFC 0003: spec is the external anchor)" >&2; exit 2; }
 [ -f "$SPEC_FILE" ]    || { echo "spec file not found: $SPEC_FILE" >&2; exit 2; }
-SPEC_FILE="$(cd "$(dirname "$SPEC_FILE")" && pwd -P)/$(basename "$SPEC_FILE")"
+SPEC_FILE="$(cd -P "$(dirname "$SPEC_FILE")" && pwd -P)/$(basename "$SPEC_FILE")"
 SPEC_SOURCE="$SPEC_FILE"
 SPEC_TARGET=$(spec_resolve_target "$SPEC_SOURCE") || exit 1
 
 [ -z "$MAX_ITER" ]    && { echo "--max-iter is required" >&2; exit 2; }
 [ -z "$BACKLOG_FILE" ] && { echo "--backlog is required" >&2; exit 2; }
 [ -f "$BACKLOG_FILE" ] || { echo "BACKLOG not found: $BACKLOG_FILE" >&2; exit 2; }
-BACKLOG_FILE="$(cd "$(dirname "$BACKLOG_FILE")" && pwd -P)/$(basename "$BACKLOG_FILE")"
+BACKLOG_FILE="$(cd -P "$(dirname "$BACKLOG_FILE")" && pwd -P)/$(basename "$BACKLOG_FILE")"
 BACKLOG_TARGET=$(spec_resolve_target "$BACKLOG_FILE") || exit 1
 
 # Cross-plugin dependency check: ask-codex.sh / ask-agy.sh are provided by
@@ -138,7 +138,7 @@ if [ ! -f "$FIX_PLAN_FILE" ]; then
   cp "$PLUGIN_ROOT/prompts/fix_plan.md.template" "$FIX_PLAN_FILE"
 fi
 
-FIX_PLAN_FILE="$(cd "$(dirname "$FIX_PLAN_FILE")" && pwd -P)/$(basename "$FIX_PLAN_FILE")"
+FIX_PLAN_FILE="$(cd -P "$(dirname "$FIX_PLAN_FILE")" && pwd -P)/$(basename "$FIX_PLAN_FILE")"
 
 ORIGINAL_DIR="$(pwd -P)"
 if [ "$USE_WORKTREE" = "1" ]; then
@@ -162,7 +162,7 @@ fi
 
 TEAM=$(detect_team) || exit 2
 LOG_DIR=$(spec_init_log_dir)
-LOG_DIR=$(cd "$LOG_DIR" && pwd -P) || exit 1
+LOG_DIR=$(cd -P "$LOG_DIR" && pwd -P) || exit 1
 # Durable, spec-trio-owned root for ask-codex.sh's --output-last-message
 # artifacts. Pinned via DEV_TRIO_LOG_DIR on every reviewer call so the
 # authoritative codex-<TS>.final.md survives `git worktree remove`: the
@@ -321,7 +321,7 @@ build_harness_ignore() {
       "$WORK_DIR"/*) rel="${p#"$WORK_DIR"/}"; out="${out:+$out$'\n'}$rel" ;;
     esac
   done
-  ws="$(cd "$(spec_workspace_root)" && pwd -P)"
+  ws="$(cd -P "$(spec_workspace_root)" && pwd -P)"
   case "$ws" in
     "$WORK_DIR"/*) out="${out:+$out$'\n'}${ws#"$WORK_DIR"/}/" ;;
   esac
@@ -1069,9 +1069,11 @@ if [ "$COVERAGE_CHECK" = "1" ]; then
     # break --coverage-requeue or --manifest-history when the workspace or
     # backlog path contained a space.
     COVERAGE_EXTRA_ARGS=()
+    COVERAGE_ADDITIONS=""
     spec_check_or_stop
     if [ "$COVERAGE_REQUEUE" = "1" ] && [ "$DRY_RUN" != "1" ]; then
-      COVERAGE_EXTRA_ARGS+=( --requeue "$BACKLOG_FILE" )
+      COVERAGE_ADDITIONS=$(mktemp "$LOG_DIR/coverage-additions.XXXXXX") || exit 1
+      COVERAGE_EXTRA_ARGS+=( --requeue "$COVERAGE_ADDITIONS" )
     fi
     # RFC 0004 PR 5: pass --manifest-history when this run produced manifests
     # so spec-coverage's report can roll up reviewer verdicts per §5.N.
@@ -1083,14 +1085,18 @@ if [ "$COVERAGE_CHECK" = "1" ]; then
       echo "=== coverage check @ $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
       echo "since-ref: $START_HEAD"
       echo
-      "$COVERAGE_HELPER" --spec "$SPEC_FILE" --since-ref "$START_HEAD" \
+      spec_run_stage "$COVERAGE_HELPER" --spec "$SPEC_FILE" --since-ref "$START_HEAD" \
         --repo "$ORIGINAL_DIR" "${COVERAGE_EXTRA_ARGS[@]+${COVERAGE_EXTRA_ARGS[@]}}" --quiet
     } 2>&1 | tee "$COVERAGE_LOG" >> "$SUMMARY_LOG"
-    COVERAGE_RC=${PIPESTATUS[0]}
-    [ "$COVERAGE_RC" -eq 0 ] || { STOP_REASON=coverage-failed; exit 1; }
-    BACKLOG_STAMP=$(spec_stamp "$BACKLOG_FILE") || exit 1
-    GUARD_STAMPS[2]="$BACKLOG_STAMP"
+    COVERAGE_PIPESTATUS=("${PIPESTATUS[@]}")
     spec_check_or_stop
+    if [ "${COVERAGE_PIPESTATUS[0]}" -ne 0 ] || [ "${COVERAGE_PIPESTATUS[1]}" -ne 0 ]; then
+      STOP_REASON=coverage-failed
+      exit 1
+    fi
+    if [ -n "$COVERAGE_ADDITIONS" ]; then
+      spec_append_coverage "$COVERAGE_ADDITIONS" || { STOP_REASON=coverage-persistence-failed; exit 1; }
+    fi
     echo "coverage report: $COVERAGE_LOG" >&2
   fi
 fi
