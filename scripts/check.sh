@@ -26,6 +26,7 @@ fi
 "$ROOT/tests/smoke-review-results.sh"
 "$ROOT/tests/smoke-review-callers.sh"
 "$ROOT/spec-trio/tests/smoke-pr5.sh"
+python3 "$ROOT/spec-trio/tests/test_verification.py"
 
 if [ -x "$ROOT/runtime/.venv/bin/pytest" ]; then
   "$ROOT/runtime/.venv/bin/ruff" check "$ROOT/runtime/src" "$ROOT/runtime/tests"

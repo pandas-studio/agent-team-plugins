@@ -155,7 +155,7 @@ run_spec_trio() {
     AGENT_TEAM="smoke-pr5-$team" \
     CLAUDE_CLI="$wd/wrap-claude.sh" \
     CODEX_CLI="$wd/wrap-codex.sh" \
-      "$SPEC_TRIO" --spec "$wd/spec.md" --backlog "$wd/BACKLOG.md" \
+      "$SPEC_TRIO" --test-cmd 'git diff --check' --spec "$wd/spec.md" --backlog "$wd/BACKLOG.md" \
         --no-research "$@" >/dev/null 2>&1
   )
 }
@@ -220,7 +220,7 @@ run_spec_trio case1b "$WD1b" --max-iter 1
 LD1b="$(case_log_dir case1b)"
 R1b="$LD1b/spec-trio-*-iter-1-review.manifest.json"
 assert_eq "spec reviewer verdict remains OUT-OF-SCOPE" "OUT-OF-SCOPE" "$(manifest_field "$R1b" '.verdict')"
-assert_cmd "spec violation routes to human attention" "grep -q 'human attention — spec violation' '$WD1b/fix_plan.md'"
+assert_cmd "spec violation routes to human attention" "grep -q 'OUT-OF-SCOPE (human attention; blocked; task remains pending)' '$WD1b/fix_plan.md'"
 
 # --------------------------------------------------------------------------
 section "Case 2: gate 1 round-trip (planner emits no allowlist)"
@@ -468,15 +468,14 @@ EOF
   SPEC_TRIO_WORKSPACE="$WD9b_BASE/spec ws with spaces" \
   AGENT_TEAM="smoke-pr5-case9b" \
   CLAUDE_CLI="$WD9b/wrap-claude.sh" CODEX_CLI="$WD9b/wrap-codex.sh" \
-    "$SPEC_TRIO" --spec "$WD9b/spec.md" --backlog "$WD9b/BACKLOG.md" \
+    "$SPEC_TRIO" --test-cmd 'git diff --check' --spec "$WD9b/spec.md" --backlog "$WD9b/BACKLOG.md" \
       --no-research --max-iter 1 --dry-run --coverage-check --coverage-requeue \
       >/dev/null 2>&1
 )
-# §5.99 was never cited in any commit; --coverage-requeue should append it.
-# If the args had been split on space, --requeue would point at a partial
-# path or be silently dropped, and the line wouldn't appear.
-assert_cmd "spaces-in-path: BACKLOG appended with §5.99 coverage gap" \
-  "grep -q 'spec coverage gap §5.99' '$WD9b/BACKLOG.md'"
+# Dry-run reports coverage but must never append real backlog tasks.
+# Real-run requeue with spaced paths is covered by test_verification.py.
+assert_cmd "spaces-in-path: dry-run leaves BACKLOG unchanged" \
+  "! grep -q 'spec coverage gap §5.99' '$WD9b/BACKLOG.md'"
 
 # --------------------------------------------------------------------------
 section "Case 10a: planner failure re-queues task (NEEDS-FIX, not OUT-OF-SCOPE)"
@@ -513,7 +512,7 @@ EOF
   AGENT_TEAM="smoke-pr5-case10a" \
   PLANNER_CLI="$WD10a/planner-fail.sh" CODER_CLI="$WD10a/coder-stub.sh" \
   CODEX_CLI="$WD10a/wrap-codex.sh" \
-    "$SPEC_TRIO" --spec "$WD10a/spec.md" --backlog "$WD10a/BACKLOG.md" \
+    "$SPEC_TRIO" --test-cmd 'git diff --check' --spec "$WD10a/spec.md" --backlog "$WD10a/BACKLOG.md" \
       --no-research --max-iter 1 --autoship >/dev/null 2>&1
 )
 LD10a="$(case_log_dir case10a)"
@@ -525,8 +524,8 @@ assert_eq  "planner-fail: skip-reason=plan-failed" \
   "plan-failed" "$(manifest_field "$R10a" '[.inputs[]?|select(.kind=="skip-reason")|.value][0]')"
 assert_eq  "planner-fail: plan-rc=7 recorded" \
   "7" "$(manifest_field "$R10a" '[.inputs[]?|select(.kind=="plan-rc")|.value][0]')"
-assert_cmd "planner-fail: BACKLOG.md got retry line" \
-  "grep -q 'retry (iter 1 NEEDS-FIX): §5.1 task that the planner will fail on' $WD10a/BACKLOG.md"
+assert_cmd "planner-fail: BACKLOG.md retains original pending row" \
+  "grep -Fq -- '- [ ] §5.1 task that the planner will fail on' $WD10a/BACKLOG.md"
 
 # --------------------------------------------------------------------------
 section "Case 10b: --autoship refuses to ship a failed coder run"
@@ -559,7 +558,7 @@ EOF
   cd "$WD10b"
   AGENT_TEAM="smoke-pr5-case10b" \
   PLANNER_CLI="$WD10b/planner-stub.sh" CODER_CLI="$WD10b/coder-fail.sh" \
-    "$SPEC_TRIO" --spec "$WD10b/spec.md" --backlog "$WD10b/BACKLOG.md" \
+    "$SPEC_TRIO" --test-cmd 'git diff --check' --spec "$WD10b/spec.md" --backlog "$WD10b/BACKLOG.md" \
       --no-research --max-iter 1 --autoship >/dev/null 2>&1
 )
 LD10b="$(case_log_dir case10b)"
@@ -571,8 +570,8 @@ assert_eq  "autoship+coder-fail: skip-reason=autoship-coder-failed" \
   "autoship-coder-failed" "$(manifest_field "$R10b" '[.inputs[]?|select(.kind=="skip-reason")|.value][0]')"
 assert_eq  "autoship+coder-fail: coder-rc=13 recorded" \
   "13" "$(manifest_field "$R10b" '[.inputs[]?|select(.kind=="coder-rc")|.value][0]')"
-assert_cmd "autoship+coder-fail: BACKLOG.md got retry line" \
-  "grep -q 'retry (iter 1 NEEDS-FIX): §5.1 task that the coder will fail on' $WD10b/BACKLOG.md"
+assert_cmd "autoship+coder-fail: BACKLOG.md retains original pending row" \
+  "grep -Fq -- '- [ ] §5.1 task that the coder will fail on' $WD10b/BACKLOG.md"
 
 # --------------------------------------------------------------------------
 section "Case 8: re-init guard (unit-style, direct source)"

@@ -10,7 +10,7 @@ This skill copies the three spec-trio workspace templates from the plugin into `
 
 - `prompts/spec.md.template`     → `./spec.md`     (§1–§6 contract you'll fill in — Goals, Interfaces, Behavior, Constraints, Test criteria, Non-goals)
 - `prompts/BACKLOG.md.template`  → `./BACKLOG.md`  (task list with §-citation examples)
-- `prompts/fix_plan.md.template` → `./fix_plan.md` (iteration log + completion marker)
+- `prompts/fix_plan.md.template` → `./fix_plan.md` (iteration log; the driver owns completion)
 
 It is **non-destructive**: if any of the three already exists in `$PWD`, this skill leaves it alone and reports which were copied vs which were skipped.
 
@@ -46,7 +46,7 @@ Summarize:
 > Seeded:
 > - `spec.md`      — fill in §1 Goals, §2 Interfaces, §3 Behavior, §4 Constraints, §5 Test criteria, §6 Non-goals **before** running. Keep the numbered headings stable — §-IDs become long-lived citation handles.
 > - `BACKLOG.md`   — replace the example tasks with real ones, each citing a `§N` / `§N.M` from `spec.md`. If a task can't be expressed within the spec, amend the spec rather than the task.
-> - `fix_plan.md`  — left empty; spec-trio writes here per iteration. Completion marker is `<promise>COMPLETE</promise>`.
+> - `fix_plan.md`  — left empty; spec-trio writes here per iteration. Only driver-verified tasks become complete; markers cannot skip pending work.
 >
 > Logs land under `$PWD/.spec-trio/log/<team>/` (override with `SPEC_TRIO_WORKSPACE`). Add `.spec-trio/` to `.gitignore`.
 >
@@ -59,8 +59,10 @@ Summarize:
 > Then run:
 >
 > ```
-> spec-trio.sh --spec spec.md --backlog BACKLOG.md --max-iter 10
+> spec-trio.sh --spec spec.md --backlog BACKLOG.md --max-iter 10 --test-cmd 'pytest -q'
 > ```
+>
+> Replace the example test command with your project’s verification command. Real runs require it, including `--autoship`. Blocking review results stop the loop with exit 4; capped runs with pending work exit 3.
 >
 > Add `--coverage-check` to classify each `### §5.N` against the commits the run produced. Run `spec-trio-doctor.sh` any time to verify the environment.
 

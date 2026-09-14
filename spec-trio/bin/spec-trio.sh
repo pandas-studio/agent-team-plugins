@@ -1,55 +1,36 @@
 #!/usr/bin/env bash
-# spec-trio.sh — ralph-trio with an external spec.md anchor injected into the
-# planner, coder, and reviewer prompts (RFC 0003).
-#
-# Each iteration:
-#   1. Pop one task from BACKLOG.md
-#   2. Stage 1 (Planner)    → claude -p with roles/planner.md  + <spec>
-#   2b Stage 1.5 (Research) → if the plan emits `## NEED RESEARCH`, ask-agy.sh
-#                             answers it BEFORE coding; grafted into the first
-#                             coder prompt (fires even under --autoship)
-#   3. Stage 2 (Coder)      → claude -p with roles/worker.md   + <spec> + plan
-#   4. Stage 3 (Reviewer)   → ask-codex.sh --with-spec spec.md against HEAD diff;
-#                             verdict read from codex's --output-last-message
-#                             (.final.md), not the streamed transcript. A
-#                             reviewer `## NEED RESEARCH` triggers Stage 3.5
-#                             (ask-agy.sh) + one research-informed retry.
-#
-# Status (PR 3): --strict-scope (default ON) gates the pipeline twice — after
-# the planner (plan-invalid: missing/empty <allowed-paths>) and after the
-# coder (scope-violation: changed path outside allowlist). On either failure
-# the iteration short-circuits to OUT-OF-SCOPE (no requeue, fix_plan tagged
-# human-attention). --no-strict-scope downgrades both gates to warnings.
-# --autoship does NOT bypass the gates; --dry-run does.
-# Status (PR 6): --coverage-check classifies each spec §5.N criterion against
-# commits made during the run (by literal §-citation in commit messages,
-# falling back to a keyword pass for PARTIAL detection). Output appears in
-# the summary log + a dedicated coverage log; coverage gaps do NOT fail the
-# run. --coverage-requeue additionally appends NOT-COVERED criteria as new
-# BACKLOG tasks for a later iteration.
+# spec-trio.sh — implement a backlog against one frozen spec contract.
 #
 # Usage:
-#   spec-trio.sh --spec PATH --max-iter N --backlog PATH [--prompt PATH]
-#                [--fix-plan PATH] [--max-runtime SPEC] [--worktree]
-#                [--base-branch BR] [--no-research] [--autoship] [--dry-run]
-#                [--strict-scope | --no-strict-scope]
-#                [--coverage-check | --coverage-requeue]
+#   spec-trio.sh --spec PATH --backlog PATH --max-iter N --test-cmd 'COMMAND'
+#     [--max-runtime SPEC] [--worktree] [--base-branch BR]
+#     [--prompt PATH] [--fix-plan PATH] [--inject-fix-plan] [--fix-plan-tail N]
+#     [--no-research] [--autoship] [--dry-run]
+#     [--strict-scope | --no-strict-scope] [--no-validate] [--max-diff-lines N]
+#     [--coverage-check | --coverage-requeue]
 #
-# Dependencies (plugin layout):
-#   - lib/common.sh, lib/manifest.sh, lib/spec-helpers.sh — vendored alongside,
-#     sourced from $PLUGIN_ROOT/lib (no cross-plugin lib lookup).
-#   - ask-codex.sh, ask-agy.sh — on PATH via the dev-trio plugin. Checked
-#     after arg parse so --dry-run / --autoship / --no-research can be used
-#     without the dev-trio plugin installed.
-#   - Role prompts — $PLUGIN_ROOT/lib/roles/{planner,worker,reviewer}.md.
+# --test-cmd is required for every real run, including --autoship; it is
+# executed with bash -c in the active workspace. --dry-run skips execution
+# and never changes the backlog. --autoship skips review only.
 #
-# Logs: $LOG_DIR/spec-trio-<TS>{,-iter-N-{plan,code,review,research}.log}
-#   where $LOG_DIR = $SPEC_TRIO_WORKSPACE/log/<team> (default $PWD/.spec-trio/log/<team>).
+# Each attempt: select pending task, plan, optional research, code, scope
+# gate, tests, scope gate, review. Research-informed code retries repeat the
+# gates. Contract/backlog changes or blocking reviews stop immediately.
+# A task is completed only after passing gates and any required worktree
+# merge. A completion promise in fix_plan.md cannot skip pending tasks.
+#
+# Exit: 0 completed/dry-run; 1 execution error; 2 invalid input;
+#       3 pending at a cap or after coverage requeue; 4 human attention;
+#       130 interrupted. Runtime caps are checked between iterations.
+#
+# Dependencies: bash, git, jq, and the configured model CLIs; reviewed runs
+# need dev-trio's ask-codex.sh and shared review-result.sh. Research needs
+# ask-agy.sh. Logs and frozen specs live under .spec-trio/log/<team>/.
 
 set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_ROOT="$(cd -P "$SCRIPT_DIR/.." && pwd)"
 ROLES_DIR="$PLUGIN_ROOT/lib/roles"
 REVIEWER_ROLE_FILE="$ROLES_DIR/reviewer.md"
 [ -f "$ROLES_DIR/planner.md" ]  || { echo "ERROR: $ROLES_DIR/planner.md missing"  >&2; exit 2; }
@@ -63,6 +44,7 @@ export REVIEWER_ROLE_FILE
 # shellcheck disable=SC1091
 . "$PLUGIN_ROOT/lib/manifest.sh" || { echo "spec-trio: failed to load lib/manifest.sh (jq missing?)" >&2; exit 2; }
 
+TEST_CMD=""
 MAX_ITER=""
 MAX_RUNTIME_SPEC="0"
 BACKLOG_FILE=""
@@ -82,10 +64,11 @@ STRICT_SCOPE=1
 COVERAGE_CHECK=0
 COVERAGE_REQUEUE=0
 
-usage() { sed -n '2,29p' "$0" >&2; }
+usage() { sed -n '2,27p' "$0" >&2; }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --test-cmd)        [ "$#" -ge 2 ] || { echo "--test-cmd needs a command" >&2; exit 2; }; TEST_CMD="$2"; shift 2 ;;
     --spec)            SPEC_FILE="$2"; shift 2 ;;
     --max-iter)        MAX_ITER="$2"; shift 2 ;;
     --max-runtime)     MAX_RUNTIME_SPEC="$2"; shift 2 ;;
@@ -110,16 +93,24 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+# Reject missing verification before creating any workspace artifacts.
+if [ "$DRY_RUN" != "1" ] && [[ ! "$TEST_CMD" =~ [^[:space:]] ]]; then
+  echo "--test-cmd is required for real runs (including --autoship)" >&2
+  exit 2
+fi
+. "$PLUGIN_ROOT/lib/verification.sh" || exit 1
+
 [ -z "$SPEC_FILE" ]    && { echo "--spec is required (RFC 0003: spec is the external anchor)" >&2; exit 2; }
 [ -f "$SPEC_FILE" ]    || { echo "spec file not found: $SPEC_FILE" >&2; exit 2; }
-SPEC_FILE="$(cd "$(dirname "$SPEC_FILE")" && pwd)/$(basename "$SPEC_FILE")"
-SPEC_BODY="$(cat "$SPEC_FILE")"
-SPEC_BODY="${SPEC_BODY//<\/spec>/[STRIPPED-CLOSING-TAG]}"
+SPEC_FILE="$(cd -P "$(dirname "$SPEC_FILE")" && pwd -P)/$(basename "$SPEC_FILE")"
+SPEC_SOURCE="$SPEC_FILE"
+SPEC_TARGET=$(spec_resolve_target "$SPEC_SOURCE") || exit 1
 
 [ -z "$MAX_ITER" ]    && { echo "--max-iter is required" >&2; exit 2; }
 [ -z "$BACKLOG_FILE" ] && { echo "--backlog is required" >&2; exit 2; }
 [ -f "$BACKLOG_FILE" ] || { echo "BACKLOG not found: $BACKLOG_FILE" >&2; exit 2; }
-BACKLOG_FILE="$(cd "$(dirname "$BACKLOG_FILE")" && pwd)/$(basename "$BACKLOG_FILE")"
+BACKLOG_FILE="$(cd -P "$(dirname "$BACKLOG_FILE")" && pwd -P)/$(basename "$BACKLOG_FILE")"
+BACKLOG_TARGET=$(spec_resolve_target "$BACKLOG_FILE") || exit 1
 
 # Cross-plugin dependency check: ask-codex.sh / ask-agy.sh are provided by
 # the dev-trio plugin on PATH. ask-codex.sh (reviewer) is skipped under
@@ -147,7 +138,9 @@ if [ ! -f "$FIX_PLAN_FILE" ]; then
   cp "$PLUGIN_ROOT/prompts/fix_plan.md.template" "$FIX_PLAN_FILE"
 fi
 
-ORIGINAL_DIR="$(pwd)"
+FIX_PLAN_FILE="$(cd -P "$(dirname "$FIX_PLAN_FILE")" && pwd -P)/$(basename "$FIX_PLAN_FILE")"
+
+ORIGINAL_DIR="$(pwd -P)"
 if [ "$USE_WORKTREE" = "1" ]; then
   git -C "$ORIGINAL_DIR" rev-parse --git-dir >/dev/null 2>&1 || { echo "--worktree requires git repo" >&2; exit 2; }
   [ -z "$BASE_BRANCH" ] && BASE_BRANCH="$(git -C "$ORIGINAL_DIR" rev-parse --abbrev-ref HEAD)"
@@ -169,6 +162,7 @@ fi
 
 TEAM=$(detect_team) || exit 2
 LOG_DIR=$(spec_init_log_dir)
+LOG_DIR=$(cd -P "$LOG_DIR" && pwd -P) || exit 1
 # Durable, spec-trio-owned root for ask-codex.sh's --output-last-message
 # artifacts. Pinned via DEV_TRIO_LOG_DIR on every reviewer call so the
 # authoritative codex-<TS>.final.md survives `git worktree remove`: the
@@ -178,9 +172,25 @@ LOG_DIR=$(spec_init_log_dir)
 # main repo), so this absolute path is unaffected by the later cd. ask-codex.sh
 # appends /$TEAM and returns exact artifact paths through a fresh receipt.
 CODEX_FINAL_ROOT="$LOG_DIR/codex"
-TS=$(date +%Y%m%d-%H%M%S)
+# Keep the exact bytes of one contract for every stage and the coverage report.
+SOURCE_STAMP=$(spec_stamp "$SPEC_SOURCE") || exit 1
+CONTRACT_DIR=$(mktemp -d "$LOG_DIR/contract-XXXXXXXX") || exit 1
+SPEC_FILE="$CONTRACT_DIR/spec.md"
+cp "$SPEC_SOURCE" "$SPEC_FILE" || exit 1
+chmod 444 "$SPEC_FILE" || exit 1
+SNAPSHOT_STAMP=$(spec_stamp "$SPEC_FILE") || exit 1
+[ "${SOURCE_STAMP##*:}" = "${SNAPSHOT_STAMP##*:}" ] || exit 1
+BACKLOG_STAMP=$(spec_stamp "$BACKLOG_FILE") || exit 1
+GUARD_FAILURE="$CONTRACT_DIR/guard-failure.txt"
+GUARD_PATHS=("$SPEC_SOURCE" "$SPEC_FILE" "$BACKLOG_FILE")
+GUARD_STAMPS=("$SOURCE_STAMP" "$SNAPSHOT_STAMP" "$BACKLOG_STAMP")
+SPEC_BODY="$(cat "$SPEC_FILE")"
+TS="$(date +%Y%m%d-%H%M%S)-${CONTRACT_DIR##*contract-}"
 SUMMARY_LOG="$LOG_DIR/spec-trio-$TS.log"
-ln -sfn "spec-trio-$TS.log" "$LOG_DIR/latest-spec-trio.log"
+ln -sfn "spec-trio-$TS.log" "$LOG_DIR/latest-spec-trio.log" || exit 1
+STOP_REASON=running
+trap 'spec_finish "$?"' EXIT
+spec_check_or_stop
 
 # parse_runtime has already explained a bad spec on stderr.
 MAX_RUNTIME_SECS=$(parse_runtime "$MAX_RUNTIME_SPEC") || exit 2
@@ -203,7 +213,8 @@ WORKER_ROLE="$(cat "$ROLES_DIR/worker.md")"
 {
   echo "=== spec-trio.sh @ $TS ==="
   echo "TEAM:         $TEAM"
-  echo "SPEC:         $SPEC_FILE"
+  echo "SPEC:         $SPEC_SOURCE (snapshot: $SPEC_FILE)"
+  echo "TEST_CMD:     $TEST_CMD"
   echo "BACKLOG:      $BACKLOG_FILE"
   echo "PROMPT:       ${PROMPT_FILE:-<none>}"
   echo "FIX_PLAN:     $FIX_PLAN_FILE"
@@ -220,6 +231,7 @@ WORKER_ROLE="$(cat "$ROLES_DIR/worker.md")"
 } | tee "$SUMMARY_LOG" >&2
 
 trap '
+  STOP_REASON=interrupted
   manifest_cleanup
   ralph_log "interrupted (Ctrl-C). Last iter=${ITER:-0}. Summary: $SUMMARY_LOG"
   exit 130
@@ -296,7 +308,7 @@ extract_need_research() {
 
 # build_harness_ignore — echo the newline-separated set of paths (relative to
 # WORK_DIR) the scope gate must ignore because the harness writes them itself,
-# not the coder: the popped BACKLOG, the templated fix_plan, the spec contract,
+# not the coder: the driver-owned BACKLOG, the templated fix_plan, the spec contract,
 # AND the spec-trio workspace/log tree. The workspace defaults to $PWD/.spec-trio
 # and (without --worktree) lives inside WORK_DIR, so its per-iter logs+manifests
 # would otherwise read as untracked out-of-allowlist changes and trip
@@ -304,12 +316,12 @@ extract_need_research() {
 # a trailing slash so check_scope treats it as a directory prefix.
 build_harness_ignore() {
   local out="" p rel ws
-  for p in "$BACKLOG_FILE" "$FIX_PLAN_FILE" "$SPEC_FILE"; do
+  for p in "$BACKLOG_FILE" "$BACKLOG_TARGET" "$FIX_PLAN_FILE" "$SPEC_SOURCE" "$SPEC_TARGET"; do
     case "$p" in
       "$WORK_DIR"/*) rel="${p#"$WORK_DIR"/}"; out="${out:+$out$'\n'}$rel" ;;
     esac
   done
-  ws="$(spec_workspace_root)"
+  ws="$(cd -P "$(spec_workspace_root)" && pwd -P)"
   case "$ws" in
     "$WORK_DIR"/*) out="${out:+$out$'\n'}${ws#"$WORK_DIR"/}/" ;;
   esac
@@ -334,18 +346,18 @@ apply_scope_gate() {
     ralph_log "  [scope-gate] OUT-OF-SCOPE: changed paths violate allowlist (strict-scope ON) — see $scope_log"
     # RFC 0004 PR 5: synthesize spec-review manifest (parent=coder) so the
     # OUT-OF-SCOPE verdict round-trips. Finalize before flag-set (atomicity).
-    manifest_init spec-review "$scope_log"
+    manifest_init spec-review "$scope_log" || exit 1
     REVIEW_RUN_ID="$MANIFEST_RUN_ID"
-    manifest_set_parent "$parent"
-    manifest_add_input kind=task value="$TASK"
-    manifest_add_input kind=spec path="$SPEC_FILE"
-    manifest_add_input kind=code-log path="$code_log"
+    manifest_set_parent "$parent" || exit 1
+    manifest_add_input kind=task value="$TASK" || exit 1
+    manifest_add_input kind=spec path="$SPEC_FILE" || exit 1
+    manifest_add_input kind=code-log path="$code_log" || exit 1
     [ -n "$ALLOWED_JOINED" ] && manifest_add_input kind=allowed-paths value="$ALLOWED_JOINED"
-    manifest_add_input kind=scope-fail value=scope-violation
-    manifest_add_input kind=scope-log path="$scope_log"
-    manifest_add_input kind=skip-reason value=scope-gate
-    manifest_set_verdict OUT-OF-SCOPE
-    manifest_finalize
+    manifest_add_input kind=scope-fail value=scope-violation || exit 1
+    manifest_add_input kind=scope-log path="$scope_log" || exit 1
+    manifest_add_input kind=skip-reason value=scope-gate || exit 1
+    manifest_set_verdict OUT-OF-SCOPE || exit 1
+    manifest_finalize || exit 1
     VERDICT="OUT-OF-SCOPE"
     REVIEW_LOG="$scope_log"
     SCOPE_FAIL=1
@@ -390,7 +402,13 @@ REVIEW_RUN_ID=""
 RESEARCH_RUN_ID=""
 CODE2_RUN_ID=""
 REVIEW2_RUN_ID=""
+TASK_BASE_SHA=""
 while :; do
+  spec_check_or_stop
+  if [ "$DRY_RUN" != "1" ] && [ "$(spec_pending_count)" -eq 0 ]; then
+    STOP_REASON=backlog-empty
+    break
+  fi
   ITER=$((ITER + 1))
   PARENT_RUN_ID=""
   PLAN_RUN_ID=""
@@ -400,11 +418,13 @@ while :; do
   CODE2_RUN_ID=""
   REVIEW2_RUN_ID=""
   if ! enforce_max_iter "$ITER" "$MAX_ITER"; then
+    STOP_REASON=max-iter
     ralph_log "max-iter cap reached ($MAX_ITER). Stopping."
     echo "=== STOP (max-iter) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
     break
   fi
   if ! enforce_max_runtime "$DEADLINE"; then
+    STOP_REASON=max-runtime
     ralph_log "max-runtime deadline reached. Stopping."
     echo "=== STOP (max-runtime) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
     break
@@ -415,14 +435,16 @@ while :; do
     # the manifest pipeline still fires. Cap iters at DRY_RUN_BACKLOG_COUNT
     # so --max-iter 0 (unlimited) still terminates.
     if [ "$ITER" -gt "$DRY_RUN_BACKLOG_COUNT" ]; then
+      STOP_REASON=dry-run-backlog-empty
       ralph_log "dry-run: synthetic backlog drained ($DRY_RUN_BACKLOG_COUNT iters). Stopping."
       echo "=== STOP (dry-run-backlog-empty) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
       break
     fi
     TASK="(dry-run synthetic task — iter $ITER)"
   else
-    TASK=$(pop_top_task "$BACKLOG_FILE") || true
+    spec_select_task || exit 1
     if [ -z "$TASK" ]; then
+      STOP_REASON=backlog-empty
       ralph_log "BACKLOG drained. Stopping."
       echo "=== STOP (backlog-empty) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
       break
@@ -437,8 +459,7 @@ while :; do
   if [ "$USE_WORKTREE" = "1" ]; then
     if ! WT=$(with_worktree "$ITER" "$BASE_BRANCH"); then
       ralph_log "could not create the iter $ITER worktree. Stopping."
-      # pop_top_task already marked the task done; put it back.
-      [ "$DRY_RUN" = "1" ] || append_to_backlog "$BACKLOG_FILE" "$TASK"
+      STOP_REASON=worktree-failed
       echo "=== STOP (worktree-failed) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
       WORKTREE_FAILED=1
       break
@@ -447,18 +468,17 @@ while :; do
     export RALPH_WT_DIR="$WT"
     printf '  worktree: %s\n' "$WT" >> "$SUMMARY_LOG"
   fi
-  # Iter-base SHA: HEAD as of this iter's start, captured AFTER worktree setup
-  # (so worktree mode anchors on the throwaway branch, not $ORIGINAL_DIR).
-  # check_scope uses this to walk every commit the coder produces during the
-  # iter — without it the gate would only see HEAD~1..HEAD and miss earlier
-  # commits in a multi-commit iter. Empty (e.g. unborn HEAD) → check_scope
-  # falls back to its legacy HEAD~1..HEAD behavior.
-  # --verify: plain `rev-parse HEAD` prints the literal "HEAD" in a repo with no
-  # commits, which after the coder's first commit names that commit — hiding it
-  # from both the scope gate and the reviewer. Anchor an unborn repo on the
-  # empty tree instead, so the first commit is diffed in full.
-  ITER_BASE_SHA="$(git -C "$WORK_DIR" rev-parse --verify -q HEAD 2>/dev/null \
-    || git -C "$WORK_DIR" hash-object -t tree /dev/null 2>/dev/null || true)"
+  spec_protect_worktree || exit 1
+  spec_check_or_stop
+  # In-place retries retain commits from failed attempts. Keep the task's
+  # original baseline for both scope checks and review until it completes.
+  # Worktree retries discard their failed branch, so anchor each new workspace.
+  # An unborn repository uses the empty tree to include its first commit.
+  if [ "$USE_WORKTREE" = "1" ] || [ -z "$TASK_BASE_SHA" ]; then
+    TASK_BASE_SHA="$(git -C "$WORK_DIR" rev-parse --verify -q HEAD 2>/dev/null \
+      || git -C "$WORK_DIR" hash-object -t tree /dev/null 2>/dev/null || true)"
+  fi
+  ITER_BASE_SHA="$TASK_BASE_SHA"
 
   PLAN_LOG="$LOG_DIR/spec-trio-$TS-iter-$ITER-plan.log"
   CODE_LOG="$LOG_DIR/spec-trio-$TS-iter-$ITER-code.log"
@@ -471,6 +491,8 @@ while :; do
   VERDICT=""
   PLAN_FAILED=0          # 1 = planner CLI exited non-zero; skip Stage 2+3
   PLAN_RC=0
+  TEST_RC=0
+  TEST_LOG=""
   PRE_RESEARCH=""        # Stage 1.5 planner-research body; "" = none (threads into Stage 2)
   RESEARCH_FAILED=0      # 1 = planner asked for research but ask-agy.sh failed
 
@@ -480,45 +502,49 @@ while :; do
     FP_EXCERPT=$(build_fix_plan_excerpt "$FIX_PLAN_FILE" "$FIX_PLAN_TAIL")
   fi
 
+  if [ -n "${RETRY_CONTEXT:-}" ]; then
+    FP_EXCERPT="${FP_EXCERPT}${FP_EXCERPT:+$'\n'}$RETRY_CONTEXT"
+  fi
+
   # ---- Stage 1: Planner ----
   # RFC 0004 PR 5: each stage emits a sibling .manifest.json next to its log.
   # kind=spec lands on every emitted manifest (incl. dry-run/autoship/synthetic):
   # the spec is the contract input regardless of whether the model ran.
   ralph_log "  [stage 1/3] planner → $PLAN_LOG"
   STRICT_SCOPE_BOOL="$([ "$STRICT_SCOPE" = "1" ] && echo true || echo false)"
-  manifest_init spec-plan "$PLAN_LOG"
+  manifest_init spec-plan "$PLAN_LOG" || exit 1
   PLAN_RUN_ID="$MANIFEST_RUN_ID"
-  manifest_add_input kind=task value="$TASK"
-  manifest_add_input kind=spec path="$SPEC_FILE"
-  manifest_add_input kind=strict-scope value="$STRICT_SCOPE_BOOL"
+  manifest_add_input kind=task value="$TASK" || exit 1
+  manifest_add_input kind=spec path="$SPEC_FILE" || exit 1
+  manifest_add_input kind=strict-scope value="$STRICT_SCOPE_BOOL" || exit 1
   if [ "$DRY_RUN" = "1" ]; then
-    manifest_add_input kind=skip-reason value=dry-run
+    manifest_add_input kind=skip-reason value=dry-run || exit 1
     echo "[dry-run plan] task: $TASK" | tee "$PLAN_LOG" >/dev/null
     PLAN="(dry-run plan for $TASK)"
   else
-    manifest_add_role planner claude "$ROLES_DIR/planner.md"
+    manifest_add_role planner claude "$ROLES_DIR/planner.md" || exit 1
     [ -n "$PROMPT_FILE" ] && manifest_add_input kind=prompt-md path="$PROMPT_FILE"
     if [ "$INJECT_FIX_PLAN" = "1" ]; then
-      manifest_add_input kind=fix-plan path="$FIX_PLAN_FILE"
-      manifest_add_input kind=fix-plan-tail value="$FIX_PLAN_TAIL"
+      manifest_add_input kind=fix-plan path="$FIX_PLAN_FILE" || exit 1
+      manifest_add_input kind=fix-plan-tail value="$FIX_PLAN_TAIL" || exit 1
     fi
     PLAN_PROMPT=$(build_planner_prompt "$TASK" "$SPEC_BODY" "$PROMPT_CONTEXT" "$FP_EXCERPT")
-    ( cd "$WORK_DIR" && "${PLANNER_CLI:-${CLAUDE_CLI:-claude}}" -p "$PLAN_PROMPT" 2>&1 ) | tee "$PLAN_LOG" >/dev/null
+    ( cd "$WORK_DIR" && spec_run_stage "${PLANNER_CLI:-${CLAUDE_CLI:-claude}}" -p "$PLAN_PROMPT" 2>&1 ) | tee "$PLAN_LOG" >/dev/null
     PLAN_RC="${PIPESTATUS[0]}"
+    spec_check_or_stop
     PLAN="$(cat "$PLAN_LOG")"
     if [ "$PLAN_RC" != "0" ]; then
       # Planner CLI exited non-zero. Without this check the loop would treat
       # the planner's stderr as the plan and feed it to a coder that has no
-      # way to know the plan is bogus — and pop_top_task already consumed
-      # the BACKLOG entry. Set PLAN_FAILED=1; Stage 2 + 3 below treat it as
-      # a hard skip and the verdict dispatch re-queues via NEEDS-FIX.
+      # way to know the plan is bogus — without marking the BACKLOG entry complete. Set PLAN_FAILED=1; Stage 2 + 3 below treat it as
+      # a hard skip and the verdict dispatch retains the task for retry via NEEDS-FIX.
       PLAN_FAILED=1
-      manifest_add_input kind=skip-reason value=plan-failed
-      manifest_add_input kind=plan-rc value="$PLAN_RC"
-      ralph_log "  [stage 1/3] planner exited rc=$PLAN_RC — marking iter PLAN-FAILED (re-queue task, skip Stage 2+3)"
+      manifest_add_input kind=skip-reason value=plan-failed || exit 1
+      manifest_add_input kind=plan-rc value="$PLAN_RC" || exit 1
+      ralph_log "  [stage 1/3] planner exited rc=$PLAN_RC — marking iter PLAN-FAILED (keep task pending, skip Stage 2+3)"
     fi
   fi
-  manifest_finalize
+  manifest_finalize || exit 1
   PARENT_RUN_ID="$PLAN_RUN_ID"
 
   # ---- Scope gate 1: plan-invalid check (after Stage 1, before Stage 2) ----
@@ -544,16 +570,16 @@ while :; do
         # OUT-OF-SCOPE verdict so manifest consumers (spec-coverage) see it
         # even though no real reviewer ran. Finalize BEFORE flipping flags
         # for atomicity: if finalize fails, dispatch must not skip.
-        manifest_init spec-review "$SCOPE_LOG"
+        manifest_init spec-review "$SCOPE_LOG" || exit 1
         REVIEW_RUN_ID="$MANIFEST_RUN_ID"
-        manifest_set_parent "$PARENT_RUN_ID"
-        manifest_add_input kind=task value="$TASK"
-        manifest_add_input kind=spec path="$SPEC_FILE"
-        manifest_add_input kind=scope-fail value=plan-invalid
-        manifest_add_input kind=scope-log path="$SCOPE_LOG"
-        manifest_add_input kind=skip-reason value=scope-gate
-        manifest_set_verdict OUT-OF-SCOPE
-        manifest_finalize
+        manifest_set_parent "$PARENT_RUN_ID" || exit 1
+        manifest_add_input kind=task value="$TASK" || exit 1
+        manifest_add_input kind=spec path="$SPEC_FILE" || exit 1
+        manifest_add_input kind=scope-fail value=plan-invalid || exit 1
+        manifest_add_input kind=scope-log path="$SCOPE_LOG" || exit 1
+        manifest_add_input kind=skip-reason value=scope-gate || exit 1
+        manifest_set_verdict OUT-OF-SCOPE || exit 1
+        manifest_finalize || exit 1
         VERDICT="OUT-OF-SCOPE"
         REVIEW_LOG="$SCOPE_LOG"
         SCOPE_FAIL=1
@@ -578,18 +604,19 @@ while :; do
     PLAN_RESEARCH_QS=$(extract_need_research "$PLAN_LOG")
     if [ -n "$PLAN_RESEARCH_QS" ]; then
       ralph_log "  [stage 1.5] planner requested research → $PLAN_RESEARCH_LOG"
-      manifest_init spec-research "$PLAN_RESEARCH_LOG"
+      manifest_init spec-research "$PLAN_RESEARCH_LOG" || exit 1
       PLAN_RESEARCH_RUN_ID="$MANIFEST_RUN_ID"
-      manifest_set_parent "$PARENT_RUN_ID"   # parent = planner
-      manifest_add_input kind=spec path="$SPEC_FILE"
-      manifest_add_input kind=question value="$PLAN_RESEARCH_QS"
+      manifest_set_parent "$PARENT_RUN_ID"   # parent = planner || exit 1
+      manifest_add_input kind=spec path="$SPEC_FILE" || exit 1
+      manifest_add_input kind=question value="$PLAN_RESEARCH_QS" || exit 1
       # Durable agy log under spec-trio's tree (survives worktree teardown); the
       # research body is captured via the tee into $PLAN_RESEARCH_LOG.
       RESEARCH_RC=0
       ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$LOG_DIR/agy" \
-          MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-agy.sh "$PLAN_RESEARCH_QS" 2>&1 ) | tee "$PLAN_RESEARCH_LOG" >/dev/null || RESEARCH_RC=$?
+          MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage ask-agy.sh "$PLAN_RESEARCH_QS" 2>&1 ) | tee "$PLAN_RESEARCH_LOG" >/dev/null || RESEARCH_RC=$?
+      spec_check_or_stop
       [ "$RESEARCH_RC" -ne 0 ] && manifest_add_input kind=research-rc value="$RESEARCH_RC"
-      manifest_finalize
+      manifest_finalize || exit 1
       PARENT_RUN_ID="$PLAN_RESEARCH_RUN_ID"  # coder's parent becomes research
       if [ "$RESEARCH_RC" -ne 0 ]; then
         # ask-agy.sh failed (auth, rate-limit, missing binary, …). $PLAN_RESEARCH_LOG
@@ -618,15 +645,15 @@ while :; do
     # then let the verdict dispatch route NEEDS-FIX via Stage 3.
     ralph_log "  [stage 2/3] coder SKIPPED (planner failed rc=$PLAN_RC)"
     echo "PLAN_FAILED=1 — skipping coder (planner exited rc=$PLAN_RC, see $PLAN_LOG)" > "$CODE_LOG"
-    manifest_init spec-code "$CODE_LOG"
+    manifest_init spec-code "$CODE_LOG" || exit 1
     CODE_RUN_ID="$MANIFEST_RUN_ID"
-    manifest_set_parent "$PARENT_RUN_ID"
-    manifest_add_input kind=task value="$TASK"
-    manifest_add_input kind=spec path="$SPEC_FILE"
-    manifest_add_input kind=plan path="$PLAN_LOG"
-    manifest_add_input kind=skip-reason value=plan-failed
-    manifest_add_input kind=plan-rc value="$PLAN_RC"
-    manifest_finalize
+    manifest_set_parent "$PARENT_RUN_ID" || exit 1
+    manifest_add_input kind=task value="$TASK" || exit 1
+    manifest_add_input kind=spec path="$SPEC_FILE" || exit 1
+    manifest_add_input kind=plan path="$PLAN_LOG" || exit 1
+    manifest_add_input kind=skip-reason value=plan-failed || exit 1
+    manifest_add_input kind=plan-rc value="$PLAN_RC" || exit 1
+    manifest_finalize || exit 1
     PARENT_RUN_ID="$CODE_RUN_ID"
   elif [ "$SCOPE_FAIL" = "1" ]; then
     # Gate 1 already emitted the synthetic review manifest; no coder manifest
@@ -636,28 +663,29 @@ while :; do
     echo "SCOPE_FAIL=1 (plan-invalid) — skipping coder" > "$CODE_LOG"
   else
     ralph_log "  [stage 2/3] coder  → $CODE_LOG"
-    manifest_init spec-code "$CODE_LOG"
+    manifest_init spec-code "$CODE_LOG" || exit 1
     CODE_RUN_ID="$MANIFEST_RUN_ID"
-    manifest_set_parent "$PARENT_RUN_ID"
-    manifest_add_input kind=task value="$TASK"
-    manifest_add_input kind=spec path="$SPEC_FILE"
-    manifest_add_input kind=plan path="$PLAN_LOG"
+    manifest_set_parent "$PARENT_RUN_ID" || exit 1
+    manifest_add_input kind=task value="$TASK" || exit 1
+    manifest_add_input kind=spec path="$SPEC_FILE" || exit 1
+    manifest_add_input kind=plan path="$PLAN_LOG" || exit 1
     [ -n "$ALLOWED_JOINED" ] && manifest_add_input kind=allowed-paths value="$ALLOWED_JOINED"
     if [ "$DRY_RUN" = "1" ]; then
-      manifest_add_input kind=skip-reason value=dry-run
+      manifest_add_input kind=skip-reason value=dry-run || exit 1
       echo "[dry-run code] would implement plan for: $TASK" | tee "$CODE_LOG" >/dev/null
     else
-      manifest_add_role worker claude "$ROLES_DIR/worker.md"
+      manifest_add_role worker claude "$ROLES_DIR/worker.md" || exit 1
       [ -n "$PROMPT_FILE" ] && manifest_add_input kind=prompt-md path="$PROMPT_FILE"
       [ -n "$PRE_RESEARCH" ] && manifest_add_input kind=research path="$PLAN_RESEARCH_LOG"
       if [ "$INJECT_FIX_PLAN" = "1" ]; then
-        manifest_add_input kind=fix-plan path="$FIX_PLAN_FILE"
-        manifest_add_input kind=fix-plan-tail value="$FIX_PLAN_TAIL"
+        manifest_add_input kind=fix-plan path="$FIX_PLAN_FILE" || exit 1
+        manifest_add_input kind=fix-plan-tail value="$FIX_PLAN_TAIL" || exit 1
       fi
       CODE_PROMPT=$(build_coder_prompt "$TASK" "$SPEC_BODY" "$PLAN" "$PROMPT_CONTEXT" "$PRE_RESEARCH" "$FP_EXCERPT")
-      ( cd "$WORK_DIR" && "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p "$CODE_PROMPT" 2>&1 ) | tee "$CODE_LOG" >/dev/null || CODE_RC=$?
+      ( cd "$WORK_DIR" && spec_run_stage "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p "$CODE_PROMPT" 2>&1 ) | tee "$CODE_LOG" >/dev/null || CODE_RC=$?
+      spec_test_code "$CODE_RC" "$CODE_LOG"
     fi
-    manifest_finalize
+    manifest_finalize || exit 1
     PARENT_RUN_ID="$CODE_RUN_ID"
   fi
   printf '  code rc:  %d\n' "$CODE_RC" >> "$SUMMARY_LOG"
@@ -680,37 +708,26 @@ while :; do
     VERDICT="NEEDS-FIX"
     ralph_log "  [stage 3/3] reviewer SKIPPED (planner failed)"
     echo "PLAN_FAILED=1 — skipping reviewer (planner rc=$PLAN_RC, see $PLAN_LOG)" > "$REVIEW_LOG"
-    manifest_init spec-review "$REVIEW_LOG"
+    manifest_init spec-review "$REVIEW_LOG" || exit 1
     REVIEW_RUN_ID="$MANIFEST_RUN_ID"
-    manifest_set_parent "$PARENT_RUN_ID"
-    manifest_add_input kind=task value="$TASK"
-    manifest_add_input kind=spec path="$SPEC_FILE"
-    manifest_add_input kind=skip-reason value=plan-failed
-    manifest_add_input kind=plan-rc value="$PLAN_RC"
-    manifest_set_verdict NEEDS-FIX
-    manifest_finalize
+    manifest_set_parent "$PARENT_RUN_ID" || exit 1
+    manifest_add_input kind=task value="$TASK" || exit 1
+    manifest_add_input kind=spec path="$SPEC_FILE" || exit 1
+    manifest_add_input kind=skip-reason value=plan-failed || exit 1
+    manifest_add_input kind=plan-rc value="$PLAN_RC" || exit 1
+    manifest_set_verdict NEEDS-FIX || exit 1
+    manifest_finalize || exit 1
   elif [ "$SCOPE_FAIL" = "1" ]; then
     # Gate 1 or Gate 2 already wrote a synthetic spec-review manifest with
     # verdict=OUT-OF-SCOPE; nothing to emit here.
     ralph_log "  [stage 3/3] reviewer SKIPPED (scope-gate)"
-  elif [ "$AUTOSHIP" = "1" ] && [ "$CODE_RC" != "0" ]; then
-    # --autoship skips review, NOT coder failure. Without this check, a
-    # broken coder run (rate-limit, partial diff, missing CLI) would be
-    # marked SHIP and — in worktree mode — get fast-forward-merged. Route
-    # to NEEDS-FIX (re-queue) so the task survives a transient coder error.
-    VERDICT="NEEDS-FIX"
-    ralph_log "  [stage 3/3] reviewer SKIPPED (--autoship), but coder rc=$CODE_RC — NEEDS-FIX (re-queue, refusing to ship a failed coder run)"
-    echo "AUTOSHIP=1 + coder rc=$CODE_RC — refusing to ship a failed coder run" > "$REVIEW_LOG"
-    manifest_init spec-review "$REVIEW_LOG"
-    REVIEW_RUN_ID="$MANIFEST_RUN_ID"
-    manifest_set_parent "$PARENT_RUN_ID"
-    manifest_add_input kind=task value="$TASK"
-    manifest_add_input kind=spec path="$SPEC_FILE"
-    manifest_add_input kind=code-log path="$CODE_LOG"
-    manifest_add_input kind=skip-reason value=autoship-coder-failed
-    manifest_add_input kind=coder-rc value="$CODE_RC"
-    manifest_set_verdict NEEDS-FIX
-    manifest_finalize
+  elif [ "$CODE_RC" != "0" ] || [ "$TEST_RC" != "0" ]; then
+    FAIL_REASON=test-failed
+    if [ "$CODE_RC" != "0" ]; then
+      FAIL_REASON=coder-failed
+      [ "$AUTOSHIP" != "1" ] || FAIL_REASON=autoship-coder-failed
+    fi
+    spec_retry_verdict "$CODE_RUN_ID" "$FAIL_REASON" "$REVIEW_LOG"
   elif [ "$AUTOSHIP" = "1" ] && [ "$RESEARCH_FAILED" = "1" ]; then
     # --autoship has no reviewer to catch uninformed code. The planner declared
     # this task depends on pre-coding research (Stage 1.5), but ask-agy.sh
@@ -719,49 +736,49 @@ while :; do
     VERDICT="NEEDS-FIX"
     ralph_log "  [stage 3/3] reviewer SKIPPED (--autoship), but planner research failed — NEEDS-FIX (re-queue, refusing to ship research-dependent work without research)"
     echo "AUTOSHIP=1 + planner research failed — refusing to ship research-dependent work" > "$REVIEW_LOG"
-    manifest_init spec-review "$REVIEW_LOG"
+    manifest_init spec-review "$REVIEW_LOG" || exit 1
     REVIEW_RUN_ID="$MANIFEST_RUN_ID"
-    manifest_set_parent "$PARENT_RUN_ID"
-    manifest_add_input kind=task value="$TASK"
-    manifest_add_input kind=spec path="$SPEC_FILE"
-    manifest_add_input kind=code-log path="$CODE_LOG"
-    manifest_add_input kind=skip-reason value=autoship-research-failed
-    manifest_set_verdict NEEDS-FIX
-    manifest_finalize
+    manifest_set_parent "$PARENT_RUN_ID" || exit 1
+    manifest_add_input kind=task value="$TASK" || exit 1
+    manifest_add_input kind=spec path="$SPEC_FILE" || exit 1
+    manifest_add_input kind=code-log path="$CODE_LOG" || exit 1
+    manifest_add_input kind=skip-reason value=autoship-research-failed || exit 1
+    manifest_set_verdict NEEDS-FIX || exit 1
+    manifest_finalize || exit 1
   elif [ "$AUTOSHIP" = "1" ]; then
     VERDICT="SHIP"
     ralph_log "  [stage 3/3] reviewer SKIPPED (--autoship)"
     echo "AUTOSHIP=1 — skipping codex review" > "$REVIEW_LOG"
-    manifest_init spec-review "$REVIEW_LOG"
+    manifest_init spec-review "$REVIEW_LOG" || exit 1
     REVIEW_RUN_ID="$MANIFEST_RUN_ID"
-    manifest_set_parent "$PARENT_RUN_ID"
-    manifest_add_input kind=task value="$TASK"
-    manifest_add_input kind=spec path="$SPEC_FILE"
-    manifest_add_input kind=code-log path="$CODE_LOG"
-    manifest_add_input kind=skip-reason value=autoship
-    manifest_set_verdict SHIP
-    manifest_finalize
+    manifest_set_parent "$PARENT_RUN_ID" || exit 1
+    manifest_add_input kind=task value="$TASK" || exit 1
+    manifest_add_input kind=spec path="$SPEC_FILE" || exit 1
+    manifest_add_input kind=code-log path="$CODE_LOG" || exit 1
+    manifest_add_input kind=skip-reason value=autoship || exit 1
+    manifest_set_verdict SHIP || exit 1
+    manifest_finalize || exit 1
   elif [ "$DRY_RUN" = "1" ]; then
     VERDICT="SHIP"
     ralph_log "  [stage 3/3] reviewer SKIPPED (--dry-run)"
     echo "DRY_RUN=1 — skipping codex review" > "$REVIEW_LOG"
-    manifest_init spec-review "$REVIEW_LOG"
+    manifest_init spec-review "$REVIEW_LOG" || exit 1
     REVIEW_RUN_ID="$MANIFEST_RUN_ID"
-    manifest_set_parent "$PARENT_RUN_ID"
-    manifest_add_input kind=task value="$TASK"
-    manifest_add_input kind=spec path="$SPEC_FILE"
-    manifest_add_input kind=code-log path="$CODE_LOG"
-    manifest_add_input kind=skip-reason value=dry-run
-    manifest_set_verdict SHIP
-    manifest_finalize
+    manifest_set_parent "$PARENT_RUN_ID" || exit 1
+    manifest_add_input kind=task value="$TASK" || exit 1
+    manifest_add_input kind=spec path="$SPEC_FILE" || exit 1
+    manifest_add_input kind=code-log path="$CODE_LOG" || exit 1
+    manifest_add_input kind=skip-reason value=dry-run || exit 1
+    manifest_set_verdict SHIP || exit 1
+    manifest_finalize || exit 1
   else
     ralph_log "  [stage 3/3] reviewer → $REVIEW_LOG"
-    manifest_init spec-review "$REVIEW_LOG"
+    manifest_init spec-review "$REVIEW_LOG" || exit 1
     REVIEW_RUN_ID="$MANIFEST_RUN_ID"
-    manifest_set_parent "$PARENT_RUN_ID"
-    manifest_add_input kind=task value="$TASK"
-    manifest_add_input kind=spec path="$SPEC_FILE"
-    manifest_add_input kind=code-log path="$CODE_LOG"
+    manifest_set_parent "$PARENT_RUN_ID" || exit 1
+    manifest_add_input kind=task value="$TASK" || exit 1
+    manifest_add_input kind=spec path="$SPEC_FILE" || exit 1
+    manifest_add_input kind=code-log path="$CODE_LOG" || exit 1
     # Reviewer role recorded by ask-codex.sh into the parent manifest via
     # the PR 9 nested-write carve-out (it knows REVIEWER_ROLE_FILE; we don't).
     # DEV_TRIO_LOG_DIR pins ask-codex.sh's .final.md into spec-trio's durable
@@ -769,60 +786,65 @@ while :; do
     RANGE_HINT=$(build_range_hint "$ITER_BASE_SHA" "$WORK_DIR")
     REVIEW_RECEIPT=$(review_receipt_create "$REVIEW_LOG") || exit 2
     ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$CODEX_FINAL_ROOT" \
-        DEV_TRIO_REVIEW_PROFILE=spec DEV_TRIO_REVIEW_RECEIPT="$REVIEW_RECEIPT" MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-codex.sh --with-spec "$SPEC_FILE" "Review uncommitted+committed changes related to this task: '$TASK'.${RANGE_HINT} Use the standard SHIP/NEEDS-FIX/DISCUSS/OUT-OF-SCOPE verdict format from your role prompt." 2>&1 ) | tee "$REVIEW_LOG" >/dev/null
+        DEV_TRIO_REVIEW_PROFILE=spec DEV_TRIO_REVIEW_RECEIPT="$REVIEW_RECEIPT" MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage ask-codex.sh --with-spec "$SPEC_FILE" "Review uncommitted+committed changes related to this task: '$TASK'.${RANGE_HINT} Use the standard SHIP/NEEDS-FIX/DISCUSS/OUT-OF-SCOPE verdict format from your role prompt." 2>&1 ) | tee "$REVIEW_LOG" >/dev/null
     # PIPESTATUS[0] = ask-codex.sh's rc (the subshell). Non-zero means codex
     # invocation or result processing failed — even if it echoes the verdict
     # placeholder, so naive parsing would yield a bogus verdict. Force UNKNOWN
     # whenever codex didn't cleanly exit.
     CODEX_RC=${PIPESTATUS[0]}
+    spec_check_or_stop
     REVIEW_DATA=$(review_result_from_receipt "$REVIEW_RECEIPT" "$CODEX_RC") || REVIEW_DATA=""
     VERDICT="UNKNOWN"
     REVIEW_SRC=""
     if [ -n "$REVIEW_DATA" ]; then
       REVIEW_RESULT_PATH=$(printf '%s\n' "$REVIEW_DATA" | jq -r '.result_path')
-      manifest_add_input kind=review-result path="$REVIEW_RESULT_PATH"
+      manifest_add_input kind=review-result path="$REVIEW_RESULT_PATH" || exit 1
       if [ "$CODEX_RC" -eq 0 ]; then
         VERDICT=$(printf '%s\n' "$REVIEW_DATA" | jq -r '.verdict')
         REVIEW_SRC=$(printf '%s\n' "$REVIEW_DATA" | jq -r '.final_path')
         { printf '\n=== AUTHORITATIVE FINAL ===\n'; cat "$REVIEW_SRC"; } >> "$REVIEW_LOG"
-        manifest_add_input kind=codex-final path="$REVIEW_SRC"
+        manifest_add_input kind=codex-final path="$REVIEW_SRC" || exit 1
       fi
     else
       ralph_log "  review result unavailable — forcing UNKNOWN verdict (receipt: $REVIEW_RECEIPT)"
     fi
     if [ "$CODEX_RC" -ne 0 ]; then
       ralph_log "  ask-codex.sh exited rc=$CODEX_RC — forcing UNKNOWN verdict (review log: $REVIEW_LOG)"
-      manifest_add_input kind=codex-rc value="$CODEX_RC"
+      manifest_add_input kind=codex-rc value="$CODEX_RC" || exit 1
     fi
     [ -z "$VERDICT" ] && VERDICT="UNKNOWN"
     MV=$(to_manifest_verdict "$VERDICT")
     if [ "$MV" = "null" ] && [ -n "$VERDICT" ]; then
-      manifest_add_input kind=raw-verdict value="$VERDICT"
+      manifest_add_input kind=raw-verdict value="$VERDICT" || exit 1
     fi
-    manifest_set_verdict "$MV"
-    manifest_finalize
+    manifest_set_verdict "$MV" || exit 1
+    manifest_finalize || exit 1
 
     # NEED RESEARCH branch — runs once. Read from the authoritative final.
-    if [ "$NO_RESEARCH" = "0" ]; then
+    if [ "$NO_RESEARCH" = "0" ] && { [ "$VERDICT" = "SHIP" ] || [ "$VERDICT" = "NEEDS-FIX" ]; }; then
       RESEARCH_QS=$(extract_need_research "$REVIEW_SRC")
       if [ -n "$RESEARCH_QS" ]; then
         # Stage 4: Research (parent = stage 3 review)
         ralph_log "  [stage 3.5] codex requested research → $RESEARCH_LOG"
-        manifest_init spec-research "$RESEARCH_LOG"
+        manifest_init spec-research "$RESEARCH_LOG" || exit 1
         RESEARCH_RUN_ID="$MANIFEST_RUN_ID"
-        manifest_set_parent "$REVIEW_RUN_ID"
+        manifest_set_parent "$REVIEW_RUN_ID" || exit 1
         # Researcher role recorded by ask-agy.sh via the PR 9 carve-out.
         # DEV_TRIO_LOG_DIR pins ask-agy.sh's own agy-<TS>.log into spec-trio's
         # main-repo log tree so it doesn't litter the (torn-down) worktree; the
         # research content is captured durably via the tee into $RESEARCH_LOG.
-        manifest_add_input kind=spec path="$SPEC_FILE"
-        manifest_add_input kind=question value="$RESEARCH_QS"
+        manifest_add_input kind=spec path="$SPEC_FILE" || exit 1
+        manifest_add_input kind=question value="$RESEARCH_QS" || exit 1
+        RESEARCH_RC=0
         ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$LOG_DIR/agy" \
-            MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-agy.sh "$RESEARCH_QS" 2>&1 ) | tee "$RESEARCH_LOG" >/dev/null || true
-        manifest_finalize
+            MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage ask-agy.sh "$RESEARCH_QS" 2>&1 ) | tee "$RESEARCH_LOG" >/dev/null || RESEARCH_RC=$?
+        spec_check_or_stop
+        manifest_add_input kind=research-rc value="$RESEARCH_RC" || exit 1
+        manifest_finalize || exit 1
         # Stage 5: Code2 (parent = research)
         ralph_log "  [stage 2 retry] re-running coder with research"
-        RESEARCH="$(cat "$RESEARCH_LOG")"
+        RESEARCH=""
+        [ "$RESEARCH_RC" -ne 0 ] || RESEARCH="$(cat "$RESEARCH_LOG")"
         # Carry the planner's pre-coding research (Stage 1.5, if any) into the
         # retry too: the first coder built on it, so dropping it here would make
         # the retry coder lose facts it relied on. Stack the planner block above
@@ -834,19 +856,29 @@ while :; do
 $RESEARCH"
         fi
         CODE2_LOG="$LOG_DIR/spec-trio-$TS-iter-$ITER-code2.log"
-        manifest_init spec-code "$CODE2_LOG"
+        manifest_init spec-code "$CODE2_LOG" || exit 1
         CODE2_RUN_ID="$MANIFEST_RUN_ID"
-        manifest_set_parent "$RESEARCH_RUN_ID"
-        manifest_add_role worker claude "$ROLES_DIR/worker.md"
-        manifest_add_input kind=task value="$TASK"
-        manifest_add_input kind=spec path="$SPEC_FILE"
-        manifest_add_input kind=plan path="$PLAN_LOG"
+        manifest_set_parent "$RESEARCH_RUN_ID" || exit 1
+        manifest_add_input kind=task value="$TASK" || exit 1
+        manifest_add_input kind=spec path="$SPEC_FILE" || exit 1
+        manifest_add_input kind=plan path="$PLAN_LOG" || exit 1
         [ -n "${PRE_RESEARCH:-}" ] && manifest_add_input kind=research path="${PLAN_RESEARCH_LOG:-}"
-        manifest_add_input kind=research path="$RESEARCH_LOG"
+        manifest_add_input kind=research path="$RESEARCH_LOG" || exit 1
         [ -n "$ALLOWED_JOINED" ] && manifest_add_input kind=allowed-paths value="$ALLOWED_JOINED"
         CODE_PROMPT2=$(build_coder_prompt "$TASK" "$SPEC_BODY" "$PLAN" "$PROMPT_CONTEXT" "$RETRY_RESEARCH" "$FP_EXCERPT")
-        ( cd "$WORK_DIR" && "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p "$CODE_PROMPT2" 2>&1 ) | tee "$CODE2_LOG" >/dev/null || true
-        manifest_finalize
+        CODE_RC=0
+        if [ "$RESEARCH_RC" -eq 0 ]; then
+          manifest_add_role worker claude "$ROLES_DIR/worker.md" || exit 1
+          ( cd "$WORK_DIR" && spec_run_stage "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p "$CODE_PROMPT2" 2>&1 ) | tee "$CODE2_LOG" >/dev/null || CODE_RC=$?
+          spec_test_code "$CODE_RC" "$CODE2_LOG"
+        else
+          TEST_RC=0
+          TEST_LOG=""
+          manifest_add_input kind=skip-reason value=research-failed || exit 1
+          manifest_add_input kind=research-rc value="$RESEARCH_RC" || exit 1
+          manifest_add_input kind=test-status value=skipped-research-failed || exit 1
+        fi
+        manifest_finalize || exit 1
         # ---- Scope gate 2b: re-check the research-retry coder (Code2) ----
         # The retry coder can stray outside the planner allowlist exactly like
         # Stage 2's coder. Without re-checking, the retry would go straight to
@@ -859,80 +891,81 @@ $RESEARCH"
         if [ -n "$ALLOWED_PATHS_LIST" ]; then
           apply_scope_gate "$CODE2_RUN_ID" "$CODE2_LOG" "$SCOPE2_LOG" || RETRY_SCOPE_OK=0
         fi
+        if [ "$RETRY_SCOPE_OK" = "1" ] && { [ "$CODE_RC" -ne 0 ] || [ "$TEST_RC" -ne 0 ] || [ "$RESEARCH_RC" -ne 0 ]; }; then
+          REVIEW_LOG="$LOG_DIR/spec-trio-$TS-iter-$ITER-review2.log"
+          spec_retry_verdict "$CODE2_RUN_ID" retry-verification-failed "$REVIEW_LOG"
+          RETRY_SCOPE_OK=0
+        fi
         if [ "$RETRY_SCOPE_OK" = "1" ]; then
           # Stage 6: Review2 (parent = code2)
           REVIEW2_LOG="$LOG_DIR/spec-trio-$TS-iter-$ITER-review2.log"
-          manifest_init spec-review "$REVIEW2_LOG"
+          manifest_init spec-review "$REVIEW2_LOG" || exit 1
           REVIEW2_RUN_ID="$MANIFEST_RUN_ID"
-          manifest_set_parent "$CODE2_RUN_ID"
+          manifest_set_parent "$CODE2_RUN_ID" || exit 1
           # Reviewer role recorded by ask-codex.sh via the PR 9 carve-out.
-          manifest_add_input kind=task value="$TASK"
-          manifest_add_input kind=spec path="$SPEC_FILE"
-          manifest_add_input kind=code-log path="$CODE2_LOG"
+          manifest_add_input kind=task value="$TASK" || exit 1
+          manifest_add_input kind=spec path="$SPEC_FILE" || exit 1
+          manifest_add_input kind=code-log path="$CODE2_LOG" || exit 1
           # Pin the durable .final.md root (see Stage-3 review above).
           RANGE_HINT2=$(build_range_hint "$ITER_BASE_SHA" "$WORK_DIR")
           REVIEW_RECEIPT=$(review_receipt_create "$REVIEW2_LOG") || exit 2
           ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$CODEX_FINAL_ROOT" \
-              DEV_TRIO_REVIEW_PROFILE=spec DEV_TRIO_REVIEW_RECEIPT="$REVIEW_RECEIPT" MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-codex.sh --with-spec "$SPEC_FILE" "Re-review the same task after research-informed retry: '$TASK'.${RANGE_HINT2} Use the standard SHIP/NEEDS-FIX/DISCUSS/OUT-OF-SCOPE verdict format from your role prompt." 2>&1 ) | tee "$REVIEW2_LOG" >/dev/null
+              DEV_TRIO_REVIEW_PROFILE=spec DEV_TRIO_REVIEW_RECEIPT="$REVIEW_RECEIPT" MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage ask-codex.sh --with-spec "$SPEC_FILE" "Re-review the same task after research-informed retry: '$TASK'.${RANGE_HINT2} Use the standard SHIP/NEEDS-FIX/DISCUSS/OUT-OF-SCOPE verdict format from your role prompt." 2>&1 ) | tee "$REVIEW2_LOG" >/dev/null
           CODEX2_RC=${PIPESTATUS[0]}
+          spec_check_or_stop
           REVIEW_DATA=$(review_result_from_receipt "$REVIEW_RECEIPT" "$CODEX2_RC") || REVIEW_DATA=""
           VERDICT="UNKNOWN"
           REVIEW2_SRC=""
           if [ -n "$REVIEW_DATA" ]; then
             REVIEW_RESULT_PATH=$(printf '%s\n' "$REVIEW_DATA" | jq -r '.result_path')
-            manifest_add_input kind=review-result path="$REVIEW_RESULT_PATH"
+            manifest_add_input kind=review-result path="$REVIEW_RESULT_PATH" || exit 1
             if [ "$CODEX2_RC" -eq 0 ]; then
               VERDICT=$(printf '%s\n' "$REVIEW_DATA" | jq -r '.verdict')
               REVIEW2_SRC=$(printf '%s\n' "$REVIEW_DATA" | jq -r '.final_path')
               { printf '\n=== AUTHORITATIVE FINAL ===\n'; cat "$REVIEW2_SRC"; } >> "$REVIEW2_LOG"
-              manifest_add_input kind=codex-final path="$REVIEW2_SRC"
+              manifest_add_input kind=codex-final path="$REVIEW2_SRC" || exit 1
             fi
           else
             ralph_log "  review result unavailable — forcing UNKNOWN verdict (receipt: $REVIEW_RECEIPT)"
           fi
           if [ "$CODEX2_RC" -ne 0 ]; then
             ralph_log "  ask-codex.sh exited rc=$CODEX2_RC — forcing UNKNOWN verdict (review log: $REVIEW2_LOG)"
-            manifest_add_input kind=codex-rc value="$CODEX2_RC"
+            manifest_add_input kind=codex-rc value="$CODEX2_RC" || exit 1
           fi
           [ -z "$VERDICT" ] && VERDICT="UNKNOWN"
           MV=$(to_manifest_verdict "$VERDICT")
           if [ "$MV" = "null" ] && [ -n "$VERDICT" ]; then
-            manifest_add_input kind=raw-verdict value="$VERDICT"
+            manifest_add_input kind=raw-verdict value="$VERDICT" || exit 1
           fi
-          manifest_set_verdict "$MV"
-          manifest_finalize
+          manifest_set_verdict "$MV" || exit 1
+          manifest_finalize || exit 1
           REVIEW_LOG="$REVIEW2_LOG"
         fi
       fi
     fi
   fi
 
+  spec_check_or_stop
   printf '  verdict:  %s\n' "$VERDICT" >> "$SUMMARY_LOG"
 
-  # ---- Verdict dispatch ----
+  # Completion is a driver decision, after verification and any required merge.
   PASSED=0
   case "$VERDICT" in
-    SHIP)
-      PASSED=1
-      printf '## iter %d · %s · SHIP\nTask: %s\nReview: %s\n\n' "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TASK" "$REVIEW_LOG" >> "$FIX_PLAN_FILE"
-      ;;
+    SHIP) PASSED=1 ;;
     NEEDS-FIX)
-      append_to_backlog "$BACKLOG_FILE" "retry (iter $ITER NEEDS-FIX): $TASK — see $REVIEW_LOG"
-      printf '## iter %d · %s · NEEDS-FIX (re-queued)\nTask: %s\nReview: %s\n\n' "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TASK" "$REVIEW_LOG" >> "$FIX_PLAN_FILE"
-      ;;
-    OUT-OF-SCOPE)
-      printf '## iter %d · %s · OUT-OF-SCOPE (human attention — spec violation)\nTask: %s\nReview: %s\n\n' "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TASK" "$REVIEW_LOG" >> "$FIX_PLAN_FILE"
-      ;;
-    DISCUSS)
-      printf '## iter %d · %s · DISCUSS (human attention)\nTask: %s\nReview: %s\n\n' "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TASK" "$REVIEW_LOG" >> "$FIX_PLAN_FILE"
+      RETRY_CONTEXT="Previous attempt failed. Task: $TASK. Read review $REVIEW_LOG and test ${TEST_LOG:-not-run} before retrying."
+      printf '## iter %d · NEEDS-FIX (pending retry)\nTask: %s\nReview: %s\nTest: %s\n\n' "$ITER" "$TASK" "$REVIEW_LOG" "$TEST_LOG" >> "$FIX_PLAN_FILE" || exit 1
       ;;
     *)
-      printf '## iter %d · %s · UNKNOWN verdict\nTask: %s\nReview: %s\n\n' "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TASK" "$REVIEW_LOG" >> "$FIX_PLAN_FILE"
+      STOP_REASON="$VERDICT"
+      printf '## iter %d · %s (human attention; blocked; task remains pending)\nTask: %s\nReview: %s\nWorktree: %s\n\n' "$ITER" "$VERDICT" "$TASK" "$REVIEW_LOG" "$WT" >> "$FIX_PLAN_FILE" || exit 1
+      exit 4
       ;;
   esac
 
   # ---- Worktree pre-merge validation + merge/discard ----
   if [ "$USE_WORKTREE" = "1" ]; then
+    spec_check_or_stop
     PRESERVE_WORKTREE=0
     # Preserve the reviewed working-tree state: when the coder leaves its changes
     # uncommitted, commit them onto the iteration branch BEFORE validating/merging
@@ -952,6 +985,7 @@ $RESEARCH"
         ralph_log "worktree for iter $ITER needs attention (commit-blocked). Stopping."
         echo "=== STOP (worktree-commit-blocked) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
         WORKTREE_FAILED=1
+        STOP_REASON=worktree-blocked
         break
       fi
     fi
@@ -963,13 +997,21 @@ $RESEARCH"
         printf '## iter %d · %s · WORKTREE-VALIDATE-BLOCK\nTask: %s\nValidate log: %s\n\n' \
           "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TASK" "$VAL_LOG" >> "$FIX_PLAN_FILE"
         PASSED=0
+        RETRY_CONTEXT="Previous attempt failed pre-merge validation. Read $VAL_LOG before retrying task: $TASK"
       else
         printf '  validate: ok\n' >> "$SUMMARY_LOG"
       fi
     fi
     if [ "$PRESERVE_WORKTREE" = "0" ]; then
+      spec_check_or_stop
       merge_or_discard_worktree "$WT" "$ITER" "$PASSED" "$ORIGINAL_DIR"
       MERGE_RC=$?
+      # The worktree may have been removed. Keep guarding original inputs.
+      GUARD_PATHS=("$SPEC_SOURCE" "$SPEC_FILE" "$BACKLOG_FILE")
+      GUARD_STAMPS=("$SOURCE_STAMP" "$SNAPSHOT_STAMP" "$BACKLOG_STAMP")
+      if [ "$PASSED" = "1" ] && { [ "$MERGE_RC" = "0" ] || [ "$MERGE_RC" = "2" ]; }; then
+        [ "$DRY_RUN" = "1" ] || spec_complete_task || exit 1
+      fi
       OUTCOME=$([ "$PASSED" = "1" ] && echo merged || echo discarded)
       if [ "$MERGE_RC" = "0" ]; then
         printf '  worktree: %s\n' "$OUTCOME" >> "$SUMMARY_LOG"
@@ -990,19 +1032,22 @@ $RESEARCH"
         ralph_log "worktree for iter $ITER needs attention (blocked). Stopping."
         echo "=== STOP (worktree-blocked) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
         WORKTREE_FAILED=1
+        STOP_REASON=worktree-blocked
         break
       fi
     fi
     unset RALPH_WT_DIR
   fi
 
-  COMPLETED=$ITER
-
-  if check_promise "$FIX_PLAN_FILE"; then
-    ralph_log "completion promise found in $FIX_PLAN_FILE. Stopping."
-    echo "=== STOP (promise) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
-    break
+  if [ "$USE_WORKTREE" != "1" ] && [ "$PASSED" = "1" ] && [ "$DRY_RUN" != "1" ]; then
+    spec_complete_task || exit 1
   fi
+  if [ "$PASSED" = "1" ]; then
+    RETRY_CONTEXT=""
+    TASK_BASE_SHA=""
+  fi
+  # Completion markers are advisory only: drain the actual pending backlog.
+
 done
 
 # --coverage-check: after the iteration loop, classify each spec §5.N
@@ -1010,11 +1055,14 @@ done
 # to the summary log and (with --coverage-requeue) NOT-COVERED criteria
 # are appended back into BACKLOG.md as new tasks for a later run. This is
 # advisory — coverage gaps do not fail the spec-trio invocation.
+spec_check_or_stop
 if [ "$COVERAGE_CHECK" = "1" ]; then
   COVERAGE_LOG="$LOG_DIR/spec-trio-$TS-coverage.log"
   COVERAGE_HELPER="$PLUGIN_ROOT/bin/spec-coverage.sh"
   if [ ! -x "$COVERAGE_HELPER" ]; then
-    echo "WARN: $COVERAGE_HELPER not found or not executable; skipping --coverage-check" | tee -a "$SUMMARY_LOG" >&2
+    echo "ERROR: $COVERAGE_HELPER not found or not executable" >&2
+    STOP_REASON=coverage-unavailable
+    exit 1
   else
     # Build coverage helper's extra-args as an array so paths with spaces
     # (BACKLOG.md path, $LOG_DIR) survive intact. The earlier string-built
@@ -1022,8 +1070,11 @@ if [ "$COVERAGE_CHECK" = "1" ]; then
     # break --coverage-requeue or --manifest-history when the workspace or
     # backlog path contained a space.
     COVERAGE_EXTRA_ARGS=()
-    if [ "$COVERAGE_REQUEUE" = "1" ]; then
-      COVERAGE_EXTRA_ARGS+=( --requeue "$BACKLOG_FILE" )
+    COVERAGE_ADDITIONS=""
+    spec_check_or_stop
+    if [ "$COVERAGE_REQUEUE" = "1" ] && [ "$DRY_RUN" != "1" ]; then
+      COVERAGE_ADDITIONS=$(mktemp "$LOG_DIR/coverage-additions.XXXXXX") || exit 1
+      COVERAGE_EXTRA_ARGS+=( --requeue "$COVERAGE_ADDITIONS" )
     fi
     # RFC 0004 PR 5: pass --manifest-history when this run produced manifests
     # so spec-coverage's report can roll up reviewer verdicts per §5.N.
@@ -1035,14 +1086,26 @@ if [ "$COVERAGE_CHECK" = "1" ]; then
       echo "=== coverage check @ $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
       echo "since-ref: $START_HEAD"
       echo
-      "$COVERAGE_HELPER" --spec "$SPEC_FILE" --since-ref "$START_HEAD" \
+      spec_run_stage "$COVERAGE_HELPER" --spec "$SPEC_FILE" --since-ref "$START_HEAD" \
         --repo "$ORIGINAL_DIR" "${COVERAGE_EXTRA_ARGS[@]+${COVERAGE_EXTRA_ARGS[@]}}" --quiet
     } 2>&1 | tee "$COVERAGE_LOG" >> "$SUMMARY_LOG"
+    COVERAGE_PIPESTATUS=("${PIPESTATUS[@]}")
+    spec_check_or_stop
+    if [ "${COVERAGE_PIPESTATUS[0]}" -ne 0 ] || [ "${COVERAGE_PIPESTATUS[1]}" -ne 0 ]; then
+      STOP_REASON=coverage-failed
+      exit 1
+    fi
+    if [ -n "$COVERAGE_ADDITIONS" ]; then
+      spec_append_coverage "$COVERAGE_ADDITIONS" || { STOP_REASON=coverage-persistence-failed; exit 1; }
+    fi
     echo "coverage report: $COVERAGE_LOG" >&2
   fi
 fi
 
-echo "=== spec-trio done (completed=$COMPLETED) ===" | tee -a "$SUMMARY_LOG" >&2
-echo "summary: $SUMMARY_LOG" >&2
-# A worktree that could not be created, merged or discarded: don't report success.
-if [ "${WORKTREE_FAILED:-0}" = "1" ]; then exit 1; fi
+spec_check_or_stop
+[ "${WORKTREE_FAILED:-0}" != "1" ] || exit 1
+if [ "$DRY_RUN" != "1" ] && [ "$(spec_pending_count)" -gt 0 ]; then
+  [ "$STOP_REASON" != "backlog-empty" ] || STOP_REASON=coverage-requeued
+  exit 3
+fi
+exit 0

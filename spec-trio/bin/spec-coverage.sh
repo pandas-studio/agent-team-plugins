@@ -29,6 +29,7 @@
 #
 # Exit codes:
 #   0  ok (regardless of coverage outcome — coverage gaps don't fail the run)
+#   1  requeue persistence failure (earlier successfully appended rows remain)
 #   2  usage error / missing spec / invalid since-ref / no §5.N criteria
 #
 # Standalone use:
@@ -117,7 +118,7 @@ log
 # count_manifest_verdicts <id>
 #   Echo "<ship>\t<needs-fix>\t<discuss>\t<oos>" — verdict tallies for each
 #   spec-review manifest in $MANIFEST_HISTORY whose kind=task value cites $id.
-#   Anchored regex (§5\.N(?![0-9])) prevents §5.3 from also matching §5.30.
+#   Anchored regex (§5\.N(?![0-9]|\\.[0-9])) prevents §5.3 from also matching §5.30.
 #   Manifests with verdict=null (UNKNOWN reviewer / parse miss) are silently
 #   dropped from the 4-bucket rollup — they're not evidence of any closed-vocab
 #   outcome. RFC 0004 PR 5.
@@ -135,7 +136,7 @@ count_manifest_verdicts() {
       | select(
           [.inputs[]?
            | select(.kind == "task")
-           | select((.value // "") | test("§5\\." + $num + "(?![0-9])"))
+           | select((.value // "") | test("§5\\." + $num + "(?![0-9]|\\.[0-9])"))
           ] | length > 0
         )
       | (.verdict // "null")
@@ -150,12 +151,13 @@ count_manifest_verdicts() {
 #   stdout: <STATUS>\t<short shas (space-sep, may be empty)>
 classify_one() {
   local id="$1" name="$2"
-  local hits
+  local hits citation_re
+  citation_re="${id//./\\.}([^0-9.]|[.]([^0-9]|$)|$)"
   # Pass 1: literal §5.N in commit messages within range.
   if [ -n "$RANGE" ]; then
-    hits="$(git -C "$REPO" log --format='%h' --fixed-strings --grep="$id" "$RANGE" 2>/dev/null)"
+    hits="$(git -C "$REPO" log --format='%h' --extended-regexp --grep="$citation_re" "$RANGE" 2>/dev/null)"
   else
-    hits="$(git -C "$REPO" log --format='%h' --fixed-strings --grep="$id" 2>/dev/null)"
+    hits="$(git -C "$REPO" log --format='%h' --extended-regexp --grep="$citation_re" 2>/dev/null)"
   fi
   if [ -n "$hits" ]; then
     printf 'COVERED\t%s\n' "$(printf '%s' "$hits" | tr '\n' ' ' | sed 's/ *$//')"
@@ -247,7 +249,10 @@ if [ -n "$REQUEUE" ] && [ "$COUNT_MISSING" -gt 0 ]; then
   while IFS=$'\t' read -r id name status shas; do
     [ "$status" = "NOT-COVERED" ] || continue
     [ -z "$id" ] && continue
-    printf -- '- [ ] (spec coverage gap %s) %s\n' "$id" "$name" >> "$REQUEUE"
+    if ! printf -- '- [ ] (spec coverage gap %s) %s\n' "$id" "$name" >> "$REQUEUE"; then
+      echo "ERROR: failed to append coverage task $id to $REQUEUE ($appended additions written)" >&2
+      exit 1
+    fi
     appended=$((appended + 1))
   done <<< "$RESULTS"
   log

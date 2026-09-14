@@ -68,7 +68,7 @@ done
 echo
 echo "3. Plugin layout"
 for rel in bin/spec-trio.sh bin/spec-coverage.sh bin/spec-trio-doctor.sh \
-           lib/common.sh lib/manifest.sh lib/spec-helpers.sh lib/pm.md \
+           lib/common.sh lib/manifest.sh lib/spec-helpers.sh lib/verification.sh lib/pm.md \
            lib/roles/planner.md lib/roles/worker.md lib/roles/reviewer.md \
            prompts/spec.md.template prompts/BACKLOG.md.template prompts/fix_plan.md.template \
            tests/smoke-pr5.sh \
@@ -268,7 +268,7 @@ STUB
       PLANNER_CLI=true CODER_CLI=true \
       TMUX="" \
       PATH="$STUB_BIN:$PATH" \
-      "$PLUGIN_ROOT/bin/spec-trio.sh" --spec "$cwd/spec.md" --backlog "$cwd/BACKLOG.md" \
+      "$PLUGIN_ROOT/bin/spec-trio.sh" --test-cmd 'git diff --check' --spec "$cwd/spec.md" --backlog "$cwd/BACKLOG.md" \
         --max-iter 1 --no-strict-scope --no-research \
       >"$cwd/spec.out" 2>"$cwd/spec.err"
     )
@@ -379,7 +379,7 @@ STUB
       CODER_CAPTURE="$cwd/coder-prompt.txt" \
       TMUX="" \
       PATH="$S7:$PATH" \
-      "$PLUGIN_ROOT/bin/spec-trio.sh" --spec "$cwd/spec.md" --backlog "$cwd/BACKLOG.md" \
+      "$PLUGIN_ROOT/bin/spec-trio.sh" --test-cmd 'git diff --check' --spec "$cwd/spec.md" --backlog "$cwd/BACKLOG.md" \
         --max-iter 1 --autoship --no-strict-scope \
       >"$cwd/spec.out" 2>"$cwd/spec.err"
     )
@@ -544,7 +544,7 @@ STUB
       FOCUS_CAPTURE="$T8/focus-$team" \
       TMUX="" \
       PATH="$S8:$PATH" \
-      "$PLUGIN_ROOT/bin/spec-trio.sh" --spec "$cwd/spec.md" --backlog "$cwd/BACKLOG.md" \
+      "$PLUGIN_ROOT/bin/spec-trio.sh" --test-cmd 'git diff --check' --spec "$cwd/spec.md" --backlog "$cwd/BACKLOG.md" \
         --max-iter 1 "$@" \
       >"$T8/$team.out" 2>"$T8/$team.err"
     )
@@ -565,7 +565,7 @@ STUB
   # --- P1: research-retry coder strays outside allowlist → OUT-OF-SCOPE, no Review2 ---
   CASE_P1="$T8/p1"
   run_scope_case "$CASE_P1" "scope-p1" "$S8/coder-stray.sh" need-research \
-    || true   # OUT-OF-SCOPE is a normal (rc=0) terminal verdict; run shouldn't error
+    || true   # OUT-OF-SCOPE stops for human attention (rc=4)
   S2P1=$(ls "$CASE_P1/.spec-trio/log/scope-p1"/spec-trio-*-iter-1-scope2.manifest.json 2>/dev/null | tail -1)
   R2P1=$(ls "$CASE_P1/.spec-trio/log/scope-p1"/spec-trio-*-iter-1-review2.manifest.json 2>/dev/null | tail -1)
   VS2=$([ -n "$S2P1" ] && jq -r '.verdict' "$S2P1" 2>/dev/null)

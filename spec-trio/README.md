@@ -1,6 +1,6 @@
 # spec-trio
 
-Spec-anchored ralph-trio: an external `spec.md` is the load-bearing contract that gates the planner / coder / reviewer pipeline. Each agent sees the spec body in its prompt; the driver enforces an allowlist scope check on the planner's `<allowed-paths>` and (optionally) a §5.N coverage classifier against commits made during the run.
+Spec-anchored ralph-trio: an external `spec.md` is the load-bearing contract that gates the planner / coder / reviewer pipeline. Each agent sees the same frozen spec snapshot in its prompt; the driver enforces an allowlist scope check on the planner's `<allowed-paths>` and (optionally) a §5.N coverage classifier against commits made during the run.
 
 Use spec-trio when you want **user intent to live outside the model** — the spec is the thing you edit when the model goes off-mission, not a re-prompt.
 
@@ -54,37 +54,80 @@ claude --plugin-dir ./agent-team-plugins/spec-trio
 /spec-trio:bootstrap                          # seeds spec.md, BACKLOG.md from templates
 # edit spec.md — fill in §1 Goals, §2 Interfaces, §3 Behavior, §4 Constraints, §5 Test criteria, §6 Non-goals
 # edit BACKLOG.md — add `- [ ] (§3.1) ...` task lines
-spec-trio.sh --spec spec.md --backlog BACKLOG.md --max-iter 10
+spec-trio.sh --spec spec.md --backlog BACKLOG.md --max-iter 10 --test-cmd 'pytest -q'
 ```
+
+Real runs require `--test-cmd 'COMMAND'`, including `--autoship`. Choose a
+command that proves the task's behavior; the driver runs it with `bash -c` in
+the active workspace (the iteration worktree when enabled). A missing or blank
+command exits 2 before creating files or calling models. `--dry-run` needs no
+test command and does not modify the backlog, even with `--coverage-requeue`.
 
 Per backlog task, each iteration runs:
 
-1. **Stage 1 — Planner** (`claude -p` with `lib/roles/planner.md` + `<spec>` body). Plan must include an `<allowed-paths>` block declaring every file/dir the coder may touch.
-2. **Scope gate 1** — if `<allowed-paths>` is missing or empty under `--strict-scope` (default), the iteration short-circuits to `OUT-OF-SCOPE` (no coder, no reviewer).
-3. **Stage 1.5 — Pre-coding research** — if the plan emits `## NEED RESEARCH`, `ask-agy.sh` (Antigravity) answers it **before** coding and the answer is grafted into the first coder prompt. Fires even under `--autoship`; skipped with `--no-research`.
-4. **Stage 2 — Coder** (`claude -p` with `lib/roles/worker.md` + `<spec>` + plan + any pre-coding research).
-5. **Scope gate 2** — every uncommitted/committed/untracked path that the coder produced is compared against the allowlist. Paths are listed verbatim (non-ASCII names match as written), a rename counts as both its source and its destination, a submodule with any change counts as its path, and a name containing a newline always fails. If any path is outside, the iteration short-circuits to `OUT-OF-SCOPE` (no reviewer).
-6. **Stage 3 — Reviewer** (`ask-codex.sh --with-spec spec.md`, pointed at the iteration's commit range from the iter-base commit plus any uncommitted/untracked changes — the same range for the post-research re-review) → verdict: `SHIP / NEEDS-FIX / DISCUSS / OUT-OF-SCOPE`. The verdict comes from the exact `.review.json` identified by the invocation receipt and is linked into the parent manifest. Research requests use the same invocation's final file. Missing or failed results become UNKNOWN; neither the stream nor `latest` links supply a fallback.
-7. If codex emits `## NEED RESEARCH`: invoke `ask-agy.sh`, re-run Stage 2 with research context (stacked above any pre-coding research), re-review.
+1. Select the first unchecked task without marking it complete. Capture one
+   spec snapshot for the run; plan, code, review and coverage all use it.
+2. Planner declares `<allowed-paths>`. Missing paths under strict scope block
+   the run. Planner `## NEED RESEARCH` triggers research before implementation.
+3. Coder implements the task. A failed coder cannot proceed to review or SHIP.
+4. Check the contract and allowed paths, execute the test command, then check
+   scope again. Record the command, test log and exit code in the coder manifest.
+5. Reviewer returns its invocation-specific result. Research-informed retries
+   repeat the coder, scope and test gates before re-review.
+6. Mark the selected row `[x]` only after success and, in worktree mode, successful
+   validation and merge. An agent's completion marker cannot skip pending rows.
 
 Verdict dispatch:
 
-| Verdict | Action |
+| Result | Action |
 | :--- | :--- |
-| `SHIP` | Log to fix_plan.md, continue. |
-| `NEEDS-FIX` | Re-queue the task to BACKLOG.md with the review log path. |
-| `OUT-OF-SCOPE` | Log to fix_plan.md as `human attention — spec violation`. **Not re-queued** — retrying with the same bad allowlist would loop. |
-| `DISCUSS` | Log to fix_plan.md (human attention). |
-| `UNKNOWN` | Log to fix_plan.md (codex output unparseable). |
+| `SHIP` | Complete after gates and any required merge succeed. |
+| `NEEDS-FIX`, planner/coder/test failure | Keep the same row pending; retry with failure-log context within the run caps. |
+| `OUT-OF-SCOPE`, `DISCUSS`, `UNKNOWN` | Stop immediately, retain the pending task and preserve an active worktree for inspection. |
+| Changed/deleted spec or changed backlog | Stop immediately; do not restore user files or silently adopt a new contract. |
+
+In-place retries retain the task’s initial Git baseline for scope checks and review, including commits from failed attempts. A completed task starts a new baseline; worktree retries use the new workspace baseline because failed attempt branches are discarded.
+
+The source spec, frozen snapshot and backlog are checked before and after each
+external stage and before completion. A worktree's spec/backlog copies are also
+protected against changes from their starting state. Guard stamps include the
+resolved destination, so retargeting an intermediate symlink is detected even
+when the destination files contain identical bytes. This detects changes at
+stage boundaries; it is not an OS-level write sandbox.
+
+### Exit status and migration
+
+Existing real-run commands must add `--test-cmd`. Previous `[x]` entries remain
+unchanged; inspect and reopen any historical tasks you want verified again.
+
+| Exit | Meaning |
+| :--- | :--- |
+| 0 | All queued tasks completed, or successful dry-run (explicitly labeled). |
+| 1 | Execution, persistence, coverage execution or worktree operation failed. |
+| 2 | Invalid arguments or missing prerequisites. |
+| 3 | Pending tasks remain after a cap, or coverage requeued work. |
+| 4 | Human attention required: contract/backlog change or blocking review. |
+| 130 | Interrupted; the current uncompleted task remains pending. |
+
+The final summary records `status`, `completed`, `pending`, `reason` and `exit`.
+A successful merge followed by cleanup failure counts the task completed but
+exits 1; a failed merge leaves the task pending. A coverage gap alone remains
+advisory, but `--coverage-requeue` creates pending work and therefore exits 3.
+
+Coverage classification never edits the live backlog. The driver stages requeue
+additions separately, checks the original backlog and resolved symlink destination,
+then publishes the prepared contents atomically. Concurrent edits block the run;
+persistence failures exit 1. Standalone `spec-coverage.sh --requeue` also exits 1
+on append failure, retaining any rows successfully appended before the error.
 
 Useful flags:
 
 - `--strict-scope` (default ON) — enforce both gates. `--no-strict-scope` downgrades both to warnings.
 - `--coverage-check` — after the run, classify each `### §5.N` test-criterion subsection against commits made during the run (`COVERED` / `PARTIAL` / `NOT-COVERED`).
 - `--coverage-requeue` — additionally append each `NOT-COVERED` criterion as a new BACKLOG task.
-- `--worktree` — run each iter in a throwaway git worktree; fast-forward merge on SHIP, discard otherwise.
-- `--autoship` — skip the reviewer stage (still gates on scope). Useful for mechanical refactors with a tight allowlist.
-- `--dry-run` — no model calls; still emits manifests. **Bypasses both scope gates.**
+- `--worktree` — run each iter in a throwaway git worktree; fast-forward merge after tests and SHIP; discard retryable failed attempts and preserve blocked worktrees.
+- `--autoship` — skip the reviewer stage (still gates on contract, scope and tests). Useful for mechanical refactors with a tight allowlist.
+- `--dry-run` — no model calls; still emits manifests. **Bypasses scope and test execution; preserves the backlog.**
 - `--no-research` — skip both NEED RESEARCH branches (planner Stage 1.5 + reviewer Stage 3.5; no `ask-agy.sh` dep).
 
 ## Workspace artifacts
@@ -115,9 +158,12 @@ spec-coverage.sh --spec spec.md --since-ref HEAD~10 \
                  --manifest-history $PWD/.spec-trio/log/<team>
 ```
 
+**This is implementation-trace classification, not proof of passing tests.** Test
+commands and their outcomes are recorded separately in coder manifests.
+
 Classification rules:
 
-- **COVERED**: at least one commit message in the range contains the literal `§5.N` (worker.md commit convention: `git commit -m "spec §N.M: ..."`).
+- **COVERED**: at least one commit message in the range contains the exact `§5.N` identifier (so `§5.10` or `§5.1.2` cannot cover `§5.1`) (worker.md commit convention: `git commit -m "spec §N.M: ..."`).
 - **PARTIAL**: no §-citation, but a distinctive keyword from the criterion heading appears in some commit's message or diff (catches "did the work, forgot to cite"). Skipped with `--no-partial`.
 - **NOT-COVERED**: neither.
 
@@ -143,7 +189,7 @@ The transcript becomes the rationale for the spec edit. Re-run `spec-trio.sh` af
 spec-trio-doctor.sh
 ```
 
-`tests/smoke-pr5.sh` — comprehensive 232-assertion smoke (RFC 0004 fixtures): both scope gates, dispatch states, manifest schema invariants, and the coverage `--manifest-history` rollup with anchored-regex behavior (§5.3 doesn't match §5.30).
+`tests/smoke-pr5.sh` — comprehensive manifest/scope smoke (RFC 0004 fixtures): both scope gates, dispatch states, manifest schema invariants, and the coverage `--manifest-history` rollup with anchored-regex behavior (§5.3 doesn't match §5.30).
 
 ```bash
 bash $PLUGIN_ROOT/tests/smoke-pr5.sh
@@ -162,6 +208,7 @@ spec-trio/
 ├── lib/                          # internal (sourced, not on PATH)
 │   ├── common.sh                 # workspace / team / log / worktree / promise — vendored from ralph-trio
 │   ├── manifest.sh               # RFC 0004 run manifest helper — vendored from ralph-trio
+│   ├── verification.sh           # frozen contract, test gate and task lifecycle
 │   ├── spec-helpers.sh           # parse_allowed_paths, check_scope, parse_test_criteria, criterion_keywords
 │   └── roles/
 │       ├── planner.md            # Stage 1 spec-aware planner (emits <allowed-paths>)
@@ -170,9 +217,9 @@ spec-trio/
 ├── prompts/                      # workspace seed templates (copied by bootstrap skill)
 │   ├── spec.md.template          # §1–§6 spec scaffold
 │   ├── BACKLOG.md.template       # task-list with §-citation examples
-│   └── fix_plan.md.template      # iteration log + completion marker
+│   └── fix_plan.md.template      # iteration log; driver owns completion
 ├── tests/
-│   └── smoke-pr5.sh              # 232-assert smoke (manifests + gates + coverage rollup)
+│   └── smoke-pr5.sh              # manifest/scope smoke (manifests + gates + coverage rollup)
 ├── skills/
 │   └── bootstrap/SKILL.md        # /spec-trio:bootstrap
 └── .claude-plugin/plugin.json
@@ -187,7 +234,7 @@ spec-trio runs untrusted LLM output in a loop against a spec contract. Defenses 
 - **Scope gates as hard contract enforcement.** The planner's `<allowed-paths>` block becomes a deterministic filter — gate 1 rejects plans without one (under strict-scope), gate 2 rejects coder output that touches anything outside it. §4 Constraints get an additional absolute check in the reviewer prompt.
 - **Team-name validation.** `$AGENT_TEAM` / tmux window names flow into filesystem paths and branch names. An explicit `$AGENT_TEAM` must match `[A-Za-z0-9][A-Za-z0-9._-]*` (max 48 chars) or the run exits with an error; a tmux-derived name is sanitized to that set with a loud warning.
 - **Pre-merge validation** (worktree mode): `git diff --check` (whitespace, conflict markers) + secret-pattern scan on added lines + diff-size cap (default 10,000 lines). Failure → discard the iteration's branch instead of merging.
-- **OUT-OF-SCOPE routes to human attention**, not to retry. A bad allowlist that loops the reviewer would burn iterations; the driver routes it to fix_plan with `human attention — spec violation` and lets the operator fix the spec or re-scope the task.
+- **OUT-OF-SCOPE stops for human attention**, without marking the task done. A bad allowlist that loops the reviewer would burn iterations; the driver routes it to fix_plan with `human attention — spec violation` and lets the operator fix the spec or re-scope the task.
 
 ## License
 
