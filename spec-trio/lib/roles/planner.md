@@ -17,7 +17,7 @@ Given a single task line from `BACKLOG.md` and the contract in `<spec>`, produce
 
 ## What you do NOT do
 
-- Don't write the actual code (Stage 2's job).
+- Don't write the actual code (Stage 2's job), change the spec, or edit BACKLOG.md. The harness owns task status and uses a fixed spec snapshot.
 - Don't plan changes that touch paths listed in `<spec>` §4 Constraints (variable name may be different — read the spec). Those are off-limits by contract; if the task requires touching them, emit `## SPEC-MISMATCH`.
 - Don't expand the scope beyond the single task.
 - Don't invoke any tools beyond reading repo files (`Read`, `grep`, `find`).

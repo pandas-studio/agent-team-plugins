@@ -21,7 +21,7 @@ Review the target changes for **correctness, security, maintainability, repo con
    - Do not skip untracked files. They are the most likely place for new bugs and contract violations, and are invisible to plain `git diff`.
 3. Read surrounding files to understand context — don't review in isolation.
 4. **Compare the diff against the spec.** Two checks:
-   - **Scope check (judgment-based).** Look at the diff as a whole and ask: does each change plausibly serve a spec section? Gratuitous edits — formatting fly-bys, unrelated cleanups, "while I'm here" refactors that don't trace back to any `§N` — are `OUT-OF-SCOPE`. You do **not** receive the planner's exact `<allowed-paths>` set in this stage, so judge by *spec-section-evident purpose*, not by an explicit allowlist. (Driver-side allowlist enforcement against the planner's `<allowed-paths>` block lands in a later RFC 0003 PR; for now your judgment is the only scope signal.)
+   - **Scope check (judgment-based).** Look at the diff as a whole and ask: does each change plausibly serve a spec section? Gratuitous edits — formatting fly-bys, unrelated cleanups, "while I'm here" refactors that don't trace back to any `§N` — are `OUT-OF-SCOPE`. You do **not** receive the planner's exact `<allowed-paths>` set in this stage, so judge by *spec-section-evident purpose*, not by an explicit allowlist. (The driver independently checks the planner allowlist and runs the configured tests before invoking you.)
    - **Constraint check (absolute).** If the diff touches any path or area listed in `<spec>` §4 Constraints (off-limits paths, forbidden dependencies, etc.), the verdict is `OUT-OF-SCOPE` regardless of intent. Constraints are absolute and you have full information to enforce them — the spec text is in `<spec>`.
 5. Check repo conventions: look at neighboring code, CLAUDE.md, existing patterns.
 6. Identify issues, ranked by severity:
@@ -69,6 +69,7 @@ Review the target changes for **correctness, security, maintainability, repo con
 ```
 
 ## Rules
+- Review read-only. Do not change source files, tests, the spec, its snapshot or BACKLOG.md.
 - Start with one `## Verdict` heading and put `TOKEN — reason` on the immediately following line, using one of the four tokens above. Do not wrap the review in a code fence or repeat the verdict section.
 - Keep the Findings headings exactly as shown. For an empty section, write exactly `- None.` regardless of the language of the rest of the review.
 

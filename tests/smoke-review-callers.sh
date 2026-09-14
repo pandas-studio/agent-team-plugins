@@ -76,8 +76,9 @@ for plugin in ralph-trio spec-trio; do
     git -C "$repo" add file.txt spec.md BACKLOG.md
     git -C "$repo" -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm baseline
     args=(--backlog "$repo/BACKLOG.md" --max-iter 1)
-    [ "$plugin" != spec-trio ] || args+=(--spec "$repo/spec.md")
+    [ "$plugin" != spec-trio ] || args+=(--spec "$repo/spec.md" --test-cmd 'git diff --check')
     case "$scenario" in retarget|failed|retry) ;; *) args+=(--no-research) ;; esac
+    driver_rc=0
     (
       cd "$repo"
       env -u REVIEWER_CLI -u REVIEWER_ROLE_FILE -u MANIFEST_PARENT_TMP \
@@ -91,7 +92,10 @@ for plugin in ralph-trio spec-trio; do
         REVIEW_TEST_CASE="$scenario" REVIEW_TEST_COUNTER="$case_root/count" \
         REVIEW_TEST_RESEARCH="$case_root/research" REVIEW_TEST_DECOY="$case_root/decoy.md" \
         "$ROOT/$plugin/bin/$plugin.sh" "${args[@]}"
-    ) > "$TMP/driver.out" 2>&1
+    ) > "$TMP/driver.out" 2>&1 || driver_rc=$?
+    expected_rc=0
+    if [ "$plugin" = spec-trio ] && { [ "$scenario" = malformed ] || [ "$scenario" = failed ]; }; then expected_rc=4; fi
+    check "$plugin $scenario exit status" test "$driver_rc" -eq "$expected_rc"
     expected_calls=1
     [ "$scenario" != retry ] || expected_calls=2
     check "$plugin $scenario reviewer count" test "$(cat "$case_root/count")" -eq "$expected_calls"

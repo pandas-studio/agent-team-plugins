@@ -1,6 +1,6 @@
 # spec-trio BACKLOG
 
-Each line is one iteration's worth of work. `spec-trio.sh` pops the top unchecked line, marks it done in-place, and runs planner → coder → reviewer against it — with `spec.md` as the load-bearing contract.
+Each line is one iteration's worth of work. `spec-trio.sh` selects the top unchecked line and runs planner → coder → tests → reviewer against it, marking it done only after success and any required merge — with `spec.md` as the load-bearing contract.
 
 Format: GitHub-style task list (`- [ ] ...`). Cite the spec section the task satisfies so the planner has a starting hook (`§3.2`, `§5.1`, …). The planner is responsible for emitting `<allowed-paths>` based on what the spec actually permits.
 
@@ -15,7 +15,8 @@ Format: GitHub-style task list (`- [ ] ...`). Cite the spec section the task sat
 - Top of list = highest priority.
 - Each task should map to one or more `§N` / `§N.M` spec sections. If a task doesn't fit the spec, the planner will emit `SPEC-MISMATCH` and stop — fix the task wording or amend `spec.md` (see "When to reach for debate" in the README) rather than fight the gate.
 - The harness can append entries:
-  - `NEEDS-FIX` re-queues the same task with a review-log pointer.
+  - `NEEDS-FIX` and verification failures retry the same unchecked row; the driver passes failure-log context to the next attempt.
   - `--coverage-requeue` appends `- [ ] (spec coverage gap §5.N) <name>` for any test criterion that no commit cited.
   - Don't be surprised by new lines appearing mid-run.
+- DISCUSS, UNKNOWN, OUT-OF-SCOPE or changed protected inputs stop the run for human attention. Never mark their tasks complete.
 - This file is **state**. Commit it (or not) as you see fit, but be aware overnight runs will mutate it.
