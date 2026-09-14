@@ -402,6 +402,7 @@ REVIEW_RUN_ID=""
 RESEARCH_RUN_ID=""
 CODE2_RUN_ID=""
 REVIEW2_RUN_ID=""
+TASK_BASE_SHA=""
 while :; do
   spec_check_or_stop
   if [ "$DRY_RUN" != "1" ] && [ "$(spec_pending_count)" -eq 0 ]; then
@@ -469,18 +470,15 @@ while :; do
   fi
   spec_protect_worktree || exit 1
   spec_check_or_stop
-  # Iter-base SHA: HEAD as of this iter's start, captured AFTER worktree setup
-  # (so worktree mode anchors on the throwaway branch, not $ORIGINAL_DIR).
-  # check_scope uses this to walk every commit the coder produces during the
-  # iter — without it the gate would only see HEAD~1..HEAD and miss earlier
-  # commits in a multi-commit iter. Empty (e.g. unborn HEAD) → check_scope
-  # falls back to its legacy HEAD~1..HEAD behavior.
-  # --verify: plain `rev-parse HEAD` prints the literal "HEAD" in a repo with no
-  # commits, which after the coder's first commit names that commit — hiding it
-  # from both the scope gate and the reviewer. Anchor an unborn repo on the
-  # empty tree instead, so the first commit is diffed in full.
-  ITER_BASE_SHA="$(git -C "$WORK_DIR" rev-parse --verify -q HEAD 2>/dev/null \
-    || git -C "$WORK_DIR" hash-object -t tree /dev/null 2>/dev/null || true)"
+  # In-place retries retain commits from failed attempts. Keep the task's
+  # original baseline for both scope checks and review until it completes.
+  # Worktree retries discard their failed branch, so anchor each new workspace.
+  # An unborn repository uses the empty tree to include its first commit.
+  if [ "$USE_WORKTREE" = "1" ] || [ -z "$TASK_BASE_SHA" ]; then
+    TASK_BASE_SHA="$(git -C "$WORK_DIR" rev-parse --verify -q HEAD 2>/dev/null \
+      || git -C "$WORK_DIR" hash-object -t tree /dev/null 2>/dev/null || true)"
+  fi
+  ITER_BASE_SHA="$TASK_BASE_SHA"
 
   PLAN_LOG="$LOG_DIR/spec-trio-$TS-iter-$ITER-plan.log"
   CODE_LOG="$LOG_DIR/spec-trio-$TS-iter-$ITER-code.log"
@@ -1044,7 +1042,10 @@ $RESEARCH"
   if [ "$USE_WORKTREE" != "1" ] && [ "$PASSED" = "1" ] && [ "$DRY_RUN" != "1" ]; then
     spec_complete_task || exit 1
   fi
-  [ "$PASSED" != "1" ] || RETRY_CONTEXT=""
+  if [ "$PASSED" = "1" ]; then
+    RETRY_CONTEXT=""
+    TASK_BASE_SHA=""
+  fi
   # Completion markers are advisory only: drain the actual pending backlog.
 
 done

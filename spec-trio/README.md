@@ -86,6 +86,8 @@ Verdict dispatch:
 | `OUT-OF-SCOPE`, `DISCUSS`, `UNKNOWN` | Stop immediately, retain the pending task and preserve an active worktree for inspection. |
 | Changed/deleted spec or changed backlog | Stop immediately; do not restore user files or silently adopt a new contract. |
 
+In-place retries retain the task’s initial Git baseline for scope checks and review, including commits from failed attempts. A completed task starts a new baseline; worktree retries use the new workspace baseline because failed attempt branches are discarded.
+
 The source spec, frozen snapshot and backlog are checked before and after each
 external stage and before completion. A worktree's spec/backlog copies are also
 protected against changes from their starting state. Guard stamps include the

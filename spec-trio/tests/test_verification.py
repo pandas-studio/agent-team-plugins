@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DRIVER = ROOT / "spec-trio/bin/spec-trio.sh"
 
 STUB = r"""#!/usr/bin/env python3
-import os, sys, json, signal, time
+import os, sys, json, signal, time, subprocess
 from pathlib import Path
 args = sys.argv[1:]
 state = Path(os.environ['FIXTURE_STATE'])
@@ -43,7 +43,8 @@ if role == 'planner':
         time.sleep(2)
     if os.environ.get('PLANNER_FAIL'):
         sys.exit(7)
-    print('<allowed-paths>file.txt</allowed-paths>')
+    paths = 'file.txt,retained.txt' if os.environ.get('COMMIT_RETRY') and not (os.environ.get('NARROW_RETRY') and n > 1) else 'file.txt'
+    print('<allowed-paths>' + paths + '</allowed-paths>')
     if os.environ.get('PLAN_RESEARCH'):
         print('## NEED RESEARCH\n- lookup')
 elif role == 'coder':
@@ -51,6 +52,11 @@ elif role == 'coder':
         (state / 'ready').touch()
         time.sleep(30)
     Path('file.txt').write_text('good\n' if not os.environ.get('RETRY_TEST') or n > 1 else 'bad\n')
+    if os.environ.get('COMMIT_RETRY') and n == 1:
+        Path('retained.txt').write_text('first implementation remains\n')
+        subprocess.run(['git', 'add', 'file.txt', 'retained.txt'], check=True)
+        subprocess.run(['git', 'commit', '-qm', 'failed attempt implementation'], check=True)
+        (state / 'failed.sha').write_text(subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip())
     if os.environ.get('STRAY'):
         Path('other.txt').write_text('outside scope')
     if os.environ.get('PROMISE'):
@@ -240,6 +246,36 @@ class VerificationTests(unittest.TestCase):
         self.pending(False)
         self.assertEqual((self.repo / "file.txt").read_text(), "good\n")
         self.assertEqual((self.state / "reviewer.count").read_text(), "1")
+
+    def test_committed_failed_attempt_remains_in_retry_review(self):
+        baseline = self.git("rev-parse", "HEAD").strip()
+        self.env.update(COMMIT_RETRY="1", RETRY_TEST="1")
+        self.run_driver("--max-iter", "2")
+        self.rc(0)
+        self.pending(False)
+        failed = (self.state / "failed.sha").read_text()
+        prompt = (self.state / "reviewer1.prompt").read_text()
+        self.assertIn(f"{baseline}..{failed}", prompt)
+        self.assertIn("retained.txt", self.git("diff", "--name-only", baseline, "HEAD"))
+        self.assertEqual((self.repo / "file.txt").read_text(), "good\n")
+        self.assertEqual((self.state / "reviewer.count").read_text(), "1")
+
+    def test_retry_scope_includes_previous_attempt_commits(self):
+        self.env.update(COMMIT_RETRY="1", RETRY_TEST="1", NARROW_RETRY="1")
+        self.run_driver("--max-iter", "2")
+        self.rc(4)
+        self.pending()
+        self.assertIn("OUT-OF-SCOPE", self.result.stderr)
+        self.assertFalse((self.state / "reviewer.count").exists())
+
+    def test_completed_task_resets_review_baseline(self):
+        (self.repo / "BACKLOG.md").write_text("- [ ] first\n- [ ] second\n")
+        self.env["COMMIT_RETRY"] = "1"
+        self.run_driver("--max-iter", "2")
+        self.rc(0)
+        completed = (self.state / "failed.sha").read_text()
+        prompt = (self.state / "reviewer2.prompt").read_text()
+        self.assertIn(f"HEAD is still at `{completed}`", prompt)
 
     def test_retry_test_failure_does_not_reuse_ship(self):
         self.env["RESEARCH_RETRY"] = "1"
