@@ -7,7 +7,7 @@ argument-hint: [extra-rounds]
 
 # Continue a debate
 
-Extend the most recent debate in the workspace by `$ARGUMENTS` more rounds (default 2). New rounds (N+1, N+2, ...) are appended to the existing `debate-<TS>/` directory. The middle/right panes will pick them up as new round files appear; the `── new debate run detected — re-tailing ──` separator does **not** fire because the `latest-debate` symlink does not retarget.
+Extend the most recent debate in the workspace by `$ARGUMENTS` more rounds (default 2). New rounds (N+1, N+2, ...) are appended to the existing `debate-<TS>/` directory, where N is the last *completed* round. If round 1 itself never completed (for example its generator call failed), `debate.sh` reports "resuming from round 1" and runs rounds 1..E, reusing the round-1 context saved in `context.md`. The middle/right panes will pick them up as new round files appear; the `── new debate run detected — re-tailing ──` separator does **not** fire because the `latest-debate` symlink does not retarget.
 
 ## 1 · Resolve the prior debate
 
@@ -57,6 +57,6 @@ Use `Glob` to enumerate **all** `round-*.md` files in `<real-dir>` (not just the
 ## Constraints
 
 - **Do not call `ask-generator.sh` / `ask-critic.sh` directly.** `debate.sh --continue-from` is the only entry point for this skill.
-- **Do not rewrite or delete prior round files.** Append-only.
+- **Do not rewrite or delete prior round files yourself.** `debate.sh` keeps completed rounds and only re-runs an incomplete one (a round with no `.done` sidecar), overwriting that failed transcript.
 - **Do not start a new `debate-<TS>/` dir.** If the user wants a fresh debate on a different topic, they should use `/debate-conductor:run` instead — tell them so rather than silently switching.
 - **Each new round only sees the immediately preceding generator+critic pair**, not the full transcript. If the user expects round 6 to remember round 1's framing, prompt them to restate it as part of the topic — the engine intentionally keeps prompts bounded as the debate grows.

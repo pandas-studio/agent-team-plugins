@@ -141,6 +141,7 @@ $PWD/.debate-conductor/log/<team>/
 ├── latest-debate -> debate-<TS>
 ├── debate-<TS>/
 │   ├── topic.txt              # original topic — read by /continue
+│   ├── context.md             # round-1 context file, if given — reused when round 1 is retried
 │   ├── models.json            # model pair, source, and rotation reused by /continue
 │   ├── round-1-gen.md
 │   ├── round-2-crit.md
@@ -159,7 +160,7 @@ Override the log location with `DEBATE_LOG_DIR=/path/to/logs`.
 | :--- | :--- |
 | `/debate-conductor:bootstrap` | One-time per session: splits the current tmux pane into 3 and starts role tails. |
 | `/debate-conductor:run [N] [rounds]` | Resolves topic N, runs `debate.sh`, summarises verdict + moves. |
-| `/debate-conductor:continue [extra-rounds]` | Append N more rounds (default 2) to the most recent debate in the same `debate-<TS>/`. Round numbering continues; the saved model pair and rotation are reused unless explicitly overridden; tail panes pick up new rounds without retarget. |
+| `/debate-conductor:continue [extra-rounds]` | Append N more rounds (default 2) to the most recent debate in the same `debate-<TS>/`. Round numbering continues; the saved model pair and rotation are reused unless explicitly overridden; tail panes pick up new rounds without retarget. A debate whose round 1 failed restarts at round 1 with its saved context. |
 | `/debate-conductor:install-pm` | Writes/upgrades the PM orchestration policy in the workspace's `CLAUDE.md` from Claude or `AGENTS.md` from Codex (idempotent, marker-guarded). Tells the PM when to dispatch a debate vs answer directly. |
 
 Claude skills have `disable-model-invocation: true`; Codex skill metadata sets

@@ -458,6 +458,28 @@ run_debate() {
 done_rounds() { ls -a "$TMP/debate-log/$1"/debate-*/ 2>/dev/null | grep -c '^\.round-.*\.done$' || true; }
 assert_eq "$(run_debate gen-denied denied answer)" "5"
 assert_eq "$(done_rounds gen-denied)" "0"
+# /continue resumes a debate whose round 1 failed at round 1, in the same dir.
+continue_debate() {
+  local team="$1" dir="$2" rc=0
+  ( cd "$TMP" && env -u DEBATE_GENERATOR_MODEL -u DEBATE_CRITIC_MODEL -u DEBATE_PRIMARY_GEN \
+      -u DEBATE_CONDUCTOR_PM_HOST TMUX='' AGENT_TEAM="$team" \
+      AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" DEBATE_LOG_DIR="$TMP/debate-log" \
+      GENERATOR_CLI="$TMP/worker-cli/answer" CRITIC_CLI="$TMP/worker-cli/answer" \
+      "$ROOT/debate-conductor/bin/debate.sh" --continue-from "$dir" -n 2 "smoke: $team" \
+      > /dev/null 2>"$TMP/continue.err" </dev/null ) || rc=$?
+  echo "$rc"
+}
+GEN_DENIED_DIR="$(cd "$TMP/debate-log/gen-denied/latest-debate" && pwd -P)"
+assert_eq "$(continue_debate gen-denied "$GEN_DENIED_DIR")" "0"
+assert_ok grep -q 'resuming from round 1' "$TMP/continue.err"
+assert_eq "$(done_rounds gen-denied)" "2"
+assert_eq "$(ls -d "$TMP/debate-log/gen-denied"/debate-* | wc -l | tr -d ' ')" "1"
+assert_eq "$(head -1 "$GEN_DENIED_DIR/round-1-gen.md")" "<!-- debate-round: 1 gen agy -->"
+assert_ok grep -qx 'Verdict: RECONSIDER' "$GEN_DENIED_DIR/round-1-gen.md"
+# A debate dir that never started (no topic.txt) is still refused.
+mkdir -p "$TMP/debate-log/never-started/debate-20260101-000000"
+assert_eq "$(continue_debate never-started "$TMP/debate-log/never-started/debate-20260101-000000")" "2"
+assert_ok grep -q 'no completed round' "$TMP/continue.err"
 assert_eq "$(run_debate crit-denied answer denied)" "5"
 assert_eq "$(done_rounds crit-denied)" "1"
 assert_eq "$(run_debate both-answer answer answer)" "0"

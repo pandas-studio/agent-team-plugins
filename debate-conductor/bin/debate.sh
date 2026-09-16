@@ -86,7 +86,9 @@ generator=agy, critic=claude. MODEL is any registered model id — run
 'agent-team-models list' to see them. With --rotate, models alternate roles
 every two rounds. With --continue-from=<debate-TS dir>, append N more rounds to
 an existing debate (round numbering continues from last+1) and reuse its model
-pair/rotation unless this invocation explicitly overrides them.
+pair/rotation unless this invocation explicitly overrides them. A debate whose
+first round never completed resumes at round 1, reusing the context file saved
+with it; a context-file argument replaces that saved context.
 
 With --until-converged (-c), stop as soon as a Critic round emits the canonical
 \`Verdict: STRENGTHEN\` line; -n is then the upper bound (default cap 6).
@@ -180,13 +182,28 @@ if [ -n "$CONTINUE_FROM" ]; then
   # exits 0. Pre-touched files and crashed-mid-round files have no sidecar,
   # so /continue resumes from the failed round, not after it.
   #
+  # With no sidecar at all, round 1 itself failed. topic.txt is written only
+  # after preflight created the dir, so its presence means this debate started:
+  # resume at round 1. Without it there is nothing to resume.
+  #
   # The `|| true` wrap is required because `set -euo pipefail` is on and
   # `ls` returns non-zero when the glob matches nothing — without it, an
   # empty result aborts the script before our custom error message fires.
   LAST_ROUND=$( { ls "$DEBATE_DIR"/.round-*.done 2>/dev/null || true; } \
     | sed -E 's@.*/\.round-([0-9]+)-.*@\1@' \
     | sort -n | tail -1)
-  [ -z "$LAST_ROUND" ] && { echo "no completed round in $DEBATE_DIR — start a fresh debate with /run instead of /continue" >&2; exit 2; }
+  if [ -z "$LAST_ROUND" ]; then
+    [ -f "$DEBATE_DIR/topic.txt" ] || { echo "no completed round in $DEBATE_DIR — start a fresh debate with /run instead of /continue" >&2; exit 2; }
+    echo "debate: no completed round in $DEBATE_DIR; resuming from round 1" >&2
+    LAST_ROUND=0
+  fi
+  # context.md is either absent or a regular file this script wrote. Anything
+  # else (a directory, a symlink) would be skipped on reuse or swallow the copy
+  # on save, so refuse before this run touches latest-debate or models.json.
+  if [ -L "$DEBATE_DIR/context.md" ] || { [ -e "$DEBATE_DIR/context.md" ] && [ ! -f "$DEBATE_DIR/context.md" ]; }; then
+    echo "debate: $DEBATE_DIR/context.md is not a regular file; remove it or start a fresh debate" >&2
+    exit 2
+  fi
   START_ROUND=$((LAST_ROUND + 1))
   END_ROUND=$((LAST_ROUND + ROUNDS))
 else
@@ -450,8 +467,21 @@ ln -sfn "debate-$TS" "$LOG_DIR/latest-debate"
 [ ! -f "$DEBATE_DIR/topic.txt" ] && printf '%s\n' "$TOPIC" > "$DEBATE_DIR/topic.txt"
 write_model_metadata
 
+# Round-1 context. Saved beside topic.txt so a resumed round 1 gets the same
+# input; a context file passed to this invocation replaces the saved one. Only
+# round 1 reads it, so later-round continues leave it untouched.
 CONTEXT_BLOCK=""
-[ -n "$CONTEXT_FILE" ] && CONTEXT_BLOCK="$(cat "$CONTEXT_FILE")"
+if [ "$START_ROUND" -eq 1 ]; then
+  if [ -n "$CONTEXT_FILE" ]; then
+    CONTEXT_BLOCK="$(cat "$CONTEXT_FILE")"
+    CONTEXT_TMP="$(umask 077 && mktemp "$DEBATE_DIR/.context.md.XXXXXX")" \
+      && cat "$CONTEXT_FILE" > "$CONTEXT_TMP" \
+      && mv -f "$CONTEXT_TMP" "$DEBATE_DIR/context.md" \
+      || { rm -f "${CONTEXT_TMP:-}"; echo "debate: could not save context to $DEBATE_DIR/context.md" >&2; exit 1; }
+  elif [ -n "$CONTINUE_FROM" ] && [ -f "$DEBATE_DIR/context.md" ]; then
+    CONTEXT_BLOCK="$(cat "$DEBATE_DIR/context.md")"
+  fi
+fi
 
 # Pre-create empty round files so tail-role.sh's `tail -F` can follow them
 # from the start. Without this, BSD/GNU tail glob expands once at invocation
