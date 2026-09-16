@@ -392,6 +392,23 @@ for wrapper in debate-conductor/lib/ask-generator.sh debate-conductor/lib/ask-cr
   assert_eq "$(run_worker "$wrapper" broken)" "9"
 done
 
+# Capturing the answer must not leave model output on disk, even when the run
+# is interrupted.
+mkdir -p "$TMP/answer-tmp"
+printf '#!/bin/sh\necho partial answer\nsleep 30\n' > "$TMP/worker-cli/slow"
+chmod +x "$TMP/worker-cli/slow"
+( TMPDIR="$TMP/answer-tmp" REGISTRY_CMD_OVERRIDE="$TMP/worker-cli/slow" \
+    AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" \
+    bash -c '. "$1/dev-trio/lib/registry.sh"; registry_run_answer agy question' _ "$ROOT" \
+    > "$TMP/slow.out" 2>&1 </dev/null ) &
+slow_pid=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do grep -q 'partial answer' "$TMP/slow.out" 2>/dev/null && break; sleep 0.5; done
+assert_ok grep -q 'partial answer' "$TMP/slow.out"
+kill -TERM "$slow_pid" 2>/dev/null || true
+wait "$slow_pid" 2>/dev/null || true
+pkill -f "$TMP/worker-cli/slow" 2>/dev/null || true
+assert_eq "$(ls -A "$TMP/answer-tmp")" ""
+
 run_debate() {
   local team="$1" gen="$2" crit="$3" rc=0
   ( cd "$TMP" && env -u DEBATE_GENERATOR_MODEL -u DEBATE_CRITIC_MODEL -u DEBATE_PRIMARY_GEN \

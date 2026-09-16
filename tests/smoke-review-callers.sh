@@ -131,12 +131,15 @@ for plugin in ralph-trio spec-trio; do
     else
       check "$plugin never dispatches stale/failed research" test ! -e "$case_root/research"
     fi
-    # Manifests of reviews that actually ran; a synthesized retry verdict
-    # (spec-trio after failed research) links no review result.
-    manifests=()
-    for manifest in "$state/log/caller"/"$plugin"-*-review*.manifest.json; do
-      if json_is "$manifest" 'any(.inputs[]?; .kind=="review-result")'; then manifests+=("$manifest"); fi
-    done
+    manifests=( "$state/log/caller"/"$plugin"-*-review*.manifest.json )
+    if [ "$plugin" = spec-trio ] && [ "$scenario" = research-denied ]; then
+      # After failed research spec-trio synthesizes the retry verdict without
+      # running a review: exactly that review2 manifest links no result.
+      synthesized=( "$state/log/caller"/"$plugin"-*-review2.manifest.json )
+      check "$plugin synthesized retry verdict has no review result" \
+        json_is "${synthesized[0]}" '([.inputs[]|select(.kind=="review-result")]|length==0) and ([.inputs[]|select(.kind=="skip-reason")]|length==1)'
+      manifests=( "$state/log/caller"/"$plugin"-*-review.manifest.json )
+    fi
     check "$plugin review manifest count" test "${#manifests[@]}" -eq "$expected_calls"
     for manifest in "${manifests[@]}"; do
       check "$plugin parent links one exact result" json_is "$manifest" '[.inputs[]|select(.kind=="review-result")]|length==1'

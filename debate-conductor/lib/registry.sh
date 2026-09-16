@@ -324,21 +324,26 @@ registry_run() {
 }
 
 # registry_run_answer ID PROMPT — registry_run for a role whose answer is its
-# stdout. Streams stdout and stderr merged on stdout, as `registry_run ... 2>&1`
-# does. Returns the model's exit code, except that a zero exit with no
+# stdout. Streams the model's stdout as it arrives (a final line without a
+# newline gains one) and leaves its stderr on stderr. Returns the model's exit code, except that a zero exit with no
 # non-whitespace stdout returns 5: agy's print mode soft-denies a tool it
 # cannot prompt for, prints its guidance on stderr only and still exits 0, and
 # that guidance must not be mistaken for an answer.
 registry_run_answer() {
-  local answer rc=0
-  answer="$(mktemp "${TMPDIR:-/tmp}/registry-answer.XXXXXX")" || return 2
-  { { registry_run "$@" || echo "$?" > "$answer.rc"; } | tee "$answer"; } 2>&1 || true
-  [ -f "$answer.rc" ] && rc="$(cat "$answer.rc")"
-  if [ "$rc" -eq 0 ] && ! grep -q '[^[:space:]]' "$answer"; then
+  local status rc=0
+  # No temp file: the answer streams straight through awk to the caller's
+  # stdout (fd 4) and only two markers ("rc N", "empty") come back on fd 3, so
+  # an interrupted run leaves nothing behind.
+  { status="$(
+    { { registry_run "$@" || echo "rc $?" >&3; } \
+        | awk '{ print; fflush() } /[^[:space:]]/ { seen = 1 } END { if (!seen) print "empty" > "/dev/fd/3" }' >&4
+    } 3>&1
+  )"; } 4>&1
+  case "$status" in *"rc "*) rc="${status#*rc }"; rc="${rc%%[!0-9]*}" ;; esac
+  if [ "$rc" -eq 0 ] && case "$status" in *empty*) true ;; *) false ;; esac; then
     echo "registry: model '$1' exited 0 with no output on stdout — treating as failure (rc=5)"
     rc=5
   fi
-  rm -f "$answer" "$answer.rc"
   return "$rc"
 }
 
