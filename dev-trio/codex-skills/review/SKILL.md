@@ -23,15 +23,23 @@ raw argument string on whitespace or interpolate it as executable shell text.
 Explicit role settings still win; `--no-memories` is valid only with a Codex
 reviewer, so a Claude reviewer will reject it before inference.
 
-Capture this invocation's exit code and exact final/log paths from stderr.
-On nonzero exit, or absent/empty final response, report an incomplete review.
-Do not use old `latest` artifacts. On success read the `.final.md` and extract
-only the canonical token line immediately after `## Verdict`:
-`SHIP`, `NEEDS-FIX`, or `DISCUSS` followed by its reason. If that format is
-missing, report an unparseable review rather than inferring SHIP from prose.
+Capture this invocation's exit code and the exact log/final/result paths from
+its last stderr line. Read that exact `.review.json`: it is the parsed result
+the wrapper, manifest and dashboard share. Do not parse verdicts or count
+bullets in Markdown, and do not use `latest` artifacts.
+
+- `status: "ok"`: use `verdict` (`SHIP`, `NEEDS-FIX`, `DISCUSS`, or
+  `OUT-OF-SCOPE` under the spec profile) and quote `verdict_line` verbatim.
+- `findings.blocker`/`.major`/`.minor` are arrays of real findings; `null`
+  means the section is missing, so report that count as unknown, not zero.
+- `status: "parse-failed"` (exit 3) or `"invocation-failed"`: report the
+  failure, its `error`, and the artifact paths. There is no verdict.
+- A missing or unreadable result means the verdict is unavailable; never fall
+  back to the raw log or `.final.md`.
 
 Report the actual reviewer model, verdict, substantive Blocker/Major findings,
-and the final artifact link. For `NEED RESEARCH`, obtain the requested evidence
+and the result artifact link. The `.final.md` of the same successful
+invocation is supporting text only. For `NEED RESEARCH`, obtain the requested evidence
 with the [research skill](../research/SKILL.md) within the user's authorized
 scope, then repeat the original review with the same focus and spec plus the
 new research file. Fix findings only within the authorized task.
