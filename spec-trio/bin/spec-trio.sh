@@ -299,6 +299,9 @@ build_range_hint() {
 # Extract the NEED RESEARCH question(s) if present
 extract_need_research() {
   local f="$1"
+  # No readable file (e.g. a failed review left the path empty): no questions.
+  # Never let awk fall back to reading stdin.
+  [ -n "$f" ] && [ -f "$f" ] || return 0
   awk '
     /^## NEED RESEARCH/ { in_r = 1; next }
     in_r && /^## /      { in_r = 0 }

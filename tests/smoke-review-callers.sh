@@ -61,6 +61,9 @@ cat "$final"
 [ "$REVIEW_TEST_CASE" != failed ] || exit 7
 STUB
 chmod +x "$TMP/worker" "$TMP/researcher" "$TMP/reviewer"
+# Drivers get research-shaped stdin: a reader that falls back to stdin (e.g. awk
+# given an empty path after a failed review) would dispatch it as research.
+printf '## NEED RESEARCH\n- leaked from caller stdin\n' > "$TMP/stdin-research.md"
 for plugin in ralph-trio spec-trio; do
   for scenario in disagree malformed retarget failed retry; do
     case_root="$TMP/$plugin-$scenario"
@@ -92,7 +95,7 @@ for plugin in ralph-trio spec-trio; do
         REVIEW_TEST_CASE="$scenario" REVIEW_TEST_COUNTER="$case_root/count" \
         REVIEW_TEST_RESEARCH="$case_root/research" REVIEW_TEST_DECOY="$case_root/decoy.md" \
         "$ROOT/$plugin/bin/$plugin.sh" "${args[@]}"
-    ) > "$TMP/driver.out" 2>&1 || driver_rc=$?
+    ) < "$TMP/stdin-research.md" > "$TMP/driver.out" 2>&1 || driver_rc=$?
     expected_rc=0
     if [ "$plugin" = spec-trio ] && { [ "$scenario" = malformed ] || [ "$scenario" = failed ]; }; then expected_rc=4; fi
     check "$plugin $scenario exit status" test "$driver_rc" -eq "$expected_rc"
