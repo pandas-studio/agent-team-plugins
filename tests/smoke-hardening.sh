@@ -545,26 +545,12 @@ assert_ok test -f "$AGY_DIR/$AGY_LATEST"
 assert_eq "$(printf '%s\n' "$AGY_LATEST" | grep -cE '^agy-20260101-000000-[0-9]+\.log$')" "1"
 assert_eq "$(cd "$AGY_DIR" && ls -A | grep -c '^\.latest-agy-' || true)" "0"
 
-# The live viewer must show a new debate's early rounds after the latest-debate
-# symlink moves, even when the previous debate ran more rounds. Two timings:
-#   in-loop   the viewer notices the retarget while tailing the old run;
-#   between   the old run grows a round (the viewer re-tails) and the symlink
-#             moves during the pause before the next iteration.
-# For "between", a `sleep` stub on the viewer's PATH holds the first sleep that
-# starts after the re-tail notice. The inner poll loop has already exited by
-# then, so that sleep is the pause between iterations: the test retargets while
-# it is held and then releases it, independent of runner speed.
-mkdir -p "$TMP/tail-barrier"
-cat > "$TMP/tail-barrier/sleep" <<'STUB'
-#!/bin/sh
-if [ -n "${TAIL_BARRIER_DIR:-}" ] && [ ! -e "$TAIL_BARRIER_DIR/hit" ] \
-   && grep -q 'more rounds appended' "$TAIL_BARRIER_OUT" 2>/dev/null; then
-  : > "$TAIL_BARRIER_DIR/hit"
-  while [ ! -e "$TAIL_BARRIER_DIR/release" ]; do /bin/sleep 0.05; done
-fi
-exec /bin/sleep "$@"
-STUB
-chmod +x "$TMP/tail-barrier/sleep"
+# ---- Live viewer (tail-role.sh) over per-role streams ----------------------
+# debate.sh appends every attempt to debate-<TS>/stream-<role>.log; the viewer
+# follows that one file. Every count below is over the viewer's whole capture,
+# so a line shown twice or dropped fails, whatever the timing. Each test waits
+# until the viewer has displayed content it can only have read from the stream
+# before changing anything.
 TAIL_PID=""
 stop_tail() {
   [ -n "$TAIL_PID" ] || return 0
@@ -573,61 +559,41 @@ stop_tail() {
   TAIL_PID=""
 }
 trap 'stop_tail; [ -n "$LOCKWT" ] && rm -rf "$LOCKWT"; rm -rf "$TMP"' EXIT
-# tail_after OUT PATTERN MARKER: poll until PATTERN appears after the first
-# MARKER line (MARKER empty = anywhere). The old pipeline follows round files
-# through the symlink and may echo the new debate before it re-tails, so only
-# output after the re-tail notice shows what the viewer keeps displaying.
-tail_after() {
+# wait_count FILE PATTERN N: poll up to 15 s until PATTERN occurs on at least N
+# lines of FILE (GNU tail can take seconds to notice a file).
+wait_count() {
   local i=0
-  while [ "$i" -lt 100 ]; do
-    if [ -z "$3" ]; then
-      grep -q "$2" "$1" 2>/dev/null && return 0
-    else
-      sed -n "/$3/,\$p" "$1" 2>/dev/null | grep -q "$2" && return 0
-    fi
+  while [ "$i" -lt 150 ]; do
+    [ "$(grep -ac -- "$2" "$1" 2>/dev/null || true)" -ge "$3" ] && return 0
     sleep 0.1
     i=$((i + 1))
   done
+  echo "FAIL: '$2' did not reach $3 in $1" >&2
+  cat "$1" >&2
   return 1
 }
-round_file() { printf '<!-- debate-round: %s gen x -->\n%s round %s body\n' "$2" "$3" "$2" > "$1/round-$2-gen-x.md"; }
-for timing in in-loop between; do
-  team_dir="$TMP/tail-log/$timing"
-  out="$TMP/tail-$timing.out"
-  mkdir -p "$team_dir/debate-a" "$team_dir/debate-b"
-  for r in 1 2 3; do round_file "$team_dir/debate-a" "$r" old; done
-  ln -s debate-a "$team_dir/latest-debate"
-  barrier=""
-  [ "$timing" = in-loop ] || { barrier="$TMP/tail-barrier/$timing"; mkdir -p "$barrier"; }
-  ( cd "$TMP" && exec env TMUX='' AGENT_TEAM="$timing" DEBATE_LOG_DIR="$TMP/tail-log" \
-      PATH="$TMP/tail-barrier:$PATH" TAIL_BARRIER_DIR="$barrier" TAIL_BARRIER_OUT="$out" \
-      "$ROOT/debate-conductor/bin/tail-role.sh" gen > "$out" 2>&1 </dev/null ) &
+count() { grep -ac -- "$2" "$1" || true; }
+# view ROLE TEAM OUT [VAR=value...]: start a viewer on $TMP/view-log/TEAM.
+view() {
+  local role="$1" team="$2" out="$3"
+  shift 3
+  ( cd "$TMP" && exec env -u DEBATE_CONDUCTOR_PM_HOST TMUX='' AGENT_TEAM="$team" \
+      DEBATE_LOG_DIR="$TMP/view-log" "$@" "$ROOT/debate-conductor/bin/tail-role.sh" "$role" \
+      > "$out" 2>&1 </dev/null ) &
   TAIL_PID=$!
-  assert_ok tail_after "$out" 'old round 3 body' ''
-  round_file "$team_dir/debate-b" 1 new
-  if [ "$timing" = in-loop ]; then
-    marker='new debate run detected'
-  else
-    marker='more rounds appended'
-    round_file "$team_dir/debate-a" 4 old
-    # The viewer is now held in the pause between iterations.
-    i=0
-    while [ ! -e "$barrier/hit" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
-    assert_ok test -e "$barrier/hit"
-  fi
-  ln -sfn debate-b "$team_dir/latest-debate"
-  [ -z "$barrier" ] || : > "$barrier/release"
-  tail_after "$out" 'new round 1 body' "$marker" || true
-  stop_tail
-  # By row: after the re-tail notice, exactly the new debate's round-1 banner.
-  assert_eq "$(sed -n "/$marker/,\$p" "$out" | grep -c 'Round 1 · Generator')" "1"
-  assert_eq "$(sed -n "/$marker/,\$p" "$out" | grep -c 'new round 1 body')" "1"
-done
-
-# A live viewer must show a retried round in full. The failed attempt left
-# output in the round file; the retry used to truncate that file in place,
-# which GNU `tail -F` misses when the retry grows past its old offset (it drops
-# those bytes, marker included). Measured by bytes written after the retry.
+}
+# debate_in TEAM GEN_STUB CRIT_STUB ARGS...: run debate.sh ARGS "smoke: TEAM"; prints its rc.
+debate_in() {
+  local team="$1" gen="$2" crit="$3" rc=0
+  shift 3
+  ( cd "$TMP" && env -u DEBATE_GENERATOR_MODEL -u DEBATE_CRITIC_MODEL -u DEBATE_PRIMARY_GEN \
+      -u DEBATE_CONDUCTOR_PM_HOST TMUX='' AGENT_TEAM="$team" \
+      AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" DEBATE_LOG_DIR="$TMP/view-log" \
+      GENERATOR_CLI="$TMP/worker-cli/$gen" CRITIC_CLI="$TMP/worker-cli/$crit" \
+      "$ROOT/debate-conductor/bin/debate.sh" "$@" "smoke: $team" > /dev/null 2>&1 </dev/null ) || rc=$?
+  echo "$rc"
+}
+debate_dir() { (cd "$TMP/view-log/$1/latest-debate" && pwd -P); }
 cat > "$TMP/worker-cli/partial-fail" <<'STUB'
 #!/bin/sh
 i=0; while [ $i -lt 40 ]; do echo "OLD partial line $i of a failed attempt"; i=$((i+1)); done
@@ -635,47 +601,155 @@ exit 1
 STUB
 cat > "$TMP/worker-cli/long-answer" <<'STUB'
 #!/bin/sh
-echo "NEW-FIRST-LINE of the retried answer"
-i=0; while [ $i -lt 60 ]; do echo "NEW body line $i padded padded padded padded padded padded"; i=$((i+1)); done
+echo "NEW-FIRST-LINE of the answer"
+i=0; while [ $i -lt 60 ]; do echo "NEW body line $i padded padded padded padded padded"; i=$((i+1)); done
 echo "NEW-LAST-LINE"
 STUB
-chmod +x "$TMP/worker-cli/partial-fail" "$TMP/worker-cli/long-answer"
-retry_env() {
-  env -u DEBATE_GENERATOR_MODEL -u DEBATE_CRITIC_MODEL -u DEBATE_PRIMARY_GEN -u DEBATE_CONDUCTOR_PM_HOST \
-    TMUX='' AGENT_TEAM=retry-view AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" \
-    DEBATE_LOG_DIR="$TMP/retry-log" "$@"
-}
-( cd "$TMP" && retry_env GENERATOR_CLI="$TMP/worker-cli/partial-fail" CRITIC_CLI="$TMP/worker-cli/answer" \
-    "$ROOT/debate-conductor/bin/debate.sh" -n 2 "smoke: retry-view" > /dev/null 2>&1 </dev/null ) || true
-RETRY_DIR="$(cd "$TMP/retry-log/retry-view/latest-debate" && pwd -P)"
-( cd "$TMP" && exec env -u DEBATE_CONDUCTOR_PM_HOST TMUX='' AGENT_TEAM=retry-view DEBATE_LOG_DIR="$TMP/retry-log" \
-    "$ROOT/debate-conductor/bin/tail-role.sh" gen > "$TMP/retry-view.out" 2>&1 </dev/null ) &
-TAIL_PID=$!
-assert_ok tail_after "$TMP/retry-view.out" 'OLD partial line 39' ''
-sleep 1
-RETRY_OFFSET=$(wc -c < "$TMP/retry-view.out" | tr -d ' ')
-( cd "$TMP" && retry_env GENERATOR_CLI="$TMP/worker-cli/long-answer" CRITIC_CLI="$TMP/worker-cli/answer" \
-    "$ROOT/debate-conductor/bin/debate.sh" --continue-from "$RETRY_DIR" -n 2 "smoke: retry-view" > /dev/null 2>&1 </dev/null )
-# GNU tail reopens a replaced file after a few seconds; allow up to 15 s.
-i=0
-while [ "$i" -lt 150 ]; do
-  tail -c +$((RETRY_OFFSET + 1)) "$TMP/retry-view.out" | grep -aq 'NEW-LAST-LINE' && break
-  sleep 0.1
-  i=$((i + 1))
-done
+cat > "$TMP/worker-cli/tricky" <<'STUB'
+#!/bin/sh
+echo "TRICKY-START"
+echo "<!-- debate-round: 2 crit x -->"
+printf 'rs\036byte\n'
+printf 'NO-NEWLINE-END'
+STUB
+chmod +x "$TMP/worker-cli/partial-fail" "$TMP/worker-cli/long-answer" "$TMP/worker-cli/tricky"
+
+# 1. A round whose failed attempt left output is retried and more rounds are
+#    added: the pane shows the failed attempt, the retry and the new round once
+#    each. A viewer started afterwards shows the same.
+assert_eq "$(debate_in retry partial-fail answer -n 2)" "1"
+RETRY_DIR="$(debate_dir retry)"
+view gen retry "$TMP/view-retry.out"
+wait_count "$TMP/view-retry.out" 'OLD partial line 39' 1
+assert_eq "$(debate_in retry long-answer answer --continue-from "$RETRY_DIR" -n 3)" "0"
+wait_count "$TMP/view-retry.out" 'NEW-LAST-LINE' 2
 sleep 1
 stop_tail
-tail -c +$((RETRY_OFFSET + 1)) "$TMP/retry-view.out" > "$TMP/retry-view.after"
-assert_eq "$(grep -ac 'Round 1 · Generator' "$TMP/retry-view.after")" "1"
-assert_eq "$(grep -ac 'NEW-FIRST-LINE' "$TMP/retry-view.after")" "1"
-assert_eq "$(grep -ac 'NEW body line' "$TMP/retry-view.after")" "60"
-assert_eq "$(grep -ac 'NEW-LAST-LINE' "$TMP/retry-view.after")" "1"
-assert_eq "$(grep -ac 'OLD partial' "$TMP/retry-view.after")" "0"
+view gen retry "$TMP/view-retry-late.out"
+wait_count "$TMP/view-retry-late.out" 'NEW-LAST-LINE' 2
+sleep 1
+stop_tail
+for out in "$TMP/view-retry.out" "$TMP/view-retry-late.out"; do
+  assert_eq "$(count "$out" 'Round 1 · Generator')" "2"
+  assert_eq "$(count "$out" 'Round 3 · Generator')" "1"
+  assert_eq "$(count "$out" 'OLD partial line')" "40"
+  assert_eq "$(count "$out" 'NEW-FIRST-LINE')" "2"
+  assert_eq "$(count "$out" 'NEW body line')" "120"
+  assert_eq "$(count "$out" 'NEW-LAST-LINE')" "2"
+  assert_eq "$(count "$out" '<!-- debate-round')" "0"
+done
 
-# The viewer must stream when awk is mawk, which reads a pipe in blocks unless
-# run with `-W interactive`. The fake mawk below identifies itself like mawk and,
-# without -W interactive, holds all input until EOF, which `tail -F` never sends.
-# When the host awk is itself mawk, the pass-through keeps -W interactive.
+# 2. Critic round 2 fails twice instantly, then a continue retries it and adds
+#    rounds 3-5: every attempt is shown once, including the successful retry.
+assert_eq "$(debate_in crit-retry answer denied -n 2)" "5"
+CRIT_DIR="$(debate_dir crit-retry)"
+view crit crit-retry "$TMP/view-crit.out"
+wait_count "$TMP/view-crit.out" 'Round 2 · Critic' 1
+assert_eq "$(debate_in crit-retry answer denied --continue-from "$CRIT_DIR" -n 4)" "5"
+assert_eq "$(debate_in crit-retry answer answer --continue-from "$CRIT_DIR" -n 4)" "0"
+wait_count "$TMP/view-crit.out" 'Round 4 · Critic' 1
+wait_count "$TMP/view-crit.out" 'Verdict: RECONSIDER' 2
+sleep 1
+stop_tail
+assert_eq "$(count "$TMP/view-crit.out" 'Round 2 · Critic')" "3"
+assert_eq "$(count "$TMP/view-crit.out" 'Round 4 · Critic')" "1"
+assert_eq "$(count "$TMP/view-crit.out" 'Verdict: RECONSIDER')" "2"
+
+# 3. Continuing a completed debate shows only the new rounds after the old ones.
+assert_eq "$(debate_in done-continue answer answer -n 2)" "0"
+DONE_DIR="$(debate_dir done-continue)"
+view crit done-continue "$TMP/view-done.out"
+wait_count "$TMP/view-done.out" 'Verdict: RECONSIDER' 1
+assert_eq "$(debate_in done-continue answer answer --continue-from "$DONE_DIR" -n 2)" "0"
+wait_count "$TMP/view-done.out" 'Verdict: RECONSIDER' 2
+sleep 1
+stop_tail
+assert_eq "$(count "$TMP/view-done.out" 'Round 2 · Critic')" "1"
+assert_eq "$(count "$TMP/view-done.out" 'Round 4 · Critic')" "1"
+
+# 4. Model text cannot draw a banner or move text: a quoted marker is dropped,
+#    \x1e is removed, and an answer without a final newline does not swallow the
+#    next attempt's header.
+assert_eq "$(debate_in tricky tricky answer -n 3)" "0"
+TRICKY_DIR="$(debate_dir tricky)"
+view gen tricky "$TMP/view-tricky.out"
+wait_count "$TMP/view-tricky.out" 'Round 3 · Generator' 1
+wait_count "$TMP/view-tricky.out" 'NO-NEWLINE-END' 2
+sleep 1
+stop_tail
+assert_eq "$(count "$TMP/view-tricky.out" 'Round 1 · Generator')" "1"
+assert_eq "$(count "$TMP/view-tricky.out" 'Round 3 · Generator')" "1"
+assert_eq "$(count "$TMP/view-tricky.out" 'TRICKY-START')" "2"
+assert_eq "$(count "$TMP/view-tricky.out" '<!-- debate-round')" "0"
+assert_eq "$(count "$TMP/view-tricky.out" 'rsbyte')" "2"
+# Only debate.sh's two headers carry \x1e, each at the start of a line.
+assert_eq "$(LC_ALL=C tr -cd '\036' < "$TRICKY_DIR/stream-gen.log" | wc -c | tr -d ' ')" "2"
+assert_eq "$(LC_ALL=C grep -ac "^$(printf '\036')" "$TRICKY_DIR/stream-gen.log")" "2"
+# Round files and the critic stream are untouched by the generator's quoted marker.
+assert_eq "$(LC_ALL=C tr -cd '\036' < "$TRICKY_DIR/round-1-gen.md" | wc -c | tr -d ' ')" "0"
+assert_eq "$(head -1 "$TRICKY_DIR/round-1-gen.md")" "<!-- debate-round: 1 gen agy -->"
+assert_eq "$(LC_ALL=C grep -ac "^$(printf '\036')" "$TRICKY_DIR/stream-crit.log")" "1"
+
+# 5. A new debate: the pane stops the old one before announcing the new one, and
+#    shows each debate's content exactly once.
+assert_eq "$(debate_in retarget partial-fail answer -n 2)" "1"
+view gen retarget "$TMP/view-retarget.out"
+wait_count "$TMP/view-retarget.out" 'OLD partial line 39' 1
+sleep 1.1  # a new debate-<TS> directory needs a different second
+assert_eq "$(debate_in retarget long-answer answer -n 2)" "0"
+wait_count "$TMP/view-retarget.out" 'NEW-LAST-LINE' 1
+sleep 1
+stop_tail
+assert_eq "$(count "$TMP/view-retarget.out" 'new debate run detected')" "1"
+assert_eq "$(count "$TMP/view-retarget.out" 'OLD partial line')" "40"
+assert_eq "$(count "$TMP/view-retarget.out" 'NEW body line')" "60"
+assert_eq "$(sed -n '/new debate run detected/,$p' "$TMP/view-retarget.out" | grep -ac 'OLD partial line' || true)" "0"
+assert_eq "$(sed -n '1,/new debate run detected/p' "$TMP/view-retarget.out" | grep -ac 'NEW body line' || true)" "0"
+
+# 6. A debate created before streams existed: the pane says so once, then shows
+#    the rounds a continue adds.
+assert_eq "$(debate_in legacy answer answer -n 2)" "0"
+LEGACY_DIR="$(debate_dir legacy)"
+rm -f "$LEGACY_DIR/stream-gen.log" "$LEGACY_DIR/stream-crit.log"
+view crit legacy "$TMP/view-legacy.out"
+wait_count "$TMP/view-legacy.out" 'predates live streams' 1
+assert_eq "$(debate_in legacy answer answer --continue-from "$LEGACY_DIR" -n 2)" "0"
+wait_count "$TMP/view-legacy.out" 'Round 4 · Critic' 1
+sleep 1
+stop_tail
+assert_eq "$(count "$TMP/view-legacy.out" 'predates live streams')" "1"
+assert_eq "$(count "$TMP/view-legacy.out" 'Round 2 · Critic')" "0"
+assert_eq "$(count "$TMP/view-legacy.out" 'Round 4 · Critic')" "1"
+# The note also appears when the round files show up after the viewer started.
+mkdir -p "$TMP/view-log/legacy-late/debate-20260101-000000"
+ln -s debate-20260101-000000 "$TMP/view-log/legacy-late/latest-debate"
+view crit legacy-late "$TMP/view-legacy-late.out"
+sleep 1.5
+cp "$LEGACY_DIR/round-2-crit.md" "$TMP/view-log/legacy-late/debate-20260101-000000/"
+wait_count "$TMP/view-legacy-late.out" 'predates live streams' 1
+stop_tail
+assert_eq "$(count "$TMP/view-legacy-late.out" 'predates live streams')" "1"
+
+# 6b. If the follower dies (its tail killed), the pane says so and stops rather
+#     than replaying the stream and showing everything twice.
+view crit done-continue "$TMP/view-killed.out"
+wait_count "$TMP/view-killed.out" 'Round 4 · Critic' 1
+KILLED_STREAM="$DONE_DIR/stream-crit.log"
+i=0
+while [ "$i" -lt 50 ] && ! pgrep -f "tail -n [+]1 -F $KILLED_STREAM" >/dev/null; do sleep 0.1; i=$((i + 1)); done
+pkill -f "tail -n [+]1 -F $KILLED_STREAM"
+wait_count "$TMP/view-killed.out" 'stream follower stopped' 1
+i=0
+while [ "$i" -lt 50 ] && kill -0 "$TAIL_PID" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
+assert_fail kill -0 "$TAIL_PID"
+TAIL_PID=""
+assert_eq "$(count "$TMP/view-killed.out" 'Round 2 · Critic')" "1"
+assert_eq "$(count "$TMP/view-killed.out" 'Round 4 · Critic')" "1"
+
+# 7. mawk reads a pipe in blocks unless run with -W interactive. The fake mawk
+#    below identifies itself like mawk and, without -W interactive, holds all
+#    input until EOF, which `tail -F` never sends. When the host awk is itself
+#    mawk, the pass-through keeps -W interactive.
 REAL_AWK="$(command -v awk)"
 REAL_AWK_STREAM=""
 case "$("$REAL_AWK" -W version 2>&1 </dev/null || true)" in mawk*) REAL_AWK_STREAM="-W interactive" ;; esac
@@ -689,17 +763,35 @@ cat > "\$held"
 exec "$REAL_AWK" "\$@" "\$held"
 STUB
 chmod +x "$TMP/fake-mawk/awk"
-MAWK_TEAM_DIR="$TMP/mawk-log/mawk"
-mkdir -p "$MAWK_TEAM_DIR/debate-a"
-printf '<!-- debate-round: 1 gen x -->\nmawk round 1 body\n' > "$MAWK_TEAM_DIR/debate-a/round-1-gen-x.md"
-ln -s debate-a "$MAWK_TEAM_DIR/latest-debate"
-( cd "$TMP" && exec env PATH="$TMP/fake-mawk:$PATH" TMUX='' AGENT_TEAM=mawk DEBATE_LOG_DIR="$TMP/mawk-log" \
-    "$ROOT/debate-conductor/bin/tail-role.sh" gen > "$TMP/mawk-view.out" 2>&1 </dev/null ) &
-TAIL_PID=$!
-tail_after "$TMP/mawk-view.out" 'mawk round 1 body' '' || true
+view crit done-continue "$TMP/view-mawk.out" PATH="$TMP/fake-mawk:$PATH"
+wait_count "$TMP/view-mawk.out" 'Round 4 · Critic' 1
 stop_tail
-assert_eq "$(grep -ac 'Round 1 · Generator' "$TMP/mawk-view.out")" "1"
-assert_eq "$(grep -ac 'mawk round 1 body' "$TMP/mawk-view.out")" "1"
+assert_eq "$(count "$TMP/view-mawk.out" 'Round 2 · Critic')" "1"
+
+# 8. A short first line reaches the stream while the model is still running
+#    (sed must not block-buffer; #42).
+cat > "$TMP/worker-cli/held-open" <<STUB
+#!/bin/sh
+echo "EARLY-LINE"
+# Also stop when the fixture is gone, so a failed assertion cannot leave it running.
+while [ ! -e "$TMP/held-open.release" ] && [ -d "$TMP" ]; do sleep 0.1; done
+echo "LATE-LINE"
+STUB
+chmod +x "$TMP/worker-cli/held-open"
+rm -f "$TMP/held-open.release"
+( debate_in held held-open answer -n 1 > "$TMP/held-open.rc" ) &
+HELD_PID=$!
+i=0
+while [ "$i" -lt 100 ] && ! grep -aq 'EARLY-LINE' "$TMP/view-log/held/latest-debate/stream-gen.log" 2>/dev/null; do
+  sleep 0.1
+  i=$((i + 1))
+done
+assert_eq "$(grep -ac 'EARLY-LINE' "$TMP/view-log/held/latest-debate/stream-gen.log" 2>/dev/null || true)" "1"
+assert_eq "$(grep -ac 'LATE-LINE' "$TMP/view-log/held/latest-debate/stream-gen.log" 2>/dev/null || true)" "0"
+: > "$TMP/held-open.release"
+wait "$HELD_PID"
+assert_eq "$(cat "$TMP/held-open.rc")" "0"
+assert_eq "$(grep -ac 'LATE-LINE' "$TMP/view-log/held/latest-debate/stream-gen.log")" "1"
 
 cmp "$ROOT/dev-trio/lib/registry.sh" "$ROOT/debate-conductor/lib/registry.sh"
 PASS=$((PASS + 1))

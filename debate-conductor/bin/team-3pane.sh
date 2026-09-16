@@ -4,7 +4,7 @@
 #   ┌─────────────────┬─────────────────┬─────────────────┐
 #   │                 │                 │                 │
 #   │  Claude PM      │  Generator      │  Critic         │
-#   │  (this pane)    │  round-*-gen.md │  round-*-crit.md│
+#   │  (this pane)    │ stream-gen.log  │ stream-crit.log │
 #   │                 │  (live tail)    │  (live tail)    │
 #   │                 │                 │                 │
 #   └─────────────────┴─────────────────┴─────────────────┘

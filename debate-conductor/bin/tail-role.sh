@@ -15,15 +15,21 @@
 #   - Verdict tokens (only on critic pane) are colored: STRENGTHEN=green,
 #     RECONSIDER=yellow, OVERTURN=red.
 #
-# debate.sh pre-creates empty round-N-{gen,crit}*.md files so `tail -F` can
-# follow them all from the start. tail's own `==> filename <==` separators
-# are intercepted by awk and rewritten as colored round banners. Round files
-# themselves stay clean markdown — colors only live on the live-view pane.
+# What it follows: debate.sh appends every attempt of this role (retries
+# included) to one append-only file per debate, `stream-<role>.log`, starting
+# each attempt with a header line that begins with \x1e. That file is never
+# truncated or replaced, so a single `tail -n +1 -F` shows the whole debate
+# exactly once, in order, however the rounds were retried or appended. awk turns
+# headers into colored round banners. Round files stay clean markdown and are
+# not followed.
 #
-# Multi-debate handling: when the user starts a new debate run, debate.sh
-# retargets the `latest-debate` symlink. The control loop polls that symlink
-# and tears down the current tail pipeline so the outer loop can re-glob and
-# tail the new run's round files.
+# Multi-debate handling: a new debate retargets the `latest-debate` symlink.
+# The controller resolves the symlink to the physical debate directory and tails
+# that directory's stream, so only the controller switches debates: it polls
+# the symlink, stops the pipeline, then starts one on the new directory.
+#
+# A debate created before streams existed has round files but no stream. The
+# pane says so once and shows new rounds after the debate is continued.
 #
 # Log location: $DEBATE_LOG_DIR (default: $PWD/.debate-conductor/log) / $TEAM /
 set -euo pipefail
@@ -107,7 +113,7 @@ printf '%swaiting for debate to start...%s\n' "$DIM" "$RESET"
 
 shopt -s nullglob
 
-# mawk reads a pipe in large blocks, so round lines from `tail -F` would sit in
+# mawk reads a pipe in large blocks, so stream lines from `tail -F` would sit in
 # its input buffer and the pane would stay empty; fflush() only flushes output.
 # `-W interactive` makes mawk read line by line. gawk and BSD awk already do.
 AWK_STREAM=(awk)
@@ -115,59 +121,53 @@ case "$(awk -W version 2>&1 </dev/null || true)" in
   mawk*) AWK_STREAM=(awk -W interactive) ;;
 esac
 
-# Tracks the highest round number this viewer has already streamed. Persists
-# across outer-loop iterations so the awk MIN_ROUND filter knows which
-# markers in re-globbed tail output belong to "already-seen" rounds (replay
-# from default `tail -F` last-N-lines per file) vs new rounds appended by
-# /continue. Starts at 0 → on first run every round is treated as new.
-# The watermark belongs to one debate run: KNOWN_MAX_TARGET is the symlink
-# target it was measured on, and any other target starts again from 0.
-KNOWN_MAX_ROUND=0
-KNOWN_MAX_TARGET=""
+RS_BYTE="$(printf '\036')"
+LEGACY_NOTED=""
+
+stop_pipeline() {
+  [ -n "$PIPE_PG" ] || return 0
+  kill -CONT -- "-$PIPE_PG" 2>/dev/null || true
+  kill -TERM -- "-$PIPE_PG" 2>/dev/null || true
+  wait "$PIPE_PG" 2>/dev/null || true
+  PIPE_PG=""
+}
+
+# current_debate: physical directory latest-debate resolves to, or empty.
+current_debate() {
+  (cd "$LATEST" 2>/dev/null && pwd -P) || true
+}
 
 while true; do
-  while [ ! -d "$LATEST" ]; do sleep 1; done
-
-  files=( "$LATEST"/round-*-"$ROLE"*.md )
-  while [ "${#files[@]}" -eq 0 ]; do
+  DIR="$(current_debate)"
+  if [ -z "$DIR" ]; then sleep 1; continue; fi
+  STREAM="$DIR/stream-$ROLE.log"
+  if [ ! -f "$STREAM" ]; then
+    if [ "$LEGACY_NOTED" != "$DIR" ]; then
+      legacy_rounds=( "$DIR"/round-*-"$ROLE"*.md )
+      if [ "${#legacy_rounds[@]}" -gt 0 ]; then
+        printf '%sThis debate predates live streams: its rounds are in %s/round-*-%s*.md.\nRounds added by /continue will appear here.%s\n' \
+          "$DIM" "$DIR" "$ROLE" "$RESET"
+        LEGACY_NOTED="$DIR"
+      fi
+    fi
     sleep 1
-    files=( "$LATEST"/round-*-"$ROLE"*.md )
-    [ -d "$LATEST" ] || break
-  done
-  [ "${#files[@]}" -eq 0 ] && continue
+    continue
+  fi
 
-  # Bind this iteration to one run: the glob and the target must agree, or the
-  # symlink moved in between and we retry.
-  INITIAL_TARGET=$(readlink "$LATEST" 2>/dev/null || true)
-  files=( "$LATEST"/round-*-"$ROLE"*.md )
-  [ "${#files[@]}" -eq 0 ] && continue
-  [ "$(readlink "$LATEST" 2>/dev/null || true)" = "$INITIAL_TARGET" ] || continue
-  # A different run than the one the watermark was measured on (retargeted
-  # while this viewer was polling, between iterations, or while re-tailing)
-  # starts at round 1: carrying the old maximum over would hide its rounds.
-  [ "$INITIAL_TARGET" = "$KNOWN_MAX_TARGET" ] || KNOWN_MAX_ROUND=0
-  INITIAL_FILE_COUNT="${#files[@]}"
-  MIN_NEW_ROUND=$((KNOWN_MAX_ROUND + 1))
-
-  # tail (default last-N-lines) + awk pipeline backgrounded into its own
-  # process group (set -m). default tail (NOT -n 0) so a `/continue` restart
-  # picks up the new round's marker line even when our 1s file-count poll
-  # arrives after debate.sh has already written the marker + first body
-  # lines. Replay of already-seen rounds is filtered by awk's MIN_ROUND
-  # check (skips any round number < min_round).
+  # tail + awk pipeline backgrounded into its own process group (set -m).
+  # `tail -n +1`: replay the stream from the start; every line in it is
+  # displayed exactly once per debate.
   #
   # awk:
-  #   - parses `<!-- debate-round: N role model -->` markers (written by
-  #     debate.sh as the first line of each round file) into colored 3-line
-  #     round banners; suppresses the marker itself from the viewer
-  #   - skips body of any round number below MIN_ROUND (replay protection
-  #     after /continue restart)
-  #   - ignores tail's per-file `==> path <==` headers entirely (absent
-  #     when only one file is being tailed; unreliable across tail impls)
+  #   - a line starting with \x1e is a header written by debate.sh; it becomes
+  #     a colored 3-line round banner. Model output cannot contain \x1e
+  #     (debate.sh deletes it), so model text cannot draw a banner.
+  #   - plain `<!-- debate-round: ... -->` lines (the round file's own marker,
+  #     copied into the stream, or one quoted by a model) are dropped
   #   - colors `Verdict: STRENGTHEN|RECONSIDER|OVERTURN` lines (critic only)
   #   - fflush() after every line keeps streaming visible
   {
-    tail -F "${files[@]}" 2>/dev/null \
+    tail -n +1 -F "$STREAM" 2>/dev/null \
       | "${AWK_STREAM[@]}" \
           -v ROLE_COLOR="$ROLE_COLOR" \
           -v RESET="$RESET" \
@@ -175,29 +175,28 @@ while true; do
           -v YELLOW="$YELLOW" \
           -v RED="$RED" \
           -v BORDER="$BORDER" \
-          -v MIN_ROUND="$MIN_NEW_ROUND" '
-        BEGIN { min_round = MIN_ROUND + 0; in_replay = (min_round > 1) ? 1 : 0 }
-        /^==> .* <==$/ { next }
-        /^<!-- debate-round: [0-9]+ (gen|crit)( [^ ]+)? -->[[:space:]]*$/ {
-          payload = $0
+          -v HDR="$RS_BYTE" '
+        function is_marker(line) {
+          return line ~ /^<!-- debate-round: [0-9]+ (gen|crit)( [^ ]+)? -->[[:space:]]*$/
+        }
+        index($0, HDR) == 1 {
+          payload = substr($0, 2)
+          if (!is_marker(payload)) next
           sub(/^<!-- debate-round: /, "", payload)
           sub(/ -->[[:space:]]*$/,  "", payload)
           n = split(payload, parts, " ")
-          m_round = parts[1] + 0
-          if (m_round < min_round) { in_replay = 1; next }
-          in_replay = 0
           m_role  = (parts[2] == "gen") ? "Generator" : "Critic"
           m_model = (n >= 3) ? parts[3] : ""
           printf "\n%s%s%s\n", ROLE_COLOR, BORDER, RESET
           if (m_model != "")
-            printf "%s  Round %s · %s · %s%s\n", ROLE_COLOR, m_round, m_role, m_model, RESET
+            printf "%s  Round %s · %s · %s%s\n", ROLE_COLOR, parts[1], m_role, m_model, RESET
           else
-            printf "%s  Round %s · %s%s\n", ROLE_COLOR, m_round, m_role, RESET
+            printf "%s  Round %s · %s%s\n", ROLE_COLOR, parts[1], m_role, RESET
           printf "%s%s%s\n\n", ROLE_COLOR, BORDER, RESET
           fflush()
           next
         }
-        in_replay { next }
+        is_marker($0) { next }
         /^Verdict: STRENGTHEN[[:space:]]*$/ { printf "%s%s%s\n", GREEN,  $0, RESET; fflush(); next }
         /^Verdict: RECONSIDER[[:space:]]*$/ { printf "%s%s%s\n", YELLOW, $0, RESET; fflush(); next }
         /^Verdict: OVERTURN[[:space:]]*$/   { printf "%s%s%s\n", RED,    $0, RESET; fflush(); next }
@@ -207,6 +206,7 @@ while true; do
   PIPE_PG=$!
 
   PAUSED=0
+  RETARGETED=0
   while kill -0 "$PIPE_PG" 2>/dev/null; do
     KEY=""
     if [ -n "$STTY_SAVE" ]; then
@@ -226,9 +226,7 @@ while true; do
         print_header
         ;;
       q|Q)
-        kill -TERM -- "-$PIPE_PG" 2>/dev/null || true
-        wait "$PIPE_PG" 2>/dev/null || true
-        PIPE_PG=""
+        stop_pipeline
         printf '\n%s[quit]%s\n' "$DIM" "$RESET"
         exit 0
         ;;
@@ -245,45 +243,23 @@ while true; do
         ;;
     esac
 
-    # symlink retarget detection — break inner loop on new debate run
-    CURRENT_TARGET=$(readlink "$LATEST" 2>/dev/null || true)
-    if [ -n "$CURRENT_TARGET" ] && [ "$CURRENT_TARGET" != "$INITIAL_TARGET" ]; then
-      printf '\n%s── new debate run detected — re-tailing ──%s\n\n' "$DIM" "$RESET"
-      [ "$PAUSED" = "1" ] && kill -CONT -- "-$PIPE_PG" 2>/dev/null || true
-      kill -TERM -- "-$PIPE_PG" 2>/dev/null || true
-      wait "$PIPE_PG" 2>/dev/null || true
-      PIPE_PG=""
-      break
-    fi
-
-    # file-count change detection — /continue appends round files into the
-    # same dir without retargeting the symlink, but `tail -F`'s file argv was
-    # bound at startup and does not auto-pick-up new files matching the glob.
-    # Break inner loop so the outer loop re-globs and starts a fresh tail.
-    current_files=( "$LATEST"/round-*-"$ROLE"*.md )
-    if [ "${#current_files[@]}" -gt "$INITIAL_FILE_COUNT" ]; then
-      printf '\n%s── more rounds appended — re-tailing ──%s\n\n' "$DIM" "$RESET"
-      [ "$PAUSED" = "1" ] && kill -CONT -- "-$PIPE_PG" 2>/dev/null || true
-      kill -TERM -- "-$PIPE_PG" 2>/dev/null || true
-      wait "$PIPE_PG" 2>/dev/null || true
-      PIPE_PG=""
+    # A new debate: stop following this one before saying so, so nothing from
+    # the old pipeline can print after the notice.
+    NOW="$(current_debate)"
+    if [ -n "$NOW" ] && [ "$NOW" != "$DIR" ]; then
+      stop_pipeline
+      RETARGETED=1
+      printf '\n%s── new debate run detected — following it ──%s\n\n' "$DIM" "$RESET"
       break
     fi
   done
 
-  # If pipeline exited on its own (SIGPIPE on pane close, etc.), fall through
-  [ -n "$PIPE_PG" ] && wait "$PIPE_PG" 2>/dev/null || true
-  PIPE_PG=""
-
-  # Carry over the highest round number streamed so the next outer-loop
-  # iteration's awk gets MIN_ROUND = KNOWN_MAX_ROUND + 1 — anything lower
-  # arriving in the new tail's last-N-lines replay is suppressed. Recorded
-  # against the run these files came from; the next iteration discards it if
-  # the symlink now points elsewhere.
-  KNOWN_MAX_ROUND=$( { printf '%s\n' "${files[@]}" 2>/dev/null || true; } \
-    | sed -E 's@.*/round-([0-9]+)-.*@\1@' \
-    | sort -n | tail -1)
-  KNOWN_MAX_ROUND="${KNOWN_MAX_ROUND:-0}"
-  KNOWN_MAX_TARGET="$INITIAL_TARGET"
-  sleep 1
+  if [ "$RETARGETED" = "0" ]; then
+    # The pipeline ended on its own (e.g. tail or awk was killed). Starting a
+    # new one would replay the stream from the start and show every line
+    # again, so stop and say so instead.
+    stop_pipeline
+    printf '\n%s── stream follower stopped — restart this pane to follow the debate again ──%s\n' "$YELLOW" "$RESET"
+    exit 0
+  fi
 done

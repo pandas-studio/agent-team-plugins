@@ -143,6 +143,8 @@ $PWD/.debate-conductor/log/<team>/
 │   ├── topic.txt              # original topic — read by /continue
 │   ├── context.md             # round-1 context file, if given — reused when round 1 is retried
 │   ├── models.json            # model pair, source, and rotation reused by /continue
+│   ├── stream-gen.log         # append-only live stream of every generator attempt (retries included)
+│   ├── stream-crit.log        # same for the critic; the tail panes follow these
 │   ├── round-1-gen.md
 │   ├── round-2-crit.md
 │   └── round-3-gen.md
@@ -154,13 +156,15 @@ $PWD/.debate-conductor/log/<team>/
 
 Override the log location with `DEBATE_LOG_DIR=/path/to/logs`.
 
+**Live panes follow per-role streams.** `debate.sh` appends every attempt of a role (a failed attempt, its retry, rounds added by `/continue`) to `stream-<role>.log`, which is never truncated or replaced. Each pane runs one `tail` on its role's stream from the start, so it shows the whole debate once, in order, including a pane opened late. A new debate retargets `latest-debate`; the pane stops following the old stream before it prints "new debate run detected". A debate created before streams existed has no stream files: its pane says so, and shows only the rounds added by a later `/continue`. The round files remain the transcript of record.
+
 ## Skills
 
 | Skill | What it does |
 | :--- | :--- |
 | `/debate-conductor:bootstrap` | One-time per session: splits the current tmux pane into 3 and starts role tails. |
 | `/debate-conductor:run [N] [rounds]` | Resolves topic N, runs `debate.sh`, summarises verdict + moves. |
-| `/debate-conductor:continue [extra-rounds]` | Append N more rounds (default 2) to the most recent debate in the same `debate-<TS>/`. Round numbering continues; the saved model pair and rotation are reused unless explicitly overridden; tail panes pick up new rounds without retarget. A debate whose round 1 failed restarts at round 1 with its saved context. |
+| `/debate-conductor:continue [extra-rounds]` | Append N more rounds (default 2) to the most recent debate in the same `debate-<TS>/`. Round numbering continues; the saved model pair and rotation are reused unless explicitly overridden; tail panes show every attempt, retries included, from the per-role streams. A debate whose round 1 failed restarts at round 1 with its saved context. |
 | `/debate-conductor:install-pm` | Writes/upgrades the PM orchestration policy in the workspace's `CLAUDE.md` from Claude or `AGENTS.md` from Codex (idempotent, marker-guarded). Tells the PM when to dispatch a debate vs answer directly. |
 
 Claude skills have `disable-model-invocation: true`; Codex skill metadata sets
@@ -194,7 +198,7 @@ debate-conductor/
 │   ├── agent-team-models.sh   # shared model-registry CLI (vendored)
 │   ├── debate-conductor-doctor.sh  # layout probe + --until-converged stub smoke
 │   ├── team-3pane.sh          # tmux 3-pane splitter (--here mode)
-│   └── tail-role.sh           # live-tail one role's round files
+│   └── tail-role.sh           # live-tail one role's stream (stream-<role>.log)
 ├── lib/                       # internal — invoked by debate.sh / install-pm
 │   ├── ask-generator.sh       # Generator wrapper (any registered model)
 │   ├── ask-critic.sh          # Critic wrapper (any registered model)
@@ -214,7 +218,7 @@ debate-conductor/
 
 **A round needs an answer on stdout.** `ask-generator.sh` and `ask-critic.sh` exit **5** when the model CLI exits 0 but writes nothing except whitespace to stdout. For example, `agy -p` soft-denies a tool it cannot prompt for, prints guidance on stderr, and still exits 0. They exit **6** when the answer cannot be checked: the temp file cannot be created (the model is not run), or the model exits 0 but `tee` or the check fails. `debate.sh` stops on either code before writing that round's `.done` sidecar, so the guidance never becomes a draft or a critique.
 
-**Live streaming quality depends on the model CLI.** The pipeline (`stdbuf -oL` on `sed`/`tee`) forces line-buffered stdio so cleaned output flows line-by-line through the viewers. But if the model CLI itself batches its stdout in user-space (some `codex` builds do this), a round may still appear in one chunk rather than streaming. That's outside this plugin's reach.
+**Live streaming quality depends on the model CLI.** The cleaning filter runs unbuffered (`sed -u` where supported, otherwise `stdbuf -oL sed`, otherwise plain `sed`), and `tee` does not buffer, so cleaned output reaches the round file and the role stream line by line. But if the model CLI itself batches its stdout in user-space (some `codex` builds do this), a round may still appear in one chunk rather than streaming. That's outside this plugin's reach.
 
 **Convergence parsing is anchored, not fuzzy.** `--until-converged` only stops on a *standalone canonical* `Verdict: STRENGTHEN` line (the Critic role contract), taking the last such line in the round. A Critic round that errors out and echoes its role prompt contains the placeholders `Verdict: <STRENGTHEN | …>` and `<one of: STRENGTHEN / …>` — neither matches the anchor, so a failed round reads as not-converged and the debate keeps going rather than stopping on garbage. `debate-conductor-doctor.sh` covers all three paths (STRENGTHEN / RECONSIDER / placeholder) with stub CLIs.
 
