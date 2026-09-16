@@ -487,13 +487,44 @@ fi
 # from the start. Without this, BSD/GNU tail glob expands once at invocation
 # time and won't auto-add new files matching the pattern, so rounds 2+ would
 # silently bypass the live-tail panes.
+#
+# A resumed round's file may still hold the failed attempt. Replace it with a
+# new file rather than truncating it in place: GNU `tail -F` (coreutils 8.32,
+# measured) misses an in-place truncation that is rewritten past its old read
+# offset and drops that many bytes of the retry, including the round marker.
+# A replaced file is reopened and read from the start by GNU and BSD tail.
 for _r in $(seq "$START_ROUND" "$END_ROUND"); do
   if [ $((_r % 2)) -eq 1 ]; then
-    : > "$(round_file "$_r" gen "$(round_model "$_r" gen)")"
+    _f="$(round_file "$_r" gen "$(round_model "$_r" gen)")"
   else
-    : > "$(round_file "$_r" crit "$(round_model "$_r" crit)")"
+    _f="$(round_file "$_r" crit "$(round_model "$_r" crit)")"
   fi
+  rm -f "$_f"
+  : > "$_f"
 done
+
+# A resume shorter than the original run leaves that run's placeholders past
+# END_ROUND behind: empty, no `.done` sidecar, never written. They would pose
+# as the latest rounds to anything listing round files (the continue skills
+# summarise the most recent critic round), so drop them. Anything with content
+# or a sidecar is kept.
+if [ -n "$CONTINUE_FROM" ]; then
+  for _f in "$DEBATE_DIR"/round-*.md; do
+    [ -e "$_f" ] || continue
+    _base="${_f##*/}"
+    case "$_base" in
+      round-*-gen.md|round-*-gen-*.md|round-*-crit.md|round-*-crit-*.md) ;;
+      *) continue ;;
+    esac
+    _n="${_base#round-}"
+    _n="${_n%%-*}"
+    case "$_n" in ""|*[!0-9]*) continue ;; esac
+    [ "$_n" -gt "$END_ROUND" ] || continue
+    [ -s "$_f" ] && continue
+    [ -e "$DEBATE_DIR/.${_base%.md}.done" ] && continue
+    rm -f "$_f"
+  done
+fi
 
 print_header() {
   local round="$1" who="$2" model="${3:-}"

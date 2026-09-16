@@ -476,6 +476,21 @@ assert_eq "$(done_rounds gen-denied)" "2"
 assert_eq "$(ls -d "$TMP/debate-log/gen-denied"/debate-* | wc -l | tr -d ' ')" "1"
 assert_eq "$(head -1 "$GEN_DENIED_DIR/round-1-gen.md")" "<!-- debate-round: 1 gen agy -->"
 assert_ok grep -qx 'Verdict: RECONSIDER' "$GEN_DENIED_DIR/round-1-gen.md"
+# A resume shorter than the failed run removes that run's untouched placeholders
+# past the new last round, so the latest round file is a real one.
+( cd "$TMP" && env -u DEBATE_GENERATOR_MODEL -u DEBATE_CRITIC_MODEL -u DEBATE_PRIMARY_GEN \
+    -u DEBATE_CONDUCTOR_PM_HOST TMUX='' AGENT_TEAM=long-denied \
+    AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" DEBATE_LOG_DIR="$TMP/debate-log" \
+    GENERATOR_CLI="$TMP/worker-cli/denied" CRITIC_CLI="$TMP/worker-cli/answer" \
+    "$ROOT/debate-conductor/bin/debate.sh" -n 6 "smoke: long-denied" > /dev/null 2>&1 </dev/null ) || true
+LONG_DIR="$(cd "$TMP/debate-log/long-denied/latest-debate" && pwd -P)"
+assert_eq "$(ls "$LONG_DIR" | grep -c '^round-')" "6"
+# Kept: a later round with content, and files that are not round transcripts.
+printf 'kept\n' > "$LONG_DIR/round-5-gen.md"
+: > "$LONG_DIR/round-9-notes.md"
+assert_eq "$(continue_debate long-denied "$LONG_DIR")" "0"
+assert_eq "$(ls "$LONG_DIR" | grep '^round-' | tr '\n' ' ')" "round-1-gen.md round-2-crit.md round-5-gen.md round-9-notes.md "
+assert_eq "$(done_rounds long-denied)" "2"
 # A debate dir that never started (no topic.txt) is still refused.
 mkdir -p "$TMP/debate-log/never-started/debate-20260101-000000"
 assert_eq "$(continue_debate never-started "$TMP/debate-log/never-started/debate-20260101-000000")" "2"
@@ -608,6 +623,54 @@ for timing in in-loop between; do
   assert_eq "$(sed -n "/$marker/,\$p" "$out" | grep -c 'Round 1 · Generator')" "1"
   assert_eq "$(sed -n "/$marker/,\$p" "$out" | grep -c 'new round 1 body')" "1"
 done
+
+# A live viewer must show a retried round in full. The failed attempt left
+# output in the round file; the retry used to truncate that file in place,
+# which GNU `tail -F` misses when the retry grows past its old offset (it drops
+# those bytes, marker included). Measured by bytes written after the retry.
+cat > "$TMP/worker-cli/partial-fail" <<'STUB'
+#!/bin/sh
+i=0; while [ $i -lt 40 ]; do echo "OLD partial line $i of a failed attempt"; i=$((i+1)); done
+exit 1
+STUB
+cat > "$TMP/worker-cli/long-answer" <<'STUB'
+#!/bin/sh
+echo "NEW-FIRST-LINE of the retried answer"
+i=0; while [ $i -lt 60 ]; do echo "NEW body line $i padded padded padded padded padded padded"; i=$((i+1)); done
+echo "NEW-LAST-LINE"
+STUB
+chmod +x "$TMP/worker-cli/partial-fail" "$TMP/worker-cli/long-answer"
+retry_env() {
+  env -u DEBATE_GENERATOR_MODEL -u DEBATE_CRITIC_MODEL -u DEBATE_PRIMARY_GEN -u DEBATE_CONDUCTOR_PM_HOST \
+    TMUX='' AGENT_TEAM=retry-view AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" \
+    DEBATE_LOG_DIR="$TMP/retry-log" "$@"
+}
+( cd "$TMP" && retry_env GENERATOR_CLI="$TMP/worker-cli/partial-fail" CRITIC_CLI="$TMP/worker-cli/answer" \
+    "$ROOT/debate-conductor/bin/debate.sh" -n 2 "smoke: retry-view" > /dev/null 2>&1 </dev/null ) || true
+RETRY_DIR="$(cd "$TMP/retry-log/retry-view/latest-debate" && pwd -P)"
+( cd "$TMP" && exec env -u DEBATE_CONDUCTOR_PM_HOST TMUX='' AGENT_TEAM=retry-view DEBATE_LOG_DIR="$TMP/retry-log" \
+    "$ROOT/debate-conductor/bin/tail-role.sh" gen > "$TMP/retry-view.out" 2>&1 </dev/null ) &
+TAIL_PID=$!
+assert_ok tail_after "$TMP/retry-view.out" 'OLD partial line 39' ''
+sleep 1
+RETRY_OFFSET=$(wc -c < "$TMP/retry-view.out" | tr -d ' ')
+( cd "$TMP" && retry_env GENERATOR_CLI="$TMP/worker-cli/long-answer" CRITIC_CLI="$TMP/worker-cli/answer" \
+    "$ROOT/debate-conductor/bin/debate.sh" --continue-from "$RETRY_DIR" -n 2 "smoke: retry-view" > /dev/null 2>&1 </dev/null )
+# GNU tail reopens a replaced file after a few seconds; allow up to 15 s.
+i=0
+while [ "$i" -lt 150 ]; do
+  tail -c +$((RETRY_OFFSET + 1)) "$TMP/retry-view.out" | grep -aq 'NEW-LAST-LINE' && break
+  sleep 0.1
+  i=$((i + 1))
+done
+sleep 1
+stop_tail
+tail -c +$((RETRY_OFFSET + 1)) "$TMP/retry-view.out" > "$TMP/retry-view.after"
+assert_eq "$(grep -ac 'Round 1 · Generator' "$TMP/retry-view.after")" "1"
+assert_eq "$(grep -ac 'NEW-FIRST-LINE' "$TMP/retry-view.after")" "1"
+assert_eq "$(grep -ac 'NEW body line' "$TMP/retry-view.after")" "60"
+assert_eq "$(grep -ac 'NEW-LAST-LINE' "$TMP/retry-view.after")" "1"
+assert_eq "$(grep -ac 'OLD partial' "$TMP/retry-view.after")" "0"
 
 cmp "$ROOT/dev-trio/lib/registry.sh" "$ROOT/debate-conductor/lib/registry.sh"
 PASS=$((PASS + 1))
