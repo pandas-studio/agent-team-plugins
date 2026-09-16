@@ -586,12 +586,20 @@ while :; do
         # (ralph's main-repo log tree); DEV_TRIO_LOG_DIR pins ask-agy.sh's own
         # agy-<TS>.log there too so it doesn't litter the (torn-down) worktree.
         manifest_add_input kind=question value="$RESEARCH_QS"
+        RESEARCH_RC=0
         ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$LOG_DIR/agy" \
-            MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-agy.sh "$RESEARCH_QS" 2>&1 ) | tee "$RESEARCH_LOG" >/dev/null || true
+            MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-agy.sh "$RESEARCH_QS" 2>&1 ) | tee "$RESEARCH_LOG" >/dev/null || RESEARCH_RC=$?
+        [ "$RESEARCH_RC" -ne 0 ] && manifest_add_input kind=research-rc value="$RESEARCH_RC"
         manifest_finalize
         # Stage 5: Code2 (parent = research)
-        ralph_log "  [stage 2 retry] re-running coder with research"
-        RESEARCH="$(cat "$RESEARCH_LOG")"
+        RESEARCH=""
+        if [ "$RESEARCH_RC" -eq 0 ]; then
+          ralph_log "  [stage 2 retry] re-running coder with research"
+          RESEARCH="$(cat "$RESEARCH_LOG")"
+        else
+          # As in Stage 1.5: $RESEARCH_LOG holds the failure stream, not facts.
+          ralph_log "  [stage 3.5] ask-agy.sh failed (rc=$RESEARCH_RC) — re-running coder without research; not injecting error output (see $RESEARCH_LOG)"
+        fi
         # Carry the planner's pre-coding research (if any) into the retry too: the
         # first coder built on it, so dropping it here would make the retry coder
         # lose facts it relied on and risk undoing/misapplying the work. Stack the
@@ -614,7 +622,7 @@ $RESEARCH"
         manifest_add_input kind=task value="$TASK"
         manifest_add_input kind=plan path="$PLAN_LOG"
         [ -n "$PRE_RESEARCH" ] && manifest_add_input kind=research path="$PLAN_RESEARCH_LOG"
-        manifest_add_input kind=research path="$RESEARCH_LOG"
+        [ "$RESEARCH_RC" -eq 0 ] && manifest_add_input kind=research path="$RESEARCH_LOG"
         CODE_PROMPT2=$(build_coder_prompt "$TASK" "$PLAN" "$PROMPT_CONTEXT" "$RETRY_RESEARCH" "$FP_EXCERPT")
         ( cd "$WORK_DIR" && "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p "$CODE_PROMPT2" 2>&1 ) | tee "$CODE2_LOG" >/dev/null || true
         manifest_finalize

@@ -119,6 +119,10 @@ class ModelRegistry:
         return model_id, self.models[model_id]
 
 
+# Matches registry_run_answer in registry.sh: a zero exit with no answer.
+NO_OUTPUT_RETURNCODE = 5
+
+
 @dataclass(frozen=True)
 class RoleResult:
     invocation_id: str
@@ -174,17 +178,26 @@ class RoleRunner:
             check=False,
         )
         elapsed_ms = round((time.monotonic() - started) * 1000)
+        returncode = completed.returncode
         output = completed.stdout
-        if final_path and final_path.exists():
+        from_final = bool(final_path and final_path.exists())
+        if from_final:
             output = final_path.read_text(encoding="utf-8")
-        elif completed.stderr:
+        # Decide on the answer before stderr is appended: agy's print mode can
+        # soft-deny a tool, print its guidance on stderr only and still exit 0.
+        if returncode == 0 and not output.strip():
+            returncode = NO_OUTPUT_RETURNCODE
+            output = f"model {model_id!r} exited 0 with no output" + (
+                f"\n{completed.stderr}" if completed.stderr else ""
+            )
+        elif not from_final and completed.stderr:
             output += ("\n" if output else "") + completed.stderr
         return RoleResult(
             invocation_id=str(uuid.uuid4()),
             role=role,
             model=model_id,
             output=output,
-            returncode=completed.returncode,
+            returncode=returncode,
             elapsed_ms=elapsed_ms,
         )
 

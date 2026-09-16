@@ -109,7 +109,7 @@ echo "[ask-agy] running ($RESEARCHER_MODEL) — monitor: dashboard.sh agy  (raw:
 RC=0
 # Legacy RESEARCHER_CLI still wins as a per-role binary override; otherwise the
 # registry resolves the binary from the model's env_command/command.
-REGISTRY_CMD_OVERRIDE="${RESEARCHER_CLI:-}" registry_run "$RESEARCHER_MODEL" "$PROMPT" 2>&1 | tee -a "$LOG" || RC=$?
+REGISTRY_CMD_OVERRIDE="${RESEARCHER_CLI:-}" registry_run_answer "$RESEARCHER_MODEL" "$PROMPT" 2>&1 | tee -a "$LOG" || RC=$?
 printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG"
 manifest_finalize
 echo

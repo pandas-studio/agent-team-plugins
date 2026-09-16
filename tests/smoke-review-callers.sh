@@ -22,6 +22,7 @@ case "$2" in
   '# Role: Ralph Planner'*|'# Role: Spec-driven Planner'*)
     echo '<allowed-paths>file.txt</allowed-paths>' ;;
   *)
+    [ -z "${REVIEW_TEST_PROMPTS:-}" ] || printf '%s\n' "$2" >> "$REVIEW_TEST_PROMPTS"
     printf 'implemented\n' > file.txt
     git add file.txt
     git -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm 'implement fixture' || true
@@ -31,6 +32,11 @@ STUB
 cat > "$TMP/researcher" <<'STUB'
 #!/usr/bin/env bash
 printf 'research\n' >> "$REVIEW_TEST_RESEARCH"
+if [ "$REVIEW_TEST_CASE" = research-denied ]; then
+  # agy print mode after a soft-denied tool: guidance on stderr, exit 0.
+  echo 'no output produced — tool auto-denied' >&2
+  exit 0
+fi
 echo 'fixture research evidence'
 STUB
 cat > "$TMP/reviewer" <<'STUB'
@@ -47,7 +53,7 @@ while [ $# -gt 0 ]; do
 done
 case "$REVIEW_TEST_CASE:$count" in
   malformed:*) printf '## Verdict\n\nSHIP — deliberately rejected\n' > "$final" ;;
-  retry:1) printf '## Verdict\nNEEDS-FIX — need evidence\n## NEED RESEARCH\n- verify the API\n' > "$final" ;;
+  retry:1|research-denied:1) printf '## Verdict\nNEEDS-FIX — need evidence\n## NEED RESEARCH\n- verify the API\n' > "$final" ;;
   *) printf '## Verdict\nSHIP — canonical result\n## What I checked\nVerdict: NEEDS-FIX\n' > "$final" ;;
 esac
 if [ "$REVIEW_TEST_CASE" = failed ]; then
@@ -65,7 +71,7 @@ chmod +x "$TMP/worker" "$TMP/researcher" "$TMP/reviewer"
 # given an empty path after a failed review) would dispatch it as research.
 printf '## NEED RESEARCH\n- leaked from caller stdin\n' > "$TMP/stdin-research.md"
 for plugin in ralph-trio spec-trio; do
-  for scenario in disagree malformed retarget failed retry; do
+  for scenario in disagree malformed retarget failed retry research-denied; do
     case_root="$TMP/$plugin-$scenario"
     repo="$case_root/repo"
     state="$case_root/state"
@@ -80,7 +86,7 @@ for plugin in ralph-trio spec-trio; do
     git -C "$repo" -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm baseline
     args=(--backlog "$repo/BACKLOG.md" --max-iter 1)
     [ "$plugin" != spec-trio ] || args+=(--spec "$repo/spec.md" --test-cmd 'git diff --check')
-    case "$scenario" in retarget|failed|retry) ;; *) args+=(--no-research) ;; esac
+    case "$scenario" in retarget|failed|retry|research-denied) ;; *) args+=(--no-research) ;; esac
     driver_rc=0
     (
       cd "$repo"
@@ -94,20 +100,46 @@ for plugin in ralph-trio spec-trio; do
         RALPH_TRIO_WORKSPACE="$state" SPEC_TRIO_WORKSPACE="$state" \
         REVIEW_TEST_CASE="$scenario" REVIEW_TEST_COUNTER="$case_root/count" \
         REVIEW_TEST_RESEARCH="$case_root/research" REVIEW_TEST_DECOY="$case_root/decoy.md" \
+        REVIEW_TEST_PROMPTS="$case_root/coder-prompts" \
         "$ROOT/$plugin/bin/$plugin.sh" "${args[@]}"
     ) < "$TMP/stdin-research.md" > "$TMP/driver.out" 2>&1 || driver_rc=$?
     expected_rc=0
     if [ "$plugin" = spec-trio ] && { [ "$scenario" = malformed ] || [ "$scenario" = failed ]; }; then expected_rc=4; fi
+    # spec-trio skips the retry coder when research fails and leaves the task pending.
+    if [ "$plugin" = spec-trio ] && [ "$scenario" = research-denied ]; then expected_rc=3; fi
     check "$plugin $scenario exit status" test "$driver_rc" -eq "$expected_rc"
     expected_calls=1
     [ "$scenario" != retry ] || expected_calls=2
+    [ "$scenario" != research-denied ] || [ "$plugin" != ralph-trio ] || expected_calls=2
     check "$plugin $scenario reviewer count" test "$(cat "$case_root/count")" -eq "$expected_calls"
-    if [ "$scenario" = retry ]; then
+    if [ "$scenario" = research-denied ]; then
+      check "$plugin denied research request runs once" test "$(wc -l < "$case_root/research" | tr -d ' ')" -eq 1
+      check "$plugin denied research rc recorded" \
+        jq -se '[.[].inputs[]?|select(.kind=="research-rc" and (.value|tostring)=="5")]|length==1' \
+        "$state/log/caller"/"$plugin"-*-research*.manifest.json
+      check "$plugin denied research not given to a coder" \
+        sh -c '! grep -q "auto-denied" "$1" 2>/dev/null' _ "$case_root/coder-prompts"
+      if [ "$plugin" = ralph-trio ]; then
+        check "$plugin retry coder runs without research" test "$(grep -c '^# Role:' "$case_root/coder-prompts")" -eq 2
+      else
+        check "$plugin retry coder skipped" test "$(grep -c '^# Role:' "$case_root/coder-prompts")" -eq 1
+        check "$plugin research-failed skip recorded" \
+          json_is "$(ls "$state/log/caller"/"$plugin"-*-code2.manifest.json)" '[.inputs[]|select(.kind=="skip-reason" and .value=="research-failed")]|length==1'
+      fi
+    elif [ "$scenario" = retry ]; then
       check "$plugin real research request runs once" test "$(wc -l < "$case_root/research" | tr -d ' ')" -eq 1
     else
       check "$plugin never dispatches stale/failed research" test ! -e "$case_root/research"
     fi
     manifests=( "$state/log/caller"/"$plugin"-*-review*.manifest.json )
+    if [ "$plugin" = spec-trio ] && [ "$scenario" = research-denied ]; then
+      # After failed research spec-trio synthesizes the retry verdict without
+      # running a review: exactly that review2 manifest links no result.
+      synthesized=( "$state/log/caller"/"$plugin"-*-review2.manifest.json )
+      check "$plugin synthesized retry verdict has no review result" \
+        json_is "${synthesized[0]}" '([.inputs[]|select(.kind=="review-result")]|length==0) and ([.inputs[]|select(.kind=="skip-reason")]|length==1)'
+      manifests=( "$state/log/caller"/"$plugin"-*-review.manifest.json )
+    fi
     check "$plugin review manifest count" test "${#manifests[@]}" -eq "$expected_calls"
     for manifest in "${manifests[@]}"; do
       check "$plugin parent links one exact result" json_is "$manifest" '[.inputs[]|select(.kind=="review-result")]|length==1'
@@ -120,9 +152,11 @@ for plugin in ralph-trio spec-trio; do
         *) check "$plugin parsed result used" json_is "$result" '.status=="ok"' ;;
       esac
     done
-    if [ "$scenario" = retry ]; then
+    if [ "$expected_calls" -eq 2 ]; then
       check "$plugin re-review uses canonical SHIP despite decoys" \
         jq -se '[.[]|select(.verdict=="SHIP")]|length==1' "${manifests[@]}" >/dev/null
+    elif [ "$scenario" = research-denied ]; then
+      check "$plugin research-requesting review keeps its NEEDS-FIX" json_is "${manifests[0]}" '.verdict=="NEEDS-FIX"'
     elif [ "$scenario" != malformed ] && [ "$scenario" != failed ]; then
       check "$plugin ignores competing legacy verdict" json_is "${manifests[0]}" '.verdict=="SHIP"'
     fi

@@ -323,6 +323,64 @@ registry_run() {
   fi
 }
 
+# registry_run_answer ID PROMPT — registry_run for a role whose answer is its
+# stdout, streamed unchanged as it arrives (stderr stays on stderr).
+#
+# Returns, in priority order:
+#   the model's exit code, when it is nonzero;
+#   6 when the model exited 0 but its stdout could not be inspected (the
+#     temp file could not be created or written, or grep failed);
+#   5 when the model exited 0 with no non-whitespace stdout — agy's print mode
+#     soft-denies a tool it cannot prompt for, prints guidance on stderr only
+#     and still exits 0, and that must not pass for an answer;
+#   0 otherwise.
+# registry_run must report the CLI's status itself, not rely on errexit.
+#
+# A copy of stdout goes to a private temp file that the subshell removes on
+# exit. INT/TERM/HUP exit 130/143/129 (codes, not re-raised signals); bash runs
+# those traps only once the pipeline ends, so prompt cancellation is up to
+# whoever signals the process group. SIGKILL can leave the file behind.
+registry_run_answer() {
+  if [ "$#" -lt 2 ]; then
+    echo "registry_run_answer: usage: registry_run_answer ID PROMPT" >&2
+    return 2
+  fi
+  (
+    tmp=""
+    trap '[ -z "$tmp" ] || rm -f "$tmp"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    set +e
+    tmp="$(umask 077 && mktemp "${TMPDIR:-/tmp}/registry-answer.XXXXXX")" || {
+      echo "registry_run_answer: cannot create a temp file to inspect the answer" >&2
+      exit 6
+    }
+    registry_run "$@" | tee "$tmp"
+    statuses=("${PIPESTATUS[@]}")
+    if [ "${statuses[0]}" -ne 0 ]; then
+      [ "${statuses[1]}" -eq 0 ] || echo "registry_run_answer: tee also failed (rc=${statuses[1]})" >&2
+      exit "${statuses[0]}"
+    fi
+    if [ "${statuses[1]}" -ne 0 ]; then
+      echo "registry_run_answer: tee failed (rc=${statuses[1]}); the answer could not be inspected" >&2
+      exit 6
+    fi
+    grep -q '[^[:space:]]' "$tmp"
+    case "$?" in
+      0) exit 0 ;;
+      1)
+        echo "registry: model '$1' exited 0 with no output on stdout — treating as failure (rc=5)" >&2
+        exit 5
+        ;;
+      *)
+        echo "registry_run_answer: could not inspect the answer (grep failed)" >&2
+        exit 6
+        ;;
+    esac
+  )
+}
+
 # registry_extract_response <log-file>
 #   Echo the model output a wrapper logs between its '=== RESPONSE ===' header
 #   and trailing '=== END (rc=...) ===' marker. Used to synthesize a *.final.md

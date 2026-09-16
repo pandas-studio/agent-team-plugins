@@ -47,3 +47,46 @@ def test_needs_fix_retries_once_then_can_be_rejected(tmp_path: Path):
 
     graph.invoke(Command(resume="reject"), config=config)
     assert graph.get_state(config).values["status"] == "rejected"
+
+
+def test_researcher_exit_zero_without_answer_stops_before_coding(tmp_path: Path):
+    """stderr-only research (agy soft-deny) must not reach the coder."""
+    import json
+    import sys
+
+    import pytest
+
+    from agent_team_graph.registry import ModelRegistry, RoleRunner
+
+    answer = ["-c", "print('an answer')", "{prompt}"]
+    denied = ["-c", "import sys; sys.stderr.write('auto-denied\\n')", "{prompt}"]
+    config = tmp_path / "models.json"
+    config.write_text(
+        json.dumps(
+            {
+                "models": {
+                    "ok": {"command": sys.executable, "args": answer},
+                    "denied": {"command": sys.executable, "args": denied},
+                },
+                "roles": {
+                    "langgraph-conductor.planner": "ok",
+                    "langgraph-conductor.researcher": "denied",
+                    "langgraph-conductor.coder": "ok",
+                    "langgraph-conductor.reviewer": "ok",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    workspace, spec = make_repo(tmp_path)
+    connection = sqlite3.connect(":memory:", check_same_thread=False)
+    graph = build_graph(
+        checkpointer=SqliteSaver(connection),
+        artifact_root=tmp_path / "artifacts",
+        runner=RoleRunner(ModelRegistry(config)),
+    )
+    config_ = {"configurable": {"thread_id": "denied-thread"}}
+    with pytest.raises(RuntimeError, match="researcher failed with exit code 5"):
+        graph.invoke(initial(workspace, spec, "denied-thread"), config=config_)
+    assert not list((tmp_path / "artifacts").rglob("20-research.md"))
+    assert not list((tmp_path / "artifacts").rglob("30-code-attempt-*.md"))
