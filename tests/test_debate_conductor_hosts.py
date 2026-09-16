@@ -222,6 +222,80 @@ class DebateHostTests(unittest.TestCase):
         self.assertEqual(metadata["sources"]["generator"], "current-resolution")
         self.assertEqual(metadata["sources"]["critic"], "invocation")
 
+    def generator_prompts(self):
+        return [call[-1] for call in self.recorded() if call and call[0] == "-p"]
+
+    def test_continue_retries_failed_first_round_with_saved_context(self):
+        context = self.root / "context.md"
+        context.write_text("SAVED-CONTEXT-MARKER\n")
+        result = self.run_cli("debate.sh", "-n", "2", "fixture topic", str(context), STUB_RC="9")
+        self.assertEqual(result.returncode, 9, result.stderr)
+        first_dir = self.latest_debate()
+        self.assertEqual(list(first_dir.glob(".round-*.done")), [])
+        saved = first_dir / "context.md"
+        self.assertEqual(saved.read_text(), "SAVED-CONTEXT-MARKER\n")
+        self.assertEqual(saved.stat().st_mode & 0o777, 0o600)
+        self.calls.unlink()
+
+        result = self.run_cli("debate.sh", "--continue-from", str(first_dir), "-n", "2", "fixture topic")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("resuming from round 1", result.stderr)
+        self.assertEqual(self.latest_debate(), first_dir)
+        self.assertEqual(len(list(first_dir.glob(".round-*.done"))), 2)
+        prompts = self.generator_prompts()
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("SAVED-CONTEXT-MARKER", prompts[0])
+
+    def test_continue_context_argument_replaces_saved_context(self):
+        context = self.root / "context.md"
+        context.write_text("SAVED-CONTEXT-MARKER\n")
+        result = self.run_cli("debate.sh", "-n", "2", "fixture topic", str(context), STUB_RC="9")
+        self.assertEqual(result.returncode, 9, result.stderr)
+        first_dir = self.latest_debate()
+        self.calls.unlink()
+
+        replacement = self.root / "replacement.md"
+        replacement.write_text("REPLACEMENT-CONTEXT-MARKER\n")
+        result = self.run_cli("debate.sh", "--continue-from", str(first_dir), "-n", "2",
+                              "fixture topic", str(replacement))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        prompts = self.generator_prompts()
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("REPLACEMENT-CONTEXT-MARKER", prompts[0])
+        self.assertNotIn("SAVED-CONTEXT-MARKER", prompts[0])
+        self.assertEqual((first_dir / "context.md").read_text(), "REPLACEMENT-CONTEXT-MARKER\n")
+
+    def test_continue_refuses_invalid_saved_context_before_changing_state(self):
+        context = self.root / "context.md"
+        context.write_text("SAVED-CONTEXT-MARKER\n")
+        link = self.workspace / ".debate-conductor/log/host-test/latest-debate"
+        for kind in ("directory", "dangling-symlink"):
+            for passed in ((), (str(context),)):
+                with self.subTest(kind=kind, context_argument=bool(passed)):
+                    result = self.run_cli("debate.sh", "-n", "2", "fixture topic", str(context), STUB_RC="9")
+                    self.assertEqual(result.returncode, 9, result.stderr)
+                    debate_dir = self.latest_debate()
+                    saved = debate_dir / "context.md"
+                    saved.unlink()
+                    if kind == "directory":
+                        saved.mkdir()
+                    else:
+                        saved.symlink_to(debate_dir / "missing.md")
+                    link_target = os.readlink(link)
+                    models = (debate_dir / "models.json").read_bytes()
+                    if self.calls.exists():
+                        self.calls.unlink()
+
+                    result = self.run_cli("debate.sh", "--continue-from", str(debate_dir), "-n", "2",
+                                          "fixture topic", *passed, DEBATE_CRITIC_MODEL="claude")
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("context.md is not a regular file", result.stderr)
+                    self.assertEqual(self.generator_prompts(), [])
+                    self.assertEqual((debate_dir / "models.json").read_bytes(), models)
+                    self.assertEqual(os.readlink(link), link_target)
+                    self.assertTrue(saved.is_symlink() or saved.is_dir())
+                    time.sleep(1.1)  # next fresh debate gets its own debate-<TS> dir
+
     def test_continue_without_metadata_infers_models_from_round_markers(self):
         result = self.run_cli("debate.sh", "-n", "2", "fixture topic")
         self.assertEqual(result.returncode, 0, result.stderr)

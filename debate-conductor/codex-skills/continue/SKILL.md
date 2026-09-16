@@ -19,7 +19,9 @@ Read `<debate-dir>/topic.txt` and run:
 DEBATE_CONDUCTOR_PM_HOST=codex "<plugin-root>/bin/debate.sh" --continue-from "<debate-dir>" -n <extra-rounds> "<topic>"
 ```
 
-Default extra rounds to `2` when the user does not specify a number. `debate.sh`
+Default extra rounds to `2` when the user does not specify a number. Rounds
+continue after the last completed one; if round 1 never completed, `debate.sh`
+resumes at round 1 and reuses the round-1 context saved in `context.md`. `debate.sh`
 persists and reuses the transcript's model pair and any saved rotation unless
 this invocation supplies explicit model flags/env vars. Start a fresh debate to
 change model pairs inside rotation or to change whether rotation is enabled.
