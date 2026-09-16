@@ -323,6 +323,25 @@ registry_run() {
   fi
 }
 
+# registry_run_answer ID PROMPT — registry_run for a role whose answer is its
+# stdout. Streams stdout and stderr merged on stdout, as `registry_run ... 2>&1`
+# does. Returns the model's exit code, except that a zero exit with no
+# non-whitespace stdout returns 5: agy's print mode soft-denies a tool it
+# cannot prompt for, prints its guidance on stderr only and still exits 0, and
+# that guidance must not be mistaken for an answer.
+registry_run_answer() {
+  local answer rc=0
+  answer="$(mktemp "${TMPDIR:-/tmp}/registry-answer.XXXXXX")" || return 2
+  { { registry_run "$@" || echo "$?" > "$answer.rc"; } | tee "$answer"; } 2>&1 || true
+  [ -f "$answer.rc" ] && rc="$(cat "$answer.rc")"
+  if [ "$rc" -eq 0 ] && ! grep -q '[^[:space:]]' "$answer"; then
+    echo "registry: model '$1' exited 0 with no output on stdout — treating as failure (rc=5)"
+    rc=5
+  fi
+  rm -f "$answer" "$answer.rc"
+  return "$rc"
+}
+
 # registry_extract_response <log-file>
 #   Echo the model output a wrapper logs between its '=== RESPONSE ===' header
 #   and trailing '=== END (rc=...) ===' marker. Used to synthesize a *.final.md

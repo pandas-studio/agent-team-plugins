@@ -365,6 +365,50 @@ git -C "$TMP/unborn" -c user.name=t -c user.email=t@t commit -qm first
 assert_eq "$(bash -c '. "$1/spec-trio/lib/spec-helpers.sh"; collect_changed_paths "$2" "$3"' \
   _ "$ROOT" "$TMP/unborn" "$EMPTY_TREE")" "outside.txt"
 
+# A worker CLI that exits 0 with nothing on stdout has not answered: agy's print
+# mode soft-denies a tool, prints guidance on stderr only and still exits 0.
+# Every stdout-answer wrapper must fail (rc=5), keep real answers and real exit
+# codes, and debate.sh must not mark such a round complete.
+mkdir -p "$TMP/worker-cli"
+printf '#!/bin/sh\necho "no output produced — auto-denied" >&2\nexit 0\n' > "$TMP/worker-cli/denied"
+printf '#!/bin/sh\necho progress >&2\necho "## Verdict"\necho "Verdict: RECONSIDER"\n' > "$TMP/worker-cli/answer"
+printf '#!/bin/sh\necho boom >&2\nexit 9\n' > "$TMP/worker-cli/broken"
+chmod +x "$TMP/worker-cli/denied" "$TMP/worker-cli/answer" "$TMP/worker-cli/broken"
+run_worker() {
+  local wrapper="$1" stub="$2" rc=0
+  ( cd "$TMP" && env -u DEBATE_GENERATOR_MODEL -u DEBATE_CRITIC_MODEL -u DEV_TRIO_RESEARCHER_MODEL \
+      -u DEBATE_CONDUCTOR_PM_HOST -u DEV_TRIO_PM_HOST TMUX='' AGENT_TEAM=worker \
+      AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" \
+      DEBATE_LOG_DIR="$TMP/worker-log" DEV_TRIO_LOG_DIR="$TMP/worker-log" \
+      GENERATOR_CLI="$TMP/worker-cli/$stub" CRITIC_CLI="$TMP/worker-cli/$stub" \
+      RESEARCHER_CLI="$TMP/worker-cli/$stub" \
+      "$ROOT/$wrapper" "question" > "$TMP/worker.out" 2>/dev/null </dev/null ) || rc=$?
+  echo "$rc"
+}
+for wrapper in debate-conductor/lib/ask-generator.sh debate-conductor/lib/ask-critic.sh dev-trio/bin/ask-agy.sh; do
+  assert_eq "$(run_worker "$wrapper" denied)" "5"
+  assert_eq "$(run_worker "$wrapper" answer)" "0"
+  assert_ok grep -q '^Verdict: RECONSIDER$' "$TMP/worker.out"
+  assert_eq "$(run_worker "$wrapper" broken)" "9"
+done
+
+run_debate() {
+  local team="$1" gen="$2" crit="$3" rc=0
+  ( cd "$TMP" && env -u DEBATE_GENERATOR_MODEL -u DEBATE_CRITIC_MODEL -u DEBATE_PRIMARY_GEN \
+      -u DEBATE_CONDUCTOR_PM_HOST TMUX='' AGENT_TEAM="$team" \
+      AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" DEBATE_LOG_DIR="$TMP/debate-log" \
+      GENERATOR_CLI="$TMP/worker-cli/$gen" CRITIC_CLI="$TMP/worker-cli/$crit" \
+      "$ROOT/debate-conductor/bin/debate.sh" -n 2 "smoke: $team" > /dev/null 2>&1 </dev/null ) || rc=$?
+  echo "$rc"
+}
+done_rounds() { ls -a "$TMP/debate-log/$1"/debate-*/ 2>/dev/null | grep -c '^\.round-.*\.done$' || true; }
+assert_eq "$(run_debate gen-denied denied answer)" "5"
+assert_eq "$(done_rounds gen-denied)" "0"
+assert_eq "$(run_debate crit-denied answer denied)" "5"
+assert_eq "$(done_rounds crit-denied)" "1"
+assert_eq "$(run_debate both-answer answer answer)" "0"
+assert_eq "$(done_rounds both-answer)" "2"
+
 cmp "$ROOT/dev-trio/lib/registry.sh" "$ROOT/debate-conductor/lib/registry.sh"
 PASS=$((PASS + 1))
 cmp "$ROOT/dev-trio/bin/agent-team-models.sh" "$ROOT/debate-conductor/bin/agent-team-models.sh"

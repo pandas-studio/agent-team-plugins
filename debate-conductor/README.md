@@ -211,6 +211,8 @@ debate-conductor/
 
 **Context scope per round.** Each round prompt only includes the *immediately preceding* generator+critic pair — not the full transcript. So round 5 sees round 3 (your last draft) and round 4 (critic feedback), but not rounds 1–2. This keeps prompts bounded as round count grows; the trade-off is that early-round consensus or discoveries fade out unless re-stated. `/continue` follows the same rule.
 
+**A round needs an answer on stdout.** `ask-generator.sh` and `ask-critic.sh` exit **5** when the model CLI exits 0 but writes nothing except whitespace to stdout. For example, `agy -p` soft-denies a tool it cannot prompt for, prints guidance on stderr, and still exits 0. `debate.sh` then stops before writing that round's `.done` sidecar, so the guidance never becomes a draft or a critique.
+
 **Live streaming quality depends on the model CLI.** The pipeline (`stdbuf -oL` on `sed`/`tee`) forces line-buffered stdio so cleaned output flows line-by-line through the viewers. But if the model CLI itself batches its stdout in user-space (some `codex` builds do this), a round may still appear in one chunk rather than streaming. That's outside this plugin's reach.
 
 **Convergence parsing is anchored, not fuzzy.** `--until-converged` only stops on a *standalone canonical* `Verdict: STRENGTHEN` line (the Critic role contract), taking the last such line in the round. A Critic round that errors out and echoes its role prompt contains the placeholders `Verdict: <STRENGTHEN | …>` and `<one of: STRENGTHEN / …>` — neither matches the anchor, so a failed round reads as not-converged and the debate keeps going rather than stopping on garbage. `debate-conductor-doctor.sh` covers all three paths (STRENGTHEN / RECONSIDER / placeholder) with stub CLIs.

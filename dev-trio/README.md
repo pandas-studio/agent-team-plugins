@@ -145,6 +145,8 @@ claude --plugin-dir ./agent-team-plugins/dev-trio
    ask-agy.sh "What's the recommended way to stream tokens with langchain-anthropic 0.3.x?"
    ask-codex.sh "review the new retry logic in src/agent.py — concurrency safety"
    ```
+   `ask-agy.sh` exits **5** when the researcher CLI exits 0 with nothing but whitespace on stdout (for example, `agy -p` after soft-denying a tool). Treat that as failed research, not as an empty answer.
+
    Or use the wrapping skills:
    ```
    /dev-trio:research <question>

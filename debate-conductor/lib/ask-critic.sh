@@ -112,7 +112,7 @@ RC=0
 # The registry expands the model's argv template (codex -> `exec
 # --skip-git-repo-check {prompt}`, agy -> `-p {prompt}`) and resolves the
 # binary: CRITIC_CLI legacy override > model env_command (CODEX_CLI/...) > command.
-REGISTRY_CMD_OVERRIDE="${CRITIC_CLI:-}" registry_run "$MODEL" "$PROMPT" 2>&1 | $LINEBUF tee -a "$LOG" || RC=$?
+REGISTRY_CMD_OVERRIDE="${CRITIC_CLI:-}" registry_run_answer "$MODEL" "$PROMPT" 2>&1 | $LINEBUF tee -a "$LOG" || RC=$?
 printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG"
 echo
 echo "(log: $LOG, rc=$RC, model=$MODEL)" >&2
