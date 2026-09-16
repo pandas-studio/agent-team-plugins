@@ -107,6 +107,14 @@ printf '%swaiting for debate to start...%s\n' "$DIM" "$RESET"
 
 shopt -s nullglob
 
+# mawk reads a pipe in large blocks, so round lines from `tail -F` would sit in
+# its input buffer and the pane would stay empty; fflush() only flushes output.
+# `-W interactive` makes mawk read line by line. gawk and BSD awk already do.
+AWK_STREAM=(awk)
+case "$(awk -W version 2>&1 </dev/null || true)" in
+  mawk*) AWK_STREAM=(awk -W interactive) ;;
+esac
+
 # Tracks the highest round number this viewer has already streamed. Persists
 # across outer-loop iterations so the awk MIN_ROUND filter knows which
 # markers in re-globbed tail output belong to "already-seen" rounds (replay
@@ -160,7 +168,7 @@ while true; do
   #   - fflush() after every line keeps streaming visible
   {
     tail -F "${files[@]}" 2>/dev/null \
-      | awk \
+      | "${AWK_STREAM[@]}" \
           -v ROLE_COLOR="$ROLE_COLOR" \
           -v RESET="$RESET" \
           -v GREEN="$GREEN" \
