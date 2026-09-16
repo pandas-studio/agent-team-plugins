@@ -209,12 +209,16 @@ build_range_hint() {
   local pre_ref="$1" work_dir="$2"
   [ -n "$pre_ref" ] || { echo ""; return 0; }
   local post_ref
-  post_ref=$(git -C "$work_dir" rev-parse HEAD 2>/dev/null || true)
-  if [ -n "$post_ref" ] && [ "$post_ref" != "$pre_ref" ]; then
-    printf ' The just-coded diff is in the range `%s..%s` (plus any uncommitted changes still in the working tree); inspect via `git diff %s..HEAD` AND `git status --short` / `git diff HEAD`.' \
+  post_ref=$(git -C "$work_dir" rev-parse --verify -q HEAD 2>/dev/null || true)
+  if [ -z "$post_ref" ]; then
+    # Still no commit at all (the base is the empty tree): there is no HEAD to
+    # diff against, so everything is staged, unstaged, or untracked.
+    printf ' The repository has no commits yet; inspect the change via `git status --short`, `git diff --cached` and `git diff`, and read every untracked file.'
+  elif [ "$post_ref" != "$pre_ref" ]; then
+    printf ' The just-coded diff is in the range `%s..%s` (plus any uncommitted changes still in the working tree); inspect via `git diff %s..HEAD` AND `git status --short` / `git diff HEAD`, and read every untracked file.' \
       "$pre_ref" "$post_ref" "$pre_ref"
   else
-    printf ' The coder did NOT commit (HEAD is still at `%s`); inspect the working-tree state via `git status --short` and `git diff HEAD`.' \
+    printf ' The coder did NOT commit (HEAD is still at `%s`); inspect the working-tree state via `git status --short` and `git diff HEAD`, and read every untracked file.' \
       "$pre_ref"
   fi
 }
@@ -424,9 +428,13 @@ while :; do
   # explicit diff range $PRE_CODE_REF..HEAD. Without this hint, ask-codex.sh
   # defaults to the working-tree state — and after the worker commits its work
   # the tree is clean, so the reviewer would miss the just-created commit.
+  # An unborn repository has no HEAD: anchor on the empty tree so the range
+  # hint covers the coder's first commit (plain `rev-parse HEAD` would echo the
+  # literal "HEAD" and yield an empty `HEAD..HEAD` range).
   PRE_CODE_REF=""
   if git -C "$WORK_DIR" rev-parse --git-dir >/dev/null 2>&1; then
-    PRE_CODE_REF=$(git -C "$WORK_DIR" rev-parse HEAD 2>/dev/null || true)
+    PRE_CODE_REF=$(git -C "$WORK_DIR" rev-parse --verify -q HEAD 2>/dev/null \
+      || git -C "$WORK_DIR" hash-object -t tree /dev/null 2>/dev/null || true)
   fi
 
   # ---- Stage 2: Coder ----
@@ -584,7 +592,7 @@ while :; do
         # Researcher role recorded by ask-agy.sh via the PR 9 carve-out.
         # Research content is captured durably via the tee into $RESEARCH_LOG
         # (ralph's main-repo log tree); DEV_TRIO_LOG_DIR pins ask-agy.sh's own
-        # agy-<TS>.log there too so it doesn't litter the (torn-down) worktree.
+        # agy-<TS>-<PID>.log there too so it doesn't litter the (torn-down) worktree.
         manifest_add_input kind=question value="$RESEARCH_QS"
         RESEARCH_RC=0
         ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$LOG_DIR/agy" \

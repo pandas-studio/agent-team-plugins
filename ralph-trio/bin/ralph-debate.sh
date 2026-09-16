@@ -68,6 +68,12 @@ done
 [ -z "$BACKLOG_FILE" ] && { echo "--backlog is required" >&2; exit 2; }
 [ -f "$BACKLOG_FILE" ] || { echo "BACKLOG not found: $BACKLOG_FILE" >&2; exit 2; }
 BACKLOG_FILE="$(cd "$(dirname "$BACKLOG_FILE")" && pwd)/$(basename "$BACKLOG_FILE")"
+# debate.sh reads the prompt from inside the worktree subshell (`cd "$WORK_DIR"`),
+# so a relative --prompt must be anchored here, before any cd.
+if [ -n "$PROMPT_FILE" ]; then
+  [ -f "$PROMPT_FILE" ] || { echo "PROMPT not found: $PROMPT_FILE" >&2; exit 2; }
+  PROMPT_FILE="$(cd "$(dirname "$PROMPT_FILE")" && pwd)/$(basename "$PROMPT_FILE")"
+fi
 
 # Cross-plugin dependency check (skipped in dry-run; we don't actually invoke it).
 if [ "$DRY_RUN" != "1" ]; then

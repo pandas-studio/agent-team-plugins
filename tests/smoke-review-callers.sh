@@ -42,6 +42,7 @@ STUB
 cat > "$TMP/reviewer" <<'STUB'
 #!/usr/bin/env bash
 set -eu
+[ -z "${REVIEW_TEST_REVIEW_PROMPTS:-}" ] || printf '%s\n' "$*" >> "$REVIEW_TEST_REVIEW_PROMPTS"
 count=0
 [ ! -f "$REVIEW_TEST_COUNTER" ] || count=$(cat "$REVIEW_TEST_COUNTER")
 count=$((count + 1))
@@ -161,5 +162,59 @@ for plugin in ralph-trio spec-trio; do
       check "$plugin ignores competing legacy verdict" json_is "${manifests[0]}" '.verdict=="SHIP"'
     fi
   done
+done
+# ralph-trio in a repository with no commits yet. The reviewer's range hint must
+# cover the coder's first commit (base = empty tree), never `HEAD..HEAD`, and
+# must not cite a literal `HEAD` ref when the coder leaves HEAD unborn.
+EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+cat > "$TMP/coder-no-commit" <<'STUB'
+#!/usr/bin/env bash
+printf 'implemented\n' > file.txt
+echo 'coder done'
+STUB
+chmod +x "$TMP/coder-no-commit"
+for variant in commit no-commit; do
+  case_root="$TMP/ralph-trio-unborn-$variant"
+  repo="$case_root/repo"
+  mkdir -p "$repo"
+  git init -q "$repo"
+  git -C "$repo" config user.email fixture@example.com
+  git -C "$repo" config user.name Fixture
+  printf -- '- [ ] implement file\n' > "$repo/BACKLOG.md"
+  coder="$TMP/worker"
+  [ "$variant" = commit ] || coder="$TMP/coder-no-commit"
+  driver_rc=0
+  (
+    cd "$repo"
+    env -u REVIEWER_CLI -u REVIEWER_ROLE_FILE -u MANIFEST_PARENT_TMP \
+      -u DEV_TRIO_REVIEW_PROFILE -u DEV_TRIO_REVIEW_RECEIPT \
+      -u PLANNER_CLI -u RESEARCHER_CLI \
+      PATH="$ROOT/dev-trio/bin:$PATH" AGENT_TEAM=caller TMUX='' \
+      AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" \
+      DEV_TRIO_REVIEWER_MODEL=codex DEV_TRIO_RESEARCHER_MODEL=agy \
+      CLAUDE_CLI="$TMP/worker" CODER_CLI="$coder" CODEX_CLI="$TMP/reviewer" AGY_CLI="$TMP/researcher" \
+      RALPH_TRIO_WORKSPACE="$case_root/state" \
+      REVIEW_TEST_CASE=unborn REVIEW_TEST_COUNTER="$case_root/count" \
+      REVIEW_TEST_RESEARCH="$case_root/research" REVIEW_TEST_DECOY="$case_root/decoy.md" \
+      REVIEW_TEST_REVIEW_PROMPTS="$case_root/review-prompts" \
+      "$ROOT/ralph-trio/bin/ralph-trio.sh" --backlog "$repo/BACKLOG.md" --max-iter 1 --no-research
+  ) < /dev/null > "$TMP/driver.out" 2>&1 || driver_rc=$?
+  check "ralph-trio unborn $variant exit status" test "$driver_rc" -eq 0
+  check "ralph-trio unborn $variant reviewer ran once" test "$(cat "$case_root/count")" -eq 1
+  check "ralph-trio unborn $variant never cites HEAD..HEAD" \
+    sh -c '! grep -q "HEAD\.\.HEAD" "$1"' _ "$case_root/review-prompts"
+  check "ralph-trio unborn $variant never cites a literal HEAD ref" \
+    sh -c '! grep -qF -e "\`HEAD\`" -e "\`HEAD.." "$1"' _ "$case_root/review-prompts"
+  if [ "$variant" = commit ]; then
+    check "ralph-trio unborn coder made the first commit" \
+      test "$(git -C "$repo" rev-list --count HEAD)" -eq 1
+    check "ralph-trio unborn range starts at the empty tree" \
+      grep -qF "git diff $EMPTY_TREE..HEAD" "$case_root/review-prompts"
+  else
+    check "ralph-trio unborn coder left HEAD unborn" \
+      sh -c '! git -C "$1" rev-parse --verify -q HEAD >/dev/null' _ "$repo"
+    check "ralph-trio unborn no-commit hint says no commits yet" \
+      grep -qF 'The repository has no commits yet' "$case_root/review-prompts"
+  fi
 done
 printf 'review-caller smoke: %s assertions passed\n' "$PASS"

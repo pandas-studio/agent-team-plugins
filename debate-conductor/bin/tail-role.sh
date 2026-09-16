@@ -112,7 +112,10 @@ shopt -s nullglob
 # markers in re-globbed tail output belong to "already-seen" rounds (replay
 # from default `tail -F` last-N-lines per file) vs new rounds appended by
 # /continue. Starts at 0 → on first run every round is treated as new.
+# The watermark belongs to one debate run: KNOWN_MAX_TARGET is the symlink
+# target it was measured on, and any other target starts again from 0.
 KNOWN_MAX_ROUND=0
+KNOWN_MAX_TARGET=""
 
 while true; do
   while [ ! -d "$LATEST" ]; do sleep 1; done
@@ -125,7 +128,16 @@ while true; do
   done
   [ "${#files[@]}" -eq 0 ] && continue
 
+  # Bind this iteration to one run: the glob and the target must agree, or the
+  # symlink moved in between and we retry.
   INITIAL_TARGET=$(readlink "$LATEST" 2>/dev/null || true)
+  files=( "$LATEST"/round-*-"$ROLE"*.md )
+  [ "${#files[@]}" -eq 0 ] && continue
+  [ "$(readlink "$LATEST" 2>/dev/null || true)" = "$INITIAL_TARGET" ] || continue
+  # A different run than the one the watermark was measured on (retargeted
+  # while this viewer was polling, between iterations, or while re-tailing)
+  # starts at round 1: carrying the old maximum over would hide its rounds.
+  [ "$INITIAL_TARGET" = "$KNOWN_MAX_TARGET" ] || KNOWN_MAX_ROUND=0
   INITIAL_FILE_COUNT="${#files[@]}"
   MIN_NEW_ROUND=$((KNOWN_MAX_ROUND + 1))
 
@@ -257,10 +269,13 @@ while true; do
 
   # Carry over the highest round number streamed so the next outer-loop
   # iteration's awk gets MIN_ROUND = KNOWN_MAX_ROUND + 1 — anything lower
-  # arriving in the new tail's last-N-lines replay is suppressed.
+  # arriving in the new tail's last-N-lines replay is suppressed. Recorded
+  # against the run these files came from; the next iteration discards it if
+  # the symlink now points elsewhere.
   KNOWN_MAX_ROUND=$( { printf '%s\n' "${files[@]}" 2>/dev/null || true; } \
     | sed -E 's@.*/round-([0-9]+)-.*@\1@' \
     | sort -n | tail -1)
   KNOWN_MAX_ROUND="${KNOWN_MAX_ROUND:-0}"
+  KNOWN_MAX_TARGET="$INITIAL_TARGET"
   sleep 1
 done

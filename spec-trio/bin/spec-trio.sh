@@ -833,7 +833,7 @@ while :; do
         RESEARCH_RUN_ID="$MANIFEST_RUN_ID"
         manifest_set_parent "$REVIEW_RUN_ID" || exit 1
         # Researcher role recorded by ask-agy.sh via the PR 9 carve-out.
-        # DEV_TRIO_LOG_DIR pins ask-agy.sh's own agy-<TS>.log into spec-trio's
+        # DEV_TRIO_LOG_DIR pins ask-agy.sh's own agy-<TS>-<PID>.log into spec-trio's
         # main-repo log tree so it doesn't litter the (torn-down) worktree; the
         # research content is captured durably via the tee into $RESEARCH_LOG.
         manifest_add_input kind=spec path="$SPEC_FILE" || exit 1

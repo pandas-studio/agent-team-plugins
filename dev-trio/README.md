@@ -173,7 +173,7 @@ Per-team log namespace. Each invocation writes to:
 
 ```
 $PWD/.dev-trio/log/<team>/
-├── agy-<TS>.log            # raw Antigravity output + framing
+├── agy-<TS>-<PID>.log      # raw Antigravity output + framing
 ├── codex-<TS>-<PID>.log    # raw reviewer output + framing
 ├── codex-<TS>-<PID>.final.md    # unchanged final response
 ├── codex-<TS>-<PID>.review.json # common parsed review result

@@ -5,7 +5,7 @@
 #   ask-agy.sh "research question"
 #   echo "extra context" | ask-agy.sh "research question"
 #
-# Output goes to stdout AND $PWD/.dev-trio/log/<team>/agy-<TS>.log.
+# Output goes to stdout AND $PWD/.dev-trio/log/<team>/agy-<TS>-<PID>.log.
 # Override log root via DEV_TRIO_LOG_DIR=/abs/path.
 set -euo pipefail
 
@@ -82,15 +82,29 @@ fi
 REGISTRY_CMD_OVERRIDE="${RESEARCHER_CLI:-}" dev_trio_check_cli "$RESEARCHER_MODEL" || exit $?
 
 mkdir -p "$LOG_DIR"
-TS="$(date +%Y%m%d-%H%M%S)"
+# PID suffix avoids log and manifest collisions when two researchers start
+# within the same second (BSD `date` has no sub-second precision).
+TS="$(date +%Y%m%d-%H%M%S)-$$"
 LOG="$LOG_DIR/agy-$TS.log"
-ln -sfn "agy-$TS.log" "$LOG_DIR/latest-agy.log"
+LATEST_TMP=""
+cleanup_research() {
+  [ -z "$LATEST_TMP" ] || rm -f "$LATEST_TMP"
+  manifest_cleanup
+}
+trap cleanup_research EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+# ln -sfn unlinks then creates and can fail under concurrent dispatch. Rename
+# a unique sibling link instead; readers see either complete target.
+LATEST_TMP="$LOG_DIR/.latest-agy-$TS"
+ln -s "agy-$TS.log" "$LATEST_TMP"
+mv -f "$LATEST_TMP" "$LOG_DIR/latest-agy.log"
+LATEST_TMP=""
 
 manifest_init dev-trio-research "$LOG"
 manifest_add_role researcher "$RESEARCHER_MODEL" "$ROLE_FILE" "$(manifest_sha256_string "$PROMPT")"
 manifest_add_input kind=question value="$QUERY"
 [ -n "$STDIN_CONTEXT" ] && manifest_add_input kind=context value="$STDIN_CONTEXT"
-trap 'manifest_cleanup' INT TERM
 
 {
   echo "=== ask-agy.sh @ $TS ==="
