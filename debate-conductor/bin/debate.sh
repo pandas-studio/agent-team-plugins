@@ -38,6 +38,9 @@
 # Output:
 #   - stdout: full transcript with round markers
 #   - $LOG_DIR/debate-<TS>/round-<N>-{gen,crit}[-MODEL].md per round
+#   - $LOG_DIR/debate-<TS>/stream-{gen,crit}.log: append-only live stream per
+#     role, followed by tail-role.sh. Each attempt starts with a header line
+#     beginning with \x1e (never present in model output, which is filtered).
 #   - $LOG_DIR/latest-debate → symlink to most recent debate dir
 #
 # Log location: $DEBATE_LOG_DIR (default: $PWD/.debate-conductor/log) / $TEAM /
@@ -461,6 +464,12 @@ if [ "$ROTATE" = "1" ]; then
 fi
 
 mkdir -p "$DEBATE_DIR"
+# Per-role live streams for tail-role.sh: append-only, never truncated or
+# replaced, so `tail -F` on one file sees every attempt, retries included.
+# Created before latest-debate moves so a viewer switching to this debate finds
+# them. A debate created before streams existed gets them on its next continue;
+# its earlier rounds stay in the round files only.
+for _role in gen crit; do : >> "$DEBATE_DIR/stream-$_role.log"; done
 ln -sfn "debate-$TS" "$LOG_DIR/latest-debate"
 
 # Persist topic for /continue. Don't overwrite on resume — original wins.
@@ -483,16 +492,16 @@ if [ "$START_ROUND" -eq 1 ]; then
   fi
 fi
 
-# Pre-create empty round files so tail-role.sh's `tail -F` can follow them
-# from the start. Without this, BSD/GNU tail glob expands once at invocation
-# time and won't auto-add new files matching the pattern, so rounds 2+ would
-# silently bypass the live-tail panes.
+# Pre-create empty round files for the scheduled range. Live panes do not
+# follow round files (they follow stream-<role>.log); the placeholders mark
+# which rounds this run owns, and the converge-mode epilogue and the resume
+# cleanup below remove the ones never written.
 #
-# A resumed round's file may still hold the failed attempt. Replace it with a
-# new file rather than truncating it in place: GNU `tail -F` (coreutils 8.32,
-# measured) misses an in-place truncation that is rewritten past its old read
-# offset and drops that many bytes of the retry, including the round marker.
-# A replaced file is reopened and read from the start by GNU and BSD tail.
+# A resumed round's file may still hold the failed attempt; it is replaced with
+# a new file rather than truncated in place. This dates from when panes tailed
+# round files (GNU `tail -F` drops bytes on an in-place truncate that is
+# rewritten past its old offset) and remains harmless for any external
+# follower of round files.
 for _r in $(seq "$START_ROUND" "$END_ROUND"); do
   if [ $((_r % 2)) -eq 1 ]; then
     _f="$(round_file "$_r" gen "$(round_model "$_r" gen)")"
@@ -537,10 +546,10 @@ print_header() {
   printf '────────────────────────────────────────────────────\n\n'
 }
 
-# Machine-readable round marker emitted as the first line of each round file.
-# tail-role.sh's awk parses these to render banners — independent of tail's
-# per-file `==> path <==` headers (which are absent when only one file is
-# being tailed) and immune to startup ghost banners on pre-touched empty files.
+# Machine-readable round marker emitted as the first line of each round file
+# (and stdout). infer_marker_model reads it back on continue. Live panes do not
+# draw banners from it: the copy that reaches the stream is dropped, and banners
+# come only from the \x1e headers written by stream_header.
 print_marker() {
   printf '<!-- debate-round: %s %s %s -->\n' "$1" "$2" "$3"
 }
@@ -579,18 +588,28 @@ critic_verdict() {
 # format which echoes the input prompt between `user`/`codex` markers and
 # tails with `tokens used\n<count>`.
 #
-# stdbuf -oL forces line-buffered output so each cleaned line streams to the
-# downstream `tee` (and viewers) immediately rather than waiting for sed's
-# default full-buffer to fill on a long response.
-LINEBUF=""
-command -v stdbuf >/dev/null 2>&1 && LINEBUF='stdbuf -oL'
+# sed must not block-buffer, or each cleaned line reaches the round file, the
+# role stream and the viewers only when its buffer fills or the round ends.
+# `sed -u` is unbuffered on BSD and GNU sed. GNU sed also accepts `-l`, but
+# there it sets the line-wrap length and does not unbuffer, so it is not used.
+# stdbuf covers seds without -u (e.g. busybox); otherwise plain sed.
+SED_STREAM=(sed)
+if printf 'x\n' | sed -u -e 's/x/y/' >/dev/null 2>&1; then
+  SED_STREAM=(sed -u)
+elif command -v stdbuf >/dev/null 2>&1; then
+  SED_STREAM=(stdbuf -oL sed)
+fi
+# \x1e (ASCII record separator) marks stream headers written by this script.
+# It is deleted from model output below, so model text cannot forge a header.
+RS_BYTE="$(printf '\036')"
 strip_cli_banner() {
   # Range start uses `Reading additional input from stdin` (a strong codex
   # preamble marker that is virtually never in body text) instead of the bare
   # `^user$` line — the bare-marker version was deleting transcript content
   # whenever a model legitimately wrote a `user` line followed later by a
   # `codex` line. Same robustness reasoning for the trailer range start.
-  $LINEBUF sed -E \
+  "${SED_STREAM[@]}" -E \
+    -e "s/$RS_BYTE//g" \
     -e '/^\[[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]+\]/d' \
     -e '/^(OpenAI Codex|workdir:|model:|provider:|sandbox:|reasoning( (effort|summaries))?:|approval:|tokens used:)/d' \
     -e '/^session id:/d' \
@@ -615,6 +634,16 @@ fi
 [ "$UNTIL_CONVERGED" = "1" ] && echo "Mode: until-converged (stop on 'Verdict: STRENGTHEN', cap round $END_ROUND)"
 echo "Transcript dir: $DEBATE_DIR"
 
+# stream_header ROUND ROLE MODEL: start an attempt in that role's stream. A
+# failed attempt may have ended mid-line, so the header always starts a line.
+stream_header() {
+  local stream="$DEBATE_DIR/stream-$2.log"
+  if [ -s "$stream" ] && [ -n "$(tail -c 1 "$stream")" ]; then
+    printf '\n' >> "$stream"
+  fi
+  printf '%s<!-- debate-round: %s %s %s -->\n' "$RS_BYTE" "$1" "$2" "$3" >> "$stream"
+}
+
 # Always forward the resolved per-round model to the role dispatcher; ask-*.sh
 # validate it against the registry. (Previously --model was elided for the
 # built-in default, which only held while the defaults were literally agy/codex.)
@@ -625,6 +654,7 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
   if [ $((r % 2)) -eq 1 ]; then
     GEN_MODEL=$(round_model "$r" gen)
     OUT=$(round_file "$r" gen "$GEN_MODEL")
+    stream_header "$r" gen "$GEN_MODEL"
     [ "$ROTATE" = "1" ] && print_header "$r" "Generator" "$GEN_MODEL" || print_header "$r" "Generator"
     # shellcheck disable=SC2046  # word-splitting on gen_args output is intentional
     if [ "$r" -eq 1 ]; then
@@ -632,12 +662,12 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
         {
           print_marker "$r" gen "$GEN_MODEL"
           echo "$CONTEXT_BLOCK" | "$SCRIPT_DIR/../lib/ask-generator.sh" $(gen_args "$GEN_MODEL") "Topic: $TOPIC. Produce an initial substantive draft."
-        } | strip_cli_banner | $LINEBUF tee "$OUT"
+        } | strip_cli_banner | tee "$OUT" | tee -a "$DEBATE_DIR/stream-gen.log"
       else
         {
           print_marker "$r" gen "$GEN_MODEL"
           "$SCRIPT_DIR/../lib/ask-generator.sh" $(gen_args "$GEN_MODEL") "Topic: $TOPIC. Produce an initial substantive draft."
-        } | strip_cli_banner | $LINEBUF tee "$OUT"
+        } | strip_cli_banner | tee "$OUT" | tee -a "$DEBATE_DIR/stream-gen.log"
       fi
     else
       PREV_GEN_MODEL=$(round_model "$((r-2))" gen)
@@ -653,12 +683,13 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
           echo "## Critic's feedback (round $((r-1)))"
           cat "$PREV_CRIT"
         } | "$SCRIPT_DIR/../lib/ask-generator.sh" $(gen_args "$GEN_MODEL") "Topic: $TOPIC. Revise your draft, addressing the critic's Blocker and Major findings directly. Quote the critic's claim, then state your response (accept / reject with reason / modify)."
-      } | strip_cli_banner | $LINEBUF tee "$OUT"
+      } | strip_cli_banner | tee "$OUT" | tee -a "$DEBATE_DIR/stream-gen.log"
     fi
     write_round_end "$r" "$OUT"
   else
     CRIT_MODEL=$(round_model "$r" crit)
     OUT=$(round_file "$r" crit "$CRIT_MODEL")
+    stream_header "$r" crit "$CRIT_MODEL"
     PREV_GEN_MODEL=$(round_model "$((r-1))" gen)
     PREV_GEN=$(round_file "$((r-1))" gen "$PREV_GEN_MODEL")
     [ "$ROTATE" = "1" ] && print_header "$r" "Critic" "$CRIT_MODEL" || print_header "$r" "Critic"
@@ -666,7 +697,7 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
     {
       print_marker "$r" crit "$CRIT_MODEL"
       "$SCRIPT_DIR/../lib/ask-critic.sh" $(crit_args "$CRIT_MODEL") --with-research "$PREV_GEN" "Topic: $TOPIC. Critique the latest Generator draft adversarially. Focus on weaknesses, missed cases, and better alternatives."
-    } | strip_cli_banner | $LINEBUF tee "$OUT"
+    } | strip_cli_banner | tee "$OUT" | tee -a "$DEBATE_DIR/stream-crit.log"
     write_round_end "$r" "$OUT"
     # Convergence check runs only on Critic (even) rounds: a STRENGTHEN verdict
     # means the position is sound, so stop before spending another gen/crit pair.
