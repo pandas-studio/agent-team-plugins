@@ -672,6 +672,35 @@ assert_eq "$(grep -ac 'NEW body line' "$TMP/retry-view.after")" "60"
 assert_eq "$(grep -ac 'NEW-LAST-LINE' "$TMP/retry-view.after")" "1"
 assert_eq "$(grep -ac 'OLD partial' "$TMP/retry-view.after")" "0"
 
+# The viewer must stream when awk is mawk, which reads a pipe in blocks unless
+# run with `-W interactive`. The fake mawk below identifies itself like mawk and,
+# without -W interactive, holds all input until EOF, which `tail -F` never sends.
+# When the host awk is itself mawk, the pass-through keeps -W interactive.
+REAL_AWK="$(command -v awk)"
+REAL_AWK_STREAM=""
+case "$("$REAL_AWK" -W version 2>&1 </dev/null || true)" in mawk*) REAL_AWK_STREAM="-W interactive" ;; esac
+mkdir -p "$TMP/fake-mawk"
+cat > "$TMP/fake-mawk/awk" <<STUB
+#!/bin/sh
+if [ "\$1" = -W ] && [ "\$2" = version ]; then echo "mawk 1.3.4 fake"; exit 0; fi
+if [ "\$1" = -W ] && [ "\$2" = interactive ]; then shift 2; exec "$REAL_AWK" $REAL_AWK_STREAM "\$@"; fi
+held="$TMP/fake-mawk/held.\$\$"
+cat > "\$held"
+exec "$REAL_AWK" "\$@" "\$held"
+STUB
+chmod +x "$TMP/fake-mawk/awk"
+MAWK_TEAM_DIR="$TMP/mawk-log/mawk"
+mkdir -p "$MAWK_TEAM_DIR/debate-a"
+printf '<!-- debate-round: 1 gen x -->\nmawk round 1 body\n' > "$MAWK_TEAM_DIR/debate-a/round-1-gen-x.md"
+ln -s debate-a "$MAWK_TEAM_DIR/latest-debate"
+( cd "$TMP" && exec env PATH="$TMP/fake-mawk:$PATH" TMUX='' AGENT_TEAM=mawk DEBATE_LOG_DIR="$TMP/mawk-log" \
+    "$ROOT/debate-conductor/bin/tail-role.sh" gen > "$TMP/mawk-view.out" 2>&1 </dev/null ) &
+TAIL_PID=$!
+tail_after "$TMP/mawk-view.out" 'mawk round 1 body' '' || true
+stop_tail
+assert_eq "$(grep -ac 'Round 1 · Generator' "$TMP/mawk-view.out")" "1"
+assert_eq "$(grep -ac 'mawk round 1 body' "$TMP/mawk-view.out")" "1"
+
 cmp "$ROOT/dev-trio/lib/registry.sh" "$ROOT/debate-conductor/lib/registry.sh"
 PASS=$((PASS + 1))
 cmp "$ROOT/dev-trio/bin/agent-team-models.sh" "$ROOT/debate-conductor/bin/agent-team-models.sh"
