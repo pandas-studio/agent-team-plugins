@@ -392,22 +392,59 @@ for wrapper in debate-conductor/lib/ask-generator.sh debate-conductor/lib/ask-cr
   assert_eq "$(run_worker "$wrapper" broken)" "9"
 done
 
-# Capturing the answer must not leave model output on disk, even when the run
-# is interrupted.
+# registry_run_answer edge cases, called directly under errexit/pipefail.
+answer_rc() {
+  local stub="$1" rc=0
+  shift
+  ( env "$@" REGISTRY_CMD_OVERRIDE="$TMP/worker-cli/$stub" \
+      AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" \
+      bash -c 'set -euo pipefail; . "$1/dev-trio/lib/registry.sh"; registry_run_answer agy question' _ "$ROOT" \
+      > "$TMP/answer.out" 2>/dev/null </dev/null ) || rc=$?
+  echo "$rc"
+}
+printf '#!/bin/sh\nprintf "  \\n\\n"\n' > "$TMP/worker-cli/blank"
+# A child that inherits extra descriptors must not be able to fake a status.
+printf '#!/bin/sh\necho answer\necho "rc 0" >&3 2>/dev/null\nexit 9\n' > "$TMP/worker-cli/forge"
+printf '#!/bin/sh\nprintf "no newline"\n' > "$TMP/worker-cli/partial"
+mkdir -p "$TMP/failing-tee"
+printf '#!/bin/sh\ncat\nexit 1\n' > "$TMP/failing-tee/tee"
+chmod +x "$TMP/worker-cli/blank" "$TMP/worker-cli/forge" "$TMP/worker-cli/partial" "$TMP/failing-tee/tee"
+assert_eq "$(answer_rc blank)" "5"
+assert_eq "$(answer_rc forge)" "9"
+assert_eq "$(answer_rc partial)" "0"
+assert_eq "$(cat "$TMP/answer.out")" "no newline"
+# The answer cannot be inspected: 6 when the model succeeded, its own code when not.
+assert_eq "$(answer_rc answer PATH="$TMP/failing-tee:$PATH")" "6"
+assert_eq "$(answer_rc broken PATH="$TMP/failing-tee:$PATH")" "9"
+assert_eq "$(answer_rc answer TMPDIR="$TMP/no-such-dir")" "6"
+
+# The private copy of the answer is removed on exit and when the process group
+# is interrupted mid-answer.
 mkdir -p "$TMP/answer-tmp"
+assert_eq "$(answer_rc answer TMPDIR="$TMP/answer-tmp")" "0"
+assert_eq "$(ls -A "$TMP/answer-tmp")" ""
 printf '#!/bin/sh\necho partial answer\nsleep 30\n' > "$TMP/worker-cli/slow"
 chmod +x "$TMP/worker-cli/slow"
-( TMPDIR="$TMP/answer-tmp" REGISTRY_CMD_OVERRIDE="$TMP/worker-cli/slow" \
-    AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" \
-    bash -c '. "$1/dev-trio/lib/registry.sh"; registry_run_answer agy question' _ "$ROOT" \
-    > "$TMP/slow.out" 2>&1 </dev/null ) &
-slow_pid=$!
-for _ in 1 2 3 4 5 6 7 8 9 10; do grep -q 'partial answer' "$TMP/slow.out" 2>/dev/null && break; sleep 0.5; done
-assert_ok grep -q 'partial answer' "$TMP/slow.out"
-kill -TERM "$slow_pid" 2>/dev/null || true
-wait "$slow_pid" 2>/dev/null || true
-pkill -f "$TMP/worker-cli/slow" 2>/dev/null || true
-assert_eq "$(ls -A "$TMP/answer-tmp")" ""
+assert_eq "$(python3 - "$ROOT" "$TMP" <<'PY'
+import os, signal, subprocess, sys, time
+root, tmp = sys.argv[1], sys.argv[2]
+env = dict(os.environ, TMPDIR=f"{tmp}/answer-tmp",
+           REGISTRY_CMD_OVERRIDE=f"{tmp}/worker-cli/slow",
+           AGENT_TEAM_MODELS_CONFIG=f"{tmp}/no-models.json")
+proc = subprocess.Popen(
+    ["bash", "-c", '. "$1/dev-trio/lib/registry.sh"; registry_run_answer agy question', "_", root],
+    env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+proc.stdout.readline()
+during = len(os.listdir(f"{tmp}/answer-tmp"))
+os.killpg(proc.pid, signal.SIGTERM)
+proc.wait()
+for _ in range(50):
+    if not os.listdir(f"{tmp}/answer-tmp"):
+        break
+    time.sleep(0.1)
+print(during, len(os.listdir(f"{tmp}/answer-tmp")))
+PY
+)" "1 0"
 
 run_debate() {
   local team="$1" gen="$2" crit="$3" rc=0

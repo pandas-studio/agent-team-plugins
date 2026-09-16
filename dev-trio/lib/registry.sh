@@ -324,27 +324,61 @@ registry_run() {
 }
 
 # registry_run_answer ID PROMPT — registry_run for a role whose answer is its
-# stdout. Streams the model's stdout as it arrives (a final line without a
-# newline gains one) and leaves its stderr on stderr. Returns the model's exit code, except that a zero exit with no
-# non-whitespace stdout returns 5: agy's print mode soft-denies a tool it
-# cannot prompt for, prints its guidance on stderr only and still exits 0, and
-# that guidance must not be mistaken for an answer.
+# stdout, streamed unchanged as it arrives (stderr stays on stderr).
+#
+# Returns, in priority order:
+#   the model's exit code, when it is nonzero;
+#   6 when the model exited 0 but its stdout could not be inspected (the
+#     temp file could not be created or written, or grep failed);
+#   5 when the model exited 0 with no non-whitespace stdout — agy's print mode
+#     soft-denies a tool it cannot prompt for, prints guidance on stderr only
+#     and still exits 0, and that must not pass for an answer;
+#   0 otherwise.
+# registry_run must report the CLI's status itself, not rely on errexit.
+#
+# A copy of stdout goes to a private temp file that the subshell removes on
+# exit. INT/TERM/HUP exit 130/143/129 (codes, not re-raised signals); bash runs
+# those traps only once the pipeline ends, so prompt cancellation is up to
+# whoever signals the process group. SIGKILL can leave the file behind.
 registry_run_answer() {
-  local status rc=0
-  # No temp file: the answer streams straight through awk to the caller's
-  # stdout (fd 4) and only two markers ("rc N", "empty") come back on fd 3, so
-  # an interrupted run leaves nothing behind.
-  { status="$(
-    { { registry_run "$@" || echo "rc $?" >&3; } \
-        | awk '{ print; fflush() } /[^[:space:]]/ { seen = 1 } END { if (!seen) print "empty" > "/dev/fd/3" }' >&4
-    } 3>&1
-  )"; } 4>&1
-  case "$status" in *"rc "*) rc="${status#*rc }"; rc="${rc%%[!0-9]*}" ;; esac
-  if [ "$rc" -eq 0 ] && case "$status" in *empty*) true ;; *) false ;; esac; then
-    echo "registry: model '$1' exited 0 with no output on stdout — treating as failure (rc=5)"
-    rc=5
+  if [ "$#" -lt 2 ]; then
+    echo "registry_run_answer: usage: registry_run_answer ID PROMPT" >&2
+    return 2
   fi
-  return "$rc"
+  (
+    tmp=""
+    trap '[ -z "$tmp" ] || rm -f "$tmp"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    set +e
+    tmp="$(umask 077 && mktemp "${TMPDIR:-/tmp}/registry-answer.XXXXXX")" || {
+      echo "registry_run_answer: cannot create a temp file to inspect the answer" >&2
+      exit 6
+    }
+    registry_run "$@" | tee "$tmp"
+    statuses=("${PIPESTATUS[@]}")
+    if [ "${statuses[0]}" -ne 0 ]; then
+      [ "${statuses[1]}" -eq 0 ] || echo "registry_run_answer: tee also failed (rc=${statuses[1]})" >&2
+      exit "${statuses[0]}"
+    fi
+    if [ "${statuses[1]}" -ne 0 ]; then
+      echo "registry_run_answer: tee failed (rc=${statuses[1]}); the answer could not be inspected" >&2
+      exit 6
+    fi
+    grep -q '[^[:space:]]' "$tmp"
+    case "$?" in
+      0) exit 0 ;;
+      1)
+        echo "registry: model '$1' exited 0 with no output on stdout — treating as failure (rc=5)" >&2
+        exit 5
+        ;;
+      *)
+        echo "registry_run_answer: could not inspect the answer (grep failed)" >&2
+        exit 6
+        ;;
+    esac
+  )
 }
 
 # registry_extract_response <log-file>
