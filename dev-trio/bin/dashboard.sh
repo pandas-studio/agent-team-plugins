@@ -27,12 +27,12 @@ ROLE="${1:?usage: $0 agy|codex}"
 
 case "$ROLE" in
   agy)
-    ICON="🔍"; TITLE="ANTIGRAVITY · researcher"
+    ICON="🔍"; TITLE="Researcher"
     HEADER_COLOR=$'\033[1;36m'   # bright cyan
     LABEL="Query"
     ;;
   codex)
-    ICON="🧐"; TITLE="CODEX · reviewer"
+    ICON="🧐"; TITLE="Reviewer"
     HEADER_COLOR=$'\033[1;35m'   # bright magenta
     LABEL="Focus"
     ;;
@@ -69,11 +69,6 @@ PAUSED=0
 while true; do
   if [ "$PAUSED" = "0" ]; then
     WRAP_W=$(get_wrap_width)
-    BUF=""
-    BUF+="${HEADER_COLOR}═══════════════════════════════════════════════${RESET}"$'\n'
-    BUF+="${HEADER_COLOR}  ${ICON}  ${TITLE}${RESET}  ${DIM}[team: ${TEAM}]${RESET}"$'\n'
-    BUF+="${HEADER_COLOR}═══════════════════════════════════════════════${RESET}"$'\n\n'
-
     # Freeze the latest log target for this frame. Every sibling artifact is
     # resolved from this path, never from an independently changing latest link.
     SOURCE="$LATEST"
@@ -84,6 +79,15 @@ while true; do
         *) SOURCE="$LOG_DIR/$TARGET" ;;
       esac
     fi
+    MODEL=""
+    if [ -f "$SOURCE" ]; then
+      MODEL=$(sed -n 's/^=== MODEL: \(.*\) ===$/\1/p' "$SOURCE" | head -1)
+    fi
+    BUF=""
+    BUF+="${HEADER_COLOR}═══════════════════════════════════════════════${RESET}"$'\n'
+    BUF+="${HEADER_COLOR}  ${ICON}  ${TITLE}${MODEL:+ · $MODEL}${RESET}  ${DIM}[team: ${TEAM}]${RESET}"$'\n'
+    BUF+="${HEADER_COLOR}═══════════════════════════════════════════════${RESET}"$'\n\n'
+
     if [ ! -e "$SOURCE" ]; then
       BUF+="  ${DIM}(no runs yet — waiting for first call)${RESET}"$'\n'
       BUF+="  ${DIM}path: $LATEST${RESET}"$'\n\n'

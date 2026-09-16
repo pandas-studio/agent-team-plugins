@@ -1,0 +1,27 @@
+{
+  "name": "debate-conductor",
+  "version": "0.5.0",
+  "description": "Codex conducts Generator-vs-Critic debates with external CLI adapters and live transcript artifacts.",
+  "author": {
+    "name": "pandas-studio"
+  },
+  "homepage": "https://github.com/pandas-studio/agent-team-plugins/tree/main/debate-conductor",
+  "repository": "https://github.com/pandas-studio/agent-team-plugins",
+  "license": "MIT",
+  "skills": "./codex-skills/",
+  "interface": {
+    "displayName": "debate-conductor",
+    "shortDescription": "Codex PM for adversarial CLI debates",
+    "longDescription": "Run bounded Generator-vs-Critic debates through local CLI adapters, with optional tmux live tails and persistent AGENTS.md routing policy.",
+    "developerName": "pandas-studio",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use debate-conductor when this task benefits from a Generator-vs-Critic debate."
+    ]
+  }
+}

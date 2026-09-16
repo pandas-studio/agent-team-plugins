@@ -1,6 +1,8 @@
 # dev-trio
 
-Claude Code orchestrates a 3-vendor dev team: Claude (PM/Coder) + Antigravity (Researcher) + Codex (Reviewer). Live 3-pane tmux view; ad-hoc research and review skills; opt-in PM orchestration policy that installs into your workspace's `CLAUDE.md`.
+Supports **Claude Code or Codex as PM**, using the same CLI adapters and run artifacts.
+
+The original Claude host orchestrates a 3-vendor dev team: Claude (PM/Coder) + Antigravity (Researcher) + Codex (Reviewer). Live 3-pane tmux view; ad-hoc research and review skills; opt-in PM orchestration policy that installs into your workspace's `CLAUDE.md`.
 
 Default model assignment:
 
@@ -10,12 +12,66 @@ Default model assignment:
 | Top-right | Researcher dashboard | tails `agy` output |
 | Bottom-right | Reviewer dashboard | tails `codex` output |
 
+## Codex PM
+
+Codex acts as PM/coder, Antigravity researches, and Claude Code reviews by
+default. Existing `DEV_TRIO_*_MODEL` overrides and shared `models.json` role
+bindings take precedence. Claude must be installed and authenticated;
+subscription, API, and provider selection remain under Claude Code's own
+configuration. There is no subscription-only or API-key restriction.
+
+Install from a local checkout containing this support:
+
+```bash
+codex plugin marketplace add /absolute/path/to/agent-team-plugins
+codex plugin add dev-trio@pandas-studio
+```
+
+Start a new Codex session and invoke `$dev-trio:research`, `$dev-trio:review`,
+`$dev-trio:bootstrap`, or `$dev-trio:install-pm`. The last skill optionally
+installs persistent PM instructions into the current workspace's `AGENTS.md`;
+it does not change `CLAUDE.md`. Installation of the plugin alone writes neither
+project policy file. Both hosts keep the `dev-trio` namespace.
+
+The scripts can also be called directly **from the workspace being reviewed**:
+
+```bash
+DEV_TRIO_PM_HOST=codex /absolute/path/to/dev-trio/bin/dev-trio-doctor.sh
+DEV_TRIO_PM_HOST=codex /absolute/path/to/dev-trio/bin/ask-agy.sh "research question" </dev/null
+DEV_TRIO_PM_HOST=codex /absolute/path/to/dev-trio/bin/ask-codex.sh "review focus" </dev/null
+python3 /absolute/path/to/dev-trio/bin/install-pm.py --host codex
+```
+
+`DEV_TRIO_PM_HOST` accepts `claude` (default) or `codex` and applies only to that
+invocation; it never rewrites shared role bindings. Codex resolves scripts from
+the loaded skill path instead of assuming automatic `bin/` PATH registration.
+When piping research context, replace `</dev/null` with that input pipe.
+
+Despite the legacy name, `ask-codex.sh` runs the selected **reviewer**. Existing
+`latest-codex.final.md` and RFC 0004 manifests remain compatible with consumers.
+The run header and dashboard identify the actual model. `--no-memories` still
+requires an explicitly selected Codex reviewer; it is rejected for Claude.
+
+Claude's `auth status --json` must report `loggedIn: true` before a Claude
+invocation from the Codex host. In a sandbox that cannot access macOS Keychain,
+this check may require the host's normal permission escalation. Failures are
+reported before inference; the plugin does not modify credentials or retry
+using a different provider. Explicit custom CLI adapters retain their own auth
+behavior; a Claude adapter should use the `claude` model ID or `claude` binary
+name if it needs the built-in login probe.
+
+The four Codex skills preserve the explicit invocation policy. Persistent PM
+routing is opt-in through `install-pm`; otherwise use the skills when requested.
+Research/review do not require tmux. In the Codex app, bootstrap creates a
+detached tmux layout outside tmux and prints an attach command for a terminal.
+
 ## Prerequisites
 
-- `tmux`
+- `tmux` for optional dashboards (research/review work without it)
 - `claude` (Claude Code)
 - `agy` (Antigravity CLI) authenticated
 - `codex` (OpenAI Codex CLI) authenticated
+- Python 3.9+ for the policy installer and development tests
 - `jq` (1.6+) — required for the model registry and RFC 0004 run manifests
 
 Models and CLI binaries are configurable — see [Model configuration](#model-configuration). Quick binary overrides still work: `AGY_CLI` / `RESEARCHER_CLI` (researcher), `CODEX_CLI` / `REVIEWER_CLI` (reviewer).
@@ -27,7 +83,7 @@ The Researcher and Reviewer roles resolve through the shared model registry (the
 | Role | Default | Pick a different model | Override its binary |
 | :--- | :--- | :--- | :--- |
 | `dev-trio.researcher` | `agy` | `DEV_TRIO_RESEARCHER_MODEL` env, or `agent-team-models set-role dev-trio.researcher <model>` | `RESEARCHER_CLI` (any model) · `AGY_CLI` (the `agy` model) |
-| `dev-trio.reviewer` | `codex` | `DEV_TRIO_REVIEWER_MODEL` env, or `agent-team-models set-role dev-trio.reviewer <model>` | `REVIEWER_CLI` (any model) · `CODEX_CLI` (the `codex` model) |
+| `dev-trio.reviewer` | Claude PM: `codex`; Codex PM: `claude` | `DEV_TRIO_REVIEWER_MODEL` env, or `agent-team-models set-role dev-trio.reviewer <model>` | `REVIEWER_CLI` (any model) · `CODEX_CLI` (the `codex` model) |
 
 ```bash
 agent-team-models preset add kimi-code
@@ -51,7 +107,7 @@ A result/receipt I/O failure prints a diagnostic and completes the log with a no
 
 **Reviewing without Codex memories.** With Codex's memories feature enabled in `~/.codex/config.toml`, `codex exec` adds the memory summary from earlier Codex sessions to the review prompt. Pass `--no-memories` (`ask-codex.sh --no-memories "focus"` or `/dev-trio:review --no-memories ...`) to run the built-in `codex-no-memories` model instead, which adds `-c features.memories=false`. Setting `DEV_TRIO_REVIEWER_MODEL=codex-no-memories` selects the same model without the flag (and without the checks below). With the flag, `ask-codex.sh` exits with rc=2 before starting any CLI when the reviewer role resolves to a model other than `codex` / `codex-no-memories`, or when the models config defines its own `codex-no-memories`.
 
-## Install
+## Install in Claude Code
 
 ```
 /plugin marketplace add pandas-studio/agent-team-plugins
@@ -104,7 +160,10 @@ claude --plugin-dir ./agent-team-plugins/dev-trio
 | `/dev-trio:review [focus] [--with-research <file>] [--with-spec <file>]` | One-shot Codex review (default = git-uncommitted scope). Chat-side surfaces verdict (`SHIP / NEEDS-FIX / DISCUSS`) + Blocker/Major counts. Handles `## NEED RESEARCH` blocks. |
 | `/dev-trio:install-pm` | Writes/upgrades the PM orchestration policy in the workspace's `CLAUDE.md` (idempotent, marker-guarded). |
 
-All skills carry `disable-model-invocation: true` — Claude won't trigger them implicitly. You always invoke explicitly via `/`.
+Claude skills carry `disable-model-invocation: true`; Codex skills use
+`policy.allow_implicit_invocation: false` in `agents/openai.yaml`. Invoke the
+host-specific skills explicitly. Custom manifest paths avoid loading both
+variants through the default `skills/` discovery path.
 
 ## Logs
 
@@ -194,8 +253,10 @@ Reload tmux: `tmux source-file ~/.tmux.conf`. See `tmux/keybinding.conf.example`
 
 ```
 dev-trio/
-├── .claude-plugin/plugin.json
-├── skills/
+├── .claude-plugin/plugin.json  # skills: ./claude-skills/
+├── .codex-plugin/plugin.json   # skills: ./codex-skills/
+├── codex-skills/              # bootstrap/research/review/install-pm
+├── claude-skills/
 │   ├── bootstrap/SKILL.md
 │   ├── research/SKILL.md
 │   ├── review/SKILL.md
@@ -210,7 +271,9 @@ dev-trio/
 ├── lib/                       # internal
 │   ├── manifest.sh            # RFC 0004 run-manifest helper (vendored)
 │   ├── registry.sh            # shared model registry + runner (vendored)
-│   ├── pm.md                  # PM orchestration policy (source of truth)
+│   ├── host.sh                # host defaults and CLI/login checks
+│   ├── pm.md                  # Claude PM policy
+│   ├── pm-codex.md            # Codex PM policy
 │   └── roles/
 │       ├── researcher.md      # Antigravity role prompt
 │       └── reviewer.md        # Codex role prompt
@@ -225,7 +288,28 @@ A one-shot env probe + stub-CLI smoke is bundled:
 dev-trio-doctor.sh
 ```
 
-Checks `tmux` / `agy` / `codex` / `jq` presence, verifies that `ask-agy.sh` produces a well-formed RFC 0004 manifest under stub CLIs, and exercises the `agent-team-models` registry CLI (list / preset / set-role / doctor / remove against an isolated config). **Stub smokes are necessary but not sufficient** — verdict / dashboard / parse-affecting changes need a real-CLI dry-run on top.
+Checks required helpers and resolved role binaries, probes Claude login for the Codex host, treats tmux as optional, verifies that `ask-agy.sh` produces a well-formed RFC 0004 manifest under stub CLIs, and exercises the `agent-team-models` registry CLI (list / preset / set-role / doctor / remove against an isolated config). **Stub smokes are necessary but not sufficient** — verdict / dashboard / parse-affecting changes need a real-CLI dry-run on top.
+
+## Development checks
+
+```bash
+bash scripts/check.sh
+python3 tests/check_dev_trio_loaders.py   # requires local claude + codex, no inference
+```
+
+Run these from the repository root. The native discovery test copies the plugin
+into a temporary path containing spaces, installs it in a disposable
+`CODEX_HOME`, and checks both hosts expose exactly their own four skills. It
+leaves user plugin installations unchanged. CI uses recording CLI stubs for
+role precedence, authentication, argv/context handoff, failures, and policy
+updates. Live model calls are a separate acceptance check.
+
+Both manifests explicitly select their host skill directory; there is no root
+`skills/` directory. The Codex scaffold validator assumes that fixed directory,
+so it rejects the custom `skills` path even though the native loader supports
+it. Validate Codex skill metadata separately and use the native discovery test
+for the actual package paths. A temporary view normalized to `skills/` can also
+be used with the scaffold validator for its remaining metadata checks.
 
 ## Security model
 

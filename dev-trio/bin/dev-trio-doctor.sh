@@ -4,7 +4,7 @@
 # Usage: dev-trio-doctor.sh
 #
 # Checks:
-#   1. Required tools on PATH: tmux, agy, codex, jq, sha256sum/shasum.
+#   1. Helpers and resolved role CLIs; Claude login for Codex PM; optional tmux.
 #   2. Plugin layout intact (ask-codex.sh / ask-agy.sh / agent-team-models.sh /
 #      dashboard.sh / team-layout.sh / lib/manifest.sh / lib/registry.sh /
 #      lib/roles/*.md / lib/pm.md).
@@ -22,6 +22,11 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=../lib/registry.sh
+. "$PLUGIN_ROOT/lib/registry.sh" || exit 2
+# shellcheck source=../lib/host.sh
+. "$PLUGIN_ROOT/lib/host.sh"
+PM_HOST="$(dev_trio_host)" || exit $?
 
 GREEN=$'\033[1;32m'
 YELLOW=$'\033[1;33m'
@@ -40,20 +45,28 @@ echo "dev-trio doctor — plugin root: $PLUGIN_ROOT"
 echo
 
 echo "1. Required tools"
-for t in tmux jq; do
+for t in jq python3; do
   if command -v "$t" >/dev/null 2>&1; then ok "$t — $(command -v "$t")"
   else fail "$t — missing (REQUIRED)"; fi
 done
-for t in agy codex; do
-  if command -v "$t" >/dev/null 2>&1; then ok "$t — $(command -v "$t")"
+if command -v tmux >/dev/null 2>&1; then ok "tmux — optional dashboards available"
+else warn "tmux missing — research and review still work"; fi
+for role in researcher reviewer; do
+  model="$(dev_trio_resolve_role "$role")" || { fail "$role resolution failed"; continue; }
+  case "$role" in
+    researcher) override="${RESEARCHER_CLI:-}" ;;
+    reviewer) override="${REVIEWER_CLI:-}" ;;
+  esac
+  binary="$(REGISTRY_CMD_OVERRIDE="$override" registry_resolve_command "$model")" || {
+    fail "$role binary resolution failed"; continue;
+  }
+  if command -v "$binary" >/dev/null 2>&1; then
+    ok "$role -> $model ($binary); PM=$PM_HOST"
+    if ! REGISTRY_CMD_OVERRIDE="$override" dev_trio_check_cli "$model"; then
+      fail "$role CLI/login check failed"
+    fi
   else
-    # Inline the env-var hint per CLI — portable case beats Bash-4-only ${t^^}.
-    case "$t" in
-      agy)    env_hint="AGY_CLI or RESEARCHER_CLI" ;;
-      codex)  env_hint="CODEX_CLI or REVIEWER_CLI" ;;
-      *)      env_hint="(no documented override)" ;;
-    esac
-    warn "$t — missing (override via $env_hint; stub smoke below does not need it)"
+    warn "$role -> $model: $binary missing; live invocation unavailable"
   fi
 done
 if command -v sha256sum >/dev/null 2>&1; then ok "sha256sum — $(command -v sha256sum)"
@@ -64,7 +77,7 @@ echo
 echo "2. Plugin layout"
 for rel in bin/ask-codex.sh bin/ask-agy.sh bin/agent-team-models.sh \
            bin/dashboard.sh bin/team-layout.sh \
-           lib/manifest.sh lib/registry.sh lib/pm.md \
+           lib/manifest.sh lib/registry.sh lib/host.sh lib/pm.md lib/pm-codex.md \
            lib/roles/researcher.md lib/roles/reviewer.md; do
   p="$PLUGIN_ROOT/$rel"
   if [ -f "$p" ]; then ok "$rel"
@@ -96,6 +109,7 @@ STUB
   pushd "$TMPDIR_SMOKE" >/dev/null
   # Isolate from the user's shared config + role/CLI envs so the built-in
   # researcher=agy default (and the AGY_CLI stub) deterministically apply.
+  DEV_TRIO_PM_HOST=claude \
   AGENT_TEAM="doctor-smoke" \
   DEV_TRIO_LOG_DIR="$TMPDIR_SMOKE/.dev-trio/log" \
   AGENT_TEAM_MODELS_CONFIG="$TMPDIR_SMOKE/models.json" \

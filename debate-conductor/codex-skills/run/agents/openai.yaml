@@ -1,0 +1,6 @@
+interface:
+  display_name: "debate-conductor run"
+  short_description: "Codex Generator-vs-Critic debate workflow"
+  default_prompt: "Use $run from debate-conductor for this workspace."
+policy:
+  allow_implicit_invocation: false

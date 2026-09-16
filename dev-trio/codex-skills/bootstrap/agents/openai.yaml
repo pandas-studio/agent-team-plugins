@@ -1,0 +1,6 @@
+interface:
+  display_name: "dev-trio bootstrap"
+  short_description: "Codex dev-trio bootstrap workflow"
+  default_prompt: "Use $bootstrap from dev-trio for this workspace."
+policy:
+  allow_implicit_invocation: false

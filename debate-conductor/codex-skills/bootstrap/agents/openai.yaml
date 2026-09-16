@@ -1,0 +1,6 @@
+interface:
+  display_name: "debate-conductor bootstrap"
+  short_description: "Codex debate layout workflow"
+  default_prompt: "Use $bootstrap from debate-conductor for this workspace."
+policy:
+  allow_implicit_invocation: false

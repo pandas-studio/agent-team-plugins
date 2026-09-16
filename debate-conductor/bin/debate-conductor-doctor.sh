@@ -4,8 +4,8 @@
 # Usage: debate-conductor-doctor.sh
 #
 # Checks:
-#   1. Required tools on PATH: tmux, agy, codex (agy/codex warn-only — the smoke
-#      injects stub CLIs via CRITIC_CLI / GENERATOR_CLI and does not need them).
+#   1. Required tools on PATH: tmux, agy, codex, claude (agent CLIs warn-only —
+#      the smoke injects stub CLIs via *_CLI env vars and does not need them).
 #   2. Plugin layout intact (debate.sh / tail-role.sh / team-3pane.sh /
 #      lib/ask-{generator,critic}.sh / lib/roles/*.md / lib/pm.md).
 #   3. Convergence stub smoke for `debate.sh --until-converged` (RFC: Phase 1):
@@ -42,12 +42,13 @@ echo
 echo "1. Required tools"
 if command -v tmux >/dev/null 2>&1; then ok "tmux — $(command -v tmux)"
 else fail "tmux — missing (REQUIRED for the live panes)"; fi
-for t in agy codex; do
+for t in agy codex claude; do
   if command -v "$t" >/dev/null 2>&1; then ok "$t — $(command -v "$t")"
   else
     case "$t" in
       agy)   env_hint="GENERATOR_CLI or AGY_CLI" ;;
       codex) env_hint="CRITIC_CLI or CODEX_CLI" ;;
+      claude) env_hint="CRITIC_CLI or CLAUDE_CLI (when DEBATE_CONDUCTOR_PM_HOST=codex)" ;;
       *)     env_hint="(no documented override)" ;;
     esac
     warn "$t — missing (override via $env_hint; convergence smoke below does not need it)"
@@ -56,12 +57,36 @@ done
 
 echo
 echo "2. Plugin layout"
-for rel in bin/debate.sh bin/tail-role.sh bin/team-3pane.sh \
+CODEX_AGENT_METADATA="
+codex-skills/bootstrap/agents/openai.yaml
+codex-skills/run/agents/openai.yaml
+codex-skills/continue/agents/openai.yaml
+codex-skills/install-pm/agents/openai.yaml
+"
+for rel in .claude-plugin/plugin.json .codex-plugin/plugin.json \
+           bin/debate.sh bin/tail-role.sh bin/team-3pane.sh \
+           bin/install-pm.py \
            lib/ask-generator.sh lib/ask-critic.sh lib/pm.md \
-           lib/roles/generator.md lib/roles/critic.md; do
+           lib/host.sh lib/pm-codex.md \
+           lib/roles/generator.md lib/roles/critic.md \
+           claude-skills/bootstrap/SKILL.md claude-skills/run/SKILL.md \
+           claude-skills/continue/SKILL.md claude-skills/install-pm/SKILL.md \
+           codex-skills/bootstrap/SKILL.md codex-skills/run/SKILL.md \
+           codex-skills/continue/SKILL.md codex-skills/install-pm/SKILL.md \
+           $CODEX_AGENT_METADATA; do
   p="$PLUGIN_ROOT/$rel"
   if [ -f "$p" ]; then ok "$rel"
   else fail "$rel — missing at $p"; fi
+done
+for rel in $CODEX_AGENT_METADATA; do
+  p="$PLUGIN_ROOT/$rel"
+  if grep -q '^interface:$' "$p" 2>/dev/null \
+     && grep -q '^policy:$' "$p" 2>/dev/null \
+     && grep -q '^  allow_implicit_invocation: false$' "$p" 2>/dev/null; then
+    ok "$rel — Codex metadata policy"
+  else
+    fail "$rel — expected interface plus policy.allow_implicit_invocation=false"
+  fi
 done
 
 echo
@@ -88,6 +113,10 @@ STUB
   STUB_CRIT="$TMPDIR_SMOKE/stub-crit.sh"
   cat > "$STUB_CRIT" <<'STUB'
 #!/usr/bin/env bash
+if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ] && [ "${3:-}" = "--json" ]; then
+  echo '{"loggedIn": true, "authMethod": "fixture"}'
+  exit 0
+fi
 echo "## Verdict"
 case "${STUB_VERDICT:-STRENGTHEN}" in
   STRENGTHEN)
@@ -109,23 +138,47 @@ case "${STUB_VERDICT:-STRENGTHEN}" in
 esac
 STUB
   chmod +x "$STUB_CRIT"
+  SMOKE_MODELS_CONFIG="$TMPDIR_SMOKE/models.json"
+  printf '{}\n' > "$SMOKE_MODELS_CONFIG"
 
   # Run a converge-mode debate with stubbed CLIs in an isolated log dir/team.
   # Echoes the resolved debate dir on the last stdout line for the caller.
   run_smoke() {
     verdict="$1"; cap="$2"; team="$3"
     out="$TMPDIR_SMOKE/$team.out"
-    AGENT_TEAM="$team" \
-    DEBATE_LOG_DIR="$TMPDIR_SMOKE/.debate-conductor/log" \
-    GENERATOR_CLI="$STUB_GEN" \
-    CRITIC_CLI="$STUB_CRIT" \
-    STUB_VERDICT="$verdict" \
-    TMUX="" \
+    env -u DEBATE_GENERATOR_MODEL -u DEBATE_CRITIC_MODEL \
+      -u DEBATE_PRIMARY_GEN -u DEBATE_CONDUCTOR_PM_HOST \
+      AGENT_TEAM="$team" \
+      AGENT_TEAM_MODELS_CONFIG="$SMOKE_MODELS_CONFIG" \
+      DEBATE_LOG_DIR="$TMPDIR_SMOKE/.debate-conductor/log" \
+      GENERATOR_CLI="$STUB_GEN" \
+      CRITIC_CLI="$STUB_CRIT" \
+      STUB_VERDICT="$verdict" \
+      TMUX="" \
       "$PLUGIN_ROOT/bin/debate.sh" --until-converged -n "$cap" "smoke: $team" \
       >"$out" 2>"$TMPDIR_SMOKE/$team.err" </dev/null
     rc=$?
     echo "rc=$rc"
     [ "$rc" -eq 0 ] || note "stderr: $(head -3 "$TMPDIR_SMOKE/$team.err" 2>/dev/null)"
+  }
+
+  run_codex_host_smoke() {
+    out="$TMPDIR_SMOKE/codex-host.out"
+    env -u DEBATE_GENERATOR_MODEL -u DEBATE_CRITIC_MODEL \
+      -u DEBATE_PRIMARY_GEN \
+      AGENT_TEAM="codex-host" \
+      AGENT_TEAM_MODELS_CONFIG="$SMOKE_MODELS_CONFIG" \
+      DEBATE_LOG_DIR="$TMPDIR_SMOKE/.debate-conductor/log" \
+      DEBATE_CONDUCTOR_PM_HOST=codex \
+      GENERATOR_CLI="$STUB_GEN" \
+      CRITIC_CLI="$STUB_CRIT" \
+      STUB_VERDICT=STRENGTHEN \
+      TMUX="" \
+      "$PLUGIN_ROOT/bin/debate.sh" -n 2 "smoke: codex host defaults" \
+      >"$out" 2>"$TMPDIR_SMOKE/codex-host.err" </dev/null
+    rc=$?
+    echo "rc=$rc"
+    [ "$rc" -eq 0 ] || note "stderr: $(head -3 "$TMPDIR_SMOKE/codex-host.err" 2>/dev/null)"
   }
 
   # Highest completed round = max N across .round-N-*.done sidecars.
@@ -163,6 +216,15 @@ STUB
   LAST_C=$(last_done_round "$DIR_C")
   if [ "$LAST_C" = "4" ]; then ok "placeholder verdict → not a false convergence (ran to cap)"
   else fail "placeholder leaked as convergence: stopped at round '${LAST_C:-none}' (expected 4)"; fi
+
+  # --- 3d. Codex PM host defaults Critic to Claude, not Codex itself ---
+  run_codex_host_smoke >/dev/null
+  DIR_D="$TMPDIR_SMOKE/.debate-conductor/log/codex-host/latest-debate"
+  if grep -q '<!-- debate-round: 2 crit claude -->' "$DIR_D/round-2-crit.md" 2>/dev/null; then
+    ok "Codex PM host → default critic model is claude"
+  else
+    fail "Codex PM host → expected round-2 critic marker to resolve model=claude"
+  fi
 fi
 
 echo
