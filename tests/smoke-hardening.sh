@@ -463,6 +463,130 @@ assert_eq "$(done_rounds crit-denied)" "1"
 assert_eq "$(run_debate both-answer answer answer)" "0"
 assert_eq "$(done_rounds both-answer)" "2"
 
+# ralph-debate hands --prompt to debate.sh from inside the worktree, so a
+# relative path must be resolved (and checked) before any cd.
+printf -- '- [ ] task\n' > "$DRV/BACKLOG.md"
+assert_eq "$(run_driver "$ROOT/ralph-trio/bin/ralph-debate.sh" --backlog BACKLOG.md \
+  --prompt no-such.md --max-iter 1 --dry-run)" "rc=2"
+assert_ok grep -q 'PROMPT not found: no-such.md' "$TMP/drv.err"
+assert_eq "$(run_driver "$ROOT/ralph-trio/bin/ralph-debate.sh" --backlog BACKLOG.md \
+  --prompt PROMPT.md --max-iter 1 --dry-run)" "rc=0"
+DEBATE_PROMPT="$(sed -n 's/^PROMPT: *//p' "$TMP/rw/log/smoke/latest-ralph-debate.log")"
+assert_eq "$DEBATE_PROMPT" "$(cd "$DRV" && pwd)/PROMPT.md"
+
+# Two researchers started in the same second must not share a log or manifest.
+# `date` is pinned to one second for the filename format only.
+mkdir -p "$TMP/fixed-date"
+cat > "$TMP/fixed-date/date" <<'STUB'
+#!/bin/sh
+[ "$1" = "+%Y%m%d-%H%M%S" ] && { echo 20260101-000000; exit 0; }
+exec /bin/date "$@"
+STUB
+chmod +x "$TMP/fixed-date/date"
+run_agy_fixed_second() {
+  local rc=0
+  ( cd "$TMP" && env -u DEV_TRIO_RESEARCHER_MODEL -u DEV_TRIO_PM_HOST TMUX='' AGENT_TEAM=worker \
+      PATH="$TMP/fixed-date:$PATH" AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" \
+      DEV_TRIO_LOG_DIR="$TMP/agy-naming" RESEARCHER_CLI="$TMP/worker-cli/answer" \
+      "$ROOT/dev-trio/bin/ask-agy.sh" "question" > /dev/null 2>&1 </dev/null ) || rc=$?
+  echo "$rc"
+}
+assert_eq "$(run_agy_fixed_second)" "0"
+assert_eq "$(run_agy_fixed_second)" "0"
+AGY_DIR="$TMP/agy-naming/worker"
+AGY_LOGS="$(cd "$AGY_DIR" && ls | grep -cE '^agy-20260101-000000-[0-9]+\.log$' || true)"
+assert_eq "$AGY_LOGS" "2"
+AGY_MANIFESTS=0
+for m in "$AGY_DIR"/agy-20260101-000000-*.manifest.json; do
+  [ -f "$m" ] || continue
+  jq -e . "$m" >/dev/null
+  AGY_MANIFESTS=$((AGY_MANIFESTS + 1))
+done
+assert_eq "$AGY_MANIFESTS" "2"
+AGY_LATEST="$(readlink "$AGY_DIR/latest-agy.log")"
+assert_ok test -f "$AGY_DIR/$AGY_LATEST"
+assert_eq "$(printf '%s\n' "$AGY_LATEST" | grep -cE '^agy-20260101-000000-[0-9]+\.log$')" "1"
+assert_eq "$(cd "$AGY_DIR" && ls -A | grep -c '^\.latest-agy-' || true)" "0"
+
+# The live viewer must show a new debate's early rounds after the latest-debate
+# symlink moves, even when the previous debate ran more rounds. Two timings:
+#   in-loop   the viewer notices the retarget while tailing the old run;
+#   between   the old run grows a round (the viewer re-tails) and the symlink
+#             moves during the pause before the next iteration.
+# For "between", a `sleep` stub on the viewer's PATH holds the first sleep that
+# starts after the re-tail notice. The inner poll loop has already exited by
+# then, so that sleep is the pause between iterations: the test retargets while
+# it is held and then releases it, independent of runner speed.
+mkdir -p "$TMP/tail-barrier"
+cat > "$TMP/tail-barrier/sleep" <<'STUB'
+#!/bin/sh
+if [ -n "${TAIL_BARRIER_DIR:-}" ] && [ ! -e "$TAIL_BARRIER_DIR/hit" ] \
+   && grep -q 'more rounds appended' "$TAIL_BARRIER_OUT" 2>/dev/null; then
+  : > "$TAIL_BARRIER_DIR/hit"
+  while [ ! -e "$TAIL_BARRIER_DIR/release" ]; do /bin/sleep 0.05; done
+fi
+exec /bin/sleep "$@"
+STUB
+chmod +x "$TMP/tail-barrier/sleep"
+TAIL_PID=""
+stop_tail() {
+  [ -n "$TAIL_PID" ] || return 0
+  kill -TERM "$TAIL_PID" 2>/dev/null || true
+  wait "$TAIL_PID" 2>/dev/null || true
+  TAIL_PID=""
+}
+trap 'stop_tail; [ -n "$LOCKWT" ] && rm -rf "$LOCKWT"; rm -rf "$TMP"' EXIT
+# tail_after OUT PATTERN MARKER: poll until PATTERN appears after the first
+# MARKER line (MARKER empty = anywhere). The old pipeline follows round files
+# through the symlink and may echo the new debate before it re-tails, so only
+# output after the re-tail notice shows what the viewer keeps displaying.
+tail_after() {
+  local i=0
+  while [ "$i" -lt 100 ]; do
+    if [ -z "$3" ]; then
+      grep -q "$2" "$1" 2>/dev/null && return 0
+    else
+      sed -n "/$3/,\$p" "$1" 2>/dev/null | grep -q "$2" && return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+round_file() { printf '<!-- debate-round: %s gen x -->\n%s round %s body\n' "$2" "$3" "$2" > "$1/round-$2-gen-x.md"; }
+for timing in in-loop between; do
+  team_dir="$TMP/tail-log/$timing"
+  out="$TMP/tail-$timing.out"
+  mkdir -p "$team_dir/debate-a" "$team_dir/debate-b"
+  for r in 1 2 3; do round_file "$team_dir/debate-a" "$r" old; done
+  ln -s debate-a "$team_dir/latest-debate"
+  barrier=""
+  [ "$timing" = in-loop ] || { barrier="$TMP/tail-barrier/$timing"; mkdir -p "$barrier"; }
+  ( cd "$TMP" && exec env TMUX='' AGENT_TEAM="$timing" DEBATE_LOG_DIR="$TMP/tail-log" \
+      PATH="$TMP/tail-barrier:$PATH" TAIL_BARRIER_DIR="$barrier" TAIL_BARRIER_OUT="$out" \
+      "$ROOT/debate-conductor/bin/tail-role.sh" gen > "$out" 2>&1 </dev/null ) &
+  TAIL_PID=$!
+  assert_ok tail_after "$out" 'old round 3 body' ''
+  round_file "$team_dir/debate-b" 1 new
+  if [ "$timing" = in-loop ]; then
+    marker='new debate run detected'
+  else
+    marker='more rounds appended'
+    round_file "$team_dir/debate-a" 4 old
+    # The viewer is now held in the pause between iterations.
+    i=0
+    while [ ! -e "$barrier/hit" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+    assert_ok test -e "$barrier/hit"
+  fi
+  ln -sfn debate-b "$team_dir/latest-debate"
+  [ -z "$barrier" ] || : > "$barrier/release"
+  tail_after "$out" 'new round 1 body' "$marker" || true
+  stop_tail
+  # By row: after the re-tail notice, exactly the new debate's round-1 banner.
+  assert_eq "$(sed -n "/$marker/,\$p" "$out" | grep -c 'Round 1 · Generator')" "1"
+  assert_eq "$(sed -n "/$marker/,\$p" "$out" | grep -c 'new round 1 body')" "1"
+done
+
 cmp "$ROOT/dev-trio/lib/registry.sh" "$ROOT/debate-conductor/lib/registry.sh"
 PASS=$((PASS + 1))
 cmp "$ROOT/dev-trio/bin/agent-team-models.sh" "$ROOT/debate-conductor/bin/agent-team-models.sh"

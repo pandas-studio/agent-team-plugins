@@ -38,7 +38,7 @@ echo "<context bullets>" | ask-agy.sh "<question>"
 The wrapper writes:
 
 ```
-$PWD/.dev-trio/log/<team>/agy-<TS>.log
+$PWD/.dev-trio/log/<team>/agy-<TS>-<PID>.log
 $PWD/.dev-trio/log/<team>/latest-agy.log   → symlink
 ```
 
