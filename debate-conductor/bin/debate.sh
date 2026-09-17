@@ -647,11 +647,9 @@ stream_record() {
   printf '%s%s\n' "$RS_BYTE" "$2" >> "$stream"
 }
 
-# stream_header ROUND ROLE MODEL ID: start an attempt in that role's stream.
-# Records are `R ROLE` then space-separated tokens; `id=` names the attempt, so
-# a retry of the same round and model is still told apart (#53).
+# stream_header ROLE HEADER: publish an attempt's header in that role's stream.
 stream_header() {
-  stream_record "$2" "<!-- debate-round: $1 $2 $3 id=$4 -->"
+  stream_record "$1" "$2"
 }
 
 # An attempt's pipeline runs under errexit and pipefail in a background subshell
@@ -670,24 +668,30 @@ CUR_ATTEMPT_ROUND=""
 CUR_ATTEMPT_ROLE=""
 CUR_ATTEMPT_DONE=""
 CUR_ATTEMPT_ID=""
+CUR_ATTEMPT_HEADER=""
+CUR_ATTEMPT_PUBLISHED=""
 # Attempt ids are ATTEMPT_RUN.N: this run's PID and start time, then a counter,
 # so a /continue appending to the same streams does not reuse them.
 ATTEMPT_RUN="$$.$(date +%s)"
 ATTEMPT_SEQ=0
 
 # begin_attempt ROUND ROLE MODEL OUT
-# A signal after the header is written but before the attempt is registered
-# leaves the header without an end record (#52).
+# Records are `R ROLE` then space-separated tokens; `id=` names the attempt, so
+# a retry of the same round and model is still told apart (#53).
+# The attempt is registered before its header is published, and
 # CUR_ATTEMPT_ROLE is set last: it is what makes the traps record the attempt.
+# A signal in between finds CUR_ATTEMPT_PUBLISHED empty, and record_attempt_end
+# checks the stream for the header (#52).
 begin_attempt() {
-  local id
   ATTEMPT_SEQ=$((ATTEMPT_SEQ + 1))
-  id="$ATTEMPT_RUN.$ATTEMPT_SEQ"
-  stream_header "$1" "$2" "$3" "$id"
   CUR_ATTEMPT_ROUND="$1"
   CUR_ATTEMPT_DONE="$(round_done_file "$4")"
-  CUR_ATTEMPT_ID="$id"
+  CUR_ATTEMPT_ID="$ATTEMPT_RUN.$ATTEMPT_SEQ"
+  CUR_ATTEMPT_HEADER="<!-- debate-round: $1 $2 $3 id=$CUR_ATTEMPT_ID -->"
+  CUR_ATTEMPT_PUBLISHED=""
   CUR_ATTEMPT_ROLE="$2"
+  stream_header "$2" "$CUR_ATTEMPT_HEADER"
+  CUR_ATTEMPT_PUBLISHED=1
 }
 
 # complete_attempt ROUND ROLE OUT: the pipeline succeeded. `.done` first, so a
@@ -703,6 +707,11 @@ complete_attempt() {
 # through it (#50), so it decides from what is on disk:
 #   - once `.done` exists the attempt completed: a record written from here on
 #     says rc=0, whatever RC is (debate.sh still dies from the signal);
+#   - when the attempt's header may not have been published (a signal inside
+#     begin_attempt), it is written only if the stream ends with that exact
+#     header: nothing but this record can follow the header before
+#     begin_attempt marks it published, and the id rules out an earlier
+#     attempt's header. A header never published gets no record (#52);
 #   - when the role stream already ends with this attempt's own end record
 #     (its id, one numeric rc), it is not written again. A record of another
 #     attempt, or one without an id, does not count.
@@ -717,6 +726,10 @@ record_attempt_end() {
   suffix=" id=$CUR_ATTEMPT_ID -->"
   last=""
   if [ -e "$stream" ] && ! last="$(tail -n 1 "$stream")"; then
+    CUR_ATTEMPT_ROLE=""
+    return 0
+  fi
+  if [ -z "$CUR_ATTEMPT_PUBLISHED" ] && [ "$last" != "$RS_BYTE$CUR_ATTEMPT_HEADER" ]; then
     CUR_ATTEMPT_ROLE=""
     return 0
   fi

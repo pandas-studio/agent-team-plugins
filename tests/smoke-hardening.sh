@@ -945,13 +945,14 @@ assert_eq "$(done_case header-tail)" "rc=143 fired=1 done=.round-1-gen.done .rou
 record_end_case() {
   local last="$1" done="$2" rc="$3" path="${4:-$PATH}"
   rm -rf "$TMP/rec" && mkdir -p "$TMP/rec"
-  [ -z "$last" ] || printf '%s\n%s\n' "$(printf '\036')<!-- debate-round: 1 gen agy id=7.1 -->" "$last" > "$TMP/rec/stream-gen.log"
+  [ -z "$last" ] || printf '%s\n%s\n' "${REC_FIRST-$(printf '\036')<!-- debate-round: 1 gen agy id=7.1 -->}" "$last" > "$TMP/rec/stream-gen.log"
   [ "$done" = 0 ] || : > "$TMP/rec/.round-1-gen.done"
-  PATH="$path" bash -c '
+  PATH="$path" REC_PUBLISHED="${REC_PUBLISHED-1}" bash -c '
     set -euo pipefail
     eval "$(awk '"'"'$0 == "stream_record() {" || $0 == "record_attempt_end() {" { f = 1 } f { print } f && $0 == "}" { f = 0 }'"'"' "$1")"
     RS_BYTE="$(printf "\036")"; DEBATE_DIR="$2"
     CUR_ATTEMPT_ROUND=1; CUR_ATTEMPT_ROLE=gen; CUR_ATTEMPT_ID=7.1; CUR_ATTEMPT_DONE="$2/.round-1-gen.done"
+    CUR_ATTEMPT_HEADER="<!-- debate-round: 1 gen agy id=7.1 -->"; CUR_ATTEMPT_PUBLISHED="$REC_PUBLISHED"
     record_attempt_end "$3"
     printf "role=[%s] " "$CUR_ATTEMPT_ROLE"
     if [ -e "$2/stream-gen.log" ]; then
@@ -978,6 +979,49 @@ mkdir -p "$TMP/failing-tail"
 printf '#!/bin/sh\nexit 1\n' > "$TMP/failing-tail/tail"
 chmod +x "$TMP/failing-tail/tail"
 assert_eq "$(record_end_case "partial output" 1 143 "$TMP/failing-tail:$PATH")" "role=[] 0 partial output"
+# A signal inside begin_attempt (#52): the header may not be published yet. The
+# record is written only when the stream ends with this attempt's exact header.
+HDR_OWN="$(printf '\036')<!-- debate-round: 1 gen agy id=7.1 -->"
+HDR_OLD="$(printf '\036')<!-- debate-round: 1 gen agy id=7.0 -->"
+assert_eq "$(REC_PUBLISHED='' REC_FIRST="$HDR_OLD" record_end_case "$HDR_OWN" 0 143)" "role=[] 1 $OWN_END"
+assert_eq "$(REC_PUBLISHED='' REC_FIRST="$HDR_OWN" record_end_case "$HDR_OLD" 0 143)" "role=[] 0 <!-- debate-round: 1 gen agy id=7.0 -->"
+assert_eq "$(REC_PUBLISHED='' REC_FIRST="$HDR_OLD" record_end_case "$HDR_OWN output" 0 143)" "role=[] 0 <!-- debate-round: 1 gen agy id=7.1 --> output"
+assert_eq "$(REC_PUBLISHED='' record_end_case "" 0 143)" "role=[] no stream"
+
+# 3g. begin_attempt registers the attempt before publishing its header (#52).
+#     The functions run in a shell whose TERM trap records the attempt, as
+#     on_signal does; stream_header is wrapped to signal that shell right after
+#     the header is written (after), right before (before), or to fail part way
+#     through the write (fail). The stream starts with an earlier attempt's
+#     header of the same round and model.
+cat > "$TMP/ordering.sh" <<'ORDER'
+set -euo pipefail
+eval "$(awk '$0 ~ /^(stream_record|stream_header|round_done_file|begin_attempt|record_attempt_end)\(\) \{$/ { f = 1 } f { print } f && $0 == "}" { f = 0 }' "$1")"
+eval "real_$(declare -f stream_header)"
+RS_BYTE="$(printf '\036')"; DEBATE_DIR="$2"; ATTEMPT_RUN=7; ATTEMPT_SEQ=0
+CUR_ATTEMPT_ROUND=""; CUR_ATTEMPT_ROLE=""; CUR_ATTEMPT_DONE=""; CUR_ATTEMPT_ID=""
+CUR_ATTEMPT_HEADER=""; CUR_ATTEMPT_PUBLISHED=""
+case "$3" in
+  after) stream_header() { real_stream_header "$@"; kill -s TERM $$; } ;;
+  before) stream_header() { kill -s TERM $$; real_stream_header "$@"; } ;;
+  fail) stream_header() { printf '%s%s' "$RS_BYTE" "<!-- debate-round: 1 gen" >> "$DEBATE_DIR/stream-$1.log"; return 1; } ;;
+esac
+trap 'record_attempt_end 143; exit 143' TERM
+trap 'record_attempt_end "$?"; : > "$DEBATE_DIR/exit-trap"' EXIT
+begin_attempt 1 gen agy "$DEBATE_DIR/round-1-gen.md"
+echo "begin_attempt returned" >&2
+ORDER
+ordering_case() {
+  local rc=0
+  rm -rf "$TMP/ord" && mkdir -p "$TMP/ord"
+  printf '%s\n' "$(printf '\036')<!-- debate-round: 1 gen agy id=7.0 -->" > "$TMP/ord/stream-gen.log"
+  /bin/bash "$TMP/ordering.sh" "$ROOT/debate-conductor/bin/debate.sh" "$TMP/ord" "$1" 2>/dev/null || rc=$?
+  printf 'rc=%s exit-trap=%s records=%s\n' "$rc" "$([ -e "$TMP/ord/exit-trap" ] && echo 1 || echo 0)" \
+    "$(LC_ALL=C grep -a "^$(printf '\036')" "$TMP/ord/stream-gen.log" | LC_ALL=C tr -d '\036' | tr '\n' '|')"
+}
+assert_eq "$(ordering_case after)" "rc=143 exit-trap=1 records=<!-- debate-round: 1 gen agy id=7.0 -->|<!-- debate-round: 1 gen agy id=7.1 -->|<!-- debate-round-end: 1 gen rc=143 id=7.1 -->|"
+assert_eq "$(ordering_case before)" "rc=143 exit-trap=1 records=<!-- debate-round: 1 gen agy id=7.0 -->|"
+assert_eq "$(ordering_case fail)" "rc=1 exit-trap=1 records=<!-- debate-round: 1 gen agy id=7.0 -->|<!-- debate-round: 1 gen|"
 
 # 4. Model text cannot draw a banner or move text: a quoted marker is dropped,
 #    \x1e is removed, and an answer without a final newline does not swallow the
