@@ -840,6 +840,107 @@ print(f"rc={rc} gen={gen_ends} r1done={int(os.path.exists(f'{d}/.round-1-gen.don
 PYRACE
 )" "rc=-15 gen=['<!-- debate-round-end: 1 gen rc=0 -->'] r1done=1 crit-balanced=1 r2done=0 model=gone"
 
+# 3e. A signal while a completed attempt is being recorded (#50). `.done` is
+#     the completion boundary: once it exists, the attempt's end record says
+#     rc=0 (debate.sh still dies from the signal), and it is written once. PATH
+#     shims for touch and tail signal the debate.sh PID at a chosen command:
+#       done-touch   the touch that creates .round-1-gen.done
+#       done-tail    the first tail on stream-gen.log after that
+#       done-tail2   the second one (inside the write of the rc=0 record)
+#       done-fail    touch fails instead (no signal): rc=1, no .done
+#       header-tail  the tail before round 3's header: no header, no record
+mkdir -p "$TMP/done-shims"
+cat > "$TMP/done-shims/shim" <<STUB
+#!/bin/sh
+name="\${0##*/}"
+case "\$name" in touch) real="$(command -v touch)" ;; *) real="$(command -v tail)" ;; esac
+eval "last=\\\${\$#}"
+dir="\${last%/*}"
+fire=0
+case "\$SHIM_CASE:\$name" in
+  done-touch:touch) case "\$last" in *.round-1-gen.done) fire=1 ;; esac ;;
+  done-fail:touch) case "\$last" in *.round-1-gen.done) exit 1 ;; esac ;;
+  done-tail*:tail)
+    case "\$last" in *stream-gen.log)
+      if [ -e "\$dir/.round-1-gen.done" ]; then
+        n=\$((\$(cat "\$SHIM_STATE.count" 2>/dev/null || echo 0) + 1)); echo "\$n" > "\$SHIM_STATE.count"
+        [ "\$SHIM_CASE:\$n" = done-tail:1 ] || [ "\$SHIM_CASE:\$n" = done-tail2:2 ] && fire=1
+      fi ;;
+    esac ;;
+  header-tail:tail)
+    case "\$last" in *stream-gen.log)
+      [ -e "\$dir/.round-1-gen.done" ] && grep -aq 'debate-round-end: 1 gen' "\$last" && fire=1 ;;
+    esac ;;
+esac
+if [ "\$fire" = 1 ] && [ ! -e "\$SHIM_STATE.fired" ]; then
+  : > "\$SHIM_STATE.fired"
+  "\$real" "\$@"; rc=\$?
+  kill -s TERM "\$(cat "\$SHIM_STATE.pid")"
+  exit \$rc
+fi
+exec "\$real" "\$@"
+STUB
+chmod +x "$TMP/done-shims/shim"
+ln -s shim "$TMP/done-shims/touch"
+ln -s shim "$TMP/done-shims/tail"
+done_case() {
+  # The subshell's stderr is dropped too: it reports the TERM-killed debate.sh.
+  local case="$1" team="done-$1" rc=0 dir
+  ( cd "$TMP" && env -u DEBATE_GENERATOR_MODEL -u DEBATE_CRITIC_MODEL -u DEBATE_PRIMARY_GEN \
+      -u DEBATE_CONDUCTOR_PM_HOST TMUX='' AGENT_TEAM="$team" PATH="$TMP/done-shims:$PATH" \
+      SHIM_CASE="$case" SHIM_STATE="$TMP/$team" \
+      AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" DEBATE_LOG_DIR="$TMP/view-log" \
+      GENERATOR_CLI="$TMP/worker-cli/answer" CRITIC_CLI="$TMP/worker-cli/answer" \
+      bash -c 'echo $$ > "$SHIM_STATE.pid"; exec "$0" -n 3 "smoke: done"' \
+      "$ROOT/debate-conductor/bin/debate.sh" > /dev/null 2>&1 </dev/null ) 2>/dev/null || rc=$?
+  dir="$(debate_dir "$team")"
+  printf 'rc=%s fired=%s done=%s records=%s\n' "$rc" \
+    "$([ -e "$TMP/$team.fired" ] && echo 1 || echo 0)" \
+    "$(cd "$dir" && ls -a | grep '^\.round-.*\.done$' | tr '\n' ' ')" \
+    "$(LC_ALL=C grep -a "^$(printf '\036')<!-- debate-round" "$dir/stream-gen.log" | LC_ALL=C tr -d '\036' | sed 's/<!-- debate-round//; s/ -->//' | tr '\n' '|')"
+}
+assert_eq "$(done_case done-touch)" "rc=143 fired=1 done=.round-1-gen.done  records=: 1 gen agy|-end: 1 gen rc=0|"
+assert_eq "$(done_case done-tail)" "rc=143 fired=1 done=.round-1-gen.done  records=: 1 gen agy|-end: 1 gen rc=0|"
+assert_eq "$(done_case done-tail2)" "rc=143 fired=1 done=.round-1-gen.done  records=: 1 gen agy|-end: 1 gen rc=0|"
+assert_eq "$(done_case done-fail)" "rc=1 fired=0 done= records=: 1 gen agy|-end: 1 gen rc=1|"
+assert_eq "$(done_case header-tail)" "rc=143 fired=1 done=.round-1-gen.done .round-2-crit.done  records=: 1 gen agy|-end: 1 gen rc=0|"
+
+# 3f. record_attempt_end on its own: an end record already last in the stream
+#     is not written again only when it is complete and numeric; `.done` turns
+#     any status into rc=0; a stream that cannot be read is not written to.
+record_end_case() {
+  local last="$1" done="$2" rc="$3" path="${4:-$PATH}"
+  rm -rf "$TMP/rec" && mkdir -p "$TMP/rec"
+  [ -z "$last" ] || printf '%s\n%s\n' "$(printf '\036')<!-- debate-round: 1 gen agy -->" "$last" > "$TMP/rec/stream-gen.log"
+  [ "$done" = 0 ] || : > "$TMP/rec/.round-1-gen.done"
+  PATH="$path" bash -c '
+    set -euo pipefail
+    eval "$(awk '"'"'$0 == "stream_record() {" || $0 == "record_attempt_end() {" { f = 1 } f { print } f && $0 == "}" { f = 0 }'"'"' "$1")"
+    RS_BYTE="$(printf "\036")"; DEBATE_DIR="$2"
+    CUR_ATTEMPT_ROUND=1; CUR_ATTEMPT_ROLE=gen; CUR_ATTEMPT_DONE="$2/.round-1-gen.done"
+    record_attempt_end "$3"
+    printf "role=[%s] " "$CUR_ATTEMPT_ROLE"
+    if [ -e "$2/stream-gen.log" ]; then
+      n="$(LC_ALL=C grep -ac "debate-round-end" "$2/stream-gen.log" || true)"
+      printf "%s " "$n"
+      sed -n "\$p" "$2/stream-gen.log" | LC_ALL=C tr -d "\036"
+    else
+      echo "no stream"
+    fi
+  ' _ "$ROOT/debate-conductor/bin/debate.sh" "$TMP/rec" "$rc"
+}
+RS_LINE="$(printf '\036')<!-- debate-round-end: 1 gen"
+assert_eq "$(record_end_case "$RS_LINE rc=143 -->" 0 143)" "role=[] 1 <!-- debate-round-end: 1 gen rc=143 -->"
+assert_eq "$(record_end_case "$RS_LINE rc=0garbage -->" 0 143)" "role=[] 2 <!-- debate-round-end: 1 gen rc=143 -->"
+assert_eq "$(record_end_case "$RS_LINE rc= -->" 0 143)" "role=[] 2 <!-- debate-round-end: 1 gen rc=143 -->"
+assert_eq "$(record_end_case "$(printf '\036')<!-- debate-round-end: 2 gen rc=0 -->" 0 143)" "role=[] 2 <!-- debate-round-end: 1 gen rc=143 -->"
+assert_eq "$(record_end_case "partial output" 1 143)" "role=[] 1 <!-- debate-round-end: 1 gen rc=0 -->"
+assert_eq "$(record_end_case "" 0 130)" "role=[] 1 <!-- debate-round-end: 1 gen rc=130 -->"
+mkdir -p "$TMP/failing-tail"
+printf '#!/bin/sh\nexit 1\n' > "$TMP/failing-tail/tail"
+chmod +x "$TMP/failing-tail/tail"
+assert_eq "$(record_end_case "partial output" 1 143 "$TMP/failing-tail:$PATH")" "role=[] 0 partial output"
+
 # 4. Model text cannot draw a banner or move text: a quoted marker is dropped,
 #    \x1e is removed, and an answer without a final newline does not swallow the
 #    next attempt's header.
