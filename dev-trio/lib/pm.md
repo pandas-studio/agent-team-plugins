@@ -51,6 +51,15 @@ ask-codex.sh "focus on the new retry logic in src/agent.py — concurrency safet
 ask-codex.sh "review HEAD~2..HEAD"              # review last 2 commits
 ```
 
+**Reviewing a PR:** don't pass `"pr 55"` — the reviewer may run without network access and cannot see which commits the PR holds. Resolve it yourself and hand over a range:
+```bash
+mkdir -p .dev-trio/log/${AGENT_TEAM:-default}
+CFILE=.dev-trio/log/${AGENT_TEAM:-default}/context-$(date +%Y%m%d-%H%M%S).md
+gh pr view 55 --json number,url,title,baseRefName,baseRefOid,headRefName,headRefOid > "$CFILE"
+git merge-base <baseRefOid> <headRefOid>        # both commits must exist locally; ask before fetching
+ask-codex.sh --with-context "$CFILE" "review <merge-base>..<headRefOid> (PR #55)"
+```
+
 ## Handling Codex's `NEED RESEARCH` block
 
 If Codex's output ends with:
@@ -62,12 +71,19 @@ If Codex's output ends with:
 
 Do this:
 1. For each question, run `ask-agy.sh "<question>"` — capture each answer.
-2. Concatenate the answers into a temp file (e.g., `.dev-trio/log/${AGENT_TEAM:-default}/research-<ts>.md`).
-3. Re-invoke Codex with the research:
+2. Concatenate the answers into a temp file (e.g., `.dev-trio/log/${AGENT_TEAM:-default}/research-<ts>.md`). If the original review already had `--with-research`, copy that file's content in first — the wrapper takes one file per kind, so the new file replaces the old attachment.
+3. Re-invoke Codex **once** with the research, keeping the original focus and every original flag (`--with-spec`, `--with-context`, `--no-memories`). If the second review asks the same thing again, stop and report instead of looping:
    ```bash
    ask-codex.sh --with-research .dev-trio/log/${AGENT_TEAM:-default}/research-<ts>.md "<original focus>"
    ```
 4. Use Codex's final review to decide next steps. Surface blockers/major findings to the user before continuing.
+
+## Handling Codex's `NEED CONTEXT` block
+
+`## NEED CONTEXT` lists repository facts (PR commits, issue text, CI logs) as commands the reviewer could not run. Antigravity cannot answer these — you can:
+1. Run only the read-only commands (`gh pr view/diff/checks`, `gh issue view`, `gh run view`, `git log/show`). Ask the user before `git fetch` or anything that changes state.
+2. Append each command and its output to one context file (add to the existing one if the review already had `--with-context`).
+3. Re-invoke once with `--with-context <file>`, the original focus, and every original flag. If the PR's head or base moved meanwhile, start a new review instead.
 
 ## Reporting back to the user
 

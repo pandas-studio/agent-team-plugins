@@ -1,21 +1,22 @@
 ---
 name: review
-description: One-shot Codex review. Default scope = uncommitted working-tree changes. Optional --with-research <file> and --with-spec <file> for context injection. Streaming output lands in the bottom-right dashboard pane; chat-side surfaces the verdict (SHIP/NEEDS-FIX/DISCUSS) + Blocker/Major counts and handles NEED RESEARCH blocks.
+description: One-shot Codex review. Default scope = uncommitted working-tree changes. Optional --with-research <file>, --with-spec <file> and --with-context <file> for context injection. Streaming output lands in the bottom-right dashboard pane; chat-side surfaces the verdict (SHIP/NEEDS-FIX/DISCUSS) + Blocker/Major counts and handles NEED RESEARCH and NEED CONTEXT blocks.
 disable-model-invocation: true
-allowed-tools: Bash(ask-codex.sh:*) Bash(ask-agy.sh:*) Bash(git:*) Bash(cat:*) Bash(ls:*) Bash(date:*) Bash(mkdir:*) Bash(echo:*) Bash(sed:*) Read
-argument-hint: [focus] [--with-research <file>] [--with-spec <file>] [--no-memories]
+allowed-tools: Bash(ask-codex.sh:*) Bash(ask-agy.sh:*) Bash(gh pr view:*) Bash(gh pr diff:*) Bash(gh pr checks:*) Bash(gh issue view:*) Bash(gh run view:*) Bash(git:*) Bash(cat:*) Bash(ls:*) Bash(date:*) Bash(mkdir:*) Bash(echo:*) Bash(sed:*) Read
+argument-hint: [focus] [--with-research <file>] [--with-spec <file>] [--with-context <file>] [--no-memories]
 ---
 
 # Review (Codex, one-shot)
 
-You are the **PM**. Codex is the reviewer (bottom-right pane). You dispatch one review, surface the verdict, and route any `NEED RESEARCH` block back through Antigravity.
+You are the **PM**. Codex is the reviewer (bottom-right pane). You dispatch one review, surface the verdict, and route a `NEED RESEARCH` block through Antigravity and a `NEED CONTEXT` block through your own read-only `gh`/`git` commands.
 
 ## 1 · Parse `$ARGUMENTS` and build the dispatch command
 
-`$ARGUMENTS` is a single string that may interleave four pieces in any order:
+`$ARGUMENTS` is a single string that may interleave five pieces in any order:
 
 - **Optional `--with-research <file>`** — research context from a previous Antigravity call (typically `latest-agy.log` or a curated `research-<TS>.md`).
 - **Optional `--with-spec <file>`** — spec/contract the changes are expected to satisfy.
+- **Optional `--with-context <file>`** — repository facts you fetched (PR commit IDs, issue text, CI output) for a reviewer that may not reach the network.
 - **Optional `--no-memories`** — bare flag; Codex runs without its memory summary from earlier sessions.
 - **Optional free-form focus** — review scope, possibly multi-word. Examples:
   - `focus on the new retry logic in src/agent.py — concurrency safety`
@@ -29,9 +30,29 @@ Algorithm:
 1. Tokenise `$ARGUMENTS` on whitespace, walk left-to-right.
 2. If a token is `--with-research`, the next token is `<research-file>`; consume both.
 3. If a token is `--with-spec`, the next token is `<spec-file>`; consume both.
+   Likewise `--with-context` and `<context-file>`.
 4. If a token is `--no-memories`, pass it through as its own argv slot; consume only it.
 5. Every remaining token belongs to the focus; join them with a single space into one FOCUS string.
 6. If `$ARGUMENTS` is empty, omit the focus entirely (the wrapper falls back to the default working-tree scope).
+7. If FOCUS names a pull request (`pr 55`, `PR #55`, or a PR URL), resolve it before dispatch — see **PR reviews** below. Never send a bare PR reference as the focus: the reviewer may run without network access, and then cannot tell which commits the PR contains (measured: Codex under `workspace-write` failed `gh pr view` and returned `DISCUSS` with zero findings).
+
+### PR reviews
+
+You have network access; the reviewer may not. Fetch the PR's identity yourself and hand over a concrete range:
+
+```bash
+CFILE="$PWD/.dev-trio/log/${AGENT_TEAM:-default}/context-$(date +%Y%m%d-%H%M%S).md"
+mkdir -p ".dev-trio/log/${AGENT_TEAM:-default}"
+gh pr view 55 --json number,url,title,baseRefName,baseRefOid,headRefName,headRefOid > "$CFILE"
+git cat-file -e <headRefOid>^{commit} && git cat-file -e <baseRefOid>^{commit}
+git merge-base <baseRefOid> <headRefOid>
+```
+
+If either commit is missing locally, tell the user which one and ask before fetching (`git fetch <remote> pull/55/head` for the head — it works for fork PRs — and the base branch from the base repository's remote, which is not necessarily `origin`). Do not fetch without asking. Then dispatch with a range focus:
+
+```bash
+ask-codex.sh --with-context "$CFILE" "review <merge-base>..<headRefOid> (PR #55)"
+```
 
 ## 2 · Dispatch
 
@@ -107,8 +128,25 @@ If the exact `.final.md` path reported by the same successful invocation contain
    } > "$RFILE"
    ```
    If `RESEARCH_FAILED=1`, tell the user which question failed before re-reviewing; don't present the failed output to Codex as evidence (drop that section or re-run it).
-3. Re-invoke `ask-codex.sh --with-research <RFILE>` with the **same focus** as the original call, plus `--no-memories` if the original call had it.
+3. Re-invoke under the **Retry rule** below with `<RFILE>` as the research attachment (merged with any research file the original call had).
 4. Use the second verdict as the actionable one. Mention the round-trip to the user (Antigravity → Codex re-review) so they understand why latency was higher.
+
+## 4b · Handle `## NEED CONTEXT` blocks
+
+A `## NEED CONTEXT` section lists repository facts the reviewer could not fetch, as commands. Antigravity cannot answer these; you can.
+
+1. Surface the commands to the user with one line each on why the reviewer needs it.
+2. Run only read-only commands yourself: `gh pr view`, `gh pr diff`, `gh pr checks`, `gh issue view`, `gh run view` (including `--log-failed`), `git log`, `git show`. Ask before anything that changes state, including `git fetch`, and never run a command that writes to the remote.
+3. Append each command and its output (or its failure, labelled as such) to the context file — the existing one if the review had `--with-context`, a new one otherwise.
+4. Re-invoke once under the retry rule below. If the second review still asks for the same context, stop and report it; do not loop.
+
+## Retry rule (NEED RESEARCH and NEED CONTEXT)
+
+A retry re-reviews the **same scope** with more evidence:
+
+- Same focus, and every flag the original call had: `--with-spec`, `--with-research`, `--with-context`, `--no-memories`.
+- Attachments are cumulative. The wrapper takes one file per kind, so a second `--with-research` replaces the first — write the previous content plus the new answers into one file and pass that.
+- If the PR's head or base commit moved since the first review (`gh pr view` shows different IDs), that is a new review, not a retry: drop the old context, resolve the PR again, and say so to the user.
 
 ## 5 · Don't auto-fix
 
