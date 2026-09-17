@@ -644,10 +644,24 @@ done
 # Each attempt ends with a record carrying its status: round 1 failed (rc=1),
 # its retry and round 3 completed. End records never reach round files.
 RS="$(printf '\036')"
+ID_RE='id=[0-9]+\.[0-9]+\.[0-9]+'
 assert_eq "$(LC_ALL=C grep -ac "^${RS}<!-- debate-round-end: " "$RETRY_DIR/stream-gen.log")" "3"
-assert_eq "$(LC_ALL=C grep -ac "^${RS}<!-- debate-round-end: 1 gen rc=1 -->$" "$RETRY_DIR/stream-gen.log")" "1"
-assert_eq "$(LC_ALL=C grep -ac "^${RS}<!-- debate-round-end: 1 gen rc=0 -->$" "$RETRY_DIR/stream-gen.log")" "1"
-assert_eq "$(LC_ALL=C grep -ac "^${RS}<!-- debate-round-end: 3 gen rc=0 -->$" "$RETRY_DIR/stream-gen.log")" "1"
+assert_eq "$(LC_ALL=C grep -acE "^${RS}<!-- debate-round-end: 1 gen rc=1 $ID_RE -->$" "$RETRY_DIR/stream-gen.log")" "1"
+assert_eq "$(LC_ALL=C grep -acE "^${RS}<!-- debate-round-end: 1 gen rc=0 $ID_RE -->$" "$RETRY_DIR/stream-gen.log")" "1"
+assert_eq "$(LC_ALL=C grep -acE "^${RS}<!-- debate-round-end: 3 gen rc=0 $ID_RE -->$" "$RETRY_DIR/stream-gen.log")" "1"
+# attempt_pairs STREAM: every record in order as `R/id` (header) or `R/id/end`,
+# with each distinct id replaced by its first-seen index, so a stream whose
+# headers and end records pair up reads 1 1/end 2 2/end ... (#53).
+attempt_pairs() {
+  LC_ALL=C grep -a "^$(printf '\036')<!-- debate-round" "$1" | awk '
+    { id = ""; for (i = 1; i <= NF; i++) if ($i ~ /^id=/) id = substr($i, 4)
+      if (!(id in seen)) seen[id] = ++n
+      printf "%s%s%s ", $3, "/" seen[id], ($2 == "debate-round-end:") ? "/end" : "" }
+    END { print "" }'
+}
+# The failed round 1, its retry by /continue and round 3: three attempts, the
+# retry of the same round and model under a new id.
+assert_eq "$(attempt_pairs "$RETRY_DIR/stream-gen.log")" "1/1 1/1/end 1/2 1/2/end 3/3 3/3/end "
 assert_eq "$(cat "$RETRY_DIR"/round-*.md | grep -ac 'debate-round-end' || true)" "0"
 
 # 2. Critic round 2 fails twice instantly, then a continue retries it and adds
@@ -689,7 +703,7 @@ CTX_DIR="$(debate_dir ctx-fail)"
 rm -f "$CTX_DIR/round-1-gen.md"
 assert_eq "$(debate_in ctx-fail answer answer --continue-from "$CTX_DIR" -n 1)" "1"
 assert_fail test -e "$CTX_DIR/.round-3-gen.done"
-assert_eq "$(LC_ALL=C grep -ac "^$(printf '\036')<!-- debate-round-end: 3 gen rc=1 -->$" "$CTX_DIR/stream-gen.log")" "1"
+assert_eq "$(LC_ALL=C grep -ac -E "^$(printf '\036')<!-- debate-round-end: 3 gen rc=1 $ID_RE -->$" "$CTX_DIR/stream-gen.log")" "1"
 
 # 3c. INT, TERM and HUP to the debate's process group, or to the debate.sh PID
 #     alone (#48), stop the whole attempt within seconds: the model process is
@@ -714,10 +728,10 @@ for sig in INT TERM HUP parent-INT pid-INT pid-TERM pid-HUP KILL; do
   if [ "$sig" = KILL ]; then
     expected="rc=-9 fast=1 model=gone grew=0 ends=0  done=0 continued=0"
   else
-    expected="rc=-$signum fast=1 model=gone grew=0 ends=1 <!-- debate-round-end: 1 gen rc=$status --> done=0 continued=0"
+    expected="rc=-$signum fast=1 model=gone grew=0 ends=1 <!-- debate-round-end: 1 gen rc=$status id=HEAD --> done=0 continued=0"
   fi
   assert_eq "$(python3 - "$ROOT" "$TMP" "$sig" <<'PYCASE'
-import glob, os, signal, subprocess, sys, time
+import glob, os, re, signal, subprocess, sys, time
 root, tmp, case = sys.argv[1:4]
 sig = case.split("-")[-1]
 team = f"cancel-{case}"
@@ -782,6 +796,10 @@ ends = [l for l in open(stream, errors="replace") if l.startswith("\x1e<!-- deba
 done = int(os.path.exists(os.path.join(os.path.dirname(stream), ".round-1-gen.done")))
 continued = int(os.path.exists(marker))
 end = ends[0].rstrip(chr(10))[1:] if ends else ""
+# The end record names the attempt its header started.
+head = [l for l in open(stream, errors="replace") if l.startswith("\x1e<!-- debate-round: ")][0]
+head_id = re.search(r" id=(\S+) -->", head).group(1)
+end = end.replace(f" id={head_id} -->", " id=HEAD -->")
 print(f"rc={rc} fast={fast} model={model_state} grew={grew} ends={len(ends)} {end} done={done} continued={continued}")
 PYCASE
 )" "$expected"
@@ -792,7 +810,7 @@ done
 #     attempt header in a stream has exactly one end record, an interrupted
 #     attempt records 143 and is not done, and no model keeps running.
 assert_eq "$(python3 - "$ROOT" "$TMP" <<'PYRACE'
-import glob, os, signal, subprocess, sys, time
+import glob, os, re, signal, subprocess, sys, time
 root, tmp = sys.argv[1:3]
 team = "cancel-after-done"
 env = {k: v for k, v in os.environ.items()
@@ -807,9 +825,14 @@ p = subprocess.Popen([f"{root}/debate-conductor/bin/debate.sh", "-n", "2", f"smo
 # The rc=0 end record is the last step of a completed attempt (after .done).
 for _ in range(1000):
     streams = glob.glob(f"{tmp}/view-log/{team}/debate-*/stream-gen.log")
-    if streams and "<!-- debate-round-end: 1 gen rc=0 -->" in open(streams[0], errors="replace").read():
+    if streams and re.search(r"^\x1e<!-- debate-round-end: 1 gen rc=0 id=\S+ -->$",
+                             open(streams[0], errors="replace").read(), re.M):
         break
     time.sleep(0.01)
+else:
+    os.killpg(p.pid, signal.SIGKILL)
+    print("round 1 end record never appeared")
+    sys.exit(0)
 os.kill(p.pid, signal.SIGTERM)
 try:
     rc = p.wait(timeout=8)
@@ -819,12 +842,21 @@ except subprocess.TimeoutExpired:
 time.sleep(0.5)
 d = glob.glob(f"{tmp}/view-log/{team}/debate-*")[0]
 def records(role, kind):
-    return [l.rstrip(chr(10))[1:] for l in open(f"{d}/stream-{role}.log", errors="replace")
-            if l.startswith(f"\x1e<!-- debate-round{kind}: ")]
+    # The id of an end record reads ID when it names the header before it, else BAD.
+    out, head = [], None
+    for l in open(f"{d}/stream-{role}.log", errors="replace"):
+        m = re.match(r"\x1e(<!-- debate-round(-end)?: .* id=)(\S+) -->$", l.rstrip(chr(10)))
+        if not m:
+            continue
+        if m.group(2) is None:
+            head = m.group(3)
+        if (m.group(2) or str()) == kind:
+            out.append(m.group(1) + ("ID" if m.group(3) == head else "BAD") + " -->")
+    return out
 gen_ends = records("gen", "-end")
 crit_heads = records("crit", "") if os.path.exists(f"{d}/stream-crit.log") else []
 crit_ends = records("crit", "-end") if crit_heads else []
-balanced = int(len(crit_heads) == len(crit_ends) and all(e.endswith(" rc=143 -->") for e in crit_ends))
+balanced = int(len(crit_heads) == len(crit_ends) and all(e.endswith(" rc=143 id=ID -->") for e in crit_ends))
 model = "gone"
 if os.path.exists(pid_file):
     pid = int(open(pid_file).read())
@@ -838,7 +870,7 @@ if os.path.exists(pid_file):
 print(f"rc={rc} gen={gen_ends} r1done={int(os.path.exists(f'{d}/.round-1-gen.done'))} "
       f"crit-balanced={balanced} r2done={int(os.path.exists(f'{d}/.round-2-crit.done'))} model={model}")
 PYRACE
-)" "rc=-15 gen=['<!-- debate-round-end: 1 gen rc=0 -->'] r1done=1 crit-balanced=1 r2done=0 model=gone"
+)" "rc=-15 gen=['<!-- debate-round-end: 1 gen rc=0 id=ID -->'] r1done=1 crit-balanced=1 r2done=0 model=gone"
 
 # 3e. A signal while a completed attempt is being recorded (#50). `.done` is
 #     the completion boundary: once it exists, the attempt's end record says
@@ -894,30 +926,32 @@ done_case() {
       bash -c 'echo $$ > "$SHIM_STATE.pid"; exec "$0" -n 3 "smoke: done"' \
       "$ROOT/debate-conductor/bin/debate.sh" > /dev/null 2>&1 </dev/null ) 2>/dev/null || rc=$?
   dir="$(debate_dir "$team")"
-  printf 'rc=%s fired=%s done=%s records=%s\n' "$rc" \
+  printf 'rc=%s fired=%s done=%s records=%s pairs=%s\n' "$rc" \
     "$([ -e "$TMP/$team.fired" ] && echo 1 || echo 0)" \
     "$(cd "$dir" && ls -a | grep '^\.round-.*\.done$' | tr '\n' ' ')" \
-    "$(LC_ALL=C grep -a "^$(printf '\036')<!-- debate-round" "$dir/stream-gen.log" | LC_ALL=C tr -d '\036' | sed 's/<!-- debate-round//; s/ -->//' | tr '\n' '|')"
+    "$(LC_ALL=C grep -a "^$(printf '\036')<!-- debate-round" "$dir/stream-gen.log" | LC_ALL=C tr -d '\036' | sed -E 's/<!-- debate-round//; s/ id=[0-9.]+ -->//' | tr '\n' '|')" \
+    "$(attempt_pairs "$dir/stream-gen.log")"
 }
-assert_eq "$(done_case done-touch)" "rc=143 fired=1 done=.round-1-gen.done  records=: 1 gen agy|-end: 1 gen rc=0|"
-assert_eq "$(done_case done-tail)" "rc=143 fired=1 done=.round-1-gen.done  records=: 1 gen agy|-end: 1 gen rc=0|"
-assert_eq "$(done_case done-tail2)" "rc=143 fired=1 done=.round-1-gen.done  records=: 1 gen agy|-end: 1 gen rc=0|"
-assert_eq "$(done_case done-fail)" "rc=1 fired=0 done= records=: 1 gen agy|-end: 1 gen rc=1|"
-assert_eq "$(done_case header-tail)" "rc=143 fired=1 done=.round-1-gen.done .round-2-crit.done  records=: 1 gen agy|-end: 1 gen rc=0|"
+assert_eq "$(done_case done-touch)" "rc=143 fired=1 done=.round-1-gen.done  records=: 1 gen agy|-end: 1 gen rc=0| pairs=1/1 1/1/end "
+assert_eq "$(done_case done-tail)" "rc=143 fired=1 done=.round-1-gen.done  records=: 1 gen agy|-end: 1 gen rc=0| pairs=1/1 1/1/end "
+assert_eq "$(done_case done-tail2)" "rc=143 fired=1 done=.round-1-gen.done  records=: 1 gen agy|-end: 1 gen rc=0| pairs=1/1 1/1/end "
+assert_eq "$(done_case done-fail)" "rc=1 fired=0 done= records=: 1 gen agy|-end: 1 gen rc=1| pairs=1/1 1/1/end "
+assert_eq "$(done_case header-tail)" "rc=143 fired=1 done=.round-1-gen.done .round-2-crit.done  records=: 1 gen agy|-end: 1 gen rc=0| pairs=1/1 1/1/end "
 
 # 3f. record_attempt_end on its own: an end record already last in the stream
-#     is not written again only when it is complete and numeric; `.done` turns
-#     any status into rc=0; a stream that cannot be read is not written to.
+#     is not written again only when it is this attempt's (its id) and has one
+#     numeric rc; `.done` turns any status into rc=0; a stream that cannot be
+#     read is not written to.
 record_end_case() {
   local last="$1" done="$2" rc="$3" path="${4:-$PATH}"
   rm -rf "$TMP/rec" && mkdir -p "$TMP/rec"
-  [ -z "$last" ] || printf '%s\n%s\n' "$(printf '\036')<!-- debate-round: 1 gen agy -->" "$last" > "$TMP/rec/stream-gen.log"
+  [ -z "$last" ] || printf '%s\n%s\n' "$(printf '\036')<!-- debate-round: 1 gen agy id=7.1 -->" "$last" > "$TMP/rec/stream-gen.log"
   [ "$done" = 0 ] || : > "$TMP/rec/.round-1-gen.done"
   PATH="$path" bash -c '
     set -euo pipefail
     eval "$(awk '"'"'$0 == "stream_record() {" || $0 == "record_attempt_end() {" { f = 1 } f { print } f && $0 == "}" { f = 0 }'"'"' "$1")"
     RS_BYTE="$(printf "\036")"; DEBATE_DIR="$2"
-    CUR_ATTEMPT_ROUND=1; CUR_ATTEMPT_ROLE=gen; CUR_ATTEMPT_DONE="$2/.round-1-gen.done"
+    CUR_ATTEMPT_ROUND=1; CUR_ATTEMPT_ROLE=gen; CUR_ATTEMPT_ID=7.1; CUR_ATTEMPT_DONE="$2/.round-1-gen.done"
     record_attempt_end "$3"
     printf "role=[%s] " "$CUR_ATTEMPT_ROLE"
     if [ -e "$2/stream-gen.log" ]; then
@@ -930,12 +964,16 @@ record_end_case() {
   ' _ "$ROOT/debate-conductor/bin/debate.sh" "$TMP/rec" "$rc"
 }
 RS_LINE="$(printf '\036')<!-- debate-round-end: 1 gen"
-assert_eq "$(record_end_case "$RS_LINE rc=143 -->" 0 143)" "role=[] 1 <!-- debate-round-end: 1 gen rc=143 -->"
-assert_eq "$(record_end_case "$RS_LINE rc=0garbage -->" 0 143)" "role=[] 2 <!-- debate-round-end: 1 gen rc=143 -->"
-assert_eq "$(record_end_case "$RS_LINE rc= -->" 0 143)" "role=[] 2 <!-- debate-round-end: 1 gen rc=143 -->"
-assert_eq "$(record_end_case "$(printf '\036')<!-- debate-round-end: 2 gen rc=0 -->" 0 143)" "role=[] 2 <!-- debate-round-end: 1 gen rc=143 -->"
-assert_eq "$(record_end_case "partial output" 1 143)" "role=[] 1 <!-- debate-round-end: 1 gen rc=0 -->"
-assert_eq "$(record_end_case "" 0 130)" "role=[] 1 <!-- debate-round-end: 1 gen rc=130 -->"
+OWN_END="<!-- debate-round-end: 1 gen rc=143 id=7.1 -->"
+assert_eq "$(record_end_case "$RS_LINE rc=143 id=7.1 -->" 0 143)" "role=[] 1 $OWN_END"
+# Not this attempt's complete record: written.
+for last in "rc=0garbage id=7.1" "rc= id=7.1" "id=7.1" "rc=0 rc=1 id=7.1" "rc=0 rc=x id=7.1" \
+    "rc=x rc=0 id=7.1" "rc=0 id=7.0" "rc=0 id=17.1" "rc=0 id=7.11" "rc=0" "rc=0 id=7.1 id=7.1"; do
+  assert_eq "$(record_end_case "$RS_LINE $last -->" 0 143)" "role=[] 2 $OWN_END"
+done
+assert_eq "$(record_end_case "$(printf '\036')<!-- debate-round-end: 2 gen rc=0 id=7.1 -->" 0 143)" "role=[] 2 $OWN_END"
+assert_eq "$(record_end_case "partial output" 1 143)" "role=[] 1 <!-- debate-round-end: 1 gen rc=0 id=7.1 -->"
+assert_eq "$(record_end_case "" 0 130)" "role=[] 1 <!-- debate-round-end: 1 gen rc=130 id=7.1 -->"
 mkdir -p "$TMP/failing-tail"
 printf '#!/bin/sh\nexit 1\n' > "$TMP/failing-tail/tail"
 chmod +x "$TMP/failing-tail/tail"
@@ -960,11 +998,55 @@ assert_eq "$(count "$TMP/view-tricky.out" 'rsbyte')" "2"
 # start of a line: the end record after the unterminated answer starts its own.
 assert_eq "$(LC_ALL=C tr -cd '\036' < "$TRICKY_DIR/stream-gen.log" | wc -c | tr -d ' ')" "4"
 assert_eq "$(LC_ALL=C grep -ac "^$(printf '\036')" "$TRICKY_DIR/stream-gen.log")" "4"
-assert_eq "$(LC_ALL=C grep -ac "^$(printf '\036')<!-- debate-round-end: [13] gen rc=0 -->$" "$TRICKY_DIR/stream-gen.log")" "2"
+assert_eq "$(LC_ALL=C grep -ac -E "^$(printf '\036')<!-- debate-round-end: [13] gen rc=0 $ID_RE -->$" "$TRICKY_DIR/stream-gen.log")" "2"
 # Round files and the critic stream are untouched by the generator's quoted marker.
 assert_eq "$(LC_ALL=C tr -cd '\036' < "$TRICKY_DIR/round-1-gen.md" | wc -c | tr -d ' ')" "0"
 assert_eq "$(head -1 "$TRICKY_DIR/round-1-gen.md")" "<!-- debate-round: 1 gen agy -->"
 assert_eq "$(LC_ALL=C grep -ac "^$(printf '\036')" "$TRICKY_DIR/stream-crit.log")" "2"
+
+# 4b. Records carry tokens after the role (#53). One stream mixing records
+#     without ids, with ids, with unknown tokens and malformed end records: the
+#     viewer draws each header, reports each failed attempt once, and drops
+#     only framed lines it cannot read. A model line that merely looks like a
+#     marker with extra words is model text and stays visible.
+CRAFT_DIR="$TMP/view-log/crafted/debate-20260101-000002"
+mkdir -p "$CRAFT_DIR"
+ln -s debate-20260101-000002 "$TMP/view-log/crafted/latest-debate"
+{
+  printf '\036<!-- debate-round: 1 gen agy -->\nLEGACY-BODY\n\036<!-- debate-round-end: 1 gen rc=3 -->\n'
+  printf '\036<!-- debate-round: 1 gen agy id=9.1 -->\nID-BODY\n\036<!-- debate-round-end: 1 gen rc=4 id=9.1 -->\n'
+  printf '\036<!-- debate-round: 2 gen codex id=9.2 future=x -->\nFUTURE-BODY\n'
+  printf '\036<!-- debate-round-end: 2 gen id=9.2 rc=6 future=x -->\n'
+  printf '\036<!-- debate-round: 3 gen id=9.3 -->\nNO-MODEL-BODY\n'
+  printf '<!-- debate-round: 2 crit example extra words -->\n'
+  printf '<!-- debate-round: 2 crit x -->\n'
+  for bad in "id=9.3" "rc= id=9.3" "rc=1x id=9.3" "rc=7 rc=8 id=9.3" "rc=7 rc=x id=9.3" "rc=x rc=7 id=9.3"; do
+    printf '\036<!-- debate-round-end: 3 gen %s -->\n' "$bad"
+  done
+  printf '\036<!-- debate-round-end: 3 gen rc=0 id=9.3 -->\nCRAFT-END\n'
+} > "$CRAFT_DIR/stream-gen.log"
+# check_crafted OUT [VAR=value...]: view the crafted stream and check it.
+check_crafted() {
+  local out="$1" body
+  : > "$out"
+  view gen crafted "$@"
+  wait_count "$out" 'CRAFT-END' 1
+  stop_tail
+  assert_eq "$(count "$out" 'Round 1 · Generator · agy')" "2"
+  assert_eq "$(count "$out" 'Round 2 · Generator · codex')" "1"
+  assert_eq "$(count "$out" 'Round 3 · Generator')" "1"
+  assert_eq "$(count "$out" 'Round 3 · Generator · ')" "0"
+  assert_eq "$(grep -ao 'attempt failed (rc=[^)]*)' "$out" | tr '\n' ' ')" \
+    "attempt failed (rc=3) attempt failed (rc=4) attempt failed (rc=6) "
+  assert_eq "$(count "$out" 'example extra words')" "1"
+  assert_eq "$(count "$out" '2 crit x')" "0"
+  assert_eq "$(count "$out" 'id=')" "0"
+  assert_eq "$(LC_ALL=C grep -ac "$(printf '\036')" "$out" || true)" "0"
+  for body in LEGACY-BODY ID-BODY FUTURE-BODY NO-MODEL-BODY; do
+    assert_eq "$(count "$out" "$body")" "1"
+  done
+}
+check_crafted "$TMP/view-crafted.out"
 
 # 5. A new debate: the pane stops the old one before announcing the new one, and
 #    shows each debate's content exactly once.
@@ -1043,6 +1125,16 @@ view crit done-continue "$TMP/view-mawk.out" PATH="$TMP/fake-mawk:$PATH"
 wait_count "$TMP/view-mawk.out" 'Round 4 · Critic' 1
 stop_tail
 assert_eq "$(count "$TMP/view-mawk.out" 'Round 2 · Critic')" "1"
+check_crafted "$TMP/view-crafted-fake-mawk.out" PATH="$TMP/fake-mawk:$PATH"
+# The fake only checks line-by-line reading; the parsing runs on the host awk.
+# Parse the crafted stream with each other awk installed too.
+for other_awk in mawk gawk nawk; do
+  other_path="$(command -v "$other_awk" 2>/dev/null || true)"
+  [ -n "$other_path" ] || continue
+  mkdir -p "$TMP/awk-$other_awk"
+  ln -sf "$other_path" "$TMP/awk-$other_awk/awk"
+  check_crafted "$TMP/view-crafted-$other_awk.out" PATH="$TMP/awk-$other_awk:$PATH"
+done
 
 # 8. A short first line reaches the stream while the model is still running
 #    (sed must not block-buffer; #42).
