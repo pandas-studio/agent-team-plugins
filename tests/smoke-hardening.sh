@@ -1023,6 +1023,116 @@ assert_eq "$(ordering_case after)" "rc=143 exit-trap=1 records=<!-- debate-round
 assert_eq "$(ordering_case before)" "rc=143 exit-trap=1 records=<!-- debate-round: 1 gen agy id=7.0 -->|"
 assert_eq "$(ordering_case fail)" "rc=1 exit-trap=1 records=<!-- debate-round: 1 gen agy id=7.0 -->|<!-- debate-round: 1 gen|"
 
+# 3h. wait_attempt waits for an attempt in short steps (#57). bash 3.2's `wait`
+#     can miss a trapped signal that arrives as it starts and then run the trap
+#     only when the child exits, so debate.sh outlived a TERM by a whole attempt.
+#     The helper still returns the attempt's status, so errexit is unchanged, and
+#     stop_attempt cleans up the step as well as the attempt.
+# The functions are extracted once: 400 trials re-running awk over debate.sh cost
+# ~20 s of the suite.
+awk '$0 ~ /^(attempt_running|wait_attempt|stop_attempt)\(\) \{$/ { f = 1 } f { print } f && $0 == "}" { f = 0 }' \
+  "$ROOT/debate-conductor/bin/debate.sh" > "$TMP/wait57-funcs.sh"
+assert_eq "$(grep -c '^wait_attempt() {\|^attempt_running() {\|^stop_attempt() {' "$TMP/wait57-funcs.sh")" "3"
+cat > "$TMP/wait57.sh" <<'WAIT57'
+set -euo pipefail
+. "$1"
+ATTEMPT_WAIT_STEP=0.2
+case "$2" in
+  status0)  ( exit 0 ) & wait_attempt "$!"; echo "rc=$?" ;;
+  status7)  ( exit 7 ) & rc=0; wait_attempt "$!" || rc=$?; echo "rc=$rc" ;;
+  reaped)   ( exit 5 ) & pid=$!; sleep 0.5; rc=0; wait_attempt "$pid" || rc=$?; echo "rc=$rc" ;;
+  errexit)  ( exit 7 ) & wait_attempt "$!"; echo "not reached" ;;
+  race)     trap 'exit 143' TERM
+            ( sleep 3 ) <&0 &
+            pid=$!
+            kill -s TERM $$ &
+            wait_attempt "$pid"
+            exit 0 ;;
+  cleanup)  trap 'stop_attempt; exit 143' TERM
+            ( sleep 30 ) <&0 &
+            wait_attempt "$!" ;;
+esac
+WAIT57
+wait57() { /bin/bash "$TMP/wait57.sh" "$TMP/wait57-funcs.sh" "$1" 2>&1; }
+assert_eq "$(wait57 status0)" "rc=0"
+assert_eq "$(wait57 status7)" "rc=7"
+# reaped runs in the python driver below, with a timeout: a liveness regression
+# would hang it here instead of failing.
+assert_eq "$(wait57 errexit; echo "exit=$?")" "exit=7"
+# Cleanup and bounded latency, timed outside the shell under test: the parent
+# sends TERM only once a sleep step is actually running, and inspects the
+# process group before its own safety-net kill.
+assert_eq "$(python3 - "$ROOT" "$TMP" <<'PYWAIT'
+import os, platform, signal, subprocess, sys, time
+root, tmp = sys.argv[1:3]
+def trial(case, timeout=10):
+    p = subprocess.Popen(["/bin/bash", f"{tmp}/wait57.sh", f"{tmp}/wait57-funcs.sh", case],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                         text=True, start_new_session=True)
+    try:
+        out, _ = p.communicate(timeout=timeout)
+        rc = p.returncode
+    except subprocess.TimeoutExpired:
+        out, rc = "", "timeout"
+    try:
+        os.killpg(p.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    return out.strip(), rc
+def group(pid):
+    out = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,command="], capture_output=True, text=True).stdout
+    return [l for l in out.splitlines() if l.split()[1] == str(pid)]
+# 1. TERM while a step is running: the trap runs stop_attempt, and nothing of the
+#    attempt or the step is left behind.
+p = subprocess.Popen(["/bin/bash", f"{tmp}/wait57.sh", f"{tmp}/wait57-funcs.sh", "cleanup"],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+stepped = False
+for _ in range(200):
+    if any(" sleep 0.2" in l for l in group(p.pid)):
+        stepped = True
+        break
+    time.sleep(0.05)
+os.kill(p.pid, signal.SIGTERM)
+try:
+    rc = p.wait(timeout=8)
+except subprocess.TimeoutExpired:
+    rc = "timeout"
+time.sleep(0.3)
+left = len(group(p.pid))
+try:
+    os.killpg(p.pid, signal.SIGKILL)
+except (ProcessLookupError, PermissionError):
+    pass
+# 2. An attempt that exited and was reaped before the call: its status, no hang.
+reaped = trial("reaped", timeout=10)[0]
+# 3. Isolated trials: a TERM racing the start of the wait must never delay the exit
+#    by the length of the attempt. Measured 5/400 late with a plain `wait`. The race
+#    is a bash 3.2 one (0/300 on 5.2), and a loaded Linux runner could exceed the
+#    threshold without it, so only macOS runs the full batch and asserts latency.
+strict = platform.system() == "Darwin"
+late = 0
+codes = set()
+for _ in range(400 if strict else 25):
+    t0 = time.monotonic()
+    q = subprocess.Popen(["/bin/bash", f"{tmp}/wait57.sh", f"{tmp}/wait57-funcs.sh", "race"],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    try:
+        codes.add(q.wait(timeout=10))
+    except subprocess.TimeoutExpired:
+        codes.add("timeout")
+    if strict and time.monotonic() - t0 >= 1.5:
+        late += 1
+    try:
+        os.killpg(q.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+print(f"stepped={int(stepped)} rc={rc} left={left} reaped=[{reaped}] "
+      f"codes={sorted(str(c) for c in codes)} late={late}")
+PYWAIT
+)" "stepped=1 rc=143 left=0 reaped=[rc=5] codes=['143'] late=0"
+
 # 4. Model text cannot draw a banner or move text: a quoted marker is dropped,
 #    \x1e is removed, and an answer without a final newline does not swallow the
 #    next attempt's header.

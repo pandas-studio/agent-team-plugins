@@ -802,6 +802,37 @@ stop_attempt() {
   done
 }
 
+# ATTEMPT_WAIT_STEP: how long one step of wait_attempt sleeps. A fractional
+# sleep is not POSIX, so it is probed once (macOS, GNU and busybox all take it).
+ATTEMPT_WAIT_STEP=0.5
+sleep 0.01 2>/dev/null || ATTEMPT_WAIT_STEP=1
+
+# attempt_running PID: is that job still running? `kill -0` is not used: once the
+# attempt is reaped its PID can be reused by an unrelated process, and the wait
+# below would then follow that one. Read like stop_attempt reads `jobs -p`.
+attempt_running() {
+  case " $(echo $(jobs -rp)) " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# wait_attempt PID: wait for the attempt pipeline and return its status.
+# bash 3.2 (the macOS /bin/bash) can miss a trapped signal that arrives as `wait`
+# starts, and then runs the trap only once the child exits — debate.sh outlived a
+# TERM by the length of the whole attempt (#57). Waiting in short sleep steps
+# keeps that delay to about one step: measured 0/3000 steps late against 5/400
+# for a plain wait, not proved from bash internals. A stopped attempt is waited
+# on as before. The final `wait` takes the attempt's status, so a failed attempt
+# still stops debate.sh through errexit.
+wait_attempt() {
+  while attempt_running "$1"; do
+    sleep "$ATTEMPT_WAIT_STEP" &
+    wait "$!"
+  done
+  wait "$1"
+}
+
 # on_signal SIG STATUS: stop the running attempt, record it with the
 # conventional status, then die from the same signal. Exiting normally instead would let a
 # bash caller (e.g. ralph-debate.sh's loop) carry on after Ctrl-C, because
@@ -865,7 +896,7 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
       ) <&0 &
     fi
     # Unconditional, so a failed attempt stops debate.sh through errexit.
-    wait "$!"
+    wait_attempt "$!"
     complete_attempt "$r" gen "$OUT"
   else
     CRIT_MODEL=$(round_model "$r" crit)
@@ -881,7 +912,7 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
         "$SCRIPT_DIR/../lib/ask-critic.sh" $(crit_args "$CRIT_MODEL") --with-research "$PREV_GEN" "Topic: $TOPIC. Critique the latest Generator draft adversarially. Focus on weaknesses, missed cases, and better alternatives."
       } | strip_cli_banner | tee "$OUT" | tee -a "$DEBATE_DIR/stream-crit.log"
     ) <&0 &
-    wait "$!"
+    wait_attempt "$!"
     complete_attempt "$r" crit "$OUT"
     # Convergence check runs only on Critic (even) rounds: a STRENGTHEN verdict
     # means the position is sound, so stop before spending another gen/crit pair.
