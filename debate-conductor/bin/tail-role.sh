@@ -159,9 +159,10 @@ while true; do
   # displayed exactly once per debate.
   #
   # awk:
-  #   - a line starting with \x1e is a header written by debate.sh; it becomes
-  #     a colored 3-line round banner. Model output cannot contain \x1e
-  #     (debate.sh deletes it), so model text cannot draw a banner.
+  #   - a line starting with \x1e is a record written by debate.sh: an attempt
+  #     header becomes a colored 3-line round banner; an end record with a
+  #     nonzero rc becomes an "attempt failed" line. Model output cannot contain
+  #     \x1e (debate.sh deletes it), so model text cannot forge either.
   #   - plain `<!-- debate-round: ... -->` lines (the round file's own marker,
   #     copied into the stream, or one quoted by a model) are dropped
   #   - colors `Verdict: STRENGTHEN|RECONSIDER|OVERTURN` lines (critic only)
@@ -178,6 +179,14 @@ while true; do
           -v HDR="$RS_BYTE" '
         function is_marker(line) {
           return line ~ /^<!-- debate-round: [0-9]+ (gen|crit)( [^ ]+)? -->[[:space:]]*$/
+        }
+        index($0, HDR) == 1 && substr($0, 2) ~ /^<!-- debate-round-end: [0-9]+ (gen|crit) rc=[0-9]+ -->$/ {
+          # End record: say so only when the attempt failed.
+          rc = substr($0, 2)
+          sub(/^.* rc=/, "", rc)
+          sub(/ -->$/, "", rc)
+          if (rc != "0") { printf "\n%s── attempt failed (rc=%s) ──%s\n", YELLOW, rc, RESET; fflush() }
+          next
         }
         index($0, HDR) == 1 {
           payload = substr($0, 2)
