@@ -150,8 +150,10 @@ claude --plugin-dir ./agent-team-plugins/dev-trio
    Or use the wrapping skills:
    ```
    /dev-trio:research <question>
-   /dev-trio:review  [focus] [--with-research <file>] [--with-spec <file>]
+   /dev-trio:review  [focus] [--with-research <file>] [--with-spec <file>] [--with-context <file>]
    ```
+
+   **Reviewers may run without network access** (Codex's sandbox disables it by default), so the PM supplies repository facts. For a PR, resolve the base/head commits with `gh pr view` first and pass them as `--with-context <file>` with a `<merge-base>..<head>` range focus; a bare `"pr 55"` focus leaves a sandboxed reviewer unable to identify the commits. When a reviewer still needs a remote fact it returns a `## NEED CONTEXT` block of read-only commands; the PM runs them, appends the output to the context file, and re-reviews once with every original flag.
 
 ## Skills
 
@@ -159,7 +161,7 @@ claude --plugin-dir ./agent-team-plugins/dev-trio
 | :--- | :--- |
 | `/dev-trio:bootstrap` | One-time per session: splits the current tmux pane into 3 and starts the agy/codex dashboards. |
 | `/dev-trio:research <question>` | One-shot Antigravity lookup. Streaming output lands in the top-right pane; chat-side surfaces the lead + cited URLs. |
-| `/dev-trio:review [focus] [--with-research <file>] [--with-spec <file>]` | One-shot Codex review (default = git-uncommitted scope). Chat-side surfaces verdict (`SHIP / NEEDS-FIX / DISCUSS`) + Blocker/Major counts. Handles `## NEED RESEARCH` blocks. |
+| `/dev-trio:review [focus] [--with-research <file>] [--with-spec <file>] [--with-context <file>]` | One-shot Codex review (default = git-uncommitted scope). Chat-side surfaces verdict (`SHIP / NEEDS-FIX / DISCUSS`) + Blocker/Major counts. Handles `## NEED RESEARCH` (via Antigravity) and `## NEED CONTEXT` (via the PM's read-only `gh`/`git`) blocks. |
 | `/dev-trio:install-pm` | Writes/upgrades the PM orchestration policy in the workspace's `CLAUDE.md` (idempotent, marker-guarded). |
 
 Claude skills carry `disable-model-invocation: true`; Codex skills use

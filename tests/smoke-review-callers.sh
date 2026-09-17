@@ -32,6 +32,7 @@ STUB
 cat > "$TMP/researcher" <<'STUB'
 #!/usr/bin/env bash
 printf 'research\n' >> "$REVIEW_TEST_RESEARCH"
+printf '%s\n' "$2" >> "$REVIEW_TEST_RESEARCH.prompts"
 if [ "$REVIEW_TEST_CASE" = research-denied ]; then
   # agy print mode after a soft-denied tool: guidance on stderr, exit 0.
   echo 'no output produced — tool auto-denied' >&2
@@ -54,7 +55,9 @@ while [ $# -gt 0 ]; do
 done
 case "$REVIEW_TEST_CASE:$count" in
   malformed:*) printf '## Verdict\n\nSHIP — deliberately rejected\n' > "$final" ;;
-  retry:1|research-denied:1) printf '## Verdict\nNEEDS-FIX — need evidence\n## NEED RESEARCH\n- verify the API\n' > "$final" ;;
+  # NEED CONTEXT after NEED RESEARCH: the drivers' research extractors must stop
+  # at it, so repository commands never reach the researcher as questions.
+  retry:1|research-denied:1) printf '## Verdict\nNEEDS-FIX — need evidence\n## NEED RESEARCH\n- verify the API\n## NEED CONTEXT\n- `gh pr view 9 --json headRefOid`\n' > "$final" ;;
   *) printf '## Verdict\nSHIP — canonical result\n## What I checked\nVerdict: NEEDS-FIX\n' > "$final" ;;
 esac
 if [ "$REVIEW_TEST_CASE" = failed ]; then
@@ -129,6 +132,8 @@ for plugin in ralph-trio spec-trio; do
       fi
     elif [ "$scenario" = retry ]; then
       check "$plugin real research request runs once" test "$(wc -l < "$case_root/research" | tr -d ' ')" -eq 1
+      check "$plugin research question dispatched" grep -q 'verify the API' "$case_root/research.prompts"
+      check "$plugin NEED CONTEXT not sent as research" sh -c '! grep -q "gh pr view" "$1"' _ "$case_root/research.prompts"
     else
       check "$plugin never dispatches stale/failed research" test ! -e "$case_root/research"
     fi

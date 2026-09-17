@@ -17,11 +17,18 @@ DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/ask-codex.sh" "<focus>" </dev/null
 ```
 
 Omit focus for the full working tree, including untracked files. Preserve
-`--with-research <file>`, `--with-spec <file>`, and `--no-memories` as separate
-quoted argv entries when requested. Paths can contain spaces. Do not split a
+`--with-research <file>`, `--with-spec <file>`, `--with-context <file>`, and
+`--no-memories` as separate quoted argv entries when requested. Paths can contain spaces. Do not split a
 raw argument string on whitespace or interpolate it as executable shell text.
 Explicit role settings still win; `--no-memories` is valid only with a Codex
 reviewer, so a Claude reviewer will reject it before inference.
+
+For a pull request, never pass a bare `pr N` focus: the reviewer may lack
+network access and cannot tell which commits the PR contains. Run
+`gh pr view N --json number,url,title,baseRefName,baseRefOid,headRefName,headRefOid`
+yourself, save its output as a context file, confirm both commits exist locally
+(ask before fetching; `pull/N/head` works for fork PRs), and dispatch with
+`--with-context <file>` and a `<merge-base>..<headRefOid>` range focus.
 
 Capture this invocation's exit code and the exact log/final/result paths from
 its last stderr line. Read that exact `.review.json`: it is the parsed result
@@ -41,8 +48,13 @@ Report the actual reviewer model, verdict, substantive Blocker/Major findings,
 and the result artifact link. The `.final.md` of the same successful
 invocation is supporting text only. For `NEED RESEARCH`, obtain the requested evidence
 with the [research skill](../research/SKILL.md) within the user's authorized
-scope, then repeat the original review with the same focus and spec plus the
-new research file. Fix findings only within the authorized task.
+scope. For `NEED CONTEXT`, run only the read-only commands it lists (`gh pr
+view/diff/checks`, `gh issue view`, `gh run view`, `git log/show`; ask before
+`git fetch` or anything that changes state) and append their outputs to the
+context file. Then repeat the review once with the same focus and every
+original flag; attachments are cumulative (one file per kind holding the old
+and new evidence). If the PR's head or base moved meanwhile, start a new review
+instead of a retry. Fix findings only within the authorized task.
 
 Before a third round on the same function/file, check whether simplifying or
 replacing that implementation would address the repeated findings. Preserve

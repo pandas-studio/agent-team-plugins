@@ -14,7 +14,12 @@ skill's location, not a saved plugin-cache path or an assumed PATH entry.
   they do not invoke one another or recursively orchestrate the team.
 - Review the returned verdict and findings, then address issues within the
   user's authorized scope. If `NEED RESEARCH` requests evidence, obtain it
-  through research and repeat the review with the same focus and attachments.
+  through research; if `NEED CONTEXT` lists repository commands, run the
+  read-only ones yourself. Repeat the review once with the same focus and every
+  attachment, merged cumulatively.
+- For a pull request, resolve its base/head commits with `gh pr view` before
+  dispatch and pass them as a context file plus a range focus; the reviewer may
+  have no network access.
 - Report the actual model, exit status, verdict, and artifact paths. A failed
   invocation or missing final response is not a successful review. Do not use
   stale `latest` artifacts as evidence for a new invocation.
