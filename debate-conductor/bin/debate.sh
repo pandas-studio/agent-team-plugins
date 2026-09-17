@@ -647,9 +647,11 @@ stream_record() {
   printf '%s%s\n' "$RS_BYTE" "$2" >> "$stream"
 }
 
-# stream_header ROUND ROLE MODEL: start an attempt in that role's stream.
+# stream_header ROUND ROLE MODEL ID: start an attempt in that role's stream.
+# Records are `R ROLE` then space-separated tokens; `id=` names the attempt, so
+# a retry of the same round and model is still told apart (#53).
 stream_header() {
-  stream_record "$2" "<!-- debate-round: $1 $2 $3 -->"
+  stream_record "$2" "<!-- debate-round: $1 $2 $3 id=$4 -->"
 }
 
 # An attempt's pipeline runs under errexit and pipefail in a background subshell
@@ -667,14 +669,24 @@ stream_header() {
 CUR_ATTEMPT_ROUND=""
 CUR_ATTEMPT_ROLE=""
 CUR_ATTEMPT_DONE=""
+CUR_ATTEMPT_ID=""
+# Attempt ids are ATTEMPT_RUN.N: this run's PID and start time, then a counter,
+# so a /continue appending to the same streams does not reuse them.
+ATTEMPT_RUN="$$.$(date +%s)"
+ATTEMPT_SEQ=0
 
 # begin_attempt ROUND ROLE MODEL OUT
 # A signal after the header is written but before the attempt is registered
 # leaves the header without an end record (#52).
+# CUR_ATTEMPT_ROLE is set last: it is what makes the traps record the attempt.
 begin_attempt() {
-  stream_header "$1" "$2" "$3"
+  local id
+  ATTEMPT_SEQ=$((ATTEMPT_SEQ + 1))
+  id="$ATTEMPT_RUN.$ATTEMPT_SEQ"
+  stream_header "$1" "$2" "$3" "$id"
   CUR_ATTEMPT_ROUND="$1"
   CUR_ATTEMPT_DONE="$(round_done_file "$4")"
+  CUR_ATTEMPT_ID="$id"
   CUR_ATTEMPT_ROLE="$2"
 }
 
@@ -691,33 +703,34 @@ complete_attempt() {
 # through it (#50), so it decides from what is on disk:
 #   - once `.done` exists the attempt completed: a record written from here on
 #     says rc=0, whatever RC is (debate.sh still dies from the signal);
-#   - when the role stream already ends with a complete end record for this
-#     round and role, it is not written again. The attempt's header was written
-#     before it was registered, so an earlier attempt's record cannot be last.
+#   - when the role stream already ends with this attempt's own end record
+#     (its id, one numeric rc), it is not written again. A record of another
+#     attempt, or one without an id, does not count.
 # Stream records stay best effort: a stream that cannot be read is not written
 # to (rather than risk a second record), and a failed write is ignored.
 record_attempt_end() {
-  local rc="$1" role="$CUR_ATTEMPT_ROLE" stream last prefix code
+  local rc="$1" role="$CUR_ATTEMPT_ROLE" stream last prefix suffix code
   [ -n "$role" ] || return 0
   [ ! -e "$CUR_ATTEMPT_DONE" ] || rc=0
   stream="$DEBATE_DIR/stream-$role.log"
   prefix="$RS_BYTE<!-- debate-round-end: $CUR_ATTEMPT_ROUND $role rc="
+  suffix=" id=$CUR_ATTEMPT_ID -->"
   last=""
   if [ -e "$stream" ] && ! last="$(tail -n 1 "$stream")"; then
     CUR_ATTEMPT_ROLE=""
     return 0
   fi
   case "$last" in
-    "$prefix"*" -->")
+    "$prefix"*"$suffix")
       code="${last#"$prefix"}"
-      code="${code%" -->"}"
+      code="${code%"$suffix"}"
       case "$code" in
         ""|*[!0-9]*) ;;
         *) CUR_ATTEMPT_ROLE=""; return 0 ;;
       esac
       ;;
   esac
-  stream_record "$role" "<!-- debate-round-end: $CUR_ATTEMPT_ROUND $role rc=$rc -->" || true
+  stream_record "$role" "<!-- debate-round-end: $CUR_ATTEMPT_ROUND $role rc=$rc id=$CUR_ATTEMPT_ID -->" || true
   CUR_ATTEMPT_ROLE=""
 }
 trap 'record_attempt_end "$?"' EXIT

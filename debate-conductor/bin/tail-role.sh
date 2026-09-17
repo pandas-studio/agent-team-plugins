@@ -177,25 +177,35 @@ while true; do
           -v RED="$RED" \
           -v BORDER="$BORDER" \
           -v HDR="$RS_BYTE" '
+        # A round file marker, as copied into the stream or quoted by a model.
         function is_marker(line) {
           return line ~ /^<!-- debate-round: [0-9]+ (gen|crit)( [^ ]+)? -->[[:space:]]*$/
         }
-        index($0, HDR) == 1 && substr($0, 2) ~ /^<!-- debate-round-end: [0-9]+ (gen|crit) rc=[0-9]+ -->$/ {
-          # End record: say so only when the attempt failed.
-          rc = substr($0, 2)
-          sub(/^.* rc=/, "", rc)
-          sub(/ -->$/, "", rc)
-          if (rc != "0") { printf "\n%s── attempt failed (rc=%s) ──%s\n", YELLOW, rc, RESET; fflush() }
+        # Records written by debate.sh are `R ROLE` then space-separated tokens
+        # (MODEL and id= in headers, rc= and id= in end records). Tokens this
+        # viewer does not know are ignored (#53).
+        index($0, HDR) == 1 && substr($0, 2) ~ /^<!-- debate-round-end: [0-9]+ (gen|crit)( [^ ]+)+ -->$/ {
+          # End record: say so only when the attempt failed. It needs exactly
+          # one rc= token, and a numeric one.
+          payload = substr($0, 2)
+          sub(/^<!-- debate-round-end: /, "", payload)
+          sub(/ -->$/, "", payload)
+          n = split(payload, parts, " ")
+          rc = ""
+          rcs = 0
+          for (i = 3; i <= n; i++)
+            if (parts[i] ~ /^rc=/) { rcs++; rc = substr(parts[i], 4) }
+          if (rcs == 1 && rc ~ /^[0-9]+$/ && rc != "0") { printf "\n%s── attempt failed (rc=%s) ──%s\n", YELLOW, rc, RESET; fflush() }
           next
         }
         index($0, HDR) == 1 {
           payload = substr($0, 2)
-          if (!is_marker(payload)) next
+          if (payload !~ /^<!-- debate-round: [0-9]+ (gen|crit)( [^ ]+)* -->[[:space:]]*$/) next
           sub(/^<!-- debate-round: /, "", payload)
           sub(/ -->[[:space:]]*$/,  "", payload)
           n = split(payload, parts, " ")
           m_role  = (parts[2] == "gen") ? "Generator" : "Critic"
-          m_model = (n >= 3) ? parts[3] : ""
+          m_model = (n >= 3 && parts[3] !~ /=/) ? parts[3] : ""
           printf "\n%s%s%s\n", ROLE_COLOR, BORDER, RESET
           if (m_model != "")
             printf "%s  Round %s · %s · %s%s\n", ROLE_COLOR, parts[1], m_role, m_model, RESET
