@@ -563,11 +563,13 @@ print_marker() {
 # final output line is the verdict. /continue's LAST_ROUND scans these
 # sidecars; crash/CLI-failure rounds leave the .md but no .done, so resume
 # happens *from* that round, not after it.
+# round_done_file OUT: the `.done` sidecar of round file OUT.
+round_done_file() {
+  local base="${1##*/}"
+  printf '%s/.%s.done' "${1%/*}" "${base%.md}"
+}
 write_round_end() {
-  local out_file="$2"
-  local base="${out_file##*/}"
-  local dir="${out_file%/*}"
-  touch "$dir/.${base%.md}.done"
+  touch "$(round_done_file "$2")"
 }
 
 # Convergence parser (--until-converged). Echoes the Critic's verdict token by
@@ -664,11 +666,15 @@ stream_header() {
 # means none.
 CUR_ATTEMPT_ROUND=""
 CUR_ATTEMPT_ROLE=""
+CUR_ATTEMPT_DONE=""
 
-# begin_attempt ROUND ROLE MODEL
+# begin_attempt ROUND ROLE MODEL OUT
+# A signal after the header is written but before the attempt is registered
+# leaves the header without an end record (#52).
 begin_attempt() {
   stream_header "$1" "$2" "$3"
   CUR_ATTEMPT_ROUND="$1"
+  CUR_ATTEMPT_DONE="$(round_done_file "$4")"
   CUR_ATTEMPT_ROLE="$2"
 }
 
@@ -677,16 +683,42 @@ begin_attempt() {
 # End records go to the stream only; round files keep the verdict last.
 complete_attempt() {
   write_round_end "$1" "$3"
-  CUR_ATTEMPT_ROLE=""
-  stream_record "$2" "<!-- debate-round-end: $1 $2 rc=0 -->" || true
+  record_attempt_end 0
 }
 
 # record_attempt_end RC: write the end record for the attempt in progress, once.
+# A signal can run this from on_signal while complete_attempt is part way
+# through it (#50), so it decides from what is on disk:
+#   - once `.done` exists the attempt completed: a record written from here on
+#     says rc=0, whatever RC is (debate.sh still dies from the signal);
+#   - when the role stream already ends with a complete end record for this
+#     round and role, it is not written again. The attempt's header was written
+#     before it was registered, so an earlier attempt's record cannot be last.
+# Stream records stay best effort: a stream that cannot be read is not written
+# to (rather than risk a second record), and a failed write is ignored.
 record_attempt_end() {
-  if [ -n "$CUR_ATTEMPT_ROLE" ]; then
-    stream_record "$CUR_ATTEMPT_ROLE" "<!-- debate-round-end: $CUR_ATTEMPT_ROUND $CUR_ATTEMPT_ROLE rc=$1 -->" || true
+  local rc="$1" role="$CUR_ATTEMPT_ROLE" stream last prefix code
+  [ -n "$role" ] || return 0
+  [ ! -e "$CUR_ATTEMPT_DONE" ] || rc=0
+  stream="$DEBATE_DIR/stream-$role.log"
+  prefix="$RS_BYTE<!-- debate-round-end: $CUR_ATTEMPT_ROUND $role rc="
+  last=""
+  if [ -e "$stream" ] && ! last="$(tail -n 1 "$stream")"; then
     CUR_ATTEMPT_ROLE=""
+    return 0
   fi
+  case "$last" in
+    "$prefix"*" -->")
+      code="${last#"$prefix"}"
+      code="${code%" -->"}"
+      case "$code" in
+        ""|*[!0-9]*) ;;
+        *) CUR_ATTEMPT_ROLE=""; return 0 ;;
+      esac
+      ;;
+  esac
+  stream_record "$role" "<!-- debate-round-end: $CUR_ATTEMPT_ROUND $role rc=$rc -->" || true
+  CUR_ATTEMPT_ROLE=""
 }
 trap 'record_attempt_end "$?"' EXIT
 # stop_attempt: terminate the running attempt and every process it started, as
@@ -769,7 +801,7 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
   if [ $((r % 2)) -eq 1 ]; then
     GEN_MODEL=$(round_model "$r" gen)
     OUT=$(round_file "$r" gen "$GEN_MODEL")
-    begin_attempt "$r" gen "$GEN_MODEL"
+    begin_attempt "$r" gen "$GEN_MODEL" "$OUT"
     [ "$ROTATE" = "1" ] && print_header "$r" "Generator" "$GEN_MODEL" || print_header "$r" "Generator"
     # shellcheck disable=SC2046  # word-splitting on gen_args output is intentional
     if [ "$r" -eq 1 ]; then
@@ -812,7 +844,7 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
   else
     CRIT_MODEL=$(round_model "$r" crit)
     OUT=$(round_file "$r" crit "$CRIT_MODEL")
-    begin_attempt "$r" crit "$CRIT_MODEL"
+    begin_attempt "$r" crit "$CRIT_MODEL" "$OUT"
     PREV_GEN_MODEL=$(round_model "$((r-1))" gen)
     PREV_GEN=$(round_file "$((r-1))" gen "$PREV_GEN_MODEL")
     [ "$ROTATE" = "1" ] && print_header "$r" "Critic" "$CRIT_MODEL" || print_header "$r" "Critic"
