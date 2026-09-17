@@ -650,13 +650,18 @@ stream_header() {
   stream_record "$2" "<!-- debate-round: $1 $2 $3 -->"
 }
 
-# An attempt's pipeline runs in the foreground under errexit and pipefail, as
-# before: a failing command anywhere in it (the model, or a `cat` building its
-# prompt) stops debate.sh with that status, and Ctrl-C / TERM stop the whole
-# pipeline. The end record is therefore written by the EXIT trap from the exit
-# status, never by capturing the pipeline's status (`pipeline || rc=$?` would
-# turn off errexit inside it; running it in the background would make it ignore
-# SIGINT). CUR_ATTEMPT_* name the attempt in progress; empty means none.
+# An attempt's pipeline runs under errexit and pipefail in a background subshell
+# that debate.sh waits for at once: a failing command anywhere in it (the model,
+# or a `cat` building its prompt) makes `wait` fail with that status, and errexit
+# stops debate.sh. The end record is therefore written by the EXIT trap from the
+# exit status, never by capturing the pipeline's status (`pipeline || rc=$?`
+# would turn off errexit inside it). The pipeline is not in the foreground
+# because bash runs a trap only after a foreground pipeline ends, but at once
+# during `wait`: a signal sent to debate.sh's PID alone must stop the model now,
+# not when it finishes (#48). It stays in debate.sh's process group, so a signal
+# to the group (Ctrl-C, a supervisor's killpg, SIGKILL too) still reaches every
+# process of the attempt. CUR_ATTEMPT_* name the attempt in progress; empty
+# means none.
 CUR_ATTEMPT_ROUND=""
 CUR_ATTEMPT_ROLE=""
 
@@ -684,12 +689,68 @@ record_attempt_end() {
   fi
 }
 trap 'record_attempt_end "$?"' EXIT
-# on_signal SIG STATUS: record the interrupted attempt with the conventional
-# status, then die from the same signal. Exiting normally instead would let a
+# stop_attempt: terminate the running attempt and every process it started, as
+# far as they can be found. Background commands start with SIGINT ignored, so
+# they are always sent TERM. The attempt's processes are this shell's jobs that
+# are still its children, plus their descendants; each is stopped (SIGSTOP) as
+# it is found, so none forks or exits, and gets reparented out of reach, while
+# the tree is collected. Best effort: a process that exited before it was found
+# can leave children behind, and one that ignores TERM keeps running. Waits up
+# to about 2 s for the stopped processes to go. Needs ps (see below).
+stop_attempt() {
+  local roots table new tree="" i=0
+  # shellcheck disable=SC2046,SC2005  # one line of PIDs
+  roots="$(echo $(jobs -p))"
+  [ -n "$roots" ] || return 0
+  while [ "$i" -lt 50 ]; do
+    if ! table="$(ps -A -o pid= -o ppid= -o stat= 2>/dev/null)"; then
+      # Without ps nothing can be found: wait for the attempt to finish (the
+      # behavior before #48) rather than leave it writing after debate.sh exits.
+      # shellcheck disable=SC2086
+      [ -n "$tree" ] || { wait $roots 2>/dev/null || true; return 0; }
+      break
+    fi
+    new="$(printf '%s\n' "$table" | awk -v self="$$" -v roots="$roots" -v seen="$tree" '
+      BEGIN { n = split(roots, r, " "); m = split(seen, s, " "); for (i = 1; i <= m; i++) had[s[i]] = 1 }
+      { parent[$1] = $2; stat[$1] = $3; kids[$2] = kids[$2] " " $1 }
+      END {
+        q = 0
+        for (i = 1; i <= n; i++) if (parent[r[i]] == self) queue[++q] = r[i]
+        for (h = 1; h <= q; h++) {
+          p = queue[h]
+          if (stat[p] !~ /^Z/ && !(p in had)) printf "%s ", p
+          c = split(kids[p], k, " ")
+          for (j = 1; j <= c; j++) queue[++q] = k[j]
+        }
+      }')" || break
+    [ -n "$new" ] || break
+    # shellcheck disable=SC2086
+    kill -s STOP $new 2>/dev/null || true
+    tree="$tree $new"
+    i=$((i + 1))
+  done
+  [ -n "$tree" ] || return 0
+  # shellcheck disable=SC2086
+  kill -s TERM $tree 2>/dev/null || true
+  # shellcheck disable=SC2086
+  kill -s CONT $tree 2>/dev/null || true
+  # shellcheck disable=SC2086
+  wait $roots 2>/dev/null || true
+  i=0
+  # shellcheck disable=SC2086
+  while [ "$i" -lt 20 ] && ps -o stat= -p "$(echo $tree | tr ' ' ',')" 2>/dev/null | grep -qv '^Z'; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+}
+
+# on_signal SIG STATUS: stop the running attempt, record it with the
+# conventional status, then die from the same signal. Exiting normally instead would let a
 # bash caller (e.g. ralph-debate.sh's loop) carry on after Ctrl-C, because
 # bash only stops when its child was killed by SIGINT. Without these traps the
 # EXIT trap would see status 0 after TERM or HUP (measured).
 on_signal() {
+  stop_attempt || true
   record_attempt_end "$2"
   trap - "$1" EXIT
   kill -s "$1" "$$"
@@ -713,32 +774,40 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
     # shellcheck disable=SC2046  # word-splitting on gen_args output is intentional
     if [ "$r" -eq 1 ]; then
       if [ -n "$CONTEXT_BLOCK" ]; then
-        {
-          print_marker "$r" gen "$GEN_MODEL"
-          echo "$CONTEXT_BLOCK" | "$SCRIPT_DIR/../lib/ask-generator.sh" $(gen_args "$GEN_MODEL") "Topic: $TOPIC. Produce an initial substantive draft."
-        } | strip_cli_banner | tee "$OUT" | tee -a "$DEBATE_DIR/stream-gen.log"
+        (
+          {
+            print_marker "$r" gen "$GEN_MODEL"
+            echo "$CONTEXT_BLOCK" | "$SCRIPT_DIR/../lib/ask-generator.sh" $(gen_args "$GEN_MODEL") "Topic: $TOPIC. Produce an initial substantive draft."
+          } | strip_cli_banner | tee "$OUT" | tee -a "$DEBATE_DIR/stream-gen.log"
+        ) <&0 &
       else
-        {
-          print_marker "$r" gen "$GEN_MODEL"
-          "$SCRIPT_DIR/../lib/ask-generator.sh" $(gen_args "$GEN_MODEL") "Topic: $TOPIC. Produce an initial substantive draft."
-        } | strip_cli_banner | tee "$OUT" | tee -a "$DEBATE_DIR/stream-gen.log"
+        (
+          {
+            print_marker "$r" gen "$GEN_MODEL"
+            "$SCRIPT_DIR/../lib/ask-generator.sh" $(gen_args "$GEN_MODEL") "Topic: $TOPIC. Produce an initial substantive draft."
+          } | strip_cli_banner | tee "$OUT" | tee -a "$DEBATE_DIR/stream-gen.log"
+        ) <&0 &
       fi
     else
       PREV_GEN_MODEL=$(round_model "$((r-2))" gen)
       PREV_CRIT_MODEL=$(round_model "$((r-1))" crit)
       PREV_GEN=$(round_file "$((r-2))" gen "$PREV_GEN_MODEL")
       PREV_CRIT=$(round_file "$((r-1))" crit "$PREV_CRIT_MODEL")
-      {
-        print_marker "$r" gen "$GEN_MODEL"
+      (
         {
-          echo "## Your previous draft (round $((r-2)))"
-          cat "$PREV_GEN"
-          echo
-          echo "## Critic's feedback (round $((r-1)))"
-          cat "$PREV_CRIT"
-        } | "$SCRIPT_DIR/../lib/ask-generator.sh" $(gen_args "$GEN_MODEL") "Topic: $TOPIC. Revise your draft, addressing the critic's Blocker and Major findings directly. Quote the critic's claim, then state your response (accept / reject with reason / modify)."
-      } | strip_cli_banner | tee "$OUT" | tee -a "$DEBATE_DIR/stream-gen.log"
+          print_marker "$r" gen "$GEN_MODEL"
+          {
+            echo "## Your previous draft (round $((r-2)))"
+            cat "$PREV_GEN"
+            echo
+            echo "## Critic's feedback (round $((r-1)))"
+            cat "$PREV_CRIT"
+          } | "$SCRIPT_DIR/../lib/ask-generator.sh" $(gen_args "$GEN_MODEL") "Topic: $TOPIC. Revise your draft, addressing the critic's Blocker and Major findings directly. Quote the critic's claim, then state your response (accept / reject with reason / modify)."
+        } | strip_cli_banner | tee "$OUT" | tee -a "$DEBATE_DIR/stream-gen.log"
+      ) <&0 &
     fi
+    # Unconditional, so a failed attempt stops debate.sh through errexit.
+    wait "$!"
     complete_attempt "$r" gen "$OUT"
   else
     CRIT_MODEL=$(round_model "$r" crit)
@@ -748,10 +817,13 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
     PREV_GEN=$(round_file "$((r-1))" gen "$PREV_GEN_MODEL")
     [ "$ROTATE" = "1" ] && print_header "$r" "Critic" "$CRIT_MODEL" || print_header "$r" "Critic"
     # shellcheck disable=SC2046
-    {
-      print_marker "$r" crit "$CRIT_MODEL"
-      "$SCRIPT_DIR/../lib/ask-critic.sh" $(crit_args "$CRIT_MODEL") --with-research "$PREV_GEN" "Topic: $TOPIC. Critique the latest Generator draft adversarially. Focus on weaknesses, missed cases, and better alternatives."
-    } | strip_cli_banner | tee "$OUT" | tee -a "$DEBATE_DIR/stream-crit.log"
+    (
+      {
+        print_marker "$r" crit "$CRIT_MODEL"
+        "$SCRIPT_DIR/../lib/ask-critic.sh" $(crit_args "$CRIT_MODEL") --with-research "$PREV_GEN" "Topic: $TOPIC. Critique the latest Generator draft adversarially. Focus on weaknesses, missed cases, and better alternatives."
+      } | strip_cli_banner | tee "$OUT" | tee -a "$DEBATE_DIR/stream-crit.log"
+    ) <&0 &
+    wait "$!"
     complete_attempt "$r" crit "$OUT"
     # Convergence check runs only on Critic (even) rounds: a STRENGTHEN verdict
     # means the position is sound, so stop before spending another gen/crit pair.

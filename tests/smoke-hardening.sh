@@ -691,23 +691,31 @@ assert_eq "$(debate_in ctx-fail answer answer --continue-from "$CTX_DIR" -n 1)" 
 assert_fail test -e "$CTX_DIR/.round-3-gen.done"
 assert_eq "$(LC_ALL=C grep -ac "^$(printf '\036')<!-- debate-round-end: 3 gen rc=1 -->$" "$CTX_DIR/stream-gen.log")" "1"
 
-# 3c. INT, TERM and HUP to the debate's process group stop the whole attempt:
-#     nothing keeps writing to the stream, the end record carries 130 / 143 /
-#     129, the round is not marked done, and debate.sh dies from the signal
-#     (so a bash caller stops too). The last run wraps debate.sh in a bash
-#     loop like ralph-debate.sh's: Ctrl-C must stop the loop.
+# 3c. INT, TERM and HUP to the debate's process group, or to the debate.sh PID
+#     alone (#48), stop the whole attempt within seconds: the model process is
+#     gone, nothing keeps writing to the stream, the end record carries 130 /
+#     143 / 129, the round is not marked done, and debate.sh dies from the
+#     signal (so a bash caller stops too). The parent-INT run wraps debate.sh
+#     in a bash loop like ralph-debate.sh's: Ctrl-C must stop the loop. SIGKILL
+#     to the group cannot be trapped, but must still reach the model.
 cat > "$TMP/worker-cli/slow-stream" <<'STUB'
 #!/bin/sh
+[ -z "${STUB_PID_FILE:-}" ] || echo $$ > "$STUB_PID_FILE"
 i=0; while [ $i -lt 100 ]; do echo "SLOW line $i"; i=$((i+1)); sleep 0.1; done
 STUB
 chmod +x "$TMP/worker-cli/slow-stream"
-for sig in INT TERM HUP parent-INT; do
+for sig in INT TERM HUP parent-INT pid-INT pid-TERM pid-HUP KILL; do
   case "$sig" in
-    INT|parent-INT) status=130; signum=2 ;;
-    TERM) status=143; signum=15 ;;
-    HUP) status=129; signum=1 ;;
+    INT|parent-INT|pid-INT) status=130; signum=2 ;;
+    TERM|pid-TERM) status=143; signum=15 ;;
+    HUP|pid-HUP) status=129; signum=1 ;;
+    KILL) status=""; signum=9 ;;
   esac
-  expected="rc=-$signum grew=0 ends=1 <!-- debate-round-end: 1 gen rc=$status --> done=0 continued=0"
+  if [ "$sig" = KILL ]; then
+    expected="rc=-9 fast=1 model=gone grew=0 ends=0  done=0 continued=0"
+  else
+    expected="rc=-$signum fast=1 model=gone grew=0 ends=1 <!-- debate-round-end: 1 gen rc=$status --> done=0 continued=0"
+  fi
   assert_eq "$(python3 - "$ROOT" "$TMP" "$sig" <<'PYCASE'
 import glob, os, signal, subprocess, sys, time
 root, tmp, case = sys.argv[1:4]
@@ -715,9 +723,10 @@ sig = case.split("-")[-1]
 team = f"cancel-{case}"
 env = {k: v for k, v in os.environ.items()
        if k not in ("DEBATE_GENERATOR_MODEL", "DEBATE_CRITIC_MODEL", "DEBATE_PRIMARY_GEN", "DEBATE_CONDUCTOR_PM_HOST")}
+pid_file = f"{tmp}/{team}.model-pid"
 env.update(TMUX="", AGENT_TEAM=team, AGENT_TEAM_MODELS_CONFIG=f"{tmp}/no-models.json",
            DEBATE_LOG_DIR=f"{tmp}/view-log", GENERATOR_CLI=f"{tmp}/worker-cli/slow-stream",
-           CRITIC_CLI=f"{tmp}/worker-cli/answer")
+           CRITIC_CLI=f"{tmp}/worker-cli/answer", STUB_PID_FILE=pid_file)
 debate = [f"{root}/debate-conductor/bin/debate.sh", "-n", "2", f"smoke: {team}"]
 marker = f"{tmp}/{team}.continued"
 if case.startswith("parent-"):
@@ -739,8 +748,33 @@ if stream is None:
     os.killpg(p.pid, signal.SIGKILL)
     print("stream never showed SLOW line 5")
     sys.exit(0)
-os.killpg(p.pid, getattr(signal, "SIG" + sig))
-rc = p.wait()
+model = int(open(pid_file).read())
+started = time.time()
+if case.startswith("pid-"):
+    os.kill(p.pid, getattr(signal, "SIG" + sig))
+else:
+    os.killpg(p.pid, getattr(signal, "SIG" + sig))
+try:
+    rc = p.wait(timeout=8)
+except subprocess.TimeoutExpired:
+    os.killpg(p.pid, signal.SIGKILL)
+    rc = "timeout"
+# The model has 10 s of output left; stopping it must not wait for that.
+fast = int(time.time() - started < 3)
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True,
+                          text=True).stdout.strip()[:1] not in ("", "Z")
+for _ in range(30):
+    if not alive(model):
+        break
+    time.sleep(0.1)
+model_state = "alive" if alive(model) else "gone"
+if model_state == "alive":
+    os.kill(model, signal.SIGKILL)
 size = os.path.getsize(stream)
 time.sleep(1.5)
 grew = int(os.path.getsize(stream) != size)
@@ -748,10 +782,63 @@ ends = [l for l in open(stream, errors="replace") if l.startswith("\x1e<!-- deba
 done = int(os.path.exists(os.path.join(os.path.dirname(stream), ".round-1-gen.done")))
 continued = int(os.path.exists(marker))
 end = ends[0].rstrip(chr(10))[1:] if ends else ""
-print(f"rc={rc} grew={grew} ends={len(ends)} {end} done={done} continued={continued}")
+print(f"rc={rc} fast={fast} model={model_state} grew={grew} ends={len(ends)} {end} done={done} continued={continued}")
 PYCASE
 )" "$expected"
 done
+
+# 3d. A TERM to the debate.sh PID right after an attempt has completed (its
+#     rc=0 end record is written), while the next one may be starting: the completed round stays done with rc=0, every
+#     attempt header in a stream has exactly one end record, an interrupted
+#     attempt records 143 and is not done, and no model keeps running.
+assert_eq "$(python3 - "$ROOT" "$TMP" <<'PYRACE'
+import glob, os, signal, subprocess, sys, time
+root, tmp = sys.argv[1:3]
+team = "cancel-after-done"
+env = {k: v for k, v in os.environ.items()
+       if k not in ("DEBATE_GENERATOR_MODEL", "DEBATE_CRITIC_MODEL", "DEBATE_PRIMARY_GEN", "DEBATE_CONDUCTOR_PM_HOST")}
+pid_file = f"{tmp}/{team}.model-pid"
+env.update(TMUX="", AGENT_TEAM=team, AGENT_TEAM_MODELS_CONFIG=f"{tmp}/no-models.json",
+           DEBATE_LOG_DIR=f"{tmp}/view-log", GENERATOR_CLI=f"{tmp}/worker-cli/answer",
+           CRITIC_CLI=f"{tmp}/worker-cli/slow-stream", STUB_PID_FILE=pid_file)
+p = subprocess.Popen([f"{root}/debate-conductor/bin/debate.sh", "-n", "2", f"smoke: {team}"], cwd=tmp, env=env,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+# The rc=0 end record is the last step of a completed attempt (after .done).
+for _ in range(1000):
+    streams = glob.glob(f"{tmp}/view-log/{team}/debate-*/stream-gen.log")
+    if streams and "<!-- debate-round-end: 1 gen rc=0 -->" in open(streams[0], errors="replace").read():
+        break
+    time.sleep(0.01)
+os.kill(p.pid, signal.SIGTERM)
+try:
+    rc = p.wait(timeout=8)
+except subprocess.TimeoutExpired:
+    os.killpg(p.pid, signal.SIGKILL)
+    rc = "timeout"
+time.sleep(0.5)
+d = glob.glob(f"{tmp}/view-log/{team}/debate-*")[0]
+def records(role, kind):
+    return [l.rstrip(chr(10))[1:] for l in open(f"{d}/stream-{role}.log", errors="replace")
+            if l.startswith(f"\x1e<!-- debate-round{kind}: ")]
+gen_ends = records("gen", "-end")
+crit_heads = records("crit", "") if os.path.exists(f"{d}/stream-crit.log") else []
+crit_ends = records("crit", "-end") if crit_heads else []
+balanced = int(len(crit_heads) == len(crit_ends) and all(e.endswith(" rc=143 -->") for e in crit_ends))
+model = "gone"
+if os.path.exists(pid_file):
+    pid = int(open(pid_file).read())
+    try:
+        os.kill(pid, 0)
+        if subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()[:1] not in ("", "Z"):
+            model = "alive"
+            os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+print(f"rc={rc} gen={gen_ends} r1done={int(os.path.exists(f'{d}/.round-1-gen.done'))} "
+      f"crit-balanced={balanced} r2done={int(os.path.exists(f'{d}/.round-2-crit.done'))} model={model}")
+PYRACE
+)" "rc=-15 gen=['<!-- debate-round-end: 1 gen rc=0 -->'] r1done=1 crit-balanced=1 r2done=0 model=gone"
 
 # 4. Model text cannot draw a banner or move text: a quoted marker is dropped,
 #    \x1e is removed, and an answer without a final newline does not swallow the
