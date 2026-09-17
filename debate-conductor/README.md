@@ -156,7 +156,7 @@ $PWD/.debate-conductor/log/<team>/
 
 Override the log location with `DEBATE_LOG_DIR=/path/to/logs`.
 
-**Live panes follow per-role streams.** `debate.sh` appends every attempt of a role (a failed attempt, its retry, rounds added by `/continue`) to `stream-<role>.log`, which is never truncated or replaced. Each pane runs one `tail` on its role's stream from the start, so it shows the whole debate once, in order, including a pane opened late. A new debate retargets `latest-debate`; the pane stops following the old stream before it prints "new debate run detected". A debate created before streams existed has no stream files: its pane says so, and shows only the rounds added by a later `/continue`. The round files remain the transcript of record.
+**Live panes follow per-role streams.** `debate.sh` appends every attempt of a role (a failed attempt, its retry, rounds added by `/continue`) to `stream-<role>.log`, which is never truncated or replaced. Each attempt ends with a record of its exit status, and the pane prints "attempt failed (rc=N)" after a failed one. Each pane runs one `tail` on its role's stream from the start, so it shows the whole debate once, in order, including a pane opened late. A new debate retargets `latest-debate`; the pane stops following the old stream before it prints "new debate run detected". A debate created before streams existed has no stream files: its pane says so, and shows only the rounds added by a later `/continue`. The round files remain the transcript of record.
 
 ## Skills
 

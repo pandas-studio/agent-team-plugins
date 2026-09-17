@@ -9,7 +9,7 @@ assert_fail() { if "$@" >/dev/null 2>&1; then return 1; fi; PASS=$((PASS + 1)); 
 
 assert_eq() {
   if [ "$1" != "$2" ]; then
-    printf 'FAIL: expected %q, got %q\n' "$2" "$1" >&2
+    printf 'FAIL (line %s): expected %q, got %q\n' "${BASH_LINENO[0]}" "$2" "$1" >&2
     return 1
   fi
   PASS=$((PASS + 1))
@@ -637,7 +637,18 @@ for out in "$TMP/view-retry.out" "$TMP/view-retry-late.out"; do
   assert_eq "$(count "$out" 'NEW body line')" "120"
   assert_eq "$(count "$out" 'NEW-LAST-LINE')" "2"
   assert_eq "$(count "$out" '<!-- debate-round')" "0"
+  # Only the failed attempt is reported, with its exit status.
+  assert_eq "$(count "$out" 'attempt failed')" "1"
+  assert_eq "$(count "$out" 'attempt failed (rc=1)')" "1"
 done
+# Each attempt ends with a record carrying its status: round 1 failed (rc=1),
+# its retry and round 3 completed. End records never reach round files.
+RS="$(printf '\036')"
+assert_eq "$(LC_ALL=C grep -ac "^${RS}<!-- debate-round-end: " "$RETRY_DIR/stream-gen.log")" "3"
+assert_eq "$(LC_ALL=C grep -ac "^${RS}<!-- debate-round-end: 1 gen rc=1 -->$" "$RETRY_DIR/stream-gen.log")" "1"
+assert_eq "$(LC_ALL=C grep -ac "^${RS}<!-- debate-round-end: 1 gen rc=0 -->$" "$RETRY_DIR/stream-gen.log")" "1"
+assert_eq "$(LC_ALL=C grep -ac "^${RS}<!-- debate-round-end: 3 gen rc=0 -->$" "$RETRY_DIR/stream-gen.log")" "1"
+assert_eq "$(cat "$RETRY_DIR"/round-*.md | grep -ac 'debate-round-end' || true)" "0"
 
 # 2. Critic round 2 fails twice instantly, then a continue retries it and adds
 #    rounds 3-5: every attempt is shown once, including the successful retry.
@@ -654,6 +665,8 @@ stop_tail
 assert_eq "$(count "$TMP/view-crit.out" 'Round 2 · Critic')" "3"
 assert_eq "$(count "$TMP/view-crit.out" 'Round 4 · Critic')" "1"
 assert_eq "$(count "$TMP/view-crit.out" 'Verdict: RECONSIDER')" "2"
+assert_eq "$(count "$TMP/view-crit.out" 'attempt failed (rc=5)')" "2"
+assert_eq "$(count "$TMP/view-crit.out" 'attempt failed')" "2"
 
 # 3. Continuing a completed debate shows only the new rounds after the old ones.
 assert_eq "$(debate_in done-continue answer answer -n 2)" "0"
@@ -666,6 +679,79 @@ sleep 1
 stop_tail
 assert_eq "$(count "$TMP/view-done.out" 'Round 2 · Critic')" "1"
 assert_eq "$(count "$TMP/view-done.out" 'Round 4 · Critic')" "1"
+assert_eq "$(count "$TMP/view-done.out" 'attempt failed')" "0"
+
+# 3b. A command feeding the model can fail too (here: the previous generator
+#     round is missing when round 3 builds its prompt). The attempt must fail
+#     with that status, record it, and not be marked done.
+assert_eq "$(debate_in ctx-fail answer answer -n 2)" "0"
+CTX_DIR="$(debate_dir ctx-fail)"
+rm -f "$CTX_DIR/round-1-gen.md"
+assert_eq "$(debate_in ctx-fail answer answer --continue-from "$CTX_DIR" -n 1)" "1"
+assert_fail test -e "$CTX_DIR/.round-3-gen.done"
+assert_eq "$(LC_ALL=C grep -ac "^$(printf '\036')<!-- debate-round-end: 3 gen rc=1 -->$" "$CTX_DIR/stream-gen.log")" "1"
+
+# 3c. INT, TERM and HUP to the debate's process group stop the whole attempt:
+#     nothing keeps writing to the stream, the end record carries 130 / 143 /
+#     129, the round is not marked done, and debate.sh dies from the signal
+#     (so a bash caller stops too). The last run wraps debate.sh in a bash
+#     loop like ralph-debate.sh's: Ctrl-C must stop the loop.
+cat > "$TMP/worker-cli/slow-stream" <<'STUB'
+#!/bin/sh
+i=0; while [ $i -lt 100 ]; do echo "SLOW line $i"; i=$((i+1)); sleep 0.1; done
+STUB
+chmod +x "$TMP/worker-cli/slow-stream"
+for sig in INT TERM HUP parent-INT; do
+  case "$sig" in
+    INT|parent-INT) status=130; signum=2 ;;
+    TERM) status=143; signum=15 ;;
+    HUP) status=129; signum=1 ;;
+  esac
+  expected="rc=-$signum grew=0 ends=1 <!-- debate-round-end: 1 gen rc=$status --> done=0 continued=0"
+  assert_eq "$(python3 - "$ROOT" "$TMP" "$sig" <<'PYCASE'
+import glob, os, signal, subprocess, sys, time
+root, tmp, case = sys.argv[1:4]
+sig = case.split("-")[-1]
+team = f"cancel-{case}"
+env = {k: v for k, v in os.environ.items()
+       if k not in ("DEBATE_GENERATOR_MODEL", "DEBATE_CRITIC_MODEL", "DEBATE_PRIMARY_GEN", "DEBATE_CONDUCTOR_PM_HOST")}
+env.update(TMUX="", AGENT_TEAM=team, AGENT_TEAM_MODELS_CONFIG=f"{tmp}/no-models.json",
+           DEBATE_LOG_DIR=f"{tmp}/view-log", GENERATOR_CLI=f"{tmp}/worker-cli/slow-stream",
+           CRITIC_CLI=f"{tmp}/worker-cli/answer")
+debate = [f"{root}/debate-conductor/bin/debate.sh", "-n", "2", f"smoke: {team}"]
+marker = f"{tmp}/{team}.continued"
+if case.startswith("parent-"):
+    # A caller loop: runs the debate, then would go on to the next one.
+    cmd = ["bash", "-c", 'for t in 1 2; do "$@" || true; echo continued >> "$MARKER"; done', "_", *debate]
+    env["MARKER"] = marker
+else:
+    cmd = debate
+p = subprocess.Popen(cmd, cwd=tmp, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+stream = None
+for _ in range(150):
+    found = glob.glob(f"{tmp}/view-log/{team}/debate-*/stream-gen.log")
+    if found and "SLOW line 5" in open(found[0], errors="replace").read():
+        stream = found[0]
+        break
+    time.sleep(0.1)
+if stream is None:
+    os.killpg(p.pid, signal.SIGKILL)
+    print("stream never showed SLOW line 5")
+    sys.exit(0)
+os.killpg(p.pid, getattr(signal, "SIG" + sig))
+rc = p.wait()
+size = os.path.getsize(stream)
+time.sleep(1.5)
+grew = int(os.path.getsize(stream) != size)
+ends = [l for l in open(stream, errors="replace") if l.startswith("\x1e<!-- debate-round-end: ")]
+done = int(os.path.exists(os.path.join(os.path.dirname(stream), ".round-1-gen.done")))
+continued = int(os.path.exists(marker))
+end = ends[0].rstrip(chr(10))[1:] if ends else ""
+print(f"rc={rc} grew={grew} ends={len(ends)} {end} done={done} continued={continued}")
+PYCASE
+)" "$expected"
+done
 
 # 4. Model text cannot draw a banner or move text: a quoted marker is dropped,
 #    \x1e is removed, and an answer without a final newline does not swallow the
@@ -682,13 +768,15 @@ assert_eq "$(count "$TMP/view-tricky.out" 'Round 3 · Generator')" "1"
 assert_eq "$(count "$TMP/view-tricky.out" 'TRICKY-START')" "2"
 assert_eq "$(count "$TMP/view-tricky.out" '<!-- debate-round')" "0"
 assert_eq "$(count "$TMP/view-tricky.out" 'rsbyte')" "2"
-# Only debate.sh's two headers carry \x1e, each at the start of a line.
-assert_eq "$(LC_ALL=C tr -cd '\036' < "$TRICKY_DIR/stream-gen.log" | wc -c | tr -d ' ')" "2"
-assert_eq "$(LC_ALL=C grep -ac "^$(printf '\036')" "$TRICKY_DIR/stream-gen.log")" "2"
+# Only debate.sh's records carry \x1e (two headers, two end records), each at the
+# start of a line: the end record after the unterminated answer starts its own.
+assert_eq "$(LC_ALL=C tr -cd '\036' < "$TRICKY_DIR/stream-gen.log" | wc -c | tr -d ' ')" "4"
+assert_eq "$(LC_ALL=C grep -ac "^$(printf '\036')" "$TRICKY_DIR/stream-gen.log")" "4"
+assert_eq "$(LC_ALL=C grep -ac "^$(printf '\036')<!-- debate-round-end: [13] gen rc=0 -->$" "$TRICKY_DIR/stream-gen.log")" "2"
 # Round files and the critic stream are untouched by the generator's quoted marker.
 assert_eq "$(LC_ALL=C tr -cd '\036' < "$TRICKY_DIR/round-1-gen.md" | wc -c | tr -d ' ')" "0"
 assert_eq "$(head -1 "$TRICKY_DIR/round-1-gen.md")" "<!-- debate-round: 1 gen agy -->"
-assert_eq "$(LC_ALL=C grep -ac "^$(printf '\036')" "$TRICKY_DIR/stream-crit.log")" "1"
+assert_eq "$(LC_ALL=C grep -ac "^$(printf '\036')" "$TRICKY_DIR/stream-crit.log")" "2"
 
 # 5. A new debate: the pane stops the old one before announcing the new one, and
 #    shows each debate's content exactly once.

@@ -39,8 +39,9 @@
 #   - stdout: full transcript with round markers
 #   - $LOG_DIR/debate-<TS>/round-<N>-{gen,crit}[-MODEL].md per round
 #   - $LOG_DIR/debate-<TS>/stream-{gen,crit}.log: append-only live stream per
-#     role, followed by tail-role.sh. Each attempt starts with a header line
-#     beginning with \x1e (never present in model output, which is filtered).
+#     role, followed by tail-role.sh. Each attempt starts with a header line and
+#     ends with an end record carrying its exit status, both beginning with
+#     \x1e (never present in model output, which is filtered).
 #   - $LOG_DIR/latest-debate → symlink to most recent debate dir
 #
 # Log location: $DEBATE_LOG_DIR (default: $PWD/.debate-conductor/log) / $TEAM /
@@ -634,15 +635,68 @@ fi
 [ "$UNTIL_CONVERGED" = "1" ] && echo "Mode: until-converged (stop on 'Verdict: STRENGTHEN', cap round $END_ROUND)"
 echo "Transcript dir: $DEBATE_DIR"
 
-# stream_header ROUND ROLE MODEL: start an attempt in that role's stream. A
-# failed attempt may have ended mid-line, so the header always starts a line.
-stream_header() {
-  local stream="$DEBATE_DIR/stream-$2.log"
+# stream_record ROLE TEXT: append one \x1e-framed record to that role's stream.
+# An attempt may have ended mid-line, so a record always starts a line.
+stream_record() {
+  local stream="$DEBATE_DIR/stream-$1.log"
   if [ -s "$stream" ] && [ -n "$(tail -c 1 "$stream")" ]; then
     printf '\n' >> "$stream"
   fi
-  printf '%s<!-- debate-round: %s %s %s -->\n' "$RS_BYTE" "$1" "$2" "$3" >> "$stream"
+  printf '%s%s\n' "$RS_BYTE" "$2" >> "$stream"
 }
+
+# stream_header ROUND ROLE MODEL: start an attempt in that role's stream.
+stream_header() {
+  stream_record "$2" "<!-- debate-round: $1 $2 $3 -->"
+}
+
+# An attempt's pipeline runs in the foreground under errexit and pipefail, as
+# before: a failing command anywhere in it (the model, or a `cat` building its
+# prompt) stops debate.sh with that status, and Ctrl-C / TERM stop the whole
+# pipeline. The end record is therefore written by the EXIT trap from the exit
+# status, never by capturing the pipeline's status (`pipeline || rc=$?` would
+# turn off errexit inside it; running it in the background would make it ignore
+# SIGINT). CUR_ATTEMPT_* name the attempt in progress; empty means none.
+CUR_ATTEMPT_ROUND=""
+CUR_ATTEMPT_ROLE=""
+
+# begin_attempt ROUND ROLE MODEL
+begin_attempt() {
+  stream_header "$1" "$2" "$3"
+  CUR_ATTEMPT_ROUND="$1"
+  CUR_ATTEMPT_ROLE="$2"
+}
+
+# complete_attempt ROUND ROLE OUT: the pipeline succeeded. `.done` first, so a
+# failure to write it is still recorded by the EXIT trap as a failed attempt.
+# End records go to the stream only; round files keep the verdict last.
+complete_attempt() {
+  write_round_end "$1" "$3"
+  CUR_ATTEMPT_ROLE=""
+  stream_record "$2" "<!-- debate-round-end: $1 $2 rc=0 -->" || true
+}
+
+# record_attempt_end RC: write the end record for the attempt in progress, once.
+record_attempt_end() {
+  if [ -n "$CUR_ATTEMPT_ROLE" ]; then
+    stream_record "$CUR_ATTEMPT_ROLE" "<!-- debate-round-end: $CUR_ATTEMPT_ROUND $CUR_ATTEMPT_ROLE rc=$1 -->" || true
+    CUR_ATTEMPT_ROLE=""
+  fi
+}
+trap 'record_attempt_end "$?"' EXIT
+# on_signal SIG STATUS: record the interrupted attempt with the conventional
+# status, then die from the same signal. Exiting normally instead would let a
+# bash caller (e.g. ralph-debate.sh's loop) carry on after Ctrl-C, because
+# bash only stops when its child was killed by SIGINT. Without these traps the
+# EXIT trap would see status 0 after TERM or HUP (measured).
+on_signal() {
+  record_attempt_end "$2"
+  trap - "$1" EXIT
+  kill -s "$1" "$$"
+}
+trap 'on_signal INT 130' INT
+trap 'on_signal TERM 143' TERM
+trap 'on_signal HUP 129' HUP
 
 # Always forward the resolved per-round model to the role dispatcher; ask-*.sh
 # validate it against the registry. (Previously --model was elided for the
@@ -654,7 +708,7 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
   if [ $((r % 2)) -eq 1 ]; then
     GEN_MODEL=$(round_model "$r" gen)
     OUT=$(round_file "$r" gen "$GEN_MODEL")
-    stream_header "$r" gen "$GEN_MODEL"
+    begin_attempt "$r" gen "$GEN_MODEL"
     [ "$ROTATE" = "1" ] && print_header "$r" "Generator" "$GEN_MODEL" || print_header "$r" "Generator"
     # shellcheck disable=SC2046  # word-splitting on gen_args output is intentional
     if [ "$r" -eq 1 ]; then
@@ -685,11 +739,11 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
         } | "$SCRIPT_DIR/../lib/ask-generator.sh" $(gen_args "$GEN_MODEL") "Topic: $TOPIC. Revise your draft, addressing the critic's Blocker and Major findings directly. Quote the critic's claim, then state your response (accept / reject with reason / modify)."
       } | strip_cli_banner | tee "$OUT" | tee -a "$DEBATE_DIR/stream-gen.log"
     fi
-    write_round_end "$r" "$OUT"
+    complete_attempt "$r" gen "$OUT"
   else
     CRIT_MODEL=$(round_model "$r" crit)
     OUT=$(round_file "$r" crit "$CRIT_MODEL")
-    stream_header "$r" crit "$CRIT_MODEL"
+    begin_attempt "$r" crit "$CRIT_MODEL"
     PREV_GEN_MODEL=$(round_model "$((r-1))" gen)
     PREV_GEN=$(round_file "$((r-1))" gen "$PREV_GEN_MODEL")
     [ "$ROTATE" = "1" ] && print_header "$r" "Critic" "$CRIT_MODEL" || print_header "$r" "Critic"
@@ -698,7 +752,7 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
       print_marker "$r" crit "$CRIT_MODEL"
       "$SCRIPT_DIR/../lib/ask-critic.sh" $(crit_args "$CRIT_MODEL") --with-research "$PREV_GEN" "Topic: $TOPIC. Critique the latest Generator draft adversarially. Focus on weaknesses, missed cases, and better alternatives."
     } | strip_cli_banner | tee "$OUT" | tee -a "$DEBATE_DIR/stream-crit.log"
-    write_round_end "$r" "$OUT"
+    complete_attempt "$r" crit "$OUT"
     # Convergence check runs only on Critic (even) rounds: a STRENGTHEN verdict
     # means the position is sound, so stop before spending another gen/crit pair.
     if [ "$UNTIL_CONVERGED" = "1" ] && [ "$(critic_verdict "$OUT")" = "STRENGTHEN" ]; then
