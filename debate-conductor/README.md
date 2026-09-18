@@ -214,6 +214,15 @@ debate-conductor/
 └── topics/                    # default topic examples
 ```
 
+**A caller gets a receipt, not a symlink.** `latest-debate` is a convenience for viewing a debate and for choosing one to continue — it is team-wide, so it is never proof of what a particular invocation produced: any debate started by anyone else in the same team retargets it. A program that runs `debate.sh` and needs to know what *that run* wrote passes `DEBATE_RECEIPT=/abs/path` (fresh per dispatch, absolute — a relative path is refused with exit 2). On success, and only on success, `debate.sh` writes that path atomically while it still holds the writer lock:
+
+```json
+{"schema_version":1,"debate_dir":"/abs/…/debate-20260918-120000",
+ "last_round":4,"critic_round":4,"critic_file":"round-4-crit-codex.md"}
+```
+
+`last_round` and `critic_round` are the highest **completed** rounds, from the ledger; `critic_file` names that round's transcript, in whichever form the debate used (`round-4-crit.md` or the rotated `round-4-crit-codex.md`). Both critic fields are null together when no critic round has completed. The fields describe the **whole debate**, not one dispatch: a `/continue` that adds a generator round still reports the critic round an earlier dispatch completed. `lib/debate-result.sh` holds the schema, the writer and the reader a caller should use — `debate.sh` validates its own receipt through that reader before publishing it. A caller must still check the exit code: a signal arriving after publication can leave a receipt behind for a run that then failed.
+
 **Every attempt is in the ledger.** `debate-<TS>/index.jsonl` is an append-only record of the debate, one JSON object per line, written only by `debate.sh` under the writer lock. An attempt opens with a `start` record and closes with an `end` record carrying its exit status:
 
 ```

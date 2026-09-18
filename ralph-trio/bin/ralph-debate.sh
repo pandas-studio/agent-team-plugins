@@ -76,8 +76,22 @@ if [ -n "$PROMPT_FILE" ]; then
 fi
 
 # Cross-plugin dependency check (skipped in dry-run; we don't actually invoke it).
+# The shared receipt library doubles as the capability check: a debate-conductor
+# too old to publish run receipts does not ship it. Probing the executable
+# instead would miss a forwarding wrapper, and running a sample debate would tie
+# detection to model configuration.
 if [ "$DRY_RUN" != "1" ]; then
   command -v debate.sh >/dev/null 2>&1 || { echo "ERROR: ralph-debate requires the debate-conductor plugin (debate.sh not on PATH). Install: /plugin install debate-conductor@pandas-studio" >&2; exit 2; }
+  DEBATE_BIN_DIR=$(dirname "$(command -v debate.sh)")
+  # shellcheck source=/dev/null
+  . "$DEBATE_BIN_DIR/../lib/debate-result.sh" 2>/dev/null || {
+    echo "ERROR: update debate-conductor; shared debate-result.sh is required" >&2
+    exit 2
+  }
+  command -v debate_receipt_read >/dev/null 2>&1 || {
+    echo "ERROR: update debate-conductor; debate-result.sh must define debate_receipt_read" >&2
+    exit 2
+  }
 fi
 [ "$ROUNDS" -lt 2 ] && { echo "--rounds must be >= 2 (need at least one critic round)" >&2; exit 2; }
 
@@ -94,6 +108,11 @@ fi
 
 TEAM=$(detect_team) || exit 2
 LOG_DIR=$(init_log_dir)
+# The receipt each debate dispatch is bound to must be at an absolute path
+# (debate.sh refuses a relative one), and $LOG_DIR is relative whenever
+# RALPH_TRIO_WORKSPACE is. Resolved once, here in the parent shell, so it stays
+# correct across the cd into a worktree.
+LOG_DIR_ABS=$(cd "$LOG_DIR" && pwd -P) || { echo "ERROR: cannot resolve log dir $LOG_DIR" >&2; exit 1; }
 TS=$(date +%Y%m%d-%H%M%S)
 SUMMARY_LOG="$LOG_DIR/ralph-debate-$TS.log"
 ln -sfn "ralph-debate-$TS.log" "$LOG_DIR/latest-ralph-debate.log"
@@ -105,15 +124,15 @@ DEADLINE=$([ "$MAX_RUNTIME_SECS" -gt 0 ] && echo $(( $(date +%s) + MAX_RUNTIME_S
 
 # debate.sh from the debate-conductor plugin writes to its own log root:
 # $DEBATE_LOG_DIR (default $PWD/.debate-conductor/log) / $TEAM. We resolve the
-# same path here to read back the latest-debate symlink.
+# same path here so the transcripts of a --worktree run land in the workspace
+# rather than in the throwaway worktree, where they would be discarded with it.
 #
-# Normalize to absolute path here, BEFORE any cd into a worktree. With
+# Normalize to absolute path here, BEFORE any cd into a worktree: with
 # --worktree the subshell `cd "$WORK_DIR"` would re-anchor a relative
-# DEBATE_LOG_BASE to the worktree, while DEBATE_TEAM_DIR (computed in this
-# parent shell) stays anchored to the original cwd — the same lookup
-# mismatch the worktree fix is meant to prevent. The default value embeds
-# $PWD so it's already absolute; this branch only kicks in when callers pass
-# a relative DEBATE_LOG_DIR override.
+# DEBATE_LOG_BASE to the worktree. The default value embeds $PWD so it's
+# already absolute; this branch only kicks in when callers pass a relative
+# DEBATE_LOG_DIR override. (Which debate dir *this* run produced comes from its
+# receipt, not from this path — see the dispatch below.)
 DEBATE_LOG_BASE="${DEBATE_LOG_DIR:-$PWD/.debate-conductor/log}"
 case "$DEBATE_LOG_BASE" in
   /*) ;;  # already absolute
@@ -167,15 +186,6 @@ parse_critic_verdict() {
       else if (section_hit) { print section_hit }
     }
   ' "$f" 2>/dev/null
-}
-
-# Find the highest critic round file in a debate dir. Critic rounds are even.
-# Glob matches both legacy `round-N-crit.md` and rotation-mode `round-N-crit-MODEL.md`
-# (RFC 0001). sort -V is numeric on the round number, so the highest round wins
-# regardless of which model name follows.
-last_critic_file() {
-  local debate_dir="$1"
-  ls "$debate_dir"/round-*-crit*.md 2>/dev/null | sort -V | tail -1
 }
 
 ITER=0
@@ -251,45 +261,67 @@ while :; do
   else
     # Pin DEBATE_LOG_DIR explicitly so it survives the cd into $WORK_DIR. Under
     # --worktree, $WORK_DIR is the throwaway worktree path — without this pin
-    # debate.sh would default to $WORK_DIR/.debate-conductor/log and write its
-    # latest-debate symlink there, while our DEBATE_TEAM_DIR (resolved before
-    # the cd) still points at $ORIGINAL_DIR/.debate-conductor/log, so the
-    # subsequent latest-debate lookup would miss the just-created transcript
-    # and turn every completed debate into an UNKNOWN verdict.
+    # debate.sh would default to $WORK_DIR/.debate-conductor/log and the whole
+    # transcript would be discarded with the worktree.
+    # One fresh receipt per dispatch, reserved in this shell before the call and
+    # under Ralph's own durable log dir — never inside the disposable worktree,
+    # and canonicalised because $LOG_DIR is relative when RALPH_TRIO_WORKSPACE
+    # is. A receipt that cannot be reserved is not an UNKNOWN verdict: it means
+    # this invocation has no way to report what it produced, so the run stops
+    # before spending model calls, and the task goes back on the backlog.
+    if ! DEBATE_RECEIPT=$(mktemp "$LOG_DIR_ABS/debate-receipt-$TS-iter-$ITER.XXXXXX"); then
+      ralph_log "could not reserve a debate receipt under $LOG_DIR_ABS. Stopping."
+      [ "$DRY_RUN" = "1" ] || append_to_backlog "$BACKLOG_FILE" "$TASK"
+      [ -z "$WT" ] || merge_or_discard_worktree "$WT" "$ITER" 0 "$ORIGINAL_DIR" || true
+      echo "=== STOP (receipt-failed) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
+      WORKTREE_FAILED=1
+      break
+    fi
     DEBATE_RC=0
     if [ -n "$PROMPT_FILE" ]; then
-      ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEBATE_LOG_DIR="$DEBATE_LOG_BASE" debate.sh -n "$ROUNDS" "$TASK" "$PROMPT_FILE" >&2 ) || DEBATE_RC=$?
+      ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEBATE_LOG_DIR="$DEBATE_LOG_BASE" DEBATE_RECEIPT="$DEBATE_RECEIPT" debate.sh -n "$ROUNDS" "$TASK" "$PROMPT_FILE" >&2 ) || DEBATE_RC=$?
     else
-      ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEBATE_LOG_DIR="$DEBATE_LOG_BASE" debate.sh -n "$ROUNDS" "$TASK" >&2 ) || DEBATE_RC=$?
+      ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEBATE_LOG_DIR="$DEBATE_LOG_BASE" DEBATE_RECEIPT="$DEBATE_RECEIPT" debate.sh -n "$ROUNDS" "$TASK" >&2 ) || DEBATE_RC=$?
     fi
-    # Only trust latest-debate when THIS invocation succeeded. On failure (missing
-    # prompt file, model command error, …) debate.sh leaves no new transcript, but
-    # a `latest-debate` symlink from a PRIOR run may still resolve — parsing it
-    # would mark the current task from a stale debate. Capture the rc and skip the
-    # lookup on failure so the verdict falls through to UNKNOWN below.
+    # What this invocation produced comes from its own receipt, never from the
+    # team-wide `latest-debate` symlink: any other debate started in the same
+    # team between the call returning and this lookup retargets it, and the
+    # verdict read would be another run's. The exit code still gates the read —
+    # a signal after the receipt was published can leave one behind for an
+    # invocation that then failed.
+    # The receipt path goes in the summary next to the exit code, the debate dir
+    # and the verdict: a receipt records what the *producer* published, not
+    # whether this iteration accepted it, and only the parent log can say which.
+    printf '  receipt:    %s (rc=%s)\n' "$DEBATE_RECEIPT" "$DEBATE_RC" >> "$SUMMARY_LOG"
+    DEBATE_DIR=""
+    LAST_CRIT=""
     if [ "$DEBATE_RC" -ne 0 ]; then
-      ralph_log "  WARNING: debate.sh failed (rc=$DEBATE_RC) — not parsing latest-debate (avoids reusing a stale transcript)"
-      DEBATE_DIR=""
+      ralph_log "  WARNING: debate.sh failed (rc=$DEBATE_RC) — not reading its receipt"
+    elif ! RECEIPT_DATA=$(debate_receipt_read "$DEBATE_RECEIPT"); then
+      ralph_log "  WARNING: debate.sh exited 0 but its receipt is missing or unusable ($DEBATE_RECEIPT)"
     else
-      # Locate the just-created debate dir via the latest-debate symlink.
-      DEBATE_DIR_NAME=$(readlink "$DEBATE_TEAM_DIR/latest-debate" 2>/dev/null || true)
-      if [ -n "$DEBATE_DIR_NAME" ] && [ -d "$DEBATE_TEAM_DIR/$DEBATE_DIR_NAME" ]; then
-        DEBATE_DIR="$DEBATE_TEAM_DIR/$DEBATE_DIR_NAME"
-      else
-        DEBATE_DIR=""
-      fi
+      DEBATE_DIR=$(printf '%s\n' "$RECEIPT_DATA" | jq -r '.debate_dir')
+      CRIT_FILE=$(printf '%s\n' "$RECEIPT_DATA" | jq -r '.critic_file // ""')
+      [ -z "$CRIT_FILE" ] || LAST_CRIT="$DEBATE_DIR/$CRIT_FILE"
     fi
+    # Reclaim an untouched reservation — and only that. A receipt with bytes in
+    # it is kept whatever happened: when the producer exited 0 and the reader
+    # still rejected it, its contents are the evidence of what went wrong, and a
+    # complete receipt left by a run that was signalled after publication is a
+    # true record of what the producer published. Best effort by nature: a
+    # SIGKILL runs no cleanup at all, and the writer's own `.tmp.XXXXXX` can
+    # outlive it too.
+    [ -s "$DEBATE_RECEIPT" ] || rm -f "$DEBATE_RECEIPT"
     if [ -z "$DEBATE_DIR" ]; then
-      ralph_log "  WARNING: could not locate debate output dir (latest-debate symlink missing under $DEBATE_TEAM_DIR)"
       VERDICT="UNKNOWN"
     else
       printf '  debate dir: %s\n' "$DEBATE_DIR" >> "$SUMMARY_LOG"
-      LAST_CRIT=$(last_critic_file "$DEBATE_DIR")
       if [ -n "$LAST_CRIT" ]; then
         printf '  last critic: %s\n' "$LAST_CRIT" >> "$SUMMARY_LOG"
         VERDICT=$(parse_critic_verdict "$LAST_CRIT")
         [ -z "$VERDICT" ] && VERDICT="UNKNOWN"
       else
+        ralph_log "  no completed critic round in $DEBATE_DIR"
         VERDICT="UNKNOWN"
       fi
     fi

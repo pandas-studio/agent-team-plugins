@@ -122,3 +122,60 @@ round_is_complete() {
   { _index_completed_rounds "$1" ""; _done_completed_rounds "$1" ""; } \
     | grep -x -- "$2" >/dev/null
 }
+
+# completed_round_file DIR N ROLE: the transcript basename of round N's
+# *successful* attempt for that role, empty when the round did not complete.
+#
+# From the ledger: the `end` records for that round and role with `rc == 0`,
+# taking the recorded `file` — never the current model settings, never a failed
+# attempt's record, and with no ordering assumption ("the latest attempt") and
+# no matching `start` required, since a crash can destroy one. Identical
+# candidates are deduplicated; two *distinct* filenames for one completed round
+# are ambiguous, and this guesses at neither.
+#
+# Falling back per round to the `.done` sidecar's own name, which is where a
+# pre-ledger debate records the rotation form. A round with no usable ledger
+# candidate falls back even when other rounds have ledger entries — but a
+# sidecar never overrides a filename the ledger did give.
+completed_round_file() {
+  local dir="$1" round="$2" role="$3" idx names f base rest
+  idx="$(debate_index_file "$dir")"
+  if [ -f "$idx" ] && command -v jq >/dev/null 2>&1; then
+    # The count is taken inside jq, on the deduplicated array: counting lines in
+    # the shell would call two candidates unambiguous whenever one of them is a
+    # newline. A name carrying a control character is not a filename at all.
+    names="$(jq -rRn --arg role "$role" --argjson round "$round" '
+      [ inputs
+        | (fromjson? // empty)
+        | select(type == "object")
+        | select(.t == "end" and .rc == 0)
+        | select(.round == $round and .role == $role)
+        | .file
+        | select(type == "string" and . != "" and (explode | map(select(. < 32 or . == 127 or . == 65533)) | length == 0))
+      ] | unique
+      | if length == 1 then .[0] elif length == 0 then empty else "\u0001" end
+    ' "$idx" 2>/dev/null || true)"
+    case "$names" in
+      "$(printf '\001')") return 1 ;;   # two different filenames: ambiguous
+      "") ;;
+      *) printf '%s\n' "$names"; return 0 ;;
+    esac
+  fi
+  names=""
+  for f in "$dir"/.round-"$round"-*.done; do
+    [ -e "$f" ] || continue
+    base="${f##*/}"
+    rest="${base#.round-"$round"-}"
+    case "$rest" in "$role".done|"$role"-*.done) ;; *) continue ;; esac
+    base="${base#.}"
+    base="${base%.done}.md"
+    case "$names" in
+      "") names="$base" ;;
+      "$base") ;;
+      *) return 1 ;;
+    esac
+  done
+  [ -n "$names" ] || return 0
+  printf '%s\n' "$names"
+  return 0
+}
