@@ -163,7 +163,6 @@ class DebateHostTests(unittest.TestCase):
         result = self.run_cli("debate.sh", "-n", "2", "fixture topic")
         self.assertEqual(result.returncode, 0, result.stderr)
         first_dir = self.latest_debate()
-        time.sleep(1.1)
 
         result = self.run_cli("debate.sh", "-n", "2", "--primary-gen", "typo", "bad topic")
         self.assertEqual(result.returncode, 2, result.stderr)
@@ -536,6 +535,201 @@ class DebateHostTests(unittest.TestCase):
         metadata = json.loads((first_dir / "models.json").read_text())
         self.assertEqual(metadata["generator"], "agy")
 
+
+    # ── One writer per debate (#45) ─────────────────────────────────────────
+
+    def date_shim(self, stamp):
+        """PATH entry whose `date` freezes +%Y%m%d-%H%M%S and delegates the rest."""
+        real = shutil.which("date", path=self.env.get("PATH", os.defpath))
+        self.assertIsNotNone(real, "no real date on PATH")
+        shim_dir = self.root / f"date shim {stamp}"
+        shim_dir.mkdir()
+        shim = shim_dir / "date"
+        shim.write_text(
+            f"#!{sys.executable}\n"
+            "import os, sys\n"
+            f"if sys.argv[1:] == ['+%Y%m%d-%H%M%S']:\n"
+            f"    print({stamp!r})\n"
+            "    sys.exit(0)\n"
+            f"os.execv({real!r}, [{real!r}] + sys.argv[1:])\n"
+        )
+        shim.chmod(0o755)
+        return f"{shim_dir}{os.pathsep}{self.env['PATH']}"
+
+    def blocking_stub(self, ready, release):
+        """A recording CLI that reports readiness, then waits to be released."""
+        stub = self.root / f"blocking cli {ready.name}"
+        stub.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, sys, time\n"
+            "args = sys.argv[1:]\n"
+            "with open(os.environ['STUB_CALLS'], 'a') as f:\n"
+            "    f.write(json.dumps(args)+'\\n')\n"
+            "if args == ['auth','status','--json']:\n"
+            "    print(os.environ['STUB_AUTH'])\n"
+            "    sys.exit(0)\n"
+            f"open({str(ready)!r}, 'w').close()\n"
+            "deadline = time.time() + 30\n"
+            f"while not os.path.exists({str(release)!r}):\n"
+            "    if time.time() > deadline:\n"
+            "        sys.exit(7)\n"
+            "    time.sleep(0.02)\n"
+            "print(os.environ['STUB_RESPONSE'])\n"
+        )
+        stub.chmod(0o755)
+        return stub
+
+    def start_blocked_debate(self, *args, **env):
+        """Launch debate.sh whose first round blocks; return (proc, ready, release)."""
+        ready = self.root / f"ready {len(list(self.root.glob('ready *')))}"
+        release = self.root / f"release {ready.name[6:]}"
+        stub = self.blocking_stub(ready, release)
+        proc = subprocess.Popen(
+            [str(self.plugin / "bin" / "debate.sh"), *args],
+            cwd=self.workspace, text=True, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=self.env | dict(CLAUDE_CLI=str(stub), CODEX_CLI=str(stub),
+                                AGY_CLI=str(stub)) | env,
+        )
+        self.addCleanup(self.reap, proc, release)
+        deadline = time.monotonic() + 30
+        while not ready.exists():
+            self.assertIsNone(proc.poll(), "debate.sh exited before its first round")
+            self.assertLess(time.monotonic(), deadline, "first round never started")
+            time.sleep(0.02)
+        return proc, ready, release
+
+    def reap(self, proc, release):
+        release.touch()
+        if proc.poll() is None:
+            proc.kill()
+        proc.communicate(timeout=30)
+
+    def lock_of(self, debate_dir):
+        return Path(debate_dir) / ".lock"
+
+    def snapshot(self, debate_dir):
+        """Every byte under a debate dir, plus the lock's target."""
+        return sorted(
+            (str(f.relative_to(debate_dir)),
+             os.readlink(f) if f.is_symlink() else (f.read_bytes() if f.is_file() else None))
+            for f in debate_dir.rglob("*"))
+
+    def await_text(self, path, needle, timeout=30):
+        deadline = time.monotonic() + timeout
+        while True:
+            if path.exists() and needle in path.read_text():
+                return
+            self.assertLess(time.monotonic(), deadline, f"{needle!r} never reached {path}")
+            time.sleep(0.02)
+
+    def test_same_second_starts_get_distinct_debate_directories(self):
+        path = self.date_shim("20260918-120000")
+        first = self.run_cli("debate.sh", "-n", "1", "first topic", PATH=path)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        second = self.run_cli("debate.sh", "-n", "1", "second topic", PATH=path)
+        self.assertEqual(second.returncode, 0, second.stderr)
+
+        team = self.workspace / ".debate-conductor/log/host-test"
+        self.assertTrue((team / "debate-20260918-120000").is_dir())
+        self.assertTrue((team / "debate-20260918-120000-1").is_dir())
+        self.assertEqual(self.latest_debate(), (team / "debate-20260918-120000-1").resolve())
+        self.assertEqual((team / "debate-20260918-120000/topic.txt").read_text().strip(),
+                         "first topic")
+        self.assertEqual((team / "debate-20260918-120000-1/topic.txt").read_text().strip(),
+                         "second topic")
+
+    def test_suffixed_debate_directory_can_be_continued(self):
+        path = self.date_shim("20260918-130000")
+        self.assertEqual(self.run_cli("debate.sh", "-n", "1", "a", PATH=path).returncode, 0)
+        self.assertEqual(self.run_cli("debate.sh", "-n", "2", "b", PATH=path).returncode, 0)
+        suffixed = self.latest_debate()
+        self.assertTrue(suffixed.name.endswith("-1"), suffixed)
+
+        result = self.run_cli("debate.sh", "--continue-from", str(suffixed), "-n", "1", "b")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((suffixed / "round-3-gen.md").exists())
+        self.assertFalse(self.lock_of(suffixed).is_symlink())
+
+    def test_second_writer_is_refused_while_a_debate_is_running(self):
+        proc, _ready, release = self.start_blocked_debate("-n", "1", "held topic")
+        held = self.latest_debate()
+        self.assertTrue(self.lock_of(held).is_symlink())
+        # The round marker travels through `tee` before the CLI is reached, so
+        # wait for it to land in both destinations: only then is a byte-for-byte
+        # snapshot of the directory stable enough to prove the refusal wrote
+        # nothing.
+        self.await_text(held / "round-1-gen.md", "debate-round: 1 gen")
+        self.await_text(held / "stream-gen.log", "debate-round: 1 gen")
+        before = self.snapshot(held)
+
+        second = self.run_cli("debate.sh", "--continue-from", str(held), "-n", "2", "held topic")
+        self.assertEqual(second.returncode, 2, second.stdout)
+        self.assertIn("is locked by another debate.sh run", second.stderr)
+        self.assertIn("rm -rf -- ", second.stderr)
+        self.assertEqual(self.snapshot(held), before)
+        self.assertFalse(list(held.glob(".round-*.done")))
+
+        release.touch()
+        out, err = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertIn("gen agy", (held / "round-1-gen.md").read_text())
+        self.assertFalse(self.lock_of(held).is_symlink())
+
+    def test_lock_left_by_a_lost_run_is_refused_not_reclaimed(self):
+        self.assertEqual(self.run_cli("debate.sh", "-n", "1", "t").returncode, 0)
+        debate = self.latest_debate()
+        body = (debate / "round-1-gen.md").read_bytes()
+        lock = self.lock_of(debate)
+
+        for owner, expected in (
+            ("host=elsewhere pid=4242 started=2026-09-18T12:00:00",
+             "is locked by another debate.sh run"),
+            ("", "no readable owner"),
+            ("handmade", "no readable owner"),
+        ):
+            with self.subTest(owner=owner):
+                if owner:
+                    lock.symlink_to(owner)
+                else:
+                    lock.mkdir()  # a lock left in a shape this script never writes
+                result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t")
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertIn(expected, result.stderr)
+                self.assertTrue(lock.is_symlink() or lock.is_dir(),
+                                "a stranded lock must never be reclaimed")
+                self.assertEqual((debate / "round-1-gen.md").read_bytes(), body)
+                self.assertFalse((debate / "round-2-gen.md").exists())
+                if lock.is_symlink():
+                    lock.unlink()
+                else:
+                    shutil.rmtree(lock)
+
+    def test_lock_is_released_on_a_signal_and_the_status_is_preserved(self):
+        import signal
+        for sig, status in ((signal.SIGINT, 130), (signal.SIGTERM, 143), (signal.SIGHUP, 129)):
+            with self.subTest(signal=sig.name):
+                proc, _ready, release = self.start_blocked_debate("-n", "1", f"{sig.name} topic")
+                debate = self.latest_debate()
+                self.assertTrue(self.lock_of(debate).is_symlink())
+                proc.send_signal(sig)
+                proc.communicate(timeout=30)
+                self.assertEqual(proc.returncode, -sig)
+                self.assertEqual(128 - proc.returncode, status)
+                self.assertFalse(self.lock_of(debate).is_symlink())
+                release.touch()
+
+    def test_failed_continue_preflight_leaves_no_lock(self):
+        self.assertEqual(self.run_cli("debate.sh", "-n", "1", "t").returncode, 0)
+        debate = self.latest_debate()
+
+        # The lock is taken before the CLI preflight on a continue, so a refused
+        # preflight must still leave the debate unlocked and untouched.
+        result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "2", "t",
+                              CRITIC_CLI="/missing/unused-critic")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.lock_of(debate).is_symlink())
+        self.assertFalse((debate / "round-2-crit.md").exists())
 
     def test_invalid_host_does_not_block_help(self):
         result = self.run_cli("debate.sh", "--help", DEBATE_CONDUCTOR_PM_HOST="invalid")

@@ -1,6 +1,6 @@
 {
   "name": "debate-conductor",
-  "version": "0.5.12",
+  "version": "0.5.13",
   "description": "Codex conducts Generator-vs-Critic debates with external CLI adapters and live transcript artifacts.",
   "author": {
     "name": "pandas-studio"
