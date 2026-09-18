@@ -4,10 +4,11 @@
 # Usage: debate-conductor-doctor.sh
 #
 # Checks:
-#   1. Required tools on PATH: tmux, agy, codex, claude (agent CLIs warn-only —
-#      the smoke injects stub CLIs via *_CLI env vars and does not need them).
+#   1. Required tools on PATH: jq (a hard dependency through lib/registry.sh),
+#      tmux, and agy, codex, claude (agent CLIs warn-only — the smoke injects
+#      stub CLIs via *_CLI env vars and does not need them).
 #   2. Plugin layout intact (debate.sh / tail-role.sh / team-3pane.sh /
-#      lib/ask-{generator,critic}.sh / lib/roles/*.md / lib/pm.md).
+#      lib/ask-{generator,critic}.sh / lib/index.sh / lib/roles/*.md / lib/pm.md).
 #   3. Convergence stub smoke for `debate.sh --until-converged` (RFC: Phase 1):
 #      a. STRENGTHEN  → breaks at first Critic round (round 2), cleans up the
 #         pre-touched round files past the convergence point.
@@ -15,6 +16,10 @@
 #      c. placeholder → an errored Critic round that only echoes the role-prompt
 #         placeholders (`Verdict: <STRENGTHEN | ...>`) must NOT be read as a
 #         STRENGTHEN — guards the canonical-tail anchor against false positives.
+#      Completion is read from the attempt ledger *alone* here, not from the
+#      union lib/index.sh serves callers. These are fresh debates this script
+#      just ran, so the ledger must be complete for them — and reading the union
+#      would let the `.done` sidecars answer for a ledger that is never written.
 #
 # Stub smokes are *necessary but not sufficient* — anything touching the live
 # panes (tail-role.sh) or real verdict text needs a real-CLI dry-run on top.
@@ -22,6 +27,10 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# The completion reader the smoke below asserts with; also the file the layout
+# check verifies is present.
+# shellcheck source=../lib/index.sh
+[ -f "$PLUGIN_ROOT/lib/index.sh" ] && . "$PLUGIN_ROOT/lib/index.sh"
 
 GREEN=$'\033[1;32m'
 YELLOW=$'\033[1;33m'
@@ -40,6 +49,8 @@ echo "debate-conductor doctor — plugin root: $PLUGIN_ROOT"
 echo
 
 echo "1. Required tools"
+if command -v jq >/dev/null 2>&1; then ok "jq — $(command -v jq)"
+else fail "jq — missing (REQUIRED: the model registry and the attempt ledger need it)"; fi
 if command -v tmux >/dev/null 2>&1; then ok "tmux — $(command -v tmux)"
 else fail "tmux — missing (REQUIRED for the live panes)"; fi
 for t in agy codex claude; do
@@ -67,7 +78,7 @@ for rel in .claude-plugin/plugin.json .codex-plugin/plugin.json \
            bin/debate.sh bin/tail-role.sh bin/team-3pane.sh \
            bin/install-pm.py \
            lib/ask-generator.sh lib/ask-critic.sh lib/pm.md \
-           lib/host.sh lib/pm-codex.md \
+           lib/host.sh lib/index.sh lib/pm-codex.md \
            lib/roles/generator.md lib/roles/critic.md \
            claude-skills/bootstrap/SKILL.md claude-skills/run/SKILL.md \
            claude-skills/continue/SKILL.md claude-skills/install-pm/SKILL.md \
@@ -181,10 +192,10 @@ STUB
     [ "$rc" -eq 0 ] || note "stderr: $(head -3 "$TMPDIR_SMOKE/codex-host.err" 2>/dev/null)"
   }
 
-  # Highest completed round = max N across .round-N-*.done sidecars.
+  # Highest completed round, from the attempt ledger only — see the note in the
+  # header on why this is not the union that lib/index.sh serves debate.sh.
   last_done_round() {
-    { ls "$1"/.round-*.done 2>/dev/null || true; } \
-      | sed -E 's@.*/\.round-([0-9]+)-.*@\1@' | sort -n | tail -1
+    _index_completed_rounds "$1" "" | sort -n | tail -1
   }
 
   # --- 3a. STRENGTHEN converges at the first Critic round (round 2) ---

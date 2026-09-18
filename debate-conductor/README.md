@@ -141,6 +141,7 @@ $PWD/.debate-conductor/log/<team>/
 ├── latest-debate -> debate-<TS>
 ├── debate-<TS>/
 │   ├── .lock -> host=… pid=…  # present only while a debate.sh run is writing this debate
+│   ├── index.jsonl            # append-only attempt ledger — which rounds completed, and how
 │   ├── topic.txt              # original topic — read by /continue
 │   ├── context.md             # round-1 context file, if given — reused when round 1 is retried
 │   ├── models.json            # model pair, source, and rotation reused by /continue
@@ -213,13 +214,26 @@ debate-conductor/
 └── topics/                    # default topic examples
 ```
 
+**Every attempt is in the ledger.** `debate-<TS>/index.jsonl` is an append-only record of the debate, one JSON object per line, written only by `debate.sh` under the writer lock. An attempt opens with a `start` record and closes with an `end` record carrying its exit status:
+
+```
+{"v":1,"t":"start","id":"4242.1789473600.1","round":1,"role":"gen","model":"agy","file":"round-1-gen.md","ts":"…"}
+{"v":1,"t":"end","id":"4242.1789473600.1","round":1,"role":"gen","file":"round-1-gen.md","rc":0,"ts":"…"}
+```
+
+`id` is the same attempt id the role stream frames carry, so a row locates its own bytes in `stream-<role>.log` — including the bytes of an attempt that failed and was retried, which the round file no longer holds. A round counts as completed when the ledger holds an `end` record for it with `rc` 0; that is what `/continue` resumes from and what the doctor checks.
+
+Read it the way `debate.sh` does. **Duplicate records are harmless and must stay harmless** — every query is a maximum or an existence test, never a count and never "the last end record". **A `start` with no `end` is an incomplete attempt**, whose round runs again; a run that was killed outright leaves exactly that. **A line that does not parse is skipped, not fatal** (`fromjson? // empty` in jq): a crash mid-append can leave a torn final line, and the next run re-establishes the line boundary before writing so the fragment cannot swallow the record after it. Nothing but `debate.sh` should ever write to this file, and a record claiming a round the debate never ran would move the resume point — the writer lock, not validation, is what keeps that from happening.
+
+For one more release `debate.sh` also touches the older `.round-<N>-<role>[-model].done` sidecars, and completion is read as the union of the two, so a debate created before the ledger keeps resuming correctly. The sidecars are derived; nothing reads them that does not also read the ledger.
+
 ## Design notes
 
 **Context scope per round.** Each round prompt only includes the *immediately preceding* generator+critic pair — not the full transcript. So round 5 sees round 3 (your last draft) and round 4 (critic feedback), but not rounds 1–2. This keeps prompts bounded as round count grows; the trade-off is that early-round consensus or discoveries fade out unless re-stated. `/continue` follows the same rule.
 
-**A round needs an answer on stdout.** `ask-generator.sh` and `ask-critic.sh` exit **5** when the model CLI exits 0 but writes nothing except whitespace to stdout. For example, `agy -p` soft-denies a tool it cannot prompt for, prints guidance on stderr, and still exits 0. They exit **6** when the answer cannot be checked: the temp file cannot be created (the model is not run), or the model exits 0 but `tee` or the check fails. `debate.sh` stops on either code before writing that round's `.done` sidecar, so the guidance never becomes a draft or a critique.
+**A round needs an answer on stdout.** `ask-generator.sh` and `ask-critic.sh` exit **5** when the model CLI exits 0 but writes nothing except whitespace to stdout. For example, `agy -p` soft-denies a tool it cannot prompt for, prints guidance on stderr, and still exits 0. They exit **6** when the answer cannot be checked: the temp file cannot be created (the model is not run), or the model exits 0 but `tee` or the check fails. `debate.sh` stops on either code before recording the round as completed, so the guidance never becomes a draft or a critique. The failed attempt is still in the ledger, with its exit status.
 
-**Stopping a debate.** A signal to the process group (Ctrl-C, a supervisor's `killpg`) reaches every process of the running round, SIGKILL included. INT, TERM or HUP sent to the `debate.sh` PID alone also stops the round at once: `debate.sh` sends TERM to the round's process tree, waits up to about 2 s for it to exit, then records the status (130 / 143 / 129) and dies from the same signal. Signalling the PID is best effort: a process that ignores TERM keeps running, and without `ps` on `PATH` `debate.sh` waits for the round to finish instead. The `.done` sidecar marks the end of a round: a round interrupted before it is written never gets one, even if its output was complete, so `/continue` runs it again; a round interrupted after it is complete, and its end record says `rc=0`.
+**Stopping a debate.** A signal to the process group (Ctrl-C, a supervisor's `killpg`) reaches every process of the running round, SIGKILL included. INT, TERM or HUP sent to the `debate.sh` PID alone also stops the round at once: `debate.sh` sends TERM to the round's process tree, waits up to about 2 s for it to exit, then records the status (130 / 143 / 129) and dies from the same signal. Signalling the PID is best effort: a process that ignores TERM keeps running, and without `ps` on `PATH` `debate.sh` waits for the round to finish instead. A round ends when `debate.sh` marks it complete, and the `.done` sidecar is written first, before either end record: once it exists the round counts as complete and both end records say `rc=0` whatever happens next. A round interrupted before that point never gets a sidecar, even if its output was complete, so `/continue` runs it again — a trapped INT, TERM or HUP records the attempt with the signal's status (130 / 143 / 129), and a `kill -9` records nothing at all and leaves a `start` with no `end`. A run killed between the sidecar and the ledger write leaves the round complete in the sidecar alone, which is one of the reasons completion is read as the union of the two.
 
 **One writer per debate.** A debate directory has exactly one writer at a time. `debate.sh` takes an exclusive lock — `debate-<TS>/.lock`, a symlink whose target names the holding host and pid — before it reads which rounds are complete, and releases it when the run ends, including on Ctrl-C, TERM and HUP. The lock and the name of its holder are published in one atomic step (`ln -s`), so an interrupted run leaves either no lock or an identifiable one. A second run on the same debate (a `/continue` started while another one is going) is refused with exit 2 and a message naming the holder, rather than picking the same next round and overwriting its round files. Two debates started in the *same second* no longer share a directory either: the second one gets `debate-<TS>-1`, and `latest-debate` visibly retargets so the panes show the new debate.
 
