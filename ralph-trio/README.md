@@ -117,7 +117,7 @@ Needs `debate-conductor` plugin installed.
 ralph-debate.sh --max-iter 5 --backlog BACKLOG.md --rounds 3
 ```
 
-Per topic: runs `debate.sh -n $ROUNDS "$topic"`, parses the last critic round's verdict (`STRENGTHEN` / `RECONSIDER` / `OVERTURN`), logs to `fix_plan.md`, and (on `RECONSIDER`) re-queues to BACKLOG.
+Per topic: runs `debate.sh -n $ROUNDS "$topic"`, parses the verdict of the last completed critic round, found through the receipt `debate.sh` publishes for that dispatch (never the team-wide `latest-debate` symlink, which another debate can retarget). Receipts are retained beside the logs as per-dispatch audit artifacts, as dev-trio's review receipts are; the summary log records each one's path and the dispatch's exit code, so which transcript a verdict came from — and whether the iteration accepted it — can be reconstructed afterwards. An untouched reservation left by a dispatch that published nothing is cleaned up; one with contents is kept, because when a receipt is rejected its contents are the evidence (`STRENGTHEN` / `RECONSIDER` / `OVERTURN`), logs to `fix_plan.md`, and (on `RECONSIDER`) re-queues to BACKLOG.
 
 Produces *text artifacts*, not code diffs. The debate transcripts live under `$PWD/.debate-conductor/log/<team>/debate-<TS>/`.
 

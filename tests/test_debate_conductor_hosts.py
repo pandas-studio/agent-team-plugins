@@ -957,6 +957,238 @@ class DebateHostTests(unittest.TestCase):
                          ["round-1-gen-agy.md", "round-1-gen-agy.md",
                           "round-2-crit-codex.md", "round-2-crit-codex.md"])
 
+    # ── Run receipt (#61) ──────────────────────────────────────────────────
+
+    def receipt_path(self):
+        return self.root / f"debate-receipt-{len(list(self.root.glob('debate-receipt-*')))}"
+
+    def test_receipt_reports_this_runs_directory_and_completed_critic(self):
+        receipt = self.receipt_path()
+        result = self.run_cli("debate.sh", "-n", "2", "fixture topic",
+                              DEBATE_RECEIPT=str(receipt))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(receipt.read_text())
+        self.assertEqual(data["schema_version"], 1)
+        self.assertEqual(Path(data["debate_dir"]), self.latest_debate())
+        self.assertTrue(data["debate_dir"].startswith("/"))
+        self.assertEqual(data["last_round"], 2)
+        self.assertEqual(data["critic_round"], 2)
+        self.assertEqual(data["critic_file"], "round-2-crit.md")
+        self.assertTrue((Path(data["debate_dir"]) / data["critic_file"]).is_file())
+
+    def test_receipt_records_the_rotated_transcript_name(self):
+        receipt = self.receipt_path()
+        result = self.run_cli("debate.sh", "--rotate", "-n", "2", "t",
+                              DEBATE_RECEIPT=str(receipt))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(receipt.read_text())["critic_file"],
+                         "round-2-crit-codex.md")
+
+    def test_receipt_pairs_null_critic_fields_when_none_completed(self):
+        receipt = self.receipt_path()
+        result = self.run_cli("debate.sh", "-n", "1", "t", DEBATE_RECEIPT=str(receipt))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(receipt.read_text())
+        self.assertEqual(data["last_round"], 1)
+        self.assertIsNone(data["critic_round"])
+        self.assertIsNone(data["critic_file"])
+
+    def test_receipt_reports_the_round_a_converged_run_stopped_at(self):
+        receipt = self.receipt_path()
+        result = self.run_cli("debate.sh", "--until-converged", "-n", "6", "t",
+                              DEBATE_RECEIPT=str(receipt))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(receipt.read_text())
+        self.assertEqual((data["last_round"], data["critic_round"]), (2, 2))
+
+    def test_receipt_covers_the_whole_debate_not_one_dispatch(self):
+        receipt = self.receipt_path()
+        self.assertEqual(self.run_cli("debate.sh", "-n", "2", "t").returncode, 0)
+        debate = self.latest_debate()
+        # A continuation that runs only a generator round still reports the
+        # critic round an earlier dispatch completed.
+        result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t",
+                              DEBATE_RECEIPT=str(receipt))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(receipt.read_text())
+        self.assertEqual((data["last_round"], data["critic_round"]), (3, 2))
+        self.assertEqual(data["critic_file"], "round-2-crit.md")
+
+    def test_receipt_accepts_a_custom_model_id_containing_dots(self):
+        """A model id is caller-defined; `..` inside a basename escapes nothing."""
+        self.config.write_text(json.dumps({
+            "models": {"critic..v2": {"command": str(self.stub),
+                                      "args": ["-p", "{prompt}"]}},
+            "roles": {}}))
+        receipt = self.receipt_path()
+        result = self.run_cli("debate.sh", "--rotate", "-n", "2",
+                              "--primary-crit=critic..v2", "t",
+                              DEBATE_RECEIPT=str(receipt))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(receipt.read_text())
+        self.assertEqual(data["critic_file"], "round-2-crit-critic..v2.md")
+        self.assertTrue((Path(data["debate_dir"]) / data["critic_file"]).is_file())
+
+    def test_a_failed_run_publishes_no_receipt(self):
+        receipt = self.receipt_path()
+        result = self.run_cli("debate.sh", "-n", "2", "t", STUB_RC="9",
+                              DEBATE_RECEIPT=str(receipt))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(receipt.exists())
+
+    def test_relative_receipt_path_is_refused_before_anything_is_created(self):
+        result = self.run_cli("debate.sh", "-n", "2", "t", DEBATE_RECEIPT="receipt.json")
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn("DEBATE_RECEIPT must be absolute", result.stderr)
+        self.assertFalse((self.workspace / ".debate-conductor").exists())
+
+    def read_receipt(self, receipt):
+        """Run the plugin's own strict reader over a receipt file."""
+        return subprocess.run(
+            ["bash", "-c", 'set -uo pipefail; . "$1"; debate_receipt_read "$2"',
+             "bash", str(self.plugin / "lib" / "debate-result.sh"), str(receipt)],
+            text=True, capture_output=True, timeout=60)
+
+    def test_strict_reader_rejects_every_malformed_receipt(self):
+        receipt = self.receipt_path()
+        self.assertEqual(self.run_cli("debate.sh", "-n", "2", "t",
+                                      DEBATE_RECEIPT=str(receipt)).returncode, 0)
+        good = json.loads(receipt.read_text())
+        debate = Path(good["debate_dir"])
+        self.assertEqual(self.read_receipt(receipt).returncode, 0, "the real one must pass")
+
+        (debate / "escape.md").write_text("elsewhere\n")
+        # A real directory inside the debate dir, and a real transcript outside
+        # it, so the traversal case below is only stopped by the slash rule.
+        (debate / "round-2-crit-d").mkdir()
+        escape_dir = debate.parent / "escape-target"
+        escape_dir.mkdir()
+        escape = escape_dir / "round-2-crit.md"
+        escape.write_text("Verdict: OVERTURN\n")
+        outside = self.root / "outside-round-2-crit.md"
+        outside.write_text("outside\n")
+        os.symlink(outside, debate / "round-2-crit-link.md")
+        os.mkfifo(debate / "round-2-crit-fifo.md")
+
+        # Missing keys are exercised from a *valid* null/null receipt: dropping
+        # critic_file next to a numeric critic_round already fails the pairing
+        # rule, so it never reaches has() (measured — removing the has() check
+        # left this test green).
+        nulled = dict(good, critic_round=None, critic_file=None)
+        # Control characters have to be rejected inside jq, on the JSON string:
+        # command substitution strips a trailing newline and drops NUL, so a
+        # shell-side check sees the legitimate name (measured).
+        newline_name = good["critic_file"] + chr(10)
+        nul_name = "round-2-crit" + chr(0) + ".md"
+
+        bad = {
+            "two objects": json.dumps(good) + "\n" + json.dumps(good),
+            "no critic_file key": json.dumps(
+                {k: v for k, v in nulled.items() if k != "critic_file"}),
+            "no critic_round key": json.dumps(
+                {k: v for k, v in nulled.items() if k != "critic_round"}),
+            "no last_round key": json.dumps(
+                {k: v for k, v in nulled.items() if k != "last_round"}),
+            "trailing newline in critic_file": json.dumps(
+                dict(good, critic_file=newline_name)),
+            "nul in critic_file": json.dumps(dict(good, critic_file=nul_name)),
+            "trailing newline in debate_dir": json.dumps(
+                dict(good, debate_dir=good["debate_dir"] + chr(10))),
+            "wrong version": json.dumps(good | {"schema_version": 2}),
+            "relative dir": json.dumps(good | {"debate_dir": "log/debate-1"}),
+            "missing critic_file key": json.dumps(
+                {k: v for k, v in good.items() if k != "critic_file"}),
+            "unpaired null": json.dumps(good | {"critic_file": None}),
+            "odd critic round": json.dumps(good | {"critic_round": 3}),
+            "critic round past last": json.dumps(good | {"last_round": 1}),
+            "zero last round": json.dumps(good | {"last_round": 0}),
+            "traversal": json.dumps(good | {"critic_file": "../round-2-crit.md"}),
+            # This one matches the round-N-crit-*.md shape (a `case` glob's *
+            # spans slashes) *and* resolves to a real regular file outside the
+            # debate directory, so every later check would pass: only the slash
+            # rule rejects it — and that rule is what makes a `..` inside a
+            # model id harmless.
+            "traversal that resolves outside": json.dumps(
+                good | {"critic_file":
+                        f"round-2-crit-d/../../{escape_dir.name}/{escape.name}"}),
+            "not a critic name": json.dumps(good | {"critic_file": "escape.md"}),
+            "symlink": json.dumps(good | {"critic_file": "round-2-crit-link.md"}),
+            "fifo": json.dumps(good | {"critic_file": "round-2-crit-fifo.md"}),
+            "absent file": json.dumps(good | {"critic_file": "round-2-crit-gone.md"}),
+            "empty": "",
+        }
+        for name, body in bad.items():
+            with self.subTest(receipt=name):
+                receipt.write_text(body)
+                self.assertNotEqual(self.read_receipt(receipt).returncode, 0, name)
+
+        # Malformed UTF-8 has to be caught before jq, which *replaces* a bad
+        # byte with U+FFFD rather than refusing it: a receipt naming
+        # round-2-crit-<0xFF>.md was accepted whenever the decoded name existed
+        # on disk (measured). The fixture puts that file there, so the
+        # filesystem check cannot mask a reader that let the bytes through.
+        (debate / "round-2-crit-\ufffd.md").write_text("Verdict: STRENGTHEN\n")
+        for field in ("critic_file", "debate_dir"):
+            with self.subTest(receipt=f"invalid utf-8 in {field}"):
+                marker = "round-2-crit-XX.md" if field == "critic_file" else good["debate_dir"] + "XX"
+                raw = json.dumps(dict(good, **{field: marker})).encode()
+                receipt.write_bytes(raw.replace(b"XX", b"\xff"))
+                self.assertNotEqual(self.read_receipt(receipt).returncode, 0, field)
+
+        receipt.write_text(json.dumps(nulled))
+        self.assertEqual(self.read_receipt(receipt).returncode, 0,
+                         "a paired-null receipt is valid")
+
+    def test_completed_round_file_contract(self):
+        """Driven straight at the helper — cheaper and sharper than debates."""
+        def ask(lines, round_no=2, role="crit", sidecars=()):
+            debate = self.root / f"crf {len(list(self.root.glob('crf *')))}"
+            debate.mkdir()
+            if lines is not None:
+                (debate / "index.jsonl").write_text("".join(l + "\n" for l in lines))
+            for name in sidecars:
+                (debate / name).touch()
+            return subprocess.run(
+                ["bash", "-c",
+                 'set -uo pipefail; . "$1"; completed_round_file "$2" "$3" "$4"',
+                 "bash", str(self.plugin / "lib" / "index.sh"), str(debate),
+                 str(round_no), role],
+                text=True, capture_output=True, timeout=60)
+
+        end = lambda name, rc=0, rnd=2, role="crit": json.dumps(
+            {"v": 1, "t": "end", "round": rnd, "role": role, "rc": rc, "file": name})
+
+        got = ask([end("round-2-crit.md")])
+        self.assertEqual((got.returncode, got.stdout.strip()), (0, "round-2-crit.md"))
+        # A failed attempt then a successful one: the successful file wins.
+        got = ask([end("round-2-crit.md", rc=9), end("round-2-crit-codex.md")])
+        self.assertEqual((got.returncode, got.stdout.strip()), (0, "round-2-crit-codex.md"))
+        # The same name twice is one answer, not an ambiguity.
+        got = ask([end("round-2-crit.md"), end("round-2-crit.md")])
+        self.assertEqual((got.returncode, got.stdout.strip()), (0, "round-2-crit.md"))
+        # Two *distinct* successful names are ambiguous and are not guessed at.
+        got = ask([end("round-2-crit.md"), end("round-2-crit-codex.md")])
+        self.assertNotEqual(got.returncode, 0)
+        # A name that is only a control character is not a filename: it is
+        # discarded before the count, so the real one still answers.
+        got = ask([end(chr(10)), end("round-2-crit.md")])
+        self.assertEqual((got.returncode, got.stdout.strip()), (0, "round-2-crit.md"))
+        # Malformed lines are skipped, not fatal.
+        got = ask(["not json", end("round-2-crit.md")])
+        self.assertEqual((got.returncode, got.stdout.strip()), (0, "round-2-crit.md"))
+        # No ledger at all: the sidecar's own name carries the rotation form.
+        got = ask(None, sidecars=(".round-2-crit-codex.done",))
+        self.assertEqual((got.returncode, got.stdout.strip()), (0, "round-2-crit-codex.md"))
+        # A ledger that says nothing about *this* round still falls back.
+        got = ask([end("round-4-crit.md", rnd=4)], sidecars=(".round-2-crit.done",))
+        self.assertEqual((got.returncode, got.stdout.strip()), (0, "round-2-crit.md"))
+        # A disagreeing sidecar does not override an answer the ledger gave.
+        got = ask([end("round-2-crit.md")], sidecars=(".round-2-crit-codex.done",))
+        self.assertEqual((got.returncode, got.stdout.strip()), (0, "round-2-crit.md"))
+        # Nothing completed: empty, and not an error.
+        got = ask([end("round-2-crit.md", rc=9)])
+        self.assertEqual((got.returncode, got.stdout.strip()), (0, ""))
+
     def test_invalid_host_does_not_block_help(self):
         result = self.run_cli("debate.sh", "--help", DEBATE_CONDUCTOR_PM_HOST="invalid")
         self.assertEqual(result.returncode, 0, result.stderr)

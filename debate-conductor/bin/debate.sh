@@ -83,6 +83,11 @@ _INDEX_LIB="$SCRIPT_DIR/../lib/index.sh"
 # shellcheck source=../lib/index.sh
 . "$_INDEX_LIB"
 unset _INDEX_LIB
+_RESULT_LIB="$SCRIPT_DIR/../lib/debate-result.sh"
+[ -f "$_RESULT_LIB" ] || { echo "debate: debate-result.sh not found at $_RESULT_LIB" >&2; exit 1; }
+# shellcheck source=../lib/debate-result.sh
+. "$_RESULT_LIB"
+unset _RESULT_LIB
 # shellcheck source=../lib/host.sh
 . "$SCRIPT_DIR/../lib/host.sh"
 
@@ -171,6 +176,16 @@ round_file() {
 if [ -n "$CONTEXT_FILE" ]; then
   [ -f "$CONTEXT_FILE" ] || { echo "context file not found: $CONTEXT_FILE" >&2; exit 2; }
 fi
+
+# A caller that needs to know what *this* invocation produced passes an
+# absolute, fresh receipt path; see lib/debate-result.sh for why reading the
+# `latest-debate` symlink instead is a race. Validated here, before this run
+# creates anything.
+DEBATE_RECEIPT="${DEBATE_RECEIPT:-}"
+case "$DEBATE_RECEIPT" in
+  ""|/*) ;;
+  *) echo "debate: DEBATE_RECEIPT must be absolute (got: $DEBATE_RECEIPT)" >&2; exit 2 ;;
+esac
 
 TEAM=$(agent_team_detect_team) || exit 2
 LOG_BASE="${DEBATE_LOG_DIR:-$PWD/.debate-conductor/log}"
@@ -1173,6 +1188,31 @@ if [ "$UNTIL_CONVERGED" = "1" ]; then
   else
     printf '\n⚠ Reached round cap %s without a STRENGTHEN verdict — stopping.\n' "$END_ROUND"
   fi
+fi
+
+# The receipt, published while this run still holds the writer lock: a snapshot
+# taken outside it could be advanced by a concurrent --continue-from between the
+# read and the write. Success only — a failed round never reaches this line.
+if [ -n "$DEBATE_RECEIPT" ]; then
+  RECEIPT_DIR="$(cd "$DEBATE_DIR" && pwd -P)" || { echo "debate: cannot resolve $DEBATE_DIR" >&2; exit 1; }
+  RECEIPT_LAST="$(last_completed_round "$DEBATE_DIR")"
+  # Reaching this line means every scheduled round completed, so an empty
+  # answer here is a broken read, not an empty debate.
+  [ -n "$RECEIPT_LAST" ] || { echo "debate: no completed round to report in $DEBATE_DIR" >&2; exit 1; }
+  RECEIPT_CRIT="$(last_completed_round_of_role "$DEBATE_DIR" crit)"
+  RECEIPT_FILE=""
+  if [ -n "$RECEIPT_CRIT" ]; then
+    # A lookup that fails is an error, not "no critic round completed": the
+    # receipt must not quietly claim nothing finished because a read broke.
+    RECEIPT_FILE="$(completed_round_file "$DEBATE_DIR" "$RECEIPT_CRIT" crit)" || {
+      echo "debate: cannot determine the transcript of completed critic round $RECEIPT_CRIT" >&2
+      exit 1
+    }
+    [ -n "$RECEIPT_FILE" ] || { echo "debate: completed critic round $RECEIPT_CRIT has no transcript on record" >&2; exit 1; }
+  fi
+  debate_receipt_write "$DEBATE_RECEIPT" "$RECEIPT_DIR" "$RECEIPT_LAST" \
+    "$RECEIPT_CRIT" "$RECEIPT_FILE" \
+    || { echo "debate: could not publish the receipt $DEBATE_RECEIPT" >&2; exit 1; }
 fi
 
 printf '\n────────────────────────────────────────────────────\n'

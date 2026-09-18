@@ -511,6 +511,141 @@ assert_eq "$(run_driver "$ROOT/ralph-trio/bin/ralph-debate.sh" --backlog BACKLOG
 DEBATE_PROMPT="$(sed -n 's/^PROMPT: *//p' "$TMP/rw/log/smoke/latest-ralph-debate.log")"
 assert_eq "$DEBATE_PROMPT" "$(cd "$DRV" && pwd)/PROMPT.md"
 
+# ralph-debate reads what ITS OWN dispatch produced, from the receipt debate.sh
+# publishes, never from the team-wide `latest-debate` symlink (#61). The shim
+# runs the real producer, then retargets the symlink at a foreign debate whose
+# critic says the opposite thing — ralph cannot look until the shim returns, so
+# no sleeps and no scheduling assumptions. The shim lives in a bin/ with a
+# sibling lib/ because that is how ralph resolves debate-result.sh.
+RD="$TMP/rd61"
+mkdir -p "$RD/bin" "$RD/log/smoke/debate-19700101-000000" "$RD/ws"
+ln -s "$ROOT/debate-conductor/lib" "$RD/lib"
+printf '## Verdict\nVerdict: STRENGTHEN\n' > "$RD/log/smoke/debate-19700101-000000/round-2-crit.md"
+ln -sfn "debate-19700101-000000" "$RD/log/smoke/latest-debate"
+cat > "$RD/bin/debate.sh" <<SHIM
+#!/bin/sh
+"$ROOT/debate-conductor/bin/debate.sh" "\$@"
+rc=\$?
+: > "$RD/shim-ran"
+ln -sfn "debate-19700101-000000" "$RD/log/smoke/latest-debate"
+[ -n "\${RD61_DROP_RECEIPT:-}" ] && rm -f "\$DEBATE_RECEIPT"
+exit \$rc
+SHIM
+chmod +x "$RD/bin/debate.sh"
+run_rd61() {
+  rm -f "$RD/shim-ran"
+  printf -- '- [ ] task 61\n' > "$DRV/BACKLOG.md"
+  (cd "$DRV" && env PATH="$RD/bin:$ROOT/dev-trio/bin:$PATH" \
+    AGENT_TEAM=smoke TMUX="" RALPH_TRIO_WORKSPACE="$TMP/rw61" \
+    DEBATE_LOG_DIR="$RD/log" AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" \
+    GENERATOR_CLI="$TMP/worker-cli/answer" CRITIC_CLI="$TMP/worker-cli/answer" \
+    "$@" "$ROOT/ralph-trio/bin/ralph-debate.sh" --backlog BACKLOG.md --max-iter 1 \
+    >/dev/null 2>"$TMP/rd61.err" </dev/null; echo "rc=$?")
+}
+assert_eq "$(run_rd61 env)" "rc=0"
+assert_ok test -e "$RD/shim-ran"
+# The symlink really did move to the foreign debate...
+assert_eq "$(readlink "$RD/log/smoke/latest-debate")" "debate-19700101-000000"
+RD61_LOG="$TMP/rw61/log/smoke/latest-ralph-debate.log"
+# ...and ralph still reported its own debate's verdict (the stub says
+# RECONSIDER; the foreign transcript says STRENGTHEN).
+assert_eq "$(sed -n 's/^  verdict: *//p' "$RD61_LOG")" "RECONSIDER"
+RD61_DIR="$(sed -n 's/^  debate dir: *//p' "$RD61_LOG")"
+assert_eq "$(basename "$(dirname "$RD61_DIR")")" "smoke"
+case "$RD61_DIR" in *debate-19700101-000000) assert_eq "own dir" "foreign dir" ;; *) assert_eq "own dir" "own dir" ;; esac
+assert_ok test -f "$RD61_DIR/round-2-crit.md"
+# A successful dispatch whose receipt is gone is UNKNOWN, never a fallback read
+# of whatever the symlink happens to point at now.
+assert_eq "$(run_rd61 env RD61_DROP_RECEIPT=1)" "rc=0"
+assert_eq "$(sed -n 's/^  verdict: *//p' "$TMP/rw61/log/smoke/latest-ralph-debate.log")" "UNKNOWN"
+# ralph_log writes to stderr, not the summary log.
+assert_ok grep -q 'receipt is missing or unusable' "$TMP/rd61.err"
+# The receipt is kept beside the logs as a per-dispatch audit artifact, and the
+# summary log binds it to the exit code — but an untouched reservation from a
+# dispatch that published nothing is reclaimed.
+assert_ok grep -q '^  receipt: ' "$TMP/rw61/log/smoke/latest-ralph-debate.log"
+assert_ok jq -e '.schema_version == 1' "$(ls "$TMP/rw61/log/smoke"/debate-receipt-* | head -1)"
+# A dispatch that fails publishes nothing, so its reservation is still empty —
+# that is the file the cleanup exists for, and the only one it may take.
+cat > "$RD/bin/debate.sh" <<SHIM3
+#!/bin/sh
+: > "$RD/shim-ran"
+exit 7
+SHIM3
+chmod +x "$RD/bin/debate.sh"
+assert_eq "$(run_rd61 env)" "rc=0"
+assert_eq "$(sed -n 's/^  verdict: *//p' "$TMP/rw61/log/smoke/latest-ralph-debate.log")" "UNKNOWN"
+assert_eq "$(find "$TMP/rw61/log/smoke" -name 'debate-receipt-*' -size 0 | wc -l | tr -d ' ')" "0"
+# ...while the published one from the first dispatch is still there.
+# A receipt with contents is never reclaimed, even when the reader rejects it:
+# its bytes are the evidence of what the producer got wrong.
+cat > "$RD/bin/debate.sh" <<SHIM2
+#!/bin/sh
+"$ROOT/debate-conductor/bin/debate.sh" "\$@"
+rc=\$?
+: > "$RD/shim-ran"
+printf 'not a receipt\n' > "\$DEBATE_RECEIPT"
+exit \$rc
+SHIM2
+chmod +x "$RD/bin/debate.sh"
+assert_eq "$(run_rd61 env)" "rc=0"
+assert_eq "$(sed -n 's/^  verdict: *//p' "$TMP/rw61/log/smoke/latest-ralph-debate.log")" "UNKNOWN"
+assert_eq "$(grep -lx 'not a receipt' "$TMP/rw61/log/smoke"/debate-receipt-*.* | wc -l | tr -d ' ')" "1"
+# Two receipts survive the whole block: the one a successful dispatch published
+# and the one whose contents a rejected dispatch left as evidence. The empty
+# reservations of the dispatches that published nothing are gone.
+assert_eq "$(find "$TMP/rw61/log/smoke" -name 'debate-receipt-*' -size 0 | wc -l | tr -d ' ')" "0"
+assert_eq "$(find "$TMP/rw61/log/smoke" -name 'debate-receipt-*' ! -size 0 | wc -l | tr -d ' ')" "2"
+
+# A dispatch that published a perfectly good receipt and *then* failed is still
+# UNKNOWN: the exit code gates the read, because a signal after publication can
+# leave a valid receipt behind for a run that did not finish. The receipt itself
+# is kept — it records what the producer published.
+cat > "$RD/bin/debate.sh" <<SHIM4
+#!/bin/sh
+"$ROOT/debate-conductor/bin/debate.sh" "\$@"
+: > "$RD/shim-ran"
+exit 7
+SHIM4
+chmod +x "$RD/bin/debate.sh"
+assert_eq "$(run_rd61 env)" "rc=0"
+assert_eq "$(sed -n 's/^  verdict: *//p' "$TMP/rw61/log/smoke/latest-ralph-debate.log")" "UNKNOWN"
+RD61_LAST="$(sed -n 's/^  receipt: *//p' "$TMP/rw61/log/smoke/latest-ralph-debate.log" | sed 's/ (rc=.*//')"
+assert_ok jq -e '.schema_version == 1' "$RD61_LAST"
+
+# A relative RALPH_TRIO_WORKSPACE still yields an absolute receipt path, which
+# debate.sh requires: $LOG_DIR is relative in that case and is resolved once in
+# the parent shell.
+printf -- '- [ ] task rel\n' > "$DRV/BACKLOG.md"
+rm -f "$RD/shim-ran"
+cat > "$RD/bin/debate.sh" <<SHIM5
+#!/bin/sh
+exec "$ROOT/debate-conductor/bin/debate.sh" "\$@"
+SHIM5
+chmod +x "$RD/bin/debate.sh"
+assert_eq "$( (cd "$DRV" && env PATH="$RD/bin:$ROOT/dev-trio/bin:$PATH" \
+  AGENT_TEAM=smoke TMUX="" RALPH_TRIO_WORKSPACE="rel-ws" \
+  DEBATE_LOG_DIR="$RD/log" AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" \
+  GENERATOR_CLI="$TMP/worker-cli/answer" CRITIC_CLI="$TMP/worker-cli/answer" \
+  "$ROOT/ralph-trio/bin/ralph-debate.sh" --backlog BACKLOG.md --max-iter 1 \
+  >/dev/null 2>"$TMP/rd61rel.err" </dev/null; echo "rc=$?") )" "rc=0"
+assert_eq "$(sed -n 's/^  verdict: *//p' "$DRV/rel-ws/log/smoke/latest-ralph-debate.log")" "RECONSIDER"
+assert_ok grep -qE '^  receipt: +/' "$DRV/rel-ws/log/smoke/latest-ralph-debate.log"
+
+# A debate-conductor too old to ship the shared receipt library is refused up
+# front, not once per iteration.
+mkdir -p "$TMP/rd61old/bin" "$TMP/rd61old/lib"
+printf '#!/bin/sh\nexit 0\n' > "$TMP/rd61old/bin/debate.sh"
+chmod +x "$TMP/rd61old/bin/debate.sh"
+printf -- '- [ ] task old\n' > "$DRV/BACKLOG.md"
+assert_eq "$( (cd "$DRV" && env PATH="$TMP/rd61old/bin:$ROOT/dev-trio/bin:$PATH" \
+  AGENT_TEAM=smoke TMUX="" RALPH_TRIO_WORKSPACE="$TMP/rw61old" \
+  "$ROOT/ralph-trio/bin/ralph-debate.sh" --backlog BACKLOG.md --max-iter 1 \
+  >/dev/null 2>"$TMP/rd61old.err" </dev/null; echo "rc=$?") )" "rc=2"
+assert_ok grep -q 'update debate-conductor' "$TMP/rd61old.err"
+# ...and the task is still pending, not popped.
+assert_eq "$(grep -c '^- \[ \] task old$' "$DRV/BACKLOG.md")" "1"
+
 # Two researchers started in the same second must not share a log or manifest.
 # `date` is pinned to one second for the filename format only.
 mkdir -p "$TMP/fixed-date"
