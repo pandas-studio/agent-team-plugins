@@ -43,6 +43,10 @@
 #     ends with an end record carrying its exit status, both beginning with
 #     \x1e (never present in model output, which is filtered).
 #   - $LOG_DIR/latest-debate → symlink to most recent debate dir
+#   A fresh debate directory is allocated atomically, so two debates started in
+#   the same second get `debate-<TS>` and `debate-<TS>-1`. While a run is
+#   writing a debate it holds `debate-<TS>/.lock`; a second run on the same
+#   debate is refused (exit 2).
 #
 # Log location: $DEBATE_LOG_DIR (default: $PWD/.debate-conductor/log) / $TEAM /
 set -euo pipefail
@@ -167,6 +171,125 @@ TEAM=$(agent_team_detect_team) || exit 2
 LOG_BASE="${DEBATE_LOG_DIR:-$PWD/.debate-conductor/log}"
 LOG_DIR="$LOG_BASE/$TEAM"
 
+# ── One writer per debate ───────────────────────────────────────────────────
+# Everything under a debate directory (round files, `.done` sidecars, the role
+# streams, models.json) has exactly one writer. Without that, two
+# `--continue-from` runs read the same completed rounds, pick the same next
+# round, truncate the same round files and interleave appends into the streams.
+#
+# The lock is a *symlink*, `.lock`, whose target is the owner line. `ln -s`
+# creates the lock and publishes its owner in one atomic step, which is what
+# makes this safe against a signal: there is no moment where the lock exists
+# but nobody can be shown to hold it, and release_lock decides purely from
+# what `readlink` returns — no bookkeeping flag a signal could arrive between.
+# (`flock` is not available on bash 3.2, the macOS /bin/bash.) Nothing ever
+# follows the link; it is read, not opened.
+#
+# There is deliberately no automatic stale recovery. A dead owner pid is not
+# evidence that the writing stopped: a SIGKILL aimed at debate.sh alone leaves
+# its backgrounded attempt pipeline writing the round file and the stream. And
+# no sleep-and-recheck election between contenders is exclusive — two of them
+# can each elect themselves, and the one that wakes second then deletes a lock
+# the other is already holding. INT, TERM and HUP release the lock through the
+# traps below, so clearing one that outlived its run is the user's call, and
+# the refusal says how.
+LOCK_PATH=""    # where this run's lock would be; removal is gated on the owner
+LOCK_OWNER=""   # the exact owner line this run publishes, unique to this run
+
+# release_lock: drop the lock if it is still ours. It reads the owner back from
+# the link, so it is idempotent, safe to re-enter from a nested signal, and
+# never removes a lock some other run holds.
+release_lock() {
+  [ -n "$LOCK_PATH" ] || return 0
+  [ "$(readlink "$LOCK_PATH" 2>/dev/null || true)" = "$LOCK_OWNER" ] || return 0
+  rm -f "$LOCK_PATH" 2>/dev/null || true
+}
+
+# lock_refuse DIR LOCK: report the holder of an existing lock and exit 2.
+lock_refuse() {
+  local owner
+  owner="$(readlink "$2" 2>/dev/null || true)"
+  case "$owner" in
+    host=*pid=*)
+      echo "debate: $1 is locked by another debate.sh run ($owner)" >&2 ;;
+    *)
+      echo "debate: $1 holds a lock with no readable owner — another debate.sh run may be writing it" >&2 ;;
+  esac
+  # Same condition as the README: a dead debate.sh is not enough, because the
+  # model CLI, the filter and the tees it started can outlive it and keep
+  # writing. %q so the command is safe to paste for a path with spaces.
+  printf 'debate: wait for that run to finish. If it is gone, confirm that it and every process it started have stopped writing here, then: rm -rf -- %q\n' \
+    "$2" >&2
+  exit 2
+}
+
+# acquire_lock DIR: take the exclusive writer lock on debate dir DIR, or refuse
+# with rc=2 — for a live holder, and for any lock this run cannot identify.
+acquire_lock() {
+  local dir="$1" lock="$1/.lock" host
+  host="${HOSTNAME:-}"
+  [ -n "$host" ] || host="$(uname -n 2>/dev/null || echo unknown)"
+  # pid + start second + a random token: a stranded lock from a former run can
+  # never read back as this one's, whatever pid the kernel reuses.
+  LOCK_OWNER="host=$host pid=$$ started=$(date +%Y-%m-%dT%H:%M:%S) run=$RANDOM$RANDOM"
+  # Set before the link exists: release_lock still removes nothing until the
+  # link is ours, and a signal landing inside `ln -s` leaves nothing behind.
+  LOCK_PATH="$lock"
+  # Checked before the link is made because `ln -s TARGET DIR` puts the link
+  # *inside* DIR: a lock left behind as a directory would otherwise be walked
+  # straight past. Not a race with another debate.sh — this script only ever
+  # creates the lock as a symlink, and `ln -s` onto an existing symlink fails.
+  if [ -L "$lock" ] || [ -e "$lock" ]; then
+    lock_refuse "$dir" "$lock"
+  fi
+  if ! ln -s "$LOCK_OWNER" "$lock" 2>/dev/null; then
+    # Lost the race to another run, or nothing is in the way and the parent is
+    # unwritable or missing — say which.
+    if [ -L "$lock" ] || [ -e "$lock" ]; then
+      lock_refuse "$dir" "$lock"
+    fi
+    echo "debate: cannot create the writer lock $lock" >&2
+    exit 1
+  fi
+}
+
+# Early traps, replaced further down once attempt recording exists. A fatal
+# signal that is not trapped kills the shell without running the EXIT trap, so
+# INT/TERM/HUP are trapped from here on: release, then die from the same signal
+# so a bash caller still sees an interrupted child.
+release_and_die() {
+  release_lock
+  trap - "$1" EXIT
+  kill -s "$1" "$$"
+}
+trap 'release_lock' EXIT
+trap 'release_and_die INT' INT
+trap 'release_and_die TERM' TERM
+trap 'release_and_die HUP' HUP
+
+# allocate_debate_dir: create a fresh debate directory, atomically. `mkdir`
+# without -p on the leaf fails when the name is taken, which is what makes the
+# allocation exclusive: two debates started in the same second used to share
+# `debate-<TS>/` (and `latest-debate` did not visibly retarget, so viewers
+# could not tell a new debate had started). The loser takes `debate-<TS>-1`,
+# and so on. The suffix is part of TS from here on, so the `latest-debate`
+# symlink and the `--continue-from` TS parse keep working unchanged.
+allocate_debate_dir() {
+  local n=0 cand
+  mkdir -p "$LOG_DIR"
+  while :; do
+    if [ "$n" -eq 0 ]; then cand="debate-$TS"; else cand="debate-$TS-$n"; fi
+    if mkdir "$LOG_DIR/$cand" 2>/dev/null; then
+      TS="${cand#debate-}"
+      DEBATE_DIR="$LOG_DIR/$cand"
+      return 0
+    fi
+    [ -d "$LOG_DIR/$cand" ] || { echo "debate: cannot create $LOG_DIR/$cand" >&2; exit 1; }
+    n=$((n + 1))
+    [ "$n" -lt 100 ] || { echo "debate: too many debates started in the same second under $LOG_DIR" >&2; exit 1; }
+  done
+}
+
 if [ -n "$CONTINUE_FROM" ]; then
   # Append more rounds to an existing debate dir. Caller may pass either an
   # absolute path or a `latest-debate` symlink — resolve to the real dir so
@@ -181,6 +304,9 @@ if [ -n "$CONTINUE_FROM" ]; then
     *) echo "continue-from must point at a debate-<TS> dir (got: $DEBATE_DIR)" >&2; exit 2 ;;
   esac
   LOG_DIR="${DEBATE_DIR%/*}"
+  # Take the writer lock before reading any completion state: the round this
+  # run picks, and every file it then writes, must be decided under it.
+  acquire_lock "$DEBATE_DIR"
   # LAST_ROUND counts only *completed* rounds — those with a hidden sidecar
   # `.round-N-...done` file written by `write_round_end` after the wrapper
   # exits 0. Pre-touched files and crashed-mid-round files have no sidecar,
@@ -464,7 +590,14 @@ if [ "$ROTATE" = "1" ]; then
   fi
 fi
 
-mkdir -p "$DEBATE_DIR"
+if [ -n "$CONTINUE_FROM" ]; then
+  mkdir -p "$DEBATE_DIR"
+else
+  # Allocated (and locked) only once the preflight above passed, so a refused
+  # run leaves no debate directory behind.
+  allocate_debate_dir
+  acquire_lock "$DEBATE_DIR"
+fi
 # Per-role live streams for tail-role.sh: append-only, never truncated or
 # replaced, so `tail -F` on one file sees every attempt, retries included.
 # Created before latest-debate moves so a viewer switching to this debate finds
@@ -746,7 +879,7 @@ record_attempt_end() {
   stream_record "$role" "<!-- debate-round-end: $CUR_ATTEMPT_ROUND $role rc=$rc id=$CUR_ATTEMPT_ID -->" || true
   CUR_ATTEMPT_ROLE=""
 }
-trap 'record_attempt_end "$?"' EXIT
+trap 'record_attempt_end "$?"; release_lock' EXIT
 # stop_attempt: terminate the running attempt and every process it started, as
 # far as they can be found. Background commands start with SIGINT ignored, so
 # they are always sent TERM. The attempt's processes are this shell's jobs that
@@ -841,6 +974,7 @@ wait_attempt() {
 on_signal() {
   stop_attempt || true
   record_attempt_end "$2"
+  release_lock
   trap - "$1" EXIT
   kill -s "$1" "$$"
 }
