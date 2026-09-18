@@ -50,13 +50,14 @@ Streaming output is already visible in the middle/right panes — do not duplica
 
 Use `Glob` to enumerate **all** `round-*.md` files in `<real-dir>` (not just the new ones — the user wants the full arc), then `Read` to load. Report:
 
-- **Latest verdict** — the canonical 3-token line (`Verdict: STRENGTHEN | RECONSIDER | OVERTURN`) at the bottom of the most recent critic round. Quote it verbatim.
+- **Latest verdict** — the canonical 3-token line (`Verdict: STRENGTHEN | RECONSIDER | OVERTURN`) at the bottom of the most recent *completed* critic round. Quote it verbatim. A critic round counts as completed when **either** `index.jsonl` in that directory holds a line with `"t":"end"`, `"rc":0` and `"role":"crit"` for it, **or** a `.round-<N>-crit*.done` sidecar exists for it; take the highest such N. Both, not just the index: a debate started before the ledger keeps its early rounds in the sidecars alone, so the index can cover only part of it. `index.jsonl` is a handful of short lines — `Read` it — and a completed line's `"file"` names the transcript. Only when the directory has neither an `index.jsonl` nor any `.done` sidecar (a debate older than both) may you fall back to the highest-numbered non-empty `round-*-crit*.md`. If it has them and none records a completed critic round, say that no critic round completed — do not quote an unfinished transcript.
 - **What changed** between the new rounds and the prior set: did Generator's stance evolve? Did Critic discover new lines of attack? One bullet per shift, ≤25 words each.
 - **Two follow-up questions** worth asking next — concrete, not generic.
 
 ## Constraints
 
 - **Do not call `ask-generator.sh` / `ask-critic.sh` directly.** `debate.sh --continue-from` is the only entry point for this skill.
-- **Do not rewrite or delete prior round files yourself.** `debate.sh` keeps completed rounds and only re-runs an incomplete one (a round with no `.done` sidecar), overwriting that failed transcript.
+- **Do not rewrite or delete prior round files yourself.** `debate.sh` keeps completed rounds and only re-runs an incomplete one — a round that neither the attempt ledger `index.jsonl` nor a `.done` sidecar records as completed — overwriting that failed transcript.
+- **Never edit or delete `index.jsonl`.** It is the debate's append-only attempt ledger and `debate.sh` is its only writer; `/continue` decides where to resume from it.
 - **Do not start a new `debate-<TS>/` dir.** If the user wants a fresh debate on a different topic, they should use `/debate-conductor:run` instead — tell them so rather than silently switching.
 - **Each new round only sees the immediately preceding generator+critic pair**, not the full transcript. If the user expects round 6 to remember round 1's framing, prompt them to restate it as part of the topic — the engine intentionally keeps prompts bounded as the debate grows.

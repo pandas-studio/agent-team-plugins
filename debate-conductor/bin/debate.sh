@@ -78,6 +78,11 @@ _REGISTRY_LIB="$SCRIPT_DIR/../lib/registry.sh"
 # shellcheck source=../lib/registry.sh
 . "$_REGISTRY_LIB" || { echo "debate: failed to load registry.sh (jq missing?)" >&2; exit 2; }
 unset _REGISTRY_LIB
+_INDEX_LIB="$SCRIPT_DIR/../lib/index.sh"
+[ -f "$_INDEX_LIB" ] || { echo "debate: index.sh not found at $_INDEX_LIB" >&2; exit 1; }
+# shellcheck source=../lib/index.sh
+. "$_INDEX_LIB"
+unset _INDEX_LIB
 # shellcheck source=../lib/host.sh
 . "$SCRIPT_DIR/../lib/host.sh"
 
@@ -307,21 +312,18 @@ if [ -n "$CONTINUE_FROM" ]; then
   # Take the writer lock before reading any completion state: the round this
   # run picks, and every file it then writes, must be decided under it.
   acquire_lock "$DEBATE_DIR"
-  # LAST_ROUND counts only *completed* rounds — those with a hidden sidecar
-  # `.round-N-...done` file written by `write_round_end` after the wrapper
-  # exits 0. Pre-touched files and crashed-mid-round files have no sidecar,
-  # so /continue resumes from the failed round, not after it.
+  # LAST_ROUND counts only *completed* rounds: those the attempt ledger
+  # (`index.jsonl`) holds an rc=0 end record for, or — for a debate that
+  # predates the ledger, or one whose best-effort index write failed — those
+  # with a `.round-N-...done` sidecar. lib/index.sh answers from both; see the
+  # note there on why it is a union and not a fallback. Pre-touched files and
+  # crashed-mid-round attempts are in neither, so /continue resumes from the
+  # failed round, not after it.
   #
   # With no sidecar at all, round 1 itself failed. topic.txt is written only
   # after preflight created the dir, so its presence means this debate started:
   # resume at round 1. Without it there is nothing to resume.
-  #
-  # The `|| true` wrap is required because `set -euo pipefail` is on and
-  # `ls` returns non-zero when the glob matches nothing — without it, an
-  # empty result aborts the script before our custom error message fires.
-  LAST_ROUND=$( { ls "$DEBATE_DIR"/.round-*.done 2>/dev/null || true; } \
-    | sed -E 's@.*/\.round-([0-9]+)-.*@\1@' \
-    | sort -n | tail -1)
+  LAST_ROUND="$(last_completed_round "$DEBATE_DIR")"
   if [ -z "$LAST_ROUND" ]; then
     [ -f "$DEBATE_DIR/topic.txt" ] || { echo "no completed round in $DEBATE_DIR — start a fresh debate with /run instead of /continue" >&2; exit 2; }
     echo "debate: no completed round in $DEBATE_DIR; resuming from round 1" >&2
@@ -664,7 +666,7 @@ if [ -n "$CONTINUE_FROM" ]; then
     case "$_n" in ""|*[!0-9]*) continue ;; esac
     [ "$_n" -gt "$END_ROUND" ] || continue
     [ -s "$_f" ] && continue
-    [ -e "$DEBATE_DIR/.${_base%.md}.done" ] && continue
+    round_is_complete "$DEBATE_DIR" "$_n" && continue
     rm -f "$_f"
   done
 fi
@@ -803,10 +805,70 @@ CUR_ATTEMPT_DONE=""
 CUR_ATTEMPT_ID=""
 CUR_ATTEMPT_HEADER=""
 CUR_ATTEMPT_PUBLISHED=""
+# Basename of the round file this attempt writes — the ledger records it so a
+# consumer never re-derives the round-N-role[-model].md naming rule, and so the
+# rotation form is visible in the record.
+CUR_ATTEMPT_FILE=""
+# Set only once this attempt's `start` record reached index.jsonl, and cleared
+# before CUR_ATTEMPT_ROLE arms the traps: it is what stops an end record being
+# written for an attempt the ledger never opened.
+CUR_ATTEMPT_INDEXED=""
+# The status this attempt ends with, decided once by record_attempt_end. The two
+# writers are independent and a signal can land between them, so the decision
+# has to outlive the first write or a re-entry would give the ledger a different
+# status than the stream already has (measured: stream rc=9, ledger rc=143).
+CUR_ATTEMPT_RC=""
 # Attempt ids are ATTEMPT_RUN.N: this run's PID and start time, then a counter,
 # so a /continue appending to the same streams does not reuse them.
 ATTEMPT_RUN="$$.$(date +%s)"
 ATTEMPT_SEQ=0
+
+# index_append LINE: append one record to the ledger. Borrows stream_record's
+# rule that a record always starts a line — without it a torn line left by a
+# crash glues onto the next record, and the fragment can swallow a whole start
+# record. Best effort, like the stream: the callers treat a failure as "this
+# attempt is not in the ledger", which reads as incomplete and runs again.
+index_append() {
+  local idx
+  idx="$(debate_index_file "$DEBATE_DIR")"
+  if [ -s "$idx" ] && [ -n "$(tail -c 1 "$idx")" ]; then
+    printf '\n' >> "$idx" || return 1
+  fi
+  printf '%s\n' "$1" >> "$idx" || return 1
+}
+
+# index_start MODEL: open this attempt in the ledger.
+index_start() {
+  local line
+  line="$(jq -nc \
+    --arg id "$CUR_ATTEMPT_ID" --arg role "$CUR_ATTEMPT_ROLE" --arg model "$1" \
+    --arg file "$CUR_ATTEMPT_FILE" --arg ts "$(date +%Y-%m-%dT%H:%M:%S)" \
+    --argjson round "$CUR_ATTEMPT_ROUND" \
+    '{v: 1, t: "start", id: $id, round: $round, role: $role, model: $model, file: $file, ts: $ts}')" \
+    || return 1
+  index_append "$line"
+}
+
+# index_end RC: close this attempt in the ledger, once. Deduped against the
+# ledger's own last line, which — unlike the role stream's — is always one
+# well-formed record carrying the attempt id. This does not replace the
+# stream's dedupe: either write can fail on its own.
+index_end() {
+  local idx last line
+  idx="$(debate_index_file "$DEBATE_DIR")"
+  if [ -f "$idx" ] && last="$(tail -n 1 "$idx" 2>/dev/null)"; then
+    case "$(printf '%s' "$last" | jq -r 'select(type == "object") | select(.t == "end") | .id' 2>/dev/null || true)" in
+      "$CUR_ATTEMPT_ID") return 0 ;;
+    esac
+  fi
+  line="$(jq -nc \
+    --arg id "$CUR_ATTEMPT_ID" --arg role "$CUR_ATTEMPT_ROLE" \
+    --arg file "$CUR_ATTEMPT_FILE" --arg ts "$(date +%Y-%m-%dT%H:%M:%S)" \
+    --argjson round "$CUR_ATTEMPT_ROUND" --argjson rc "$1" \
+    '{v: 1, t: "end", id: $id, round: $round, role: $role, file: $file, rc: $rc, ts: $ts}')" \
+    || return 1
+  index_append "$line"
+}
 
 # begin_attempt ROUND ROLE MODEL OUT
 # Records are `R ROLE` then space-separated tokens; `id=` names the attempt, so
@@ -821,10 +883,20 @@ begin_attempt() {
   CUR_ATTEMPT_DONE="$(round_done_file "$4")"
   CUR_ATTEMPT_ID="$ATTEMPT_RUN.$ATTEMPT_SEQ"
   CUR_ATTEMPT_HEADER="<!-- debate-round: $1 $2 $3 id=$CUR_ATTEMPT_ID -->"
+  CUR_ATTEMPT_FILE="${4##*/}"
   CUR_ATTEMPT_PUBLISHED=""
+  CUR_ATTEMPT_INDEXED=""
+  CUR_ATTEMPT_RC=""
   CUR_ATTEMPT_ROLE="$2"
   stream_header "$2" "$CUR_ATTEMPT_HEADER"
   CUR_ATTEMPT_PUBLISHED=1
+  # After the header, not before: a ledger row names bytes in the stream, and
+  # a row for an attempt whose frame never got there would be a dangling
+  # reference. Set only on a successful append — the flag has to mean "the
+  # start record is on disk", or an end record could stand alone. A signal
+  # between the append and the flag leaves a start with no end, which is an
+  # incomplete attempt: the round runs again.
+  if index_start "$3"; then CUR_ATTEMPT_INDEXED=1; fi
 }
 
 # complete_attempt ROUND ROLE OUT: the pipeline succeeded. `.done` first, so a
@@ -850,20 +922,21 @@ complete_attempt() {
 #     attempt, or one without an id, does not count.
 # Stream records stay best effort: a stream that cannot be read is not written
 # to (rather than risk a second record), and a failed write is ignored.
-record_attempt_end() {
+#
+# This is the stream half only. It owns no shared state: `rc` arrives already
+# normalised and it never clears CUR_ATTEMPT_ROLE, so its early returns cannot
+# stop the ledger half from running or make a re-entry skip a pending record.
+stream_attempt_end() {
   local rc="$1" role="$CUR_ATTEMPT_ROLE" stream last prefix suffix code
   [ -n "$role" ] || return 0
-  [ ! -e "$CUR_ATTEMPT_DONE" ] || rc=0
   stream="$DEBATE_DIR/stream-$role.log"
   prefix="$RS_BYTE<!-- debate-round-end: $CUR_ATTEMPT_ROUND $role rc="
   suffix=" id=$CUR_ATTEMPT_ID -->"
   last=""
   if [ -e "$stream" ] && ! last="$(tail -n 1 "$stream")"; then
-    CUR_ATTEMPT_ROLE=""
     return 0
   fi
   if [ -z "$CUR_ATTEMPT_PUBLISHED" ] && [ "$last" != "$RS_BYTE$CUR_ATTEMPT_HEADER" ]; then
-    CUR_ATTEMPT_ROLE=""
     return 0
   fi
   case "$last" in
@@ -872,12 +945,36 @@ record_attempt_end() {
       code="${code%"$suffix"}"
       case "$code" in
         ""|*[!0-9]*) ;;
-        *) CUR_ATTEMPT_ROLE=""; return 0 ;;
+        *) return 0 ;;
       esac
       ;;
   esac
   stream_record "$role" "<!-- debate-round-end: $CUR_ATTEMPT_ROUND $role rc=$rc id=$CUR_ATTEMPT_ID -->" || true
+}
+
+# record_attempt_end RC: close the attempt in progress in both records, once.
+# It owns the shared state the two writers read, so that the `.done`-forces-0
+# normalisation happens exactly once: it is the only thing guaranteeing the
+# stream and the ledger can never disagree about an attempt's status. Neither
+# writer's failure stops the other — the ledger is the authoritative record and
+# must not be skipped because a best-effort stream read failed.
+record_attempt_end() {
+  local rc="$1"
+  [ -n "$CUR_ATTEMPT_ROLE" ] || return 0
+  if [ -n "$CUR_ATTEMPT_RC" ]; then
+    # A re-entry — a signal landing between the two writes, or inside
+    # complete_attempt (#50). The status was already decided and one of the
+    # records may already carry it; deciding again would split them.
+    rc="$CUR_ATTEMPT_RC"
+  else
+    [ ! -e "$CUR_ATTEMPT_DONE" ] || rc=0
+    CUR_ATTEMPT_RC="$rc"
+  fi
+  stream_attempt_end "$rc" || true
+  [ -z "$CUR_ATTEMPT_INDEXED" ] || index_end "$rc" || true
   CUR_ATTEMPT_ROLE=""
+  CUR_ATTEMPT_INDEXED=""
+  CUR_ATTEMPT_RC=""
 }
 trap 'record_attempt_end "$?"; release_lock' EXIT
 # stop_attempt: terminate the running attempt and every process it started, as

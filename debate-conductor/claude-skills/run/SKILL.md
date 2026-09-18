@@ -65,7 +65,7 @@ A converged run prints `✓ Converged at round N`; hitting the cap without a STR
 
 Transcripts live at `$PWD/.debate-conductor/log/<team>/latest-debate/round-*.md`. Use `Glob` to enumerate, `Read` to load each file. Then report:
 
-- **Verdict** — the canonical 3-token line at the bottom of the last critic round: `Verdict: STRENGTHEN`, `Verdict: RECONSIDER`, or `Verdict: OVERTURN`. Quote it verbatim.
+- **Verdict** — the canonical 3-token line at the bottom of the last *completed* critic round: `Verdict: STRENGTHEN`, `Verdict: RECONSIDER`, or `Verdict: OVERTURN`. Quote it verbatim. A critic round counts as completed when **either** `index.jsonl` in that directory holds a line with `"t":"end"`, `"rc":0` and `"role":"crit"` for it, **or** a `.round-<N>-crit*.done` sidecar exists for it; take the highest such N. Both, not just the index: a debate started before the ledger keeps its early rounds in the sidecars alone, so the index can cover only part of it. `index.jsonl` is a handful of short lines — `Read` it — and a completed line's `"file"` names the transcript. Only when the directory has neither an `index.jsonl` nor any `.done` sidecar (a debate older than both) may you fall back to the highest-numbered non-empty `round-*-crit*.md`. If it has them and none records a completed critic round, say that no critic round completed — do not quote an unfinished transcript.
 - **Move-by-move** — one bullet per round: `R1 (Gen, agy): <opening claim in 1 line>` → `R2 (Crit, codex): <main attack>` → `R3 (Gen, agy): <accept/reject/modify of each Blocker/Major>`. Keep each line under 25 words.
 - **Two follow-up questions** worth asking next, e.g. "what if the Critic's Blocker #2 had been about X instead?" — concrete, not generic.
 

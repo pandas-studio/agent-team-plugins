@@ -926,17 +926,22 @@ done_case() {
       bash -c 'echo $$ > "$SHIM_STATE.pid"; exec "$0" -n 3 "smoke: done"' \
       "$ROOT/debate-conductor/bin/debate.sh" > /dev/null 2>&1 </dev/null ) 2>/dev/null || rc=$?
   dir="$(debate_dir "$team")"
-  printf 'rc=%s fired=%s done=%s records=%s pairs=%s\n' "$rc" \
+  # `ledger=` carries round/role/rc of every end record: the stream's rc and the
+  # ledger's are normalised once, in record_attempt_end, and this is what proves
+  # a later change cannot make one of them disagree with the other (#44).
+  printf 'rc=%s fired=%s done=%s records=%s pairs=%s ledger=%s\n' "$rc" \
     "$([ -e "$TMP/$team.fired" ] && echo 1 || echo 0)" \
     "$(cd "$dir" && ls -a | grep '^\.round-.*\.done$' | tr '\n' ' ')" \
     "$(LC_ALL=C grep -a "^$(printf '\036')<!-- debate-round" "$dir/stream-gen.log" | LC_ALL=C tr -d '\036' | sed -E 's/<!-- debate-round//; s/ id=[0-9.]+ -->//' | tr '\n' '|')" \
-    "$(attempt_pairs "$dir/stream-gen.log")"
+    "$(attempt_pairs "$dir/stream-gen.log")" \
+    "$(jq -rRn 'inputs | (fromjson? // empty) | select(.t == "end")
+                | "\(.round)/\(.role)/rc=\(.rc)"' "$dir/index.jsonl" 2>/dev/null | tr '\n' '|')"
 }
-assert_eq "$(done_case done-touch)" "rc=143 fired=1 done=.round-1-gen.done  records=: 1 gen agy|-end: 1 gen rc=0| pairs=1/1 1/1/end "
-assert_eq "$(done_case done-tail)" "rc=143 fired=1 done=.round-1-gen.done  records=: 1 gen agy|-end: 1 gen rc=0| pairs=1/1 1/1/end "
-assert_eq "$(done_case done-tail2)" "rc=143 fired=1 done=.round-1-gen.done  records=: 1 gen agy|-end: 1 gen rc=0| pairs=1/1 1/1/end "
-assert_eq "$(done_case done-fail)" "rc=1 fired=0 done= records=: 1 gen agy|-end: 1 gen rc=1| pairs=1/1 1/1/end "
-assert_eq "$(done_case header-tail)" "rc=143 fired=1 done=.round-1-gen.done .round-2-crit.done  records=: 1 gen agy|-end: 1 gen rc=0| pairs=1/1 1/1/end "
+assert_eq "$(done_case done-touch)" "rc=143 fired=1 done=.round-1-gen.done  records=: 1 gen agy|-end: 1 gen rc=0| pairs=1/1 1/1/end  ledger=1/gen/rc=0|"
+assert_eq "$(done_case done-tail)" "rc=143 fired=1 done=.round-1-gen.done  records=: 1 gen agy|-end: 1 gen rc=0| pairs=1/1 1/1/end  ledger=1/gen/rc=0|"
+assert_eq "$(done_case done-tail2)" "rc=143 fired=1 done=.round-1-gen.done  records=: 1 gen agy|-end: 1 gen rc=0| pairs=1/1 1/1/end  ledger=1/gen/rc=0|"
+assert_eq "$(done_case done-fail)" "rc=1 fired=0 done= records=: 1 gen agy|-end: 1 gen rc=1| pairs=1/1 1/1/end  ledger=1/gen/rc=1|"
+assert_eq "$(done_case header-tail)" "rc=143 fired=1 done=.round-1-gen.done .round-2-crit.done  records=: 1 gen agy|-end: 1 gen rc=0| pairs=1/1 1/1/end  ledger=1/gen/rc=0|2/crit/rc=0|"
 
 # 3f. record_attempt_end on its own: an end record already last in the stream
 #     is not written again only when it is this attempt's (its id) and has one
@@ -949,9 +954,12 @@ record_end_case() {
   [ "$done" = 0 ] || : > "$TMP/rec/.round-1-gen.done"
   PATH="$path" REC_PUBLISHED="${REC_PUBLISHED-1}" bash -c '
     set -euo pipefail
-    eval "$(awk '"'"'$0 == "stream_record() {" || $0 == "record_attempt_end() {" { f = 1 } f { print } f && $0 == "}" { f = 0 }'"'"' "$1")"
+    eval "$(awk '"'"'$0 == "stream_record() {" || $0 == "stream_attempt_end() {" || $0 == "record_attempt_end() {" { f = 1 } f { print } f && $0 == "}" { f = 0 }'"'"' "$1")"
     RS_BYTE="$(printf "\036")"; DEBATE_DIR="$2"
     CUR_ATTEMPT_ROUND=1; CUR_ATTEMPT_ROLE=gen; CUR_ATTEMPT_ID=7.1; CUR_ATTEMPT_DONE="$2/.round-1-gen.done"
+    # No ledger here: this case drives the stream half only, and an attempt the
+    # ledger never opened writes no end record to it (#44).
+    CUR_ATTEMPT_FILE=round-1-gen.md; CUR_ATTEMPT_INDEXED=""; CUR_ATTEMPT_RC=""
     CUR_ATTEMPT_HEADER="<!-- debate-round: 1 gen agy id=7.1 -->"; CUR_ATTEMPT_PUBLISHED="$REC_PUBLISHED"
     record_attempt_end "$3"
     printf "role=[%s] " "$CUR_ATTEMPT_ROLE"
@@ -996,11 +1004,15 @@ assert_eq "$(REC_PUBLISHED='' record_end_case "" 0 143)" "role=[] no stream"
 #     header of the same round and model.
 cat > "$TMP/ordering.sh" <<'ORDER'
 set -euo pipefail
-eval "$(awk '$0 ~ /^(stream_record|stream_header|round_done_file|begin_attempt|record_attempt_end)\(\) \{$/ { f = 1 } f { print } f && $0 == "}" { f = 0 }' "$1")"
+eval "$(awk '$0 ~ /^(stream_record|stream_header|round_done_file|begin_attempt|stream_attempt_end|record_attempt_end|index_append|index_start|index_end)\(\) \{$/ { f = 1 } f { print } f && $0 == "}" { f = 0 }' "$1")"
+# debate_index_file lives in lib/index.sh, which index_append calls.
+# $3 is the ordering case; the lib path comes in as $4.
+. "$4"
 eval "real_$(declare -f stream_header)"
 RS_BYTE="$(printf '\036')"; DEBATE_DIR="$2"; ATTEMPT_RUN=7; ATTEMPT_SEQ=0
 CUR_ATTEMPT_ROUND=""; CUR_ATTEMPT_ROLE=""; CUR_ATTEMPT_DONE=""; CUR_ATTEMPT_ID=""
-CUR_ATTEMPT_HEADER=""; CUR_ATTEMPT_PUBLISHED=""
+CUR_ATTEMPT_HEADER=""; CUR_ATTEMPT_PUBLISHED=""; CUR_ATTEMPT_FILE=""
+CUR_ATTEMPT_INDEXED=""; CUR_ATTEMPT_RC=""
 case "$3" in
   after) stream_header() { real_stream_header "$@"; kill -s TERM $$; } ;;
   before) stream_header() { kill -s TERM $$; real_stream_header "$@"; } ;;
@@ -1015,13 +1027,58 @@ ordering_case() {
   local rc=0
   rm -rf "$TMP/ord" && mkdir -p "$TMP/ord"
   printf '%s\n' "$(printf '\036')<!-- debate-round: 1 gen agy id=7.0 -->" > "$TMP/ord/stream-gen.log"
-  /bin/bash "$TMP/ordering.sh" "$ROOT/debate-conductor/bin/debate.sh" "$TMP/ord" "$1" 2>/dev/null || rc=$?
+  /bin/bash "$TMP/ordering.sh" "$ROOT/debate-conductor/bin/debate.sh" "$TMP/ord" "$1" \
+    "$ROOT/debate-conductor/lib/index.sh" 2>/dev/null || rc=$?
   printf 'rc=%s exit-trap=%s records=%s\n' "$rc" "$([ -e "$TMP/ord/exit-trap" ] && echo 1 || echo 0)" \
     "$(LC_ALL=C grep -a "^$(printf '\036')" "$TMP/ord/stream-gen.log" | LC_ALL=C tr -d '\036' | tr '\n' '|')"
 }
 assert_eq "$(ordering_case after)" "rc=143 exit-trap=1 records=<!-- debate-round: 1 gen agy id=7.0 -->|<!-- debate-round: 1 gen agy id=7.1 -->|<!-- debate-round-end: 1 gen rc=143 id=7.1 -->|"
 assert_eq "$(ordering_case before)" "rc=143 exit-trap=1 records=<!-- debate-round: 1 gen agy id=7.0 -->|"
 assert_eq "$(ordering_case fail)" "rc=1 exit-trap=1 records=<!-- debate-round: 1 gen agy id=7.0 -->|<!-- debate-round: 1 gen|"
+
+# 3i. The stream record and the ledger record of one attempt always carry the
+#     same status (#44). The two writes are independent, so a signal can land
+#     between them: without a decision that outlives the first write, the
+#     re-entry normalises again and the records split (measured: stream rc=9,
+#     ledger rc=143). stream_attempt_end is wrapped to signal right after it
+#     writes, which is exactly that window.
+cat > "$TMP/rcsplit.sh" <<'RCSPLIT'
+set -euo pipefail
+eval "$(awk '$0 ~ /^(stream_record|stream_header|round_done_file|stream_attempt_end|record_attempt_end|index_append|index_start|index_end)\(\) \{$/ { f = 1 } f { print } f && $0 == "}" { f = 0 }' "$1")"
+. "$3"
+eval "real_$(declare -f stream_attempt_end)"
+DEBATE_DIR="$2"; RS_BYTE="$(printf '\036')"
+CUR_ATTEMPT_ROUND=1; CUR_ATTEMPT_ROLE=gen; CUR_ATTEMPT_ID=7.1
+CUR_ATTEMPT_DONE="$2/.round-1-gen.done"; CUR_ATTEMPT_FILE=round-1-gen.md
+CUR_ATTEMPT_HEADER="<!-- debate-round: 1 gen agy id=7.1 -->"; CUR_ATTEMPT_PUBLISHED=1
+CUR_ATTEMPT_INDEXED=""; CUR_ATTEMPT_RC=""
+printf '%s%s\n' "$RS_BYTE" "$CUR_ATTEMPT_HEADER" > "$2/stream-gen.log"
+index_start agy && CUR_ATTEMPT_INDEXED=1
+# Signal once, not on every call: the trap re-enters record_attempt_end, which
+# calls this again, and bash 5 runs the trap recursively where bash 3.2 blocks
+# the signal for the duration of its own handler — an unconditional kill here
+# looped until the shell died on Linux and passed on macOS.
+signalled=""
+stream_attempt_end() {
+  real_stream_attempt_end "$@"
+  [ -n "$signalled" ] || { signalled=1; kill -s TERM $$; }
+}
+trap 'record_attempt_end 143' TERM
+record_attempt_end "$4"
+RCSPLIT
+rcsplit_case() {
+  rm -rf "$TMP/rcsplit" && mkdir -p "$TMP/rcsplit"
+  [ "$2" = 0 ] || : > "$TMP/rcsplit/.round-1-gen.done"
+  /bin/bash "$TMP/rcsplit.sh" "$ROOT/debate-conductor/bin/debate.sh" "$TMP/rcsplit" \
+    "$ROOT/debate-conductor/lib/index.sh" "$1" >/dev/null 2>&1 || true
+  printf 'stream=%s ledger=%s\n' \
+    "$(LC_ALL=C grep -ao 'rc=[0-9]*' "$TMP/rcsplit/stream-gen.log" | tr '\n' ' ')" \
+    "$(jq -r 'select(.t == "end") | "rc=\(.rc)"' "$TMP/rcsplit/index.jsonl" | tr '\n' ' ')"
+}
+assert_eq "$(rcsplit_case 9 0)" "stream=rc=9  ledger=rc=9 "
+assert_eq "$(rcsplit_case 143 0)" "stream=rc=143  ledger=rc=143 "
+# `.done` present: both records say 0, and the re-entry keeps saying 0.
+assert_eq "$(rcsplit_case 9 1)" "stream=rc=0  ledger=rc=0 "
 
 # 3h. wait_attempt waits for an attempt in short steps (#57). bash 3.2's `wait`
 #     can miss a trapped signal that arrives as it starts and then run the trap

@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import os
+import signal
 from pathlib import Path
 import shutil
 import subprocess
@@ -579,8 +580,13 @@ class DebateHostTests(unittest.TestCase):
         stub.chmod(0o755)
         return stub
 
-    def start_blocked_debate(self, *args, **env):
-        """Launch debate.sh whose first round blocks; return (proc, ready, release)."""
+    def start_blocked_debate(self, *args, new_session=False, **env):
+        """Launch debate.sh whose first round blocks; return (proc, ready, release).
+
+        new_session puts the run in its own process group, so a test that kills
+        it can kill the group: the model stub, the filter and the tees are
+        children of debate.sh and survive a signal aimed at the parent alone.
+        """
         ready = self.root / f"ready {len(list(self.root.glob('ready *')))}"
         release = self.root / f"release {ready.name[6:]}"
         stub = self.blocking_stub(ready, release)
@@ -588,6 +594,7 @@ class DebateHostTests(unittest.TestCase):
             [str(self.plugin / "bin" / "debate.sh"), *args],
             cwd=self.workspace, text=True, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=new_session,
             env=self.env | dict(CLAUDE_CLI=str(stub), CODEX_CLI=str(stub),
                                 AGY_CLI=str(stub)) | env,
         )
@@ -730,6 +737,225 @@ class DebateHostTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.lock_of(debate).is_symlink())
         self.assertFalse((debate / "round-2-crit.md").exists())
+
+    # ── Attempt ledger (#44) ───────────────────────────────────────────────
+
+    def index_records(self, debate_dir):
+        """Every ledger line, parsed strictly — a test must see the raw file."""
+        path = Path(debate_dir) / "index.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+    def sidecars(self, debate_dir):
+        return sorted(p.name for p in Path(debate_dir).glob(".round-*.done"))
+
+    def stream_frames(self, debate_dir, role):
+        text = (Path(debate_dir) / f"stream-{role}.log").read_text()
+        return [chunk.splitlines()[0] for chunk in text.split("\x1e")[1:]]
+
+    def test_ledger_records_every_attempt_and_ids_match_the_stream(self):
+        result = self.run_cli("debate.sh", "-n", "2", "fixture topic")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        debate = self.latest_debate()
+
+        records = self.index_records(debate)
+        self.assertEqual([r["t"] for r in records], ["start", "end", "start", "end"])
+        for record in records:
+            self.assertEqual(record["v"], 1)
+        starts = [r for r in records if r["t"] == "start"]
+        ends = [r for r in records if r["t"] == "end"]
+        self.assertEqual([(r["round"], r["role"], r["model"], r["file"]) for r in starts],
+                         [(1, "gen", "agy", "round-1-gen.md"),
+                          (2, "crit", "codex", "round-2-crit.md")])
+        self.assertEqual([(r["round"], r["role"], r["file"], r["rc"]) for r in ends],
+                         [(1, "gen", "round-1-gen.md", 0),
+                          (2, "crit", "round-2-crit.md", 0)])
+        self.assertEqual([r["id"] for r in starts], [r["id"] for r in ends])
+        self.assertEqual(len(set(r["id"] for r in starts)), 2)
+        for record in records:
+            self.assertRegex(record["ts"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
+
+        # A ledger row exists to locate its own bytes: every id must appear in
+        # both frames of its role's stream.
+        for record in starts:
+            frames = self.stream_frames(debate, record["role"])
+            self.assertTrue(any(f.startswith("<!-- debate-round:") and record["id"] in f
+                                for f in frames), frames)
+            self.assertTrue(any(f.startswith("<!-- debate-round-end:") and record["id"] in f
+                                for f in frames), frames)
+
+    def test_failed_attempt_and_its_retry_are_both_in_the_ledger(self):
+        result = self.run_cli("debate.sh", "-n", "2", "fixture topic", STUB_RC="9")
+        self.assertNotEqual(result.returncode, 0)
+        debate = self.latest_debate()
+        records = self.index_records(debate)
+        self.assertEqual([r["t"] for r in records], ["start", "end"])
+        self.assertEqual(records[1]["rc"], 9)
+        self.assertEqual(self.sidecars(debate), [])
+
+        result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "2",
+                              "fixture topic")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        records = self.index_records(debate)
+        round_one = [r for r in records if r["round"] == 1]
+        self.assertEqual([r["rc"] for r in round_one if r["t"] == "end"], [9, 0])
+        self.assertEqual(len(set(r["id"] for r in round_one if r["t"] == "start")), 2,
+                         "the retry must be a new attempt id")
+        # Decision 1: the round file keeps the winner, the stream keeps both.
+        self.assertEqual((debate / "round-1-gen.md").read_text().count("debate-round: 1 gen"), 1)
+        self.assertEqual(
+            len([f for f in self.stream_frames(debate, "gen")
+                 if f.startswith("<!-- debate-round: 1 gen")]), 2)
+
+    def test_continue_resumes_from_the_ledger_without_any_sidecar(self):
+        # The one test that fails if the ledger is never written and the union
+        # quietly answers from `.done`.
+        self.assertEqual(self.run_cli("debate.sh", "-n", "2", "t").returncode, 0)
+        debate = self.latest_debate()
+        for sidecar in Path(debate).glob(".round-*.done"):
+            sidecar.unlink()
+
+        result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "2", "t")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("resuming from round 1", result.stderr)
+        self.assertTrue((debate / "round-3-gen.md").exists())
+        self.assertTrue((debate / "round-4-crit.md").exists())
+
+    def test_continue_falls_back_to_sidecars_without_a_ledger(self):
+        self.assertEqual(self.run_cli("debate.sh", "-n", "2", "t").returncode, 0)
+        debate = self.latest_debate()
+        (debate / "index.jsonl").unlink()
+
+        result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("resuming from round 1", result.stderr)
+        self.assertTrue((debate / "round-3-gen.md").exists())
+        # No migration: the rebuilt ledger holds only what this run did.
+        self.assertEqual(sorted(r["round"] for r in self.index_records(debate)), [3, 3])
+
+    def test_legacy_debate_survives_a_failed_first_indexed_continuation(self):
+        # The regression test for the blocker: with an if/else reader instead of
+        # a union, the second continuation resumes at round 1 and the pre-touch
+        # loop truncates the finished transcripts.
+        self.assertEqual(self.run_cli("debate.sh", "-n", "2", "t").returncode, 0)
+        debate = self.latest_debate()
+        (debate / "index.jsonl").unlink()
+        original = {name: (debate / name).read_bytes()
+                    for name in ("round-1-gen.md", "round-2-crit.md")}
+
+        failed = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t",
+                              STUB_RC="9")
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual([r["t"] for r in self.index_records(debate)], ["start", "end"])
+
+        result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("resuming from round 1", result.stderr)
+        for name, body in original.items():
+            self.assertEqual((debate / name).read_bytes(), body, f"{name} was overwritten")
+
+    def test_a_torn_final_ledger_line_is_ignored_and_does_not_glue(self):
+        self.assertEqual(self.run_cli("debate.sh", "-n", "2", "t").returncode, 0)
+        debate = self.latest_debate()
+        # Only the ledger may answer, or a tolerant reader is not what is tested.
+        for sidecar in Path(debate).glob(".round-*.done"):
+            sidecar.unlink()
+        with (debate / "index.jsonl").open("a") as handle:
+            handle.write('{"v":1,"t":"end","id":"x","round":9,"role":"gen","rc":0,"fi')
+
+        result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("resuming from round 1", result.stderr)
+        self.assertTrue((debate / "round-3-gen.md").exists(), "resumed past the torn round 9")
+        lines = (debate / "index.jsonl").read_text().splitlines()
+        torn = [i for i, line in enumerate(lines) if line.endswith('"fi')]
+        self.assertEqual(len(torn), 1, lines)
+        for line in lines[torn[0] + 1:]:
+            json.loads(line)  # the newline-first rule: nothing got glued on
+
+    def test_ledger_ignores_a_malformed_interior_line(self):
+        self.assertEqual(self.run_cli("debate.sh", "-n", "2", "t").returncode, 0)
+        debate = self.latest_debate()
+        # Only the ledger may answer, and the garbage has to sit *before* the
+        # record that decides the resume point — appended last, a reader that
+        # simply stops at it would still look correct.
+        for sidecar in Path(debate).glob(".round-*.done"):
+            sidecar.unlink()
+        path = debate / "index.jsonl"
+        lines = path.read_text().splitlines()
+        path.write_text("\n".join(lines[:-1] + ["not json at all", "[1,2,3]", lines[-1]]) + "\n")
+
+        result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("resuming from round 1", result.stderr)
+        self.assertTrue((debate / "round-3-gen.md").exists())
+
+    def test_round_is_complete_survives_a_large_ledger(self):
+        # `grep -q` would exit on the first match, the producers would take
+        # SIGPIPE, and pipefail would report 141 for a round that is complete.
+        # Measured: reproduces at 20000 records, not at 4000. The fixture is
+        # larger than the reproduction so the result does not ride on the pipe
+        # buffer of one machine.
+        debate = self.root / "big ledger"
+        debate.mkdir()
+        (debate / "index.jsonl").write_text(
+            '{"v":1,"t":"end","id":"x","round":2,"role":"gen","rc":0}\n' * 60000)
+        for n in range(1, 200):
+            (debate / f".round-{n}-gen.done").touch()
+        probe = subprocess.run(
+            ["bash", "-c",
+             'set -euo pipefail; . "$1"; for n in 1 2 500; do '
+             'rc=0; round_is_complete "$2" "$n" || rc=$?; printf "%s:%s " "$n" "$rc"; done',
+             "bash", str(self.plugin / "lib" / "index.sh"), str(debate)],
+            text=True, capture_output=True, timeout=120,
+        )
+        self.assertEqual(probe.returncode, 0, probe.stderr)
+        # 1 from a sidecar, 2 from the ledger, 500 from neither.
+        self.assertEqual(probe.stdout.strip(), "1:0 2:0 500:1", probe.stderr)
+
+    def test_killed_run_leaves_a_start_with_no_end_and_the_round_reruns(self):
+        # SIGKILL is the only signal that runs no trap, which is what makes the
+        # half-written attempt deterministic.
+        proc, _ready, release = self.start_blocked_debate(
+            "-n", "2", "crash topic", new_session=True)
+        debate = self.latest_debate()
+        self.await_text(debate / "index.jsonl", '"t":"start"')
+        os.killpg(proc.pid, signal.SIGKILL)  # the model and the tees outlive a bare kill
+        proc.wait(timeout=30)
+        release.touch()
+
+        records = self.index_records(debate)
+        self.assertEqual([r["t"] for r in records], ["start"])
+        self.assertEqual(records[0]["round"], 1)
+        self.assertEqual(self.sidecars(debate), [])
+
+        # SIGKILL leaves the #45 lock behind and it is never reclaimed.
+        refused = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t")
+        self.assertEqual(refused.returncode, 2, refused.stdout)
+        self.assertTrue(self.lock_of(debate).is_symlink())
+        self.lock_of(debate).unlink()
+
+        result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("resuming from round 1", result.stderr)
+        records = self.index_records(debate)
+        self.assertEqual([r["t"] for r in records], ["start", "start", "end"])
+        self.assertEqual(records[-1]["rc"], 0)
+        self.assertNotEqual(records[0]["id"], records[1]["id"])
+
+    def test_converged_run_records_only_the_rounds_it_ran(self):
+        result = self.run_cli("debate.sh", "--until-converged", "-n", "6", "t")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        debate = self.latest_debate()
+        self.assertEqual(sorted(r["round"] for r in self.index_records(debate)),
+                         [1, 1, 2, 2])
+
+    def test_rotated_round_file_names_are_recorded(self):
+        result = self.run_cli("debate.sh", "--rotate", "-n", "2", "t")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        debate = self.latest_debate()
+        self.assertEqual([r["file"] for r in self.index_records(debate)],
+                         ["round-1-gen-agy.md", "round-1-gen-agy.md",
+                          "round-2-crit-codex.md", "round-2-crit-codex.md"])
 
     def test_invalid_host_does_not_block_help(self):
         result = self.run_cli("debate.sh", "--help", DEBATE_CONDUCTOR_PM_HOST="invalid")
