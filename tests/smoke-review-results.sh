@@ -545,6 +545,32 @@ check 'a failed invocation with an answer file still fails' test "$NATIVE_RC" -e
 FAIL_RUN="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-agy.log")"
 check 'the failure is recorded, not the file' json_is "${FAIL_RUN%.log}.run.json" '.completion.exit_code==5'
 
+# #71: a pipeline ends when every process holding its write end closes it, not
+# when the CLI exits. This wrapper discards the streamed copy, so its transcript
+# is a plain append and a leaked descendant has no pipe of this wrapper's to
+# hold. A descendant holding *stdout* still blocks inside registry_run_answer's
+# own tee, which is not this wrapper's to drain — that half of #71 stays open.
+cat > "$TMP/leaky-researcher" <<'STUB'
+#!/usr/bin/env bash
+{ sleep 10; } > /dev/null &
+printf 'the answer arrived promptly\n'
+exit 0
+STUB
+chmod +x "$TMP/leaky-researcher"
+LEAK_START=$SECONDS
+leak_rc=0
+env -u DEV_TRIO_RESEARCHER_MODEL AGENT_TEAM=review-test TMUX='' DEV_TRIO_LOG_DIR="$TMP/log" \
+  AGY_CLI="$TMP/leaky-researcher" \
+  "$ROOT/dev-trio/bin/ask-researcher.sh" 'leaky question' \
+  < /dev/null > "$TMP/leak.out" 2> "$TMP/leak.err" || leak_rc=$?
+LEAK_ELAPSED=$((SECONDS - LEAK_START))
+check 'an inherited stderr does not hold the wrapper open' test "$LEAK_ELAPSED" -lt 5
+check 'the leaky run still succeeds' test "$leak_rc" -eq 0
+check 'the leaky run still answers' grep -q 'arrived promptly' "$TMP/leak.out"
+LEAK_RUN="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-agy.log")"
+check 'the leaky run records a completion' json_is "${LEAK_RUN%.log}.run.json" '.completion != null'
+check 'the transcript reached the log' grep -q 'arrived promptly' "$LEAK_RUN"
+
 # The reader takes a file, not the first document in one.
 VALID_RUN=$(cat "$AGY_RUN")
 printf '%s\n{}\n' "$VALID_RUN" > "$TMP/two-docs.run.json"

@@ -201,18 +201,24 @@ RC=0
 # exit status still in hand; this wrapper would see one number and could not
 # tell a CLI that chose to exit 5 from an empty answer.
 #
-# `|| RC=$?` would report the *rightmost* failure under pipefail, so a failing
-# tee would mask the 5/6 answer codes. Read PIPESTATUS instead; errexit is
-# lifted only around the pipeline itself.
+# The transcript is appended straight to the log: this wrapper discards the
+# streamed copy (its own stdout is the answer, read from $FINAL below), so a
+# `| tee -a "$LOG" > /dev/null` pipeline was a file append with a pipe bolted
+# on. The pipe was not free. A pipeline ends when *every* process holding the
+# write end closes it, not when the CLI exits, so a CLI that leaves a
+# background descendant holding its stdout or stderr held this wrapper open
+# for as long as that descendant lived (#71). Measured with a stub that leaks a
+# descendant holding stderr for 10 s: 10.20 s through the pipeline, 0.19 s
+# through this redirection, and no change to an ordinary run (0.19 s, median of
+# 5). A descendant holding *stdout* still blocks inside registry_run_answer's
+# own `registry_run "$@" | tee "$tmp"`, which this cannot reach — #71 stays
+# open for that half.
+#
+# errexit is lifted around the call so the 5/6 answer codes survive as $RC.
 set +e
-REGISTRY_CMD_OVERRIDE="${RESEARCHER_CLI:-}" registry_run_answer "$RESEARCHER_MODEL" "$PROMPT" "$FINAL" 2>&1 | tee -a "$LOG" > /dev/null
-RUN_STATUSES=("${PIPESTATUS[@]}")
+REGISTRY_CMD_OVERRIDE="${RESEARCHER_CLI:-}" registry_run_answer "$RESEARCHER_MODEL" "$PROMPT" "$FINAL" >> "$LOG" 2>&1
+RC=$?
 set -e
-RC="${RUN_STATUSES[0]}"
-LOG_RC="${RUN_STATUSES[1]}"
-if [ "$LOG_RC" -ne 0 ]; then
-  echo "[ask-researcher] the transcript could not be logged (rc=$LOG_RC); $LOG may be incomplete" >&2
-fi
 
 # This wrapper's stdout is the answer — that is what ralph-trio and spec-trio
 # inject into their loops. The transcript and the CLI's diagnostics went to the
