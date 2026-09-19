@@ -730,22 +730,15 @@ write_round_end() {
 # `Verdict: <STRENGTHEN | ...>` and `<one of: STRENGTHEN / ...>`. Neither matches
 # `^Verdict: (TOKEN)$`, so a failed round yields no token and is treated as
 # not-converged — the safe default that keeps the debate going on garbage rather
-# than stopping on it. Output already passed through strip_cli_banner.
+# than stopping on it. Output already passed through strip_stream_controls.
 critic_verdict() {
   grep -hE '^Verdict: (STRENGTHEN|RECONSIDER|OVERTURN)[[:space:]]*$' "$1" 2>/dev/null \
     | tail -1 | awk '{print $2}'
 }
 
-# Drop CLI metadata noise so the transcript shows only model output.
-# Handles both legacy codex banner (workdir:/model:/...) and current codex
-# format which echoes the input prompt between `user`/`codex` markers and
-# tails with `tokens used\n<count>`.
-#
-# sed must not block-buffer, or each cleaned line reaches the round file, the
-# role stream and the viewers only when its buffer fills or the round ends.
-# `sed -u` is unbuffered on BSD and GNU sed. GNU sed also accepts `-l`, but
-# there it sets the line-wrap length and does not unbuffer, so it is not used.
-# stdbuf covers seds without -u (e.g. busybox); otherwise plain sed.
+# Role wrappers publish answers, not CLI console transcripts. Preserve answer
+# text verbatim except for the reserved stream framing byte. Keep the filter
+# unbuffered so stdout-only adapters still stream answers as they arrive.
 SED_STREAM=(sed)
 if printf 'x\n' | sed -u -e 's/x/y/' >/dev/null 2>&1; then
   SED_STREAM=(sed -u)
@@ -755,20 +748,8 @@ fi
 # \x1e (ASCII record separator) marks stream headers written by this script.
 # It is deleted from model output below, so model text cannot forge a header.
 RS_BYTE="$(printf '\036')"
-strip_cli_banner() {
-  # Range start uses `Reading additional input from stdin` (a strong codex
-  # preamble marker that is virtually never in body text) instead of the bare
-  # `^user$` line — the bare-marker version was deleting transcript content
-  # whenever a model legitimately wrote a `user` line followed later by a
-  # `codex` line. Same robustness reasoning for the trailer range start.
-  "${SED_STREAM[@]}" -E \
-    -e "s/$RS_BYTE//g" \
-    -e '/^\[[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]+\]/d' \
-    -e '/^(OpenAI Codex|workdir:|model:|provider:|sandbox:|reasoning( (effort|summaries))?:|approval:|tokens used:)/d' \
-    -e '/^session id:/d' \
-    -e '/^--------+$/d' \
-    -e '/^Reading additional input from stdin/,/^codex$/d' \
-    -e '/^tokens used$/,$d'
+strip_stream_controls() {
+  "${SED_STREAM[@]}" -e "s/$RS_BYTE//g"
 }
 
 if [ -n "$CONTINUE_FROM" ]; then
@@ -1113,14 +1094,14 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
           {
             print_marker "$r" gen "$GEN_MODEL"
             echo "$CONTEXT_BLOCK" | "$SCRIPT_DIR/../lib/ask-generator.sh" $(gen_args "$GEN_MODEL") "Topic: $TOPIC. Produce an initial substantive draft."
-          } | strip_cli_banner | tee "$OUT" | tee -a "$DEBATE_DIR/stream-gen.log"
+          } | strip_stream_controls | tee "$OUT" | tee -a "$DEBATE_DIR/stream-gen.log"
         ) <&0 &
       else
         (
           {
             print_marker "$r" gen "$GEN_MODEL"
             "$SCRIPT_DIR/../lib/ask-generator.sh" $(gen_args "$GEN_MODEL") "Topic: $TOPIC. Produce an initial substantive draft."
-          } | strip_cli_banner | tee "$OUT" | tee -a "$DEBATE_DIR/stream-gen.log"
+          } | strip_stream_controls | tee "$OUT" | tee -a "$DEBATE_DIR/stream-gen.log"
         ) <&0 &
       fi
     else
@@ -1138,7 +1119,7 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
             echo "## Critic's feedback (round $((r-1)))"
             cat "$PREV_CRIT"
           } | "$SCRIPT_DIR/../lib/ask-generator.sh" $(gen_args "$GEN_MODEL") "Topic: $TOPIC. Revise your draft, addressing the critic's Blocker and Major findings directly. Quote the critic's claim, then state your response (accept / reject with reason / modify)."
-        } | strip_cli_banner | tee "$OUT" | tee -a "$DEBATE_DIR/stream-gen.log"
+        } | strip_stream_controls | tee "$OUT" | tee -a "$DEBATE_DIR/stream-gen.log"
       ) <&0 &
     fi
     # Unconditional, so a failed attempt stops debate.sh through errexit.
@@ -1156,7 +1137,7 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
       {
         print_marker "$r" crit "$CRIT_MODEL"
         "$SCRIPT_DIR/../lib/ask-critic.sh" $(crit_args "$CRIT_MODEL") --with-research "$PREV_GEN" "Topic: $TOPIC. Critique the latest Generator draft adversarially. Focus on weaknesses, missed cases, and better alternatives."
-      } | strip_cli_banner | tee "$OUT" | tee -a "$DEBATE_DIR/stream-crit.log"
+      } | strip_stream_controls | tee "$OUT" | tee -a "$DEBATE_DIR/stream-crit.log"
     ) <&0 &
     wait_attempt "$!"
     complete_attempt "$r" crit "$OUT"

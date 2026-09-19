@@ -38,6 +38,9 @@ class DebateHostTests(unittest.TestCase):
             "if args == ['auth','status','--json']:\n"
             "    print(os.environ['STUB_AUTH'])\n"
             "    sys.exit(int(os.environ.get('STUB_AUTH_RC','0')))\n"
+            "if '--output-last-message' in args:\n"
+            "    with open(args[args.index('--output-last-message') + 1], 'w') as f:\n"
+            "        f.write(os.environ['STUB_RESPONSE'])\n"
             "print(os.environ['STUB_RESPONSE'])\n"
             "sys.exit(int(os.environ.get('STUB_RC','0')))\n"
         )
@@ -575,6 +578,9 @@ class DebateHostTests(unittest.TestCase):
             "    if time.time() > deadline:\n"
             "        sys.exit(7)\n"
             "    time.sleep(0.02)\n"
+            "if '--output-last-message' in args:\n"
+            "    with open(args[args.index('--output-last-message') + 1], 'w') as f:\n"
+            "        f.write(os.environ['STUB_RESPONSE'])\n"
             "print(os.environ['STUB_RESPONSE'])\n"
         )
         stub.chmod(0o755)
