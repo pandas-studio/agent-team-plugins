@@ -3,6 +3,12 @@
 # Native final capture is authoritative; stdout-only adapters must emit only
 # answer text on stdout. RAW_LOG, when supplied, is a fresh private debug log.
 # Return the CLI's failure first, else 5 for no answer or 6 for capture I/O.
+#
+# This is the debate-side boundary over registry_run_answer, not a second
+# implementation of it. The library inspects and validates the answer; what it
+# does not do is keep the CLI's console off the caller's stdout, and the round
+# file is built from that stdout (debate.sh: strip_cli_banner | tee "$OUT"),
+# which is what issue #67 reports. Everything below exists for that boundary.
 debate_run_answer() (
   local model="$1" prompt="$2" raw_log="${3:-}" capture_dir="" final="" rc=0
   local statuses=()
@@ -33,25 +39,22 @@ debate_run_answer() (
       exit 6
     }
     final="$capture_dir/final"
-    registry_run "$model" "$prompt" "$final" >&9 2>&9
+    # The library runs the CLI, captures natively and judges the artifact. Its
+    # stdout is the transcript and its diagnostics name $final, an internal
+    # path: both go to fd 9, never to the caller.
+    registry_run_answer "$model" "$prompt" "$final" >&9 2>&9
     rc=$?
-    if [ "$rc" -eq 0 ]; then
-      if [ ! -e "$final" ] && [ ! -L "$final" ]; then
-        rc=5
-        echo "debate-answer: model '$model' exited 0 but wrote no final-answer file; check CLI native-capture support and ensure *_CLI wrappers forward all arguments" >&2
-      elif [ ! -f "$final" ] || [ ! -r "$final" ]; then
-        # Reject FIFOs/devices/directories before grep can block or disclose
-        # an internal capture path. A dangling symlink is malformed, not absent.
-        rc=6
-      else
-        grep -q '[^[:space:]]' "$final" 2>/dev/null
-        case "$?" in
-          0) cat "$final" 2>/dev/null || rc=6 ;;
-          1) rc=5 ;;
-          *) rc=6 ;;
-        esac
-      fi
+    # The library reports a missing artifact and a malformed one alike (rc=5).
+    # A directory, FIFO, device, dangling link or unreadable file is a capture
+    # failure, not an answerless run, so it keeps this side's rc=6.
+    if [ "$rc" -eq 5 ] && { [ -e "$final" ] || [ -L "$final" ]; } &&
+       { [ ! -f "$final" ] || [ ! -r "$final" ]; }; then
+      rc=6
+    elif [ "$rc" -eq 5 ] && [ ! -e "$final" ] && [ ! -L "$final" ]; then
+      echo "debate-answer: model '$model' exited 0 but wrote no final-answer file; check CLI native-capture support and ensure *_CLI wrappers forward all arguments" >&2
     fi
+    # Publication happens only after the library has validated the artifact.
+    [ "$rc" -ne 0 ] || cat "$final" 2>/dev/null || rc=6
   elif [ -n "$raw_log" ]; then
     registry_run_answer "$model" "$prompt" 2>&9 | tee -a "$raw_log"
     statuses=("${PIPESTATUS[@]}")
