@@ -15,7 +15,15 @@
 # Override log root via DEV_TRIO_LOG_DIR=/abs/path.
 #
 # Exit: the model's own code, which an artifact never promotes; 5 when it exits
-# 0 leaving no answer; 6 when the answer could not be captured or inspected.
+# 0 leaving no answer; 6 when the answer could not be captured or inspected —
+# and, narrowly, when the transcript opened and then failed to be written, e.g.
+# the disk filled mid-run: the captured copy travels through the same
+# descriptor, so its `tee` fails and the answer is not inspected. A log that
+# cannot be *reopened* for the transcript costs nothing: it is reported on
+# stderr and the run proceeds without one (measured, both the old pipeline and
+# this shape: the answer survives, rc 0). Creating the log in the first place
+# is not covered — the header write above still aborts the wrapper under
+# errexit, as it did before this change.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -201,27 +209,54 @@ RC=0
 # exit status still in hand; this wrapper would see one number and could not
 # tell a CLI that chose to exit 5 from an empty answer.
 #
-# `|| RC=$?` would report the *rightmost* failure under pipefail, so a failing
-# tee would mask the 5/6 answer codes. Read PIPESTATUS instead; errexit is
-# lifted only around the pipeline itself.
-set +e
-REGISTRY_CMD_OVERRIDE="${RESEARCHER_CLI:-}" registry_run_answer "$RESEARCHER_MODEL" "$PROMPT" "$FINAL" 2>&1 | tee -a "$LOG" > /dev/null
-RUN_STATUSES=("${PIPESTATUS[@]}")
-set -e
-RC="${RUN_STATUSES[0]}"
-LOG_RC="${RUN_STATUSES[1]}"
-if [ "$LOG_RC" -ne 0 ]; then
-  echo "[ask-researcher] the transcript could not be logged (rc=$LOG_RC); $LOG may be incomplete" >&2
+# The transcript is appended straight to the log: this wrapper discards the
+# streamed copy (its own stdout is the answer, read from $FINAL below), so a
+# `| tee -a "$LOG" > /dev/null` pipeline was a file append with a pipe bolted
+# on. The pipe was not free. A pipeline ends when *every* process holding the
+# write end closes it, not when the CLI exits, so a CLI that leaves a
+# background descendant holding its stdout or stderr held this wrapper open
+# for as long as that descendant lived (#71). Measured with a stub that leaks a
+# descendant holding stderr for 10 s: 10.20 s through the pipeline, 0.19 s
+# through this redirection, and no change to an ordinary run (0.19 s, median of
+# 5). A descendant holding *stdout* still blocks inside registry_run_answer's
+# own `registry_run "$@" | tee "$tmp"`, which this cannot reach — #71 stays
+# open for that half.
+#
+# The log is opened once, on fd 8. A bare `>> "$LOG"` on the call would make an
+# unopenable log skip the model entirely — bash fails the redirection and never
+# runs the command — so a transcript problem would decide the answer. Falling
+# back to /dev/null keeps logging best-effort, which is what the pipeline's
+# `tee` failure was: measured against a log path that cannot be opened, the old
+# shape returned PIPESTATUS[0]=0 with the answer intact, and so does this one.
+#
+# One case is *not* equivalent, and it is a deliberate trade rather than a
+# claim of parity: if the log opens and a later write fails, the copy inside
+# registry_run_answer writes through this fd, its `tee` fails, and a valid
+# answer is reported as 6. debate-conductor's fd 9 does not have this exposure
+# — its native path calls `registry_run` directly, with no `tee` in between.
+# Isolating it here means buffering the console to a temp file and appending it
+# after the run, which costs the live transcript a `tail -F` reader follows. Recorded on #71 instead.
+#
+# errexit is lifted around the call so the 5/6 answer codes survive as $RC.
+if ! exec 8>>"$LOG"; then
+  echo "[ask-researcher] the transcript could not be logged; $LOG may be incomplete" >&2
+  exec 8>/dev/null
 fi
+set +e
+REGISTRY_CMD_OVERRIDE="${RESEARCHER_CLI:-}" registry_run_answer "$RESEARCHER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8
+RC=$?
+set -e
 
 # This wrapper's stdout is the answer — that is what ralph-trio and spec-trio
 # inject into their loops. The transcript and the CLI's diagnostics went to the
-# log, which is what the pane and the dashboard follow while the run is live.
+# log, which a `tail -F` reader follows while the run is live. The dashboard
+# does not read it — it renders from the run metadata (see the header).
 if [ "$RC" -eq 0 ]; then
   cat "$FINAL" || true
 fi
 manifest_finalize
-printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG"
+printf '\n=== END (rc=%d) ===\n' "$RC" >&8 || true
+exec 8>&-
 echo || true
 echo "(log: $LOG, final: $FINAL, rc=$RC)" >&2 || true
 [ -z "$RUNSTATE_LOG" ] || runstate_complete "$RUNSTATE_LOG" exit_code="$RC" reason=ok || true

@@ -1,6 +1,6 @@
 {
   "name": "dev-trio",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Codex PM and coder coordinates CLI research and authenticated Claude Code review.",
   "author": {
     "name": "pandas-studio"
