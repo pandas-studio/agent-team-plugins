@@ -235,8 +235,7 @@ RC=0
 # answer is reported as 6. debate-conductor's fd 9 does not have this exposure
 # — its native path calls `registry_run` directly, with no `tee` in between.
 # Isolating it here means buffering the console to a temp file and appending it
-# after the run, which costs the live transcript the pane and the dashboard
-# follow. Recorded on #71 instead.
+# after the run, which costs the live transcript a `tail -F` reader follows. Recorded on #71 instead.
 #
 # errexit is lifted around the call so the 5/6 answer codes survive as $RC.
 if ! exec 8>>"$LOG"; then
@@ -250,7 +249,8 @@ set -e
 
 # This wrapper's stdout is the answer — that is what ralph-trio and spec-trio
 # inject into their loops. The transcript and the CLI's diagnostics went to the
-# log, which is what the pane and the dashboard follow while the run is live.
+# log, which a `tail -F` reader follows while the run is live. The dashboard
+# does not read it — it renders from the run metadata (see the header).
 if [ "$RC" -eq 0 ]; then
   cat "$FINAL" || true
 fi
