@@ -2,7 +2,7 @@
 name: research
 description: One-shot Antigravity research call. Use when before coding you need library/API behavior, recent changes, spec details, or option comparisons. Streaming output lands in the top-right dashboard pane; chat-side surfaces the lead paragraph + cited URL count.
 disable-model-invocation: true
-allowed-tools: Bash(ask-agy.sh:*) Bash(cat:*) Bash(ls:*) Read
+allowed-tools: Bash(ask-researcher.sh:*) Bash(cat:*) Bash(ls:*) Read
 argument-hint: <research question>
 ---
 
@@ -15,20 +15,20 @@ You are the **PM**. Antigravity is the researcher (top-right pane). You dispatch
 `$ARGUMENTS` is the research question, free-form.
 
 - **Empty** → ask the user what to research. Do not proceed without a question.
-- **Non-empty** → pass `$ARGUMENTS` verbatim to `ask-agy.sh` as a single argument. Do not paraphrase or "improve" it.
+- **Non-empty** → pass `$ARGUMENTS` verbatim to `ask-researcher.sh` as a single argument. Do not paraphrase or "improve" it.
 
 ## 2 · Dispatch
 
-Single Bash call (blocking, ~10–60 s depending on the query). `ask-agy.sh` is on the plugin's `bin/` PATH while the plugin is active — call it bare (no absolute path).
+Single Bash call (blocking, ~10–60 s depending on the query). `ask-researcher.sh` is on the plugin's `bin/` PATH while the plugin is active — call it bare (no absolute path).
 
 ```bash
-ask-agy.sh "<the user's question, verbatim>"
+ask-researcher.sh "<the user's question, verbatim>"
 ```
 
 To pipe extra context (e.g., your own grep results):
 
 ```bash
-echo "<context bullets>" | ask-agy.sh "<question>"
+echo "<context bullets>" | ask-researcher.sh "<question>"
 ```
 
 **Streaming output is already visible in the top-right pane — do not duplicate it in the chat.** Just acknowledge that it's running and wait.
@@ -60,6 +60,6 @@ But don't dispatch automatically — let the user confirm.
 
 ## Constraints
 
-- **Do not call `agy` directly.** `ask-agy.sh` is the only entry point — it handles role-prompt loading, trust-boundary tag stripping, and RFC 0004 manifest emission.
+- **Do not call `agy` directly.** `ask-researcher.sh` is the only entry point — it handles role-prompt loading, trust-boundary tag stripping, and RFC 0004 manifest emission.
 - **Do not paste the full Antigravity response back to chat.** The user has it in the pane and on disk; surface only the lead + cite count.
 - **Do not silently retry on a non-zero rc.** Surface the failure to the user (the wrapper logs `rc=N` in its `=== END ===` line); ask before re-running.

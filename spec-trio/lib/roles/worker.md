@@ -16,9 +16,9 @@ You are working **under an external spec contract**. The spec is the load-bearin
 
 ## When to call helpers
 
-- `ask-agy.sh` — *before* coding, when you're uncertain about external library/API behavior. Don't use it for things you can answer by reading the repo. (Antigravity researcher; provided by the `dev-trio` plugin on PATH.)
-- `ask-codex.sh` — *after* a non-trivial change, *before* committing. Don't use for trivial single-line edits. (Provided by the `dev-trio` plugin on PATH.)
-- (Trio variant — the harness handles ask-codex.sh for you.)
+- `ask-researcher.sh` — *before* coding, when you're uncertain about external library/API behavior. Don't use it for things you can answer by reading the repo. (Antigravity researcher; provided by the `dev-trio` plugin on PATH.)
+- `ask-reviewer.sh` — *after* a non-trivial change, *before* committing. Don't use for trivial single-line edits. (Provided by the `dev-trio` plugin on PATH.)
+- (Trio variant — the harness handles ask-reviewer.sh for you.)
 
 ## Worktree mode
 

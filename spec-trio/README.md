@@ -15,7 +15,7 @@ Use spec-trio when you want **user intent to live outside the model** — the sp
 - `git`
 - `jq` 1.6+ — required for RFC 0004 run manifests
 - `claude` (Claude Code CLI) — for planner & coder stages
-- **`dev-trio` plugin** (provides `ask-codex.sh` reviewer + `ask-agy.sh` Antigravity researcher on PATH)
+- **`dev-trio` plugin** (provides `ask-reviewer.sh` reviewer + `ask-researcher.sh` Antigravity researcher on PATH)
 
 Override the model CLI per stage:
 
@@ -25,11 +25,11 @@ PLANNER_CLI=...                  # override planner only
 CODER_CLI=...                    # override coder only
 ```
 
-`ask-codex.sh` also honors `CODEX_CLI` / `REVIEWER_CLI` (set inside dev-trio) for stubbing the reviewer.
+`ask-reviewer.sh` also honors `CODEX_CLI` / `REVIEWER_CLI` (set inside dev-trio) for stubbing the reviewer.
 
 ### Model configuration
 
-The reviewer (`ask-codex.sh`) and researcher (`ask-agy.sh`) come from the **dev-trio** plugin, which resolves each role through a shared, configurable model registry (`agent-team-models`). spec-trio inherits that resolution unchanged — point the reviewer or researcher at a different CLI globally with `agent-team-models set-role`, or per-run with dev-trio's `*_MODEL` env vars. See dev-trio's README for the registry reference.
+The reviewer (`ask-reviewer.sh`) and researcher (`ask-researcher.sh`) come from the **dev-trio** plugin, which resolves each role through a shared, configurable model registry (`agent-team-models`). spec-trio inherits that resolution unchanged — point the reviewer or researcher at a different CLI globally with `agent-team-models set-role`, or per-run with dev-trio's `*_MODEL` env vars. See dev-trio's README for the registry reference.
 
 ## Install
 
@@ -128,7 +128,7 @@ Useful flags:
 - `--worktree` — run each iter in a throwaway git worktree; fast-forward merge after tests and SHIP; discard retryable failed attempts and preserve blocked worktrees.
 - `--autoship` — skip the reviewer stage (still gates on contract, scope and tests). Useful for mechanical refactors with a tight allowlist.
 - `--dry-run` — no model calls; still emits manifests. **Bypasses scope and test execution; preserves the backlog.**
-- `--no-research` — skip both NEED RESEARCH branches (planner Stage 1.5 + reviewer Stage 3.5; no `ask-agy.sh` dep).
+- `--no-research` — skip both NEED RESEARCH branches (planner Stage 1.5 + reviewer Stage 3.5; no `ask-researcher.sh` dep).
 
 ## Workspace artifacts
 

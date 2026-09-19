@@ -5,10 +5,10 @@
 #
 # Checks:
 #   1. Helpers and resolved role CLIs; Claude login for Codex PM; optional tmux.
-#   2. Plugin layout intact (ask-codex.sh / ask-agy.sh / agent-team-models.sh /
+#   2. Plugin layout intact (ask-reviewer.sh / ask-researcher.sh / agent-team-models.sh /
 #      dashboard.sh / team-layout.sh / lib/manifest.sh / lib/registry.sh /
 #      lib/roles/*.md / lib/pm.md).
-#   3. Stub-CLI smoke: runs ask-agy.sh against a tmp stub matching
+#   3. Stub-CLI smoke: runs ask-researcher.sh against a tmp stub matching
 #      `agy -p "$2"` shape (with an isolated empty models config so the
 #      built-in researcher=agy default applies), then asserts the manifest
 #      JSON is well-formed and contains variant=dev-trio-research with
@@ -75,7 +75,7 @@ else fail "neither sha256sum nor shasum found — manifest hashing will fail"; f
 
 echo
 echo "2. Plugin layout"
-for rel in bin/ask-codex.sh bin/ask-agy.sh bin/agent-team-models.sh \
+for rel in bin/ask-reviewer.sh bin/ask-researcher.sh bin/agent-team-models.sh \
            bin/dashboard.sh bin/team-layout.sh \
            lib/manifest.sh lib/registry.sh lib/host.sh lib/pm.md lib/pm-codex.md \
            lib/roles/researcher.md lib/roles/reviewer.md; do
@@ -85,7 +85,7 @@ for rel in bin/ask-codex.sh bin/ask-agy.sh bin/agent-team-models.sh \
 done
 
 echo
-echo "3. Stub-CLI smoke (ask-agy.sh → manifest)"
+echo "3. Stub-CLI smoke (ask-researcher.sh → manifest)"
 if [ "$FAILED" = "1" ]; then
   warn "skipping smoke — prior checks failed"
 else
@@ -117,16 +117,16 @@ STUB
   RESEARCHER_CLI="" \
   AGY_CLI="$STUB_AGY" \
   TMUX="" \
-    "$PLUGIN_ROOT/bin/ask-agy.sh" "doctor smoke: what is LangGraph streaming?" \
+    "$PLUGIN_ROOT/bin/ask-researcher.sh" "doctor smoke: what is LangGraph streaming?" \
     >"$TMPDIR_SMOKE/smoke.out" 2>"$TMPDIR_SMOKE/smoke.err"
   RC=$?
   popd >/dev/null
 
   if [ "$RC" -ne 0 ]; then
-    fail "ask-agy.sh exited with rc=$RC"
+    fail "ask-researcher.sh exited with rc=$RC"
     note "stderr: $(head -3 "$TMPDIR_SMOKE/smoke.err" 2>/dev/null)"
   else
-    ok "ask-agy.sh stub run completed (rc=0)"
+    ok "ask-researcher.sh stub run completed (rc=0)"
   fi
 
   LOG_DIR_SMOKE="$TMPDIR_SMOKE/.dev-trio/log/doctor-smoke"

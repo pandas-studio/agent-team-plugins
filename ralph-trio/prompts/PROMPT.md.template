@@ -30,8 +30,8 @@ When **every** criterion is met, append the literal completion marker to `fix_pl
 
 ## Helpers available (use only when warranted)
 
-- `ask-agy.sh "<question>"` — research a library/API/spec (Antigravity). Use **before** coding when uncertain about external behavior.
-- `ask-codex.sh "<focus>"` — second-pair-of-eyes review of your uncommitted diff (Codex). Use **after** writing a non-trivial change, **before** committing.
+- `ask-researcher.sh "<question>"` — research a library/API/spec (Antigravity). Use **before** coding when uncertain about external behavior.
+- `ask-reviewer.sh "<focus>"` — second-pair-of-eyes review of your uncommitted diff (Codex). Use **after** writing a non-trivial change, **before** committing.
 - For trio/debate variants the harness handles these calls — solo variant relies on you to invoke them yourself.
 
 ## Worktree mode (when `RALPH_WT_DIR` is set in env)

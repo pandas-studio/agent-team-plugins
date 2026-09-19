@@ -94,8 +94,8 @@ Per backlog task:
 
 1. **Stage 1 — Planner** (`claude -p` with `lib/roles/planner.md`)
 2. **Stage 2 — Coder** (`claude -p` with `lib/roles/worker.md` + plan)
-3. **Stage 3 — Reviewer** (`ask-codex.sh` against HEAD diff) → verdict: SHIP / NEEDS-FIX / DISCUSS
-4. If codex emits a `## NEED RESEARCH` block: invoke `ask-agy.sh` (Antigravity), re-run Stage 2 with research context, re-review.
+3. **Stage 3 — Reviewer** (`ask-reviewer.sh` against HEAD diff) → verdict: SHIP / NEEDS-FIX / DISCUSS
+4. If codex emits a `## NEED RESEARCH` block: invoke `ask-researcher.sh` (Antigravity), re-run Stage 2 with research context, re-review.
 
 Verdict dispatch:
 
@@ -136,7 +136,7 @@ ralph-meta.sh --since "2026-05-10 22:00" --variant solo
 ralph-meta.sh --since "2 hours ago" --rewrite-backlog BACKLOG.md
 ```
 
-Inspects ralph commits + log manifests since the cutoff, calls `ask-codex.sh` once with a focused audit brief, and writes a categorised audit Markdown to `$PWD/.ralph-trio/log/<team>/ralph-meta-<TS>.md`.
+Inspects ralph commits + log manifests since the cutoff, calls `ask-reviewer.sh` once with a focused audit brief, and writes a categorised audit Markdown to `$PWD/.ralph-trio/log/<team>/ralph-meta-<TS>.md`.
 
 ## Workspace artifacts
 

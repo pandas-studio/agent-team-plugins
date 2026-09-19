@@ -6,13 +6,13 @@ description: Run a dev-trio research CLI from Codex when the task needs external
 # Research from Codex
 
 Resolve the plugin root from this loaded file: two directories above this
-skill directory. The shared entry point is [ask-agy.sh](../../bin/ask-agy.sh).
+skill directory. The shared entry point is [ask-researcher.sh](../../bin/ask-researcher.sh).
 Do not assume the plugin added its bin directory to PATH.
 
 Run from the user's workspace, passing the question as one quoted argument:
 
 ```bash
-DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/ask-agy.sh" "<question>" </dev/null
+DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/ask-researcher.sh" "<question>" </dev/null
 ```
 
 When there is additional context, pass it through stdin instead of /dev/null.

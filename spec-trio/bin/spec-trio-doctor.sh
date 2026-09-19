@@ -8,16 +8,16 @@
 #   2. Optional tools: tmux (team-name detection), claude (real runs).
 #   3. Plugin layout intact (bin/, lib/, lib/roles/, prompts/).
 #   4. Cross-plugin dependencies on PATH:
-#        - ask-codex.sh / ask-agy.sh from dev-trio plugin (always required
+#        - ask-reviewer.sh / ask-researcher.sh from dev-trio plugin (always required
 #          unless --dry-run / --autoship / --no-research; warn-not-fail here).
 #   5. Stub smoke: runs spec-trio.sh --dry-run --max-iter 1 in a temp dir and
 #      asserts the three stage manifests are well-formed with the spec-* variant
 #      strings and verdict=SHIP on the dry-run reviewer manifest.
-#   6. Stub-CLI smoke (Stage 3): the reviewer verdict MUST come from ask-codex's
+#   6. Stub-CLI smoke (Stage 3): the reviewer verdict MUST come from ask-reviewer's
 #      --output-last-message (.final.md), not the decoy stdout, and the .final.md
 #      MUST land in spec-trio's durable log tree (pinned DEV_TRIO_LOG_DIR).
 #   7. Stub-CLI smoke (Stage 1.5): a planner `## NEED RESEARCH` block fetches
-#      ask-agy.sh research pre-coding and grafts it into the first coder prompt;
+#      ask-researcher.sh research pre-coding and grafts it into the first coder prompt;
 #      failed research is not injected and (under --autoship) routes to NEEDS-FIX.
 #
 # Stub smokes are *necessary but not sufficient* — verdict / scope-gate /
@@ -81,15 +81,15 @@ done
 
 echo
 echo "4. Cross-plugin dependencies (PATH)"
-if command -v ask-codex.sh >/dev/null 2>&1; then
-  ok "ask-codex.sh — $(command -v ask-codex.sh) (dev-trio plugin; required for the reviewer stage)"
+if command -v ask-reviewer.sh >/dev/null 2>&1; then
+  ok "ask-reviewer.sh — $(command -v ask-reviewer.sh) (dev-trio plugin; required for the reviewer stage)"
 else
-  warn "ask-codex.sh — missing (install dev-trio plugin: /plugin install dev-trio@pandas-studio; only --dry-run / --autoship can run without it)"
+  warn "ask-reviewer.sh — missing (install dev-trio plugin: /plugin install dev-trio@pandas-studio; only --dry-run / --autoship can run without it)"
 fi
-if command -v ask-agy.sh >/dev/null 2>&1; then
-  ok "ask-agy.sh — $(command -v ask-agy.sh) (dev-trio plugin; Antigravity researcher; required for the NEED RESEARCH branches)"
+if command -v ask-researcher.sh >/dev/null 2>&1; then
+  ok "ask-researcher.sh — $(command -v ask-researcher.sh) (dev-trio plugin; Antigravity researcher; required for the NEED RESEARCH branches)"
 else
-  warn "ask-agy.sh — missing (install dev-trio plugin; or pass --no-research)"
+  warn "ask-researcher.sh — missing (install dev-trio plugin; or pass --no-research)"
 fi
 
 echo
@@ -176,10 +176,10 @@ fi
 echo
 echo "6. Stub-CLI smoke (spec-trio Stage 3 — verdict from codex .final.md)"
 # Real-logic regression guard for the forward-port: the reviewer's verdict MUST
-# come from ask-codex.sh's --output-last-message file (codex-<TS>.final.md), NOT
+# come from ask-reviewer.sh's --output-last-message file (codex-<TS>.final.md), NOT
 # the streamed stdout the dev-trio contract declares unreliable; and that file
 # MUST land in spec-trio's durable log tree (pinned DEV_TRIO_LOG_DIR) so it
-# survives worktree teardown. Stub ask-codex.sh emits a clean SHIP in the
+# survives worktree teardown. Stub ask-reviewer.sh emits a clean SHIP in the
 # .final.md while streaming a DECOY NEEDS-FIX on stdout — only parsing the
 # .final.md yields SHIP. Runs with --no-strict-scope so a bare `true` planner
 # (empty plan, no <allowed-paths>) still reaches the reviewer.
@@ -196,7 +196,7 @@ else
   # must exercise the same receipt contract as production.
   REVIEW_RESULT_LIB="$PLUGIN_ROOT/../dev-trio/lib/review-result.sh"
   if [ ! -f "$REVIEW_RESULT_LIB" ]; then
-    REVIEW_RESULT_LIB="$(dirname "$(command -v ask-codex.sh)")/../lib/review-result.sh"
+    REVIEW_RESULT_LIB="$(dirname "$(command -v ask-reviewer.sh)")/../lib/review-result.sh"
   fi
   if [ ! -f "$REVIEW_RESULT_LIB" ]; then
     fail "dev-trio review-result.sh missing; update/install dev-trio for reviewer smoke"
@@ -205,10 +205,10 @@ else
   REVIEW_RESULT_LIB="$(cd "$(dirname "$REVIEW_RESULT_LIB")" && pwd -P)/review-result.sh"
   mkdir -p "$T2/lib"
   ln -s "$REVIEW_RESULT_LIB" "$T2/lib/review-result.sh"
-  # Stub mimics the dev-trio ask-codex.sh output contract: authoritative review
+  # Stub mimics the dev-trio ask-reviewer.sh output contract: authoritative review
   # in $FINAL, an unreliable/decoy transcript on stdout, the `(... rc=…)` line on
   # stderr. STUB_MODE selects the scenario. Ignores --with-spec et al.
-  cat > "$STUB_BIN/ask-codex.sh" <<'STUB'
+  cat > "$STUB_BIN/ask-reviewer.sh" <<'STUB'
 #!/usr/bin/env bash
 set -uo pipefail
 TEAM="${AGENT_TEAM:-default}"
@@ -243,7 +243,7 @@ RC=$(jq -r '.exit_code' "$RESULT")
 echo "(log: $LOG, final: $FINAL, result: $RESULT, rc=$RC)" >&2
 exit "$RC"
 STUB
-  chmod +x "$STUB_BIN/ask-codex.sh"
+  chmod +x "$STUB_BIN/ask-reviewer.sh"
 
   # run_spec_case MODE CWD — single-iter spec-trio loop in a fresh git repo with
   # the stub on PATH and claude stubbed to `true` (no real model). --no-strict-
@@ -295,7 +295,7 @@ STUB
     fail "expected verdict=SHIP from .final.md, got: ${VA:-<no manifest>} (regression: parsing streamed stdout?)"
   fi
   # Durability: the .final.md must land under spec-trio's pinned workspace dir
-  # (CODEX_FINAL_ROOT=$LOG_DIR/codex; ask-codex appends /$TEAM), NOT in a stray
+  # (CODEX_FINAL_ROOT=$LOG_DIR/codex; ask-reviewer appends /$TEAM), NOT in a stray
   # .dev-trio under the run cwd (which a worktree would tear down).
   if [ -e "$CASE_A/.spec-trio/log/doctor-spec/codex/doctor-spec/latest-codex.final.md" ]; then
     ok "codex .final.md pinned under spec-trio workspace (survives worktree teardown)"
@@ -322,7 +322,7 @@ fi
 echo
 echo "7. Stub-CLI smoke (spec-trio Stage 1.5 — planner-driven pre-coding research)"
 # Regression guard for the planner NEED RESEARCH path: when the PLANNER emits a
-# `## NEED RESEARCH` block, spec-trio must fetch research via ask-agy.sh BEFORE
+# `## NEED RESEARCH` block, spec-trio must fetch research via ask-researcher.sh BEFORE
 # Stage 2 and graft it into the FIRST coder prompt. Runs under --autoship (Stage
 # 3 skipped → no codex stub needed) and --no-strict-scope with an empty allowlist
 # so the orthogonal scope gates (exercised by tests/smoke-pr5.sh) don't interfere
@@ -346,7 +346,7 @@ cat <<'PLAN'
 - What is the correct signature of the helper?
 PLAN
 STUB
-  cat > "$S7/ask-agy.sh" <<'STUB'
+  cat > "$S7/ask-researcher.sh" <<'STUB'
 #!/usr/bin/env bash
 echo "DOCTOR-RESEARCH-ANSWER: helper(x) -> y (agy stub)"
 STUB
@@ -403,12 +403,12 @@ STUB
 
   # --- Case B: research FAILS — must NOT inject the error output, and under
   # --autoship must NOT ship (the planner declared the task depends on it).
-  cat > "$S7/ask-agy.sh" <<'STUB'
+  cat > "$S7/ask-researcher.sh" <<'STUB'
 #!/usr/bin/env bash
 echo "FATAL: agy stub failure" >&2
 exit 1
 STUB
-  chmod +x "$S7/ask-agy.sh"
+  chmod +x "$S7/ask-researcher.sh"
   CWD7B="$T7/run-fail"
   run_research_case "$CWD7B" "doctor-research-fail" || true
   # Grep for the error OUTPUT, not the `<research>` tag name (the coder role's
@@ -485,7 +485,7 @@ STUB
   # Codex stub: final-ship (SHIP in .final.md), need-research (triggers retry),
   # or research-then-ship (first call asks for research, later calls SHIP).
   # FOCUS_CAPTURE (optional) records each call's focus (the last argv slot).
-  cat > "$S8/ask-codex.sh" <<'STUB'
+  cat > "$S8/ask-reviewer.sh" <<'STUB'
 #!/usr/bin/env bash
 set -uo pipefail
 if [ -n "${FOCUS_CAPTURE:-}" ]; then
@@ -515,7 +515,7 @@ RC=$(jq -r '.exit_code' "$RESULT")
 echo "(final: $FINAL, result: $RESULT, rc=$RC)" >&2
 exit "$RC"
 STUB
-  cat > "$S8/ask-agy.sh" <<'STUB'
+  cat > "$S8/ask-researcher.sh" <<'STUB'
 #!/usr/bin/env bash
 echo "DOCTOR-RESEARCH-ANSWER: helper(x) -> y"
 STUB

@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# dashboard.sh — live, formatted summary view of agy/codex wrapper runs.
+# dashboard.sh — live, formatted summary view of researcher/reviewer runs.
 #
 # Usage:
-#   dashboard.sh agy       # render Antigravity researcher status
-#   dashboard.sh codex     # render Codex reviewer status
+#   dashboard.sh agy       # render researcher status
+#   dashboard.sh codex     # render reviewer status
+#
+# `agy` and `codex` are compatibility identifiers for the two log channels
+# (agy-*.log, codex-*.log), not the model that runs — the header shows that.
 #
 # Run this in a side tmux pane. Re-renders only when the source log changes
 # (no flicker), and shows distilled key points — the full raw output stays
@@ -28,11 +31,13 @@ ROLE="${1:?usage: $0 agy|codex}"
 case "$ROLE" in
   agy)
     ICON="🔍"; TITLE="Researcher"
+    WRAPPER="ask-researcher.sh"; WRAPPER_LEGACY="ask-agy.sh"
     HEADER_COLOR=$'\033[1;36m'   # bright cyan
     LABEL="Query"
     ;;
   codex)
     ICON="🧐"; TITLE="Reviewer"
+    WRAPPER="ask-reviewer.sh"; WRAPPER_LEGACY="ask-codex.sh"
     HEADER_COLOR=$'\033[1;35m'   # bright magenta
     LABEL="Focus"
     ;;
@@ -92,7 +97,17 @@ while true; do
       BUF+="  ${DIM}(no runs yet — waiting for first call)${RESET}"$'\n'
       BUF+="  ${DIM}path: $LATEST${RESET}"$'\n\n'
     else
-      TS=$(grep "^=== ask-${ROLE}.sh @ " "$SOURCE" 2>/dev/null | tail -1 | awk '{print $4}')
+      # The wrapper writes its authoritative header as the log's first line,
+      # one run per file — so read that line and match it literally, rather
+      # than searching the body where research context can quote a header.
+      # The legacy spelling is accepted so logs written by a pre-0.7.0
+      # dev-trio still render a start time.
+      HEADER=$(head -1 "$SOURCE" 2>/dev/null)
+      TS=""
+      case "$HEADER" in
+        "=== $WRAPPER @ "*|"=== $WRAPPER_LEGACY @ "*)
+          TS=$(printf '%s\n' "$HEADER" | awk '{print $4}') ;;
+      esac
       BUF+="  ${BOLD}Started:${RESET} ${TS:-unknown}"$'\n\n'
 
       # Query/Focus body

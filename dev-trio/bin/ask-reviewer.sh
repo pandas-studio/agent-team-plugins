@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
-# ask-codex.sh — invoke Codex as the reviewer against the current repo.
+# ask-reviewer.sh — invoke Codex as the reviewer against the current repo.
 #
 # Usage:
-#   ask-codex.sh                              # review uncommitted changes (default)
-#   ask-codex.sh "focus or scope instructions"
-#   ask-codex.sh "review HEAD~1..HEAD with focus on security"
+#   ask-reviewer.sh                              # review uncommitted changes (default)
+#   ask-reviewer.sh "focus or scope instructions"
+#   ask-reviewer.sh "review HEAD~1..HEAD with focus on security"
 #
 # Optional context injection (any combination, in any order):
-#   ask-codex.sh --with-research path/to/research.md "original focus"
-#   ask-codex.sh --with-spec     path/to/spec.md     "review against contract"
-#   ask-codex.sh --with-spec spec.md --with-research research.md "focus"
-#   ask-codex.sh --with-context path/to/context.md "review <base>..<head> (PR #55)"
+#   ask-reviewer.sh --with-research path/to/research.md "original focus"
+#   ask-reviewer.sh --with-spec     path/to/spec.md     "review against contract"
+#   ask-reviewer.sh --with-spec spec.md --with-research research.md "focus"
+#   ask-reviewer.sh --with-context path/to/context.md "review <base>..<head> (PR #55)"
 # --with-context carries remote facts the PM fetched (PR commit IDs, issue text,
 # CI logs) for reviewers that cannot reach the network. One file per kind: on a
 # retry, pass one cumulative file rather than repeating the flag.
 #
 # Review without Codex's memories (no memory summary injected into the prompt):
-#   ask-codex.sh --no-memories "focus"
+#   ask-reviewer.sh --no-memories "focus"
 # Runs the built-in codex-no-memories model when the reviewer resolves to codex or
 # codex-no-memories; rc=2 for any other model or when the models config
 # redefines codex-no-memories.
@@ -28,7 +28,7 @@
 # DEV_TRIO_REVIEW_RECEIPT optionally names a fresh absolute caller receipt file.
 #
 # Reviewer role override:
-#   REVIEWER_ROLE_FILE=/path/to/role.md ask-codex.sh ...
+#   REVIEWER_ROLE_FILE=/path/to/role.md ask-reviewer.sh ...
 #
 # The reviewer model is resolved via the shared registry (DEV_TRIO_REVIEWER_MODEL
 # env > config role binding > host default); see lib/host.sh.
@@ -46,7 +46,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 _NAMESPACE_LIB="$PLUGIN_ROOT/lib/namespace.sh"
-[ -f "$_NAMESPACE_LIB" ] || { echo "ask-codex: namespace.sh not found at $_NAMESPACE_LIB" >&2; exit 1; }
+[ -f "$_NAMESPACE_LIB" ] || { echo "ask-reviewer: namespace.sh not found at $_NAMESPACE_LIB" >&2; exit 1; }
 # shellcheck source=../lib/namespace.sh
 . "$_NAMESPACE_LIB"
 unset _NAMESPACE_LIB
@@ -56,15 +56,15 @@ ROLE_FILE="${REVIEWER_ROLE_FILE:-$PLUGIN_ROOT/lib/roles/reviewer.md}"
 
 # Manifest helper (RFC 0004) lives next to this plugin's lib/.
 _MANIFEST_LIB="$PLUGIN_ROOT/lib/manifest.sh"
-[ -f "$_MANIFEST_LIB" ] || { echo "ask-codex: manifest.sh not found at $_MANIFEST_LIB" >&2; exit 1; }
+[ -f "$_MANIFEST_LIB" ] || { echo "ask-reviewer: manifest.sh not found at $_MANIFEST_LIB" >&2; exit 1; }
 # shellcheck source=../lib/manifest.sh
-. "$_MANIFEST_LIB" || { echo "ask-codex: failed to load manifest.sh (jq missing?)" >&2; exit 2; }
+. "$_MANIFEST_LIB" || { echo "ask-reviewer: failed to load manifest.sh (jq missing?)" >&2; exit 2; }
 unset _MANIFEST_LIB
 
 _REGISTRY_LIB="$PLUGIN_ROOT/lib/registry.sh"
-[ -f "$_REGISTRY_LIB" ] || { echo "ask-codex: registry.sh not found at $_REGISTRY_LIB" >&2; exit 1; }
+[ -f "$_REGISTRY_LIB" ] || { echo "ask-reviewer: registry.sh not found at $_REGISTRY_LIB" >&2; exit 1; }
 # shellcheck source=../lib/registry.sh
-. "$_REGISTRY_LIB" || { echo "ask-codex: failed to load registry.sh (jq missing?)" >&2; exit 2; }
+. "$_REGISTRY_LIB" || { echo "ask-reviewer: failed to load registry.sh (jq missing?)" >&2; exit 2; }
 unset _REGISTRY_LIB
 
 # shellcheck source=../lib/review-result.sh
@@ -83,7 +83,7 @@ PM_HOST="$(dev_trio_host)" || exit $?
 # default (Claude PM: codex; Codex PM: claude). The legacy
 # REVIEWER_CLI/CODEX_CLI still override the *binary* at run time below.
 REVIEWER_MODEL="$(dev_trio_resolve_role reviewer)"
-registry_model_exists "$REVIEWER_MODEL" || { echo "ask-codex: reviewer model '$REVIEWER_MODEL' is not registered (run: agent-team-models list)" >&2; exit 2; }
+registry_model_exists "$REVIEWER_MODEL" || { echo "ask-reviewer: reviewer model '$REVIEWER_MODEL' is not registered (run: agent-team-models list)" >&2; exit 2; }
 
 # Team namespace — isolates logs per tmux window/session.
 TEAM=$(agent_team_detect_team) || exit 2
@@ -230,7 +230,7 @@ manifest_add_input kind=focus value="$FOCUS"
 [ -n "$CONTEXT_FILE" ]  && manifest_add_input kind=context  path="$CONTEXT_FILE"
 
 {
-  echo "=== ask-codex.sh @ $TS ==="
+  echo "=== ask-reviewer.sh @ $TS ==="
   echo "=== FOCUS ==="
   echo "$FOCUS"
   if [ -n "$RESEARCH_FILE" ]; then
@@ -247,7 +247,7 @@ manifest_add_input kind=focus value="$FOCUS"
   echo "=== RESPONSE ==="
 } > "$LOG"
 
-echo "[ask-codex] running ($REVIEWER_MODEL) — monitor: dashboard.sh codex  (raw: tail -F $LOG_DIR/latest-codex.log)" >&2
+echo "[ask-reviewer] running ($REVIEWER_MODEL) — monitor: dashboard.sh codex  (raw: tail -F $LOG_DIR/latest-codex.log)" >&2
 RC=0
 # For models with native final-message capture (codex's --output-last-message),
 # the registry's final_args template writes the structured review to $FINAL
@@ -269,7 +269,7 @@ result_output_failed() {
   manifest_set_verdict "" || true
   manifest_finalize || true
   printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG" || true
-  echo "[ask-codex] result write failed: $1 (log: $LOG, final: $FINAL, rc=$RC)" >&2
+  echo "[ask-reviewer] result write failed: $1 (log: $LOG, final: $FINAL, rc=$RC)" >&2
   exit "$RC"
 }
 RESULT_TMP=$(mktemp "$RESULT.tmp.XXXXXX") || result_output_failed 'create result temporary file'
@@ -290,7 +290,7 @@ printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG"
 echo
 if [ "$RC" -ne 0 ]; then
   ERROR=$(printf '%s\n' "$RESULT_JSON" | jq -r '.error')
-  echo "[ask-codex] review failed: $ERROR (result: $RESULT)" >&2
+  echo "[ask-reviewer] review failed: $ERROR (result: $RESULT)" >&2
 fi
 echo "(log: $LOG, final: $FINAL, result: $RESULT, rc=$RC)" >&2
 exit "$RC"

@@ -12,8 +12,8 @@ You are Claude Code, invoked one-shot per Ralph iteration. The harness re-runs y
 
 ## When to call helpers
 
-- `ask-agy.sh` — *before* coding, when you're uncertain about external library/API behavior. Don't use it for things you can answer by reading the repo. (Antigravity researcher; on `$PATH` when the dev-trio plugin is active.)
-- `ask-codex.sh` — *after* a non-trivial change, *before* committing. Don't use for trivial single-line edits.
+- `ask-researcher.sh` — *before* coding, when you're uncertain about external library/API behavior. Don't use it for things you can answer by reading the repo. (Antigravity researcher; on `$PATH` when the dev-trio plugin is active.)
+- `ask-reviewer.sh` — *after* a non-trivial change, *before* committing. Don't use for trivial single-line edits.
 - (Trio + debate variants — the harness handles these for you. Solo variant — you decide.)
 
 ## Worktree mode

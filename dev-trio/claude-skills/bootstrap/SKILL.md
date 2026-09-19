@@ -33,8 +33,8 @@ This skill prepares a 3-pane tmux view: this Claude session stays in the left pa
 
 3. **Confirm and instruct**. After the split succeeds, tell the user:
    > Layout ready. The top-right pane will live-render Antigravity status and the bottom-right Codex status as soon as you dispatch a call. Next:
-   > - One-shot research → `/dev-trio:research <question>` (or raw: `ask-agy.sh "..."`)
-   > - One-shot review → `/dev-trio:review [focus]` (or raw: `ask-codex.sh ...`)
+   > - One-shot research → `/dev-trio:research <question>` (or raw: `ask-researcher.sh "..."`)
+   > - One-shot review → `/dev-trio:review [focus]` (or raw: `ask-reviewer.sh ...`)
    > - Optional: install the PM orchestration policy into this workspace's `CLAUDE.md` → `/dev-trio:install-pm`
 
 Do NOT launch a research or review from this skill — that's `research` / `review`'s job. Bootstrap is layout-only.

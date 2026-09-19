@@ -24,8 +24,8 @@
 #       130 interrupted. Runtime caps are checked between iterations.
 #
 # Dependencies: bash, git, jq, and the configured model CLIs; reviewed runs
-# need dev-trio's ask-codex.sh and shared review-result.sh. Research needs
-# ask-agy.sh. Logs and frozen specs live under .spec-trio/log/<team>/.
+# need dev-trio's ask-reviewer.sh and shared review-result.sh. Research needs
+# ask-researcher.sh. Logs and frozen specs live under .spec-trio/log/<team>/.
 
 set -uo pipefail
 
@@ -112,15 +112,15 @@ SPEC_TARGET=$(spec_resolve_target "$SPEC_SOURCE") || exit 1
 BACKLOG_FILE="$(cd -P "$(dirname "$BACKLOG_FILE")" && pwd -P)/$(basename "$BACKLOG_FILE")"
 BACKLOG_TARGET=$(spec_resolve_target "$BACKLOG_FILE") || exit 1
 
-# Cross-plugin dependency check: ask-codex.sh / ask-agy.sh are provided by
-# the dev-trio plugin on PATH. ask-codex.sh (reviewer) is skipped under
-# --autoship (Stage 3 doesn't run); ask-agy.sh (Antigravity researcher) is
+# Cross-plugin dependency check: ask-reviewer.sh / ask-researcher.sh are provided by
+# the dev-trio plugin on PATH. ask-reviewer.sh (reviewer) is skipped under
+# --autoship (Stage 3 doesn't run); ask-researcher.sh (Antigravity researcher) is
 # reachable from BOTH research paths, including planner-driven pre-coding
 # research (Stage 1.5) which fires even under --autoship — so require it
 # whenever research is possible (anything but --dry-run / --no-research).
 if [ "$DRY_RUN" != "1" ] && [ "$AUTOSHIP" != "1" ]; then
-  command -v ask-codex.sh  >/dev/null 2>&1 || { echo "ERROR: spec-trio requires the dev-trio plugin (ask-codex.sh not on PATH). Install: /plugin install dev-trio@pandas-studio" >&2; exit 2; }
-  REVIEWER_BIN_DIR=$(dirname "$(command -v ask-codex.sh)")
+  command -v ask-reviewer.sh  >/dev/null 2>&1 || { echo "ERROR: spec-trio requires the dev-trio plugin (ask-reviewer.sh not on PATH). Install: /plugin install dev-trio@pandas-studio" >&2; exit 2; }
+  REVIEWER_BIN_DIR=$(dirname "$(command -v ask-reviewer.sh)")
   # shellcheck source=/dev/null
   . "$REVIEWER_BIN_DIR/../lib/review-result.sh" || {
     echo "ERROR: update dev-trio; shared review-result.sh is required" >&2
@@ -128,7 +128,7 @@ if [ "$DRY_RUN" != "1" ] && [ "$AUTOSHIP" != "1" ]; then
   }
 fi
 if [ "$DRY_RUN" != "1" ] && [ "$NO_RESEARCH" != "1" ]; then
-  command -v ask-agy.sh >/dev/null 2>&1 || { echo "ERROR: spec-trio requires the dev-trio plugin (ask-agy.sh not on PATH). Install: /plugin install dev-trio@pandas-studio  (or pass --no-research)" >&2; exit 2; }
+  command -v ask-researcher.sh >/dev/null 2>&1 || { echo "ERROR: spec-trio requires the dev-trio plugin (ask-researcher.sh not on PATH). Install: /plugin install dev-trio@pandas-studio  (or pass --no-research)" >&2; exit 2; }
 fi
 
 if [ -z "$FIX_PLAN_FILE" ]; then
@@ -163,13 +163,13 @@ fi
 TEAM=$(detect_team) || exit 2
 LOG_DIR=$(spec_init_log_dir)
 LOG_DIR=$(cd -P "$LOG_DIR" && pwd -P) || exit 1
-# Durable, spec-trio-owned root for ask-codex.sh's --output-last-message
+# Durable, spec-trio-owned root for ask-reviewer.sh's --output-last-message
 # artifacts. Pinned via DEV_TRIO_LOG_DIR on every reviewer call so the
 # authoritative codex-<TS>.final.md survives `git worktree remove`: the
-# reviewer runs inside `cd "$WORK_DIR"`, and ask-codex.sh otherwise defaults its
+# reviewer runs inside `cd "$WORK_DIR"`, and ask-reviewer.sh otherwise defaults its
 # log root to $PWD/.dev-trio — i.e. inside the worktree that Stage-3 dispatch
 # tears down. LOG_DIR is computed here at top level (PWD = ORIGINAL_DIR, the
-# main repo), so this absolute path is unaffected by the later cd. ask-codex.sh
+# main repo), so this absolute path is unaffected by the later cd. ask-reviewer.sh
 # appends /$TEAM and returns exact artifact paths through a fresh receipt.
 CODEX_FINAL_ROOT="$LOG_DIR/codex"
 # Keep the exact bytes of one contract for every stage and the coverage report.
@@ -497,7 +497,7 @@ while :; do
   TEST_RC=0
   TEST_LOG=""
   PRE_RESEARCH=""        # Stage 1.5 planner-research body; "" = none (threads into Stage 2)
-  RESEARCH_FAILED=0      # 1 = planner asked for research but ask-agy.sh failed
+  RESEARCH_FAILED=0      # 1 = planner asked for research but ask-researcher.sh failed
 
   # Wrapped fix_plan excerpt (optional, -literal-stripped)
   FP_EXCERPT=""
@@ -616,19 +616,19 @@ while :; do
       # research body is captured via the tee into $PLAN_RESEARCH_LOG.
       RESEARCH_RC=0
       ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$LOG_DIR/agy" \
-          MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage ask-agy.sh "$PLAN_RESEARCH_QS" 2>&1 ) | tee "$PLAN_RESEARCH_LOG" >/dev/null || RESEARCH_RC=$?
+          MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage ask-researcher.sh "$PLAN_RESEARCH_QS" 2>&1 ) | tee "$PLAN_RESEARCH_LOG" >/dev/null || RESEARCH_RC=$?
       spec_check_or_stop
       [ "$RESEARCH_RC" -ne 0 ] && manifest_add_input kind=research-rc value="$RESEARCH_RC"
       manifest_finalize || exit 1
       PARENT_RUN_ID="$PLAN_RESEARCH_RUN_ID"  # coder's parent becomes research
       if [ "$RESEARCH_RC" -ne 0 ]; then
-        # ask-agy.sh failed (auth, rate-limit, missing binary, …). $PLAN_RESEARCH_LOG
+        # ask-researcher.sh failed (auth, rate-limit, missing binary, …). $PLAN_RESEARCH_LOG
         # now holds the error stream, NOT a real answer — do NOT inject it as
         # "research" (the coder would treat an error trace as facts). Flag the iter
         # so the verdict dispatch refuses to --autoship-SHIP work the planner
         # declared dependent on this lookup (a reviewed run still lets Stage 3
         # judge the research-less code). PRE_RESEARCH stays empty.
-        ralph_log "  [stage 1.5] ask-agy.sh failed (rc=$RESEARCH_RC) — research unavailable; not injecting error output (see $PLAN_RESEARCH_LOG)"
+        ralph_log "  [stage 1.5] ask-researcher.sh failed (rc=$RESEARCH_RC) — research unavailable; not injecting error output (see $PLAN_RESEARCH_LOG)"
         RESEARCH_FAILED=1
       else
         PRE_RESEARCH="$(cat "$PLAN_RESEARCH_LOG")"
@@ -733,7 +733,7 @@ while :; do
     spec_retry_verdict "$CODE_RUN_ID" "$FAIL_REASON" "$REVIEW_LOG"
   elif [ "$AUTOSHIP" = "1" ] && [ "$RESEARCH_FAILED" = "1" ]; then
     # --autoship has no reviewer to catch uninformed code. The planner declared
-    # this task depends on pre-coding research (Stage 1.5), but ask-agy.sh
+    # this task depends on pre-coding research (Stage 1.5), but ask-researcher.sh
     # failed — refuse to ship work built without the research the planner
     # required; re-queue instead.
     VERDICT="NEEDS-FIX"
@@ -782,15 +782,15 @@ while :; do
     manifest_add_input kind=task value="$TASK" || exit 1
     manifest_add_input kind=spec path="$SPEC_FILE" || exit 1
     manifest_add_input kind=code-log path="$CODE_LOG" || exit 1
-    # Reviewer role recorded by ask-codex.sh into the parent manifest via
+    # Reviewer role recorded by ask-reviewer.sh into the parent manifest via
     # the PR 9 nested-write carve-out (it knows REVIEWER_ROLE_FILE; we don't).
-    # DEV_TRIO_LOG_DIR pins ask-codex.sh's .final.md into spec-trio's durable
+    # DEV_TRIO_LOG_DIR pins ask-reviewer.sh's .final.md into spec-trio's durable
     # log tree (survives worktree teardown — see CODEX_FINAL_ROOT above).
     RANGE_HINT=$(build_range_hint "$ITER_BASE_SHA" "$WORK_DIR")
     REVIEW_RECEIPT=$(review_receipt_create "$REVIEW_LOG") || exit 2
     ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$CODEX_FINAL_ROOT" \
-        DEV_TRIO_REVIEW_PROFILE=spec DEV_TRIO_REVIEW_RECEIPT="$REVIEW_RECEIPT" MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage ask-codex.sh --with-spec "$SPEC_FILE" "Review uncommitted+committed changes related to this task: '$TASK'.${RANGE_HINT} Use the standard SHIP/NEEDS-FIX/DISCUSS/OUT-OF-SCOPE verdict format from your role prompt." 2>&1 ) | tee "$REVIEW_LOG" >/dev/null
-    # PIPESTATUS[0] = ask-codex.sh's rc (the subshell). Non-zero means codex
+        DEV_TRIO_REVIEW_PROFILE=spec DEV_TRIO_REVIEW_RECEIPT="$REVIEW_RECEIPT" MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage ask-reviewer.sh --with-spec "$SPEC_FILE" "Review uncommitted+committed changes related to this task: '$TASK'.${RANGE_HINT} Use the standard SHIP/NEEDS-FIX/DISCUSS/OUT-OF-SCOPE verdict format from your role prompt." 2>&1 ) | tee "$REVIEW_LOG" >/dev/null
+    # PIPESTATUS[0] = ask-reviewer.sh's rc (the subshell). Non-zero means codex
     # invocation or result processing failed — even if it echoes the verdict
     # placeholder, so naive parsing would yield a bogus verdict. Force UNKNOWN
     # whenever codex didn't cleanly exit.
@@ -812,7 +812,7 @@ while :; do
       ralph_log "  review result unavailable — forcing UNKNOWN verdict (receipt: $REVIEW_RECEIPT)"
     fi
     if [ "$CODEX_RC" -ne 0 ]; then
-      ralph_log "  ask-codex.sh exited rc=$CODEX_RC — forcing UNKNOWN verdict (review log: $REVIEW_LOG)"
+      ralph_log "  ask-reviewer.sh exited rc=$CODEX_RC — forcing UNKNOWN verdict (review log: $REVIEW_LOG)"
       manifest_add_input kind=codex-rc value="$CODEX_RC" || exit 1
     fi
     [ -z "$VERDICT" ] && VERDICT="UNKNOWN"
@@ -832,15 +832,15 @@ while :; do
         manifest_init spec-research "$RESEARCH_LOG" || exit 1
         RESEARCH_RUN_ID="$MANIFEST_RUN_ID"
         manifest_set_parent "$REVIEW_RUN_ID" || exit 1
-        # Researcher role recorded by ask-agy.sh via the PR 9 carve-out.
-        # DEV_TRIO_LOG_DIR pins ask-agy.sh's own agy-<TS>-<PID>.log into spec-trio's
+        # Researcher role recorded by ask-researcher.sh via the PR 9 carve-out.
+        # DEV_TRIO_LOG_DIR pins ask-researcher.sh's own agy-<TS>-<PID>.log into spec-trio's
         # main-repo log tree so it doesn't litter the (torn-down) worktree; the
         # research content is captured durably via the tee into $RESEARCH_LOG.
         manifest_add_input kind=spec path="$SPEC_FILE" || exit 1
         manifest_add_input kind=question value="$RESEARCH_QS" || exit 1
         RESEARCH_RC=0
         ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$LOG_DIR/agy" \
-            MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage ask-agy.sh "$RESEARCH_QS" 2>&1 ) | tee "$RESEARCH_LOG" >/dev/null || RESEARCH_RC=$?
+            MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage ask-researcher.sh "$RESEARCH_QS" 2>&1 ) | tee "$RESEARCH_LOG" >/dev/null || RESEARCH_RC=$?
         spec_check_or_stop
         manifest_add_input kind=research-rc value="$RESEARCH_RC" || exit 1
         manifest_finalize || exit 1
@@ -905,7 +905,7 @@ $RESEARCH"
           manifest_init spec-review "$REVIEW2_LOG" || exit 1
           REVIEW2_RUN_ID="$MANIFEST_RUN_ID"
           manifest_set_parent "$CODE2_RUN_ID" || exit 1
-          # Reviewer role recorded by ask-codex.sh via the PR 9 carve-out.
+          # Reviewer role recorded by ask-reviewer.sh via the PR 9 carve-out.
           manifest_add_input kind=task value="$TASK" || exit 1
           manifest_add_input kind=spec path="$SPEC_FILE" || exit 1
           manifest_add_input kind=code-log path="$CODE2_LOG" || exit 1
@@ -913,7 +913,7 @@ $RESEARCH"
           RANGE_HINT2=$(build_range_hint "$ITER_BASE_SHA" "$WORK_DIR")
           REVIEW_RECEIPT=$(review_receipt_create "$REVIEW2_LOG") || exit 2
           ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$CODEX_FINAL_ROOT" \
-              DEV_TRIO_REVIEW_PROFILE=spec DEV_TRIO_REVIEW_RECEIPT="$REVIEW_RECEIPT" MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage ask-codex.sh --with-spec "$SPEC_FILE" "Re-review the same task after research-informed retry: '$TASK'.${RANGE_HINT2} Use the standard SHIP/NEEDS-FIX/DISCUSS/OUT-OF-SCOPE verdict format from your role prompt." 2>&1 ) | tee "$REVIEW2_LOG" >/dev/null
+              DEV_TRIO_REVIEW_PROFILE=spec DEV_TRIO_REVIEW_RECEIPT="$REVIEW_RECEIPT" MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage ask-reviewer.sh --with-spec "$SPEC_FILE" "Re-review the same task after research-informed retry: '$TASK'.${RANGE_HINT2} Use the standard SHIP/NEEDS-FIX/DISCUSS/OUT-OF-SCOPE verdict format from your role prompt." 2>&1 ) | tee "$REVIEW2_LOG" >/dev/null
           CODEX2_RC=${PIPESTATUS[0]}
           spec_check_or_stop
           REVIEW_DATA=$(review_result_from_receipt "$REVIEW_RECEIPT" "$CODEX2_RC") || REVIEW_DATA=""
@@ -932,7 +932,7 @@ $RESEARCH"
             ralph_log "  review result unavailable — forcing UNKNOWN verdict (receipt: $REVIEW_RECEIPT)"
           fi
           if [ "$CODEX2_RC" -ne 0 ]; then
-            ralph_log "  ask-codex.sh exited rc=$CODEX2_RC — forcing UNKNOWN verdict (review log: $REVIEW2_LOG)"
+            ralph_log "  ask-reviewer.sh exited rc=$CODEX2_RC — forcing UNKNOWN verdict (review log: $REVIEW2_LOG)"
             manifest_add_input kind=codex-rc value="$CODEX2_RC" || exit 1
           fi
           [ -z "$VERDICT" ] && VERDICT="UNKNOWN"

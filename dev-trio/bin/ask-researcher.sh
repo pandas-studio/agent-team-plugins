@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# ask-agy.sh — invoke Antigravity (agy) as the researcher.
+# ask-researcher.sh — invoke Antigravity (agy) as the researcher.
 #
 # Usage:
-#   ask-agy.sh "research question"
-#   echo "extra context" | ask-agy.sh "research question"
+#   ask-researcher.sh "research question"
+#   echo "extra context" | ask-researcher.sh "research question"
 #
 # Output goes to stdout AND $PWD/.dev-trio/log/<team>/agy-<TS>-<PID>.log.
 # Override log root via DEV_TRIO_LOG_DIR=/abs/path.
@@ -14,21 +14,21 @@ PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROLE_FILE="$PLUGIN_ROOT/lib/roles/researcher.md"
 
 _NAMESPACE_LIB="$PLUGIN_ROOT/lib/namespace.sh"
-[ -f "$_NAMESPACE_LIB" ] || { echo "ask-agy: namespace.sh not found at $_NAMESPACE_LIB" >&2; exit 1; }
+[ -f "$_NAMESPACE_LIB" ] || { echo "ask-researcher: namespace.sh not found at $_NAMESPACE_LIB" >&2; exit 1; }
 # shellcheck source=../lib/namespace.sh
 . "$_NAMESPACE_LIB"
 unset _NAMESPACE_LIB
 
 _MANIFEST_LIB="$PLUGIN_ROOT/lib/manifest.sh"
-[ -f "$_MANIFEST_LIB" ] || { echo "ask-agy:manifest.sh not found at $_MANIFEST_LIB" >&2; exit 1; }
+[ -f "$_MANIFEST_LIB" ] || { echo "ask-researcher:manifest.sh not found at $_MANIFEST_LIB" >&2; exit 1; }
 # shellcheck source=../lib/manifest.sh
-. "$_MANIFEST_LIB" || { echo "ask-agy:failed to load manifest.sh (jq missing?)" >&2; exit 2; }
+. "$_MANIFEST_LIB" || { echo "ask-researcher:failed to load manifest.sh (jq missing?)" >&2; exit 2; }
 unset _MANIFEST_LIB
 
 _REGISTRY_LIB="$PLUGIN_ROOT/lib/registry.sh"
-[ -f "$_REGISTRY_LIB" ] || { echo "ask-agy: registry.sh not found at $_REGISTRY_LIB" >&2; exit 1; }
+[ -f "$_REGISTRY_LIB" ] || { echo "ask-researcher: registry.sh not found at $_REGISTRY_LIB" >&2; exit 1; }
 # shellcheck source=../lib/registry.sh
-. "$_REGISTRY_LIB" || { echo "ask-agy: failed to load registry.sh (jq missing?)" >&2; exit 2; }
+. "$_REGISTRY_LIB" || { echo "ask-researcher: failed to load registry.sh (jq missing?)" >&2; exit 2; }
 unset _REGISTRY_LIB
 
 # shellcheck source=../lib/host.sh
@@ -36,10 +36,10 @@ unset _REGISTRY_LIB
 PM_HOST="$(dev_trio_host)" || exit $?
 
 # Researcher model — DEV_TRIO_RESEARCHER_MODEL env > config role binding >
-# built-in default (agy). ask-agy has no CLI model flag, so the flag tier is
+# built-in default (agy). ask-researcher has no CLI model flag, so the flag tier is
 # empty. The legacy RESEARCHER_CLI/AGY_CLI still override the *binary* below.
 RESEARCHER_MODEL="$(dev_trio_resolve_role researcher)"
-registry_model_exists "$RESEARCHER_MODEL" || { echo "ask-agy: researcher model '$RESEARCHER_MODEL' is not registered (run: agent-team-models list)" >&2; exit 2; }
+registry_model_exists "$RESEARCHER_MODEL" || { echo "ask-researcher: researcher model '$RESEARCHER_MODEL' is not registered (run: agent-team-models list)" >&2; exit 2; }
 
 # Team namespace — isolates logs per tmux window/session.
 TEAM=$(agent_team_detect_team) || exit 2
@@ -107,7 +107,7 @@ manifest_add_input kind=question value="$QUERY"
 [ -n "$STDIN_CONTEXT" ] && manifest_add_input kind=context value="$STDIN_CONTEXT"
 
 {
-  echo "=== ask-agy.sh @ $TS ==="
+  echo "=== ask-researcher.sh @ $TS ==="
   echo "=== QUERY ==="
   echo "$QUERY"
   if [ -n "$STDIN_CONTEXT" ]; then
@@ -119,7 +119,7 @@ manifest_add_input kind=question value="$QUERY"
   echo "=== RESPONSE ==="
 } > "$LOG"
 
-echo "[ask-agy] running ($RESEARCHER_MODEL) — monitor: dashboard.sh agy  (raw: tail -F $LOG_DIR/latest-agy.log)" >&2
+echo "[ask-researcher] running ($RESEARCHER_MODEL) — monitor: dashboard.sh agy  (raw: tail -F $LOG_DIR/latest-agy.log)" >&2
 RC=0
 # Legacy RESEARCHER_CLI still wins as a per-role binary override; otherwise the
 # registry resolves the binary from the model's env_command/command.

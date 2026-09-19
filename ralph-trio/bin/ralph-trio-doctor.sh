@@ -10,7 +10,7 @@
 #      stop-hook.sh, lib/common.sh, lib/manifest.sh, lib/roles/{planner,worker}.md,
 #      prompts/*.template, hooks/settings.snippet.json).
 #   4. Cross-plugin dependencies on PATH:
-#        - ask-codex.sh / ask-agy.sh from dev-trio plugin (needed for trio/meta)
+#        - ask-reviewer.sh / ask-researcher.sh from dev-trio plugin (needed for trio/meta)
 #        - debate.sh from debate-conductor plugin (needed for debate)
 #      Missing cross-plugin deps WARN (not fail) — solo doesn't need them.
 #   5. Stub-CLI smoke: runs ralph-solo.sh --max-iter 1 --dry-run in a temp dir
@@ -77,15 +77,15 @@ done
 
 echo
 echo "4. Cross-plugin dependencies (PATH)"
-if command -v ask-codex.sh >/dev/null 2>&1; then
-  ok "ask-codex.sh — $(command -v ask-codex.sh) (dev-trio plugin; needed for ralph-trio, ralph-meta)"
+if command -v ask-reviewer.sh >/dev/null 2>&1; then
+  ok "ask-reviewer.sh — $(command -v ask-reviewer.sh) (dev-trio plugin; needed for ralph-trio, ralph-meta)"
 else
-  warn "ask-codex.sh — missing (install dev-trio plugin to use ralph-trio.sh / ralph-meta.sh; ralph-solo.sh works without it)"
+  warn "ask-reviewer.sh — missing (install dev-trio plugin to use ralph-trio.sh / ralph-meta.sh; ralph-solo.sh works without it)"
 fi
-if command -v ask-agy.sh >/dev/null 2>&1; then
-  ok "ask-agy.sh — $(command -v ask-agy.sh) (dev-trio plugin; needed for ralph-trio NEED RESEARCH branch)"
+if command -v ask-researcher.sh >/dev/null 2>&1; then
+  ok "ask-researcher.sh — $(command -v ask-researcher.sh) (dev-trio plugin; needed for ralph-trio NEED RESEARCH branch)"
 else
-  warn "ask-agy.sh — missing (install dev-trio plugin; or pass --no-research to ralph-trio.sh)"
+  warn "ask-researcher.sh — missing (install dev-trio plugin; or pass --no-research to ralph-trio.sh)"
 fi
 if command -v debate.sh >/dev/null 2>&1; then
   ok "debate.sh — $(command -v debate.sh) (debate-conductor plugin; needed for ralph-debate)"
@@ -169,10 +169,10 @@ fi
 echo
 echo "6. Stub-CLI smoke (ralph-trio Stage 3 — verdict from codex .final.md)"
 # This is the real-logic regression guard for the forward-port: the trio
-# reviewer's verdict MUST come from ask-codex.sh's --output-last-message file
+# reviewer's verdict MUST come from ask-reviewer.sh's --output-last-message file
 # (codex-<TS>.final.md), NOT the streamed stdout the dev-trio contract declares
 # unreliable; and that file MUST land in ralph's durable log tree (pinned
-# DEV_TRIO_LOG_DIR) so it survives worktree teardown. We stub ask-codex.sh to
+# DEV_TRIO_LOG_DIR) so it survives worktree teardown. We stub ask-reviewer.sh to
 # emit a clean SHIP in the .final.md while streaming a DECOY NEEDS-FIX on stdout
 # — only parsing the .final.md yields SHIP.
 if [ "$FAILED" = "1" ]; then
@@ -188,7 +188,7 @@ else
   # must exercise the same receipt contract as production.
   REVIEW_RESULT_LIB="$PLUGIN_ROOT/../dev-trio/lib/review-result.sh"
   if [ ! -f "$REVIEW_RESULT_LIB" ]; then
-    REVIEW_RESULT_LIB="$(dirname "$(command -v ask-codex.sh)")/../lib/review-result.sh"
+    REVIEW_RESULT_LIB="$(dirname "$(command -v ask-reviewer.sh)")/../lib/review-result.sh"
   fi
   if [ ! -f "$REVIEW_RESULT_LIB" ]; then
     fail "dev-trio review-result.sh missing; update/install dev-trio for reviewer smoke"
@@ -197,10 +197,10 @@ else
   REVIEW_RESULT_LIB="$(cd "$(dirname "$REVIEW_RESULT_LIB")" && pwd -P)/review-result.sh"
   mkdir -p "$T2/lib"
   ln -s "$REVIEW_RESULT_LIB" "$T2/lib/review-result.sh"
-  # Stub mimics the dev-trio ask-codex.sh output contract: authoritative review
+  # Stub mimics the dev-trio ask-reviewer.sh output contract: authoritative review
   # in $FINAL, an unreliable/decoy transcript on stdout, and the
   # `(log:…, final:…, rc=…)` line on stderr. STUB_MODE selects the scenario.
-  cat > "$STUB_BIN/ask-codex.sh" <<'STUB'
+  cat > "$STUB_BIN/ask-reviewer.sh" <<'STUB'
 #!/usr/bin/env bash
 set -uo pipefail
 TEAM="${AGENT_TEAM:-default}"
@@ -236,7 +236,7 @@ RC=$(jq -r '.exit_code' "$RESULT")
 echo "(log: $LOG, final: $FINAL, result: $RESULT, rc=$RC)" >&2
 exit "$RC"
 STUB
-  chmod +x "$STUB_BIN/ask-codex.sh"
+  chmod +x "$STUB_BIN/ask-reviewer.sh"
 
   # run_trio_case MODE CWD — runs a single-iter trio loop in a fresh git repo
   # under $CWD with the stub on PATH and claude stubbed to `true` (no real model).
@@ -312,10 +312,10 @@ fi
 echo
 echo "7. Stub-CLI smoke (ralph-trio Stage 1.5 — planner-driven pre-coding research)"
 # Regression guard for the planner NEED RESEARCH path: when the PLANNER emits a
-# `## NEED RESEARCH` block, ralph must fetch research via ask-agy.sh BEFORE Stage
+# `## NEED RESEARCH` block, ralph must fetch research via ask-researcher.sh BEFORE Stage
 # 2 and graft it into the FIRST coder prompt (planner.md promises exactly this).
 # Runs under --autoship (Stage 3 skipped → no codex stub needed). PLANNER_CLI
-# emits a research-requesting plan; ask-agy.sh is stubbed to a known answer;
+# emits a research-requesting plan; ask-researcher.sh is stubbed to a known answer;
 # CODER_CLI captures the prompt it receives so we can assert the <research> graft.
 if [ "$FAILED" = "1" ]; then
   warn "skipping Stage-1.5 smoke — prior REQUIRED checks failed"
@@ -337,7 +337,7 @@ cat <<'PLAN'
 - What is the correct signature of the helper?
 PLAN
 STUB
-  cat > "$S7/ask-agy.sh" <<'STUB'
+  cat > "$S7/ask-researcher.sh" <<'STUB'
 #!/usr/bin/env bash
 echo "DOCTOR-RESEARCH-ANSWER: helper(x) -> y (agy stub)"
 STUB
@@ -382,13 +382,13 @@ STUB
 
   # --- Case B: research FAILS — must NOT inject the error output, and under
   # --autoship must NOT ship (the planner declared the task depends on it).
-  # Re-point ask-agy.sh at a failing stub; reuse the research-requesting planner.
-  cat > "$S7/ask-agy.sh" <<'STUB'
+  # Re-point ask-researcher.sh at a failing stub; reuse the research-requesting planner.
+  cat > "$S7/ask-researcher.sh" <<'STUB'
 #!/usr/bin/env bash
 echo "FATAL: agy stub failure" >&2
 exit 1
 STUB
-  chmod +x "$S7/ask-agy.sh"
+  chmod +x "$S7/ask-researcher.sh"
   CWD7B="$T7/run-fail"
   mkdir -p "$CWD7B"
   git -C "$CWD7B" init -q

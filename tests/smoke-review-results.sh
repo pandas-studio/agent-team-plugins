@@ -160,7 +160,7 @@ invoke() {
     DEV_TRIO_LOG_DIR="$TMP/log" DEV_TRIO_REVIEWER_MODEL=codex \
     CODEX_CLI="$TMP/reviewer" CLAUDE_CLI="$TMP/reviewer" \
     TEST_REVIEW_FILE="$TMP/review.md" "$@" \
-    "$ROOT/dev-trio/bin/ask-codex.sh" 'fixture review'
+    "$ROOT/dev-trio/bin/ask-reviewer.sh" 'fixture review'
 }
 run_review() {
   local expected="$1" rc=0; shift
