@@ -16,10 +16,12 @@
 #
 # Exit: the model's own code, which an artifact never promotes; 5 when it exits
 # 0 leaving no answer; 6 when the answer could not be captured or inspected —
-# which includes a transcript that opened and then could not be written, since
-# the captured copy travels through the same descriptor. A log that cannot be
-# opened at all is best-effort: it is reported on stderr and the run proceeds
-# without a transcript.
+# and, narrowly, when the transcript opened and then failed to be written, e.g.
+# the disk filled mid-run: the captured copy travels through the same
+# descriptor, so its `tee` fails and the answer is not inspected. A log that
+# cannot be *opened* costs nothing: it is reported on stderr and the run
+# proceeds without a transcript (measured, both the old pipeline and this
+# shape: the answer survives, rc 0).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -218,14 +220,21 @@ RC=0
 # own `registry_run "$@" | tee "$tmp"`, which this cannot reach — #71 stays
 # open for that half.
 #
-# The log is opened once, on fd 8, the way debate-conductor's boundary opens
-# fd 9. A bare `>> "$LOG"` on the call would make an unopenable log skip the
-# model entirely — bash fails the redirection and never runs the command — so
-# a transcript problem would decide the answer. Falling back to /dev/null keeps
-# logging best-effort, as the pipeline's `tee` failure was. A log that opens
-# and then fails to *write* is not isolated: the copy inside
-# registry_run_answer writes through this fd, so it reports 6, and the header's
-# exit contract says so.
+# The log is opened once, on fd 8. A bare `>> "$LOG"` on the call would make an
+# unopenable log skip the model entirely — bash fails the redirection and never
+# runs the command — so a transcript problem would decide the answer. Falling
+# back to /dev/null keeps logging best-effort, which is what the pipeline's
+# `tee` failure was: measured against a log path that cannot be opened, the old
+# shape returned PIPESTATUS[0]=0 with the answer intact, and so does this one.
+#
+# One case is *not* equivalent, and it is a deliberate trade rather than a
+# claim of parity: if the log opens and a later write fails, the copy inside
+# registry_run_answer writes through this fd, its `tee` fails, and a valid
+# answer is reported as 6. debate-conductor's fd 9 does not have this exposure
+# — its native path calls `registry_run` directly, with no `tee` in between.
+# Isolating it here means buffering the console to a temp file and appending it
+# after the run, which costs the live transcript the pane and the dashboard
+# follow. Recorded on #71 instead.
 #
 # errexit is lifted around the call so the 5/6 answer codes survive as $RC.
 if ! exec 8>>"$LOG"; then
