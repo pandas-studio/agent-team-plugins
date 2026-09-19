@@ -37,8 +37,8 @@ The scripts can also be called directly **from the workspace being reviewed**:
 
 ```bash
 DEV_TRIO_PM_HOST=codex /absolute/path/to/dev-trio/bin/dev-trio-doctor.sh
-DEV_TRIO_PM_HOST=codex /absolute/path/to/dev-trio/bin/ask-agy.sh "research question" </dev/null
-DEV_TRIO_PM_HOST=codex /absolute/path/to/dev-trio/bin/ask-codex.sh "review focus" </dev/null
+DEV_TRIO_PM_HOST=codex /absolute/path/to/dev-trio/bin/ask-researcher.sh "research question" </dev/null
+DEV_TRIO_PM_HOST=codex /absolute/path/to/dev-trio/bin/ask-reviewer.sh "review focus" </dev/null
 python3 /absolute/path/to/dev-trio/bin/install-pm.py --host codex
 ```
 
@@ -47,10 +47,12 @@ invocation; it never rewrites shared role bindings. Codex resolves scripts from
 the loaded skill path instead of assuming automatic `bin/` PATH registration.
 When piping research context, replace `</dev/null` with that input pipe.
 
-Despite the legacy name, `ask-codex.sh` runs the selected **reviewer**. Existing
-`latest-codex.final.md` and RFC 0004 manifests remain compatible with consumers.
-The run header and dashboard identify the actual model. `--no-memories` still
-requires an explicitly selected Codex reviewer; it is rejected for Claude.
+`ask-reviewer.sh` runs whichever model the **reviewer** role resolves to; the
+filename names the role, not the CLI. Log and receipt names keep their legacy
+spelling (`codex-*.log`, `latest-codex.final.md`), and RFC 0004 manifests remain
+compatible with consumers. The run header and dashboard identify the actual
+model. `--no-memories` still requires an explicitly selected Codex reviewer; it
+is rejected for Claude.
 
 Claude's `auth status --json` must report `loggedIn: true` before a Claude
 invocation from the Codex host. In a sandbox that cannot access macOS Keychain,
@@ -105,7 +107,30 @@ A result/receipt I/O failure prints a diagnostic and completes the log with a no
 
 `DEV_TRIO_REVIEW_PROFILE=spec` explicitly adds `OUT-OF-SCOPE` to the vocabulary. The spec-trio driver sets this profile; update spec-trio alongside dev-trio when using the two plugins together. Other role overrides must follow the selected profile's output contract. Nested dispatches still leave verdict ownership to the parent manifest.
 
-**Reviewing without Codex memories.** With Codex's memories feature enabled in `~/.codex/config.toml`, `codex exec` adds the memory summary from earlier Codex sessions to the review prompt. Pass `--no-memories` (`ask-codex.sh --no-memories "focus"` or `/dev-trio:review --no-memories ...`) to run the built-in `codex-no-memories` model instead, which adds `-c features.memories=false`. Setting `DEV_TRIO_REVIEWER_MODEL=codex-no-memories` selects the same model without the flag (and without the checks below). With the flag, `ask-codex.sh` exits with rc=2 before starting any CLI when the reviewer role resolves to a model other than `codex` / `codex-no-memories`, or when the models config defines its own `codex-no-memories`.
+**Reviewing without Codex memories.** With Codex's memories feature enabled in `~/.codex/config.toml`, `codex exec` adds the memory summary from earlier Codex sessions to the review prompt. Pass `--no-memories` (`ask-reviewer.sh --no-memories "focus"` or `/dev-trio:review --no-memories ...`) to run the built-in `codex-no-memories` model instead, which adds `-c features.memories=false`. Setting `DEV_TRIO_REVIEWER_MODEL=codex-no-memories` selects the same model without the flag (and without the checks below). With the flag, `ask-reviewer.sh` exits with rc=2 before starting any CLI when the reviewer role resolves to a model other than `codex` / `codex-no-memories`, or when the models config defines its own `codex-no-memories`.
+
+## Upgrading to 0.7.0 — the wrappers were renamed
+
+`ask-codex.sh` is now `ask-reviewer.sh` and `ask-agy.sh` is now
+`ask-researcher.sh`: the names say the role, and the role picks the model. There
+is **no compatibility shim** — the old names are gone.
+
+Because ralph-trio and spec-trio resolve these by `command -v`, upgrade the
+three plugins together (dev-trio 0.7.0, ralph-trio 0.4.0, spec-trio 0.2.0). A
+mixed set fails the driver's dependency check as soon as a stage that needs the
+missing wrapper is enabled — and only then: `--dry-run` skips both checks,
+`--autoship` skips the reviewer check, `--no-research` skips the researcher one,
+so a mixed set can instead fail later, at the call itself.
+
+The PM policy is *copied* into each workspace's `CLAUDE.md`, so a source upgrade
+does not reach it. In every workspace that has the block, re-run
+`/dev-trio:install-pm` and start a fresh session, or the PM keeps dispatching the
+removed command names.
+
+Log, receipt and environment names are deliberately unchanged: `codex-*.log`,
+`latest-codex.final.md`, `agy-*.log`, `latest-agy.log`, `dashboard.sh agy|codex`,
+`CODEX_CLI`, `AGY_CLI`, and the `codex` / `agy` model ids. Those name the vendor
+CLI or the log channel, not the wrapper.
 
 ## Install in Claude Code
 
@@ -142,10 +167,10 @@ claude --plugin-dir ./agent-team-plugins/dev-trio
 
 4. Drive normally. The PM policy tells Claude when to dispatch:
    ```
-   ask-agy.sh "What's the recommended way to stream tokens with langchain-anthropic 0.3.x?"
-   ask-codex.sh "review the new retry logic in src/agent.py — concurrency safety"
+   ask-researcher.sh "What's the recommended way to stream tokens with langchain-anthropic 0.3.x?"
+   ask-reviewer.sh "review the new retry logic in src/agent.py — concurrency safety"
    ```
-   `ask-agy.sh` exits **5** when the researcher CLI exits 0 with nothing but whitespace on stdout (for example, `agy -p` after soft-denying a tool). It exits **6** when the answer cannot be checked: the temp file cannot be created (the CLI is not run), or the CLI exits 0 but `tee` or the check fails. Treat both as failed research, not as an empty answer.
+   `ask-researcher.sh` exits **5** when the researcher CLI exits 0 with nothing but whitespace on stdout (for example, `agy -p` after soft-denying a tool). It exits **6** when the answer cannot be checked: the temp file cannot be created (the CLI is not run), or the CLI exits 0 but `tee` or the check fails. Treat both as failed research, not as an empty answer.
 
    Or use the wrapping skills:
    ```
@@ -266,8 +291,8 @@ dev-trio/
 │   ├── review/SKILL.md
 │   └── install-pm/SKILL.md
 ├── bin/                       # on plugin PATH while active
-│   ├── ask-agy.sh             # Researcher wrapper
-│   ├── ask-codex.sh           # Reviewer wrapper
+│   ├── ask-researcher.sh             # Researcher wrapper
+│   ├── ask-reviewer.sh           # Reviewer wrapper
 │   ├── agent-team-models.sh   # shared model-registry CLI (vendored)
 │   ├── dashboard.sh           # live dashboard (agy|codex)
 │   ├── team-layout.sh         # tmux 3-pane splitter
@@ -292,7 +317,7 @@ A one-shot env probe + stub-CLI smoke is bundled:
 dev-trio-doctor.sh
 ```
 
-Checks required helpers and resolved role binaries, probes Claude login for the Codex host, treats tmux as optional, verifies that `ask-agy.sh` produces a well-formed RFC 0004 manifest under stub CLIs, and exercises the `agent-team-models` registry CLI (list / preset / set-role / doctor / remove against an isolated config). **Stub smokes are necessary but not sufficient** — verdict / dashboard / parse-affecting changes need a real-CLI dry-run on top.
+Checks required helpers and resolved role binaries, probes Claude login for the Codex host, treats tmux as optional, verifies that `ask-researcher.sh` produces a well-formed RFC 0004 manifest under stub CLIs, and exercises the `agent-team-models` registry CLI (list / preset / set-role / doctor / remove against an isolated config). **Stub smokes are necessary but not sufficient** — verdict / dashboard / parse-affecting changes need a real-CLI dry-run on top.
 
 ## Development checks
 

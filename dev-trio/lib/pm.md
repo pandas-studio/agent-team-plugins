@@ -5,14 +5,14 @@ This block is installed by `/dev-trio:install-pm` and governs how Claude Code ro
 | Role | Who | Invocation |
 |---|---|---|
 | **PM + Coder** | Claude Code (you) | this session |
-| **Researcher** | Antigravity | `ask-agy.sh "question"` |
-| **Reviewer** | Codex | `ask-codex.sh "focus"` |
+| **Researcher** | Antigravity | `ask-researcher.sh "question"` |
+| **Reviewer** | Codex | `ask-reviewer.sh "focus"` |
 
 Both wrappers are on `$PATH` while the `dev-trio` plugin is active. You are the **central router**. Codex and Antigravity do not call each other directly — when Codex needs research, it returns a `NEED RESEARCH` block and you fetch the answer from Antigravity, then re-invoke Codex with the research attached.
 
 ## When to call Antigravity
 
-Call `ask-agy.sh` when **before coding** you need:
+Call `ask-researcher.sh` when **before coding** you need:
 - Library / framework / API behavior you're not certain about (e.g., LangChain, LangGraph, Anthropic SDK specifics, version-specific quirks)
 - Recent changes / deprecations / breaking changes
 - Spec or RFC details
@@ -25,16 +25,16 @@ Don't call Antigravity for:
 
 **Pattern:**
 ```bash
-ask-agy.sh "What is the recommended way to stream tokens with langchain-anthropic 0.3.x using async iteration?"
+ask-researcher.sh "What is the recommended way to stream tokens with langchain-anthropic 0.3.x using async iteration?"
 ```
 Pipe extra context if useful:
 ```bash
-echo "We're using langgraph 0.2.x and need this to work inside a node." | ask-agy.sh "..."
+echo "We're using langgraph 0.2.x and need this to work inside a node." | ask-researcher.sh "..."
 ```
 
 ## When to call Codex
 
-Call `ask-codex.sh` after completing a **logical unit of work** — typically:
+Call `ask-reviewer.sh` after completing a **logical unit of work** — typically:
 - Before committing a non-trivial change
 - After implementing a feature/fix that touches multiple files
 - When the user asks for review explicitly
@@ -46,9 +46,9 @@ Don't call Codex for:
 
 **Pattern:**
 ```bash
-ask-codex.sh                                    # review uncommitted diff
-ask-codex.sh "focus on the new retry logic in src/agent.py — concurrency safety"
-ask-codex.sh "review HEAD~2..HEAD"              # review last 2 commits
+ask-reviewer.sh                                    # review uncommitted diff
+ask-reviewer.sh "focus on the new retry logic in src/agent.py — concurrency safety"
+ask-reviewer.sh "review HEAD~2..HEAD"              # review last 2 commits
 ```
 
 **Reviewing a PR:** don't pass `"pr 55"` — the reviewer may run without network access and cannot see which commits the PR holds. Resolve it yourself and hand over a range:
@@ -57,7 +57,7 @@ mkdir -p .dev-trio/log/${AGENT_TEAM:-default}
 CFILE=.dev-trio/log/${AGENT_TEAM:-default}/context-$(date +%Y%m%d-%H%M%S).md
 gh pr view 55 --json number,url,title,baseRefName,baseRefOid,headRefName,headRefOid > "$CFILE"
 git merge-base <baseRefOid> <headRefOid>        # both commits must exist locally; ask before fetching
-ask-codex.sh --with-context "$CFILE" "review <merge-base>..<headRefOid> (PR #55)"
+ask-reviewer.sh --with-context "$CFILE" "review <merge-base>..<headRefOid> (PR #55)"
 ```
 
 ## Handling Codex's `NEED RESEARCH` block
@@ -70,11 +70,11 @@ If Codex's output ends with:
 ```
 
 Do this:
-1. For each question, run `ask-agy.sh "<question>"` — capture each answer.
+1. For each question, run `ask-researcher.sh "<question>"` — capture each answer.
 2. Concatenate the answers into a temp file (e.g., `.dev-trio/log/${AGENT_TEAM:-default}/research-<ts>.md`). If the original review already had `--with-research`, copy that file's content in first — the wrapper takes one file per kind, so the new file replaces the old attachment.
 3. Re-invoke Codex **once** with the research, keeping the original focus and every original flag (`--with-spec`, `--with-context`, `--no-memories`). If the second review asks the same thing again, stop and report instead of looping:
    ```bash
-   ask-codex.sh --with-research .dev-trio/log/${AGENT_TEAM:-default}/research-<ts>.md "<original focus>"
+   ask-reviewer.sh --with-research .dev-trio/log/${AGENT_TEAM:-default}/research-<ts>.md "<original focus>"
    ```
 4. Use Codex's final review to decide next steps. Surface blockers/major findings to the user before continuing.
 

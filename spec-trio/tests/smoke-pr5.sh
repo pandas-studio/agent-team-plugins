@@ -33,20 +33,20 @@ mkdir -p "$SPEC_LOG_BASE"
 [ -x "$SPEC_COVERAGE" ]  || { echo "missing: $SPEC_COVERAGE" >&2; exit 2; }
 [ -f "$MANIFEST_LIB" ]   || { echo "missing: $MANIFEST_LIB" >&2; exit 2; }
 
-# spec-trio.sh checks PATH for ask-codex.sh / ask-agy.sh before running any
+# spec-trio.sh checks PATH for ask-reviewer.sh / ask-researcher.sh before running any
 # non-dry-run / non-autoship case. If we can find a sibling dev-trio plugin
 # checkout (the monorepo arrangement), prepend its bin/ to PATH. The cases
-# stub the underlying `codex` binary via CODEX_CLI, so ask-codex.sh itself
+# stub the underlying `codex` binary via CODEX_CLI, so ask-reviewer.sh itself
 # still runs end-to-end — only the LLM call inside it is stubbed.
 SIBLING_DEV_BIN="$(cd "$PLUGIN_ROOT/../dev-trio/bin" 2>/dev/null && pwd)"
-if [ -n "$SIBLING_DEV_BIN" ] && [ -x "$SIBLING_DEV_BIN/ask-codex.sh" ]; then
+if [ -n "$SIBLING_DEV_BIN" ] && [ -x "$SIBLING_DEV_BIN/ask-reviewer.sh" ]; then
   case ":$PATH:" in
     *":$SIBLING_DEV_BIN:"*) ;;
     *) export PATH="$SIBLING_DEV_BIN:$PATH" ;;
   esac
 fi
-command -v ask-codex.sh  >/dev/null 2>&1 || { echo "smoke prereq missing: ask-codex.sh (install dev-trio plugin or run from a sibling-checkout layout)" >&2; exit 2; }
-command -v ask-agy.sh >/dev/null 2>&1 || { echo "smoke prereq missing: ask-agy.sh (install dev-trio plugin)" >&2; exit 2; }
+command -v ask-reviewer.sh  >/dev/null 2>&1 || { echo "smoke prereq missing: ask-reviewer.sh (install dev-trio plugin or run from a sibling-checkout layout)" >&2; exit 2; }
+command -v ask-researcher.sh >/dev/null 2>&1 || { echo "smoke prereq missing: ask-researcher.sh (install dev-trio plugin)" >&2; exit 2; }
 
 PASS=0; FAIL=0; ASSERTS=0
 assert_cmd() {

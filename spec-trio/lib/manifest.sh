@@ -49,7 +49,7 @@
 #
 # Nesting contract (RFC 0004 PR 6, env var MANIFEST_PARENT_TMP):
 #   When a parent variant (ralph-trio, spec-trio, …) invokes a child
-#   dispatcher script (dev/ask-codex.sh, dev/ask-gemini.sh, …) that has
+#   dispatcher script (dev/ask-reviewer.sh, dev/ask-gemini.sh, …) that has
 #   also adopted manifests, the child must NOT emit its own manifest:
 #   a duplicate child manifest would force every consumer into
 #   parent/child join logic for one logical action.
@@ -72,7 +72,7 @@
 #   the no-op semantics: parent owns the input + verdict framing.
 #
 #   The env var name is part of the public surface. Renaming it without
-#   updating all current adopters (ralph-trio, spec-trio, dev/ask-codex,
+#   updating all current adopters (ralph-trio, spec-trio, dev/ask-reviewer,
 #   dev/ask-gemini, watch/ask-bug-reviewer, watch/ask-design-reviewer)
 #   silently breaks nesting suppression — every nested call would emit a
 #   duplicate child manifest.
@@ -232,7 +232,7 @@ manifest_set_parent() {
 #
 #   Nested-write carve-out (PR 9): when MANIFEST_PARENT_TMP is set, this
 #   helper writes to the parent's tmp instead of no-op'ing. Rationale: only
-#   the child dispatcher (ask-codex / ask-gemini / …) knows the resolved
+#   the child dispatcher (ask-reviewer / ask-gemini / …) knows the resolved
 #   role-file path — REVIEWER_ROLE_FILE override, etc. — so the role entry
 #   belongs to its call site. Parents must NOT pre-fill an empty-prompt_path
 #   role entry before invoking the child; the child's own call records it.

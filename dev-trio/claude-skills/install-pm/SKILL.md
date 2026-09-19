@@ -1,6 +1,6 @@
 ---
 name: install-pm
-description: Install (or upgrade) the dev-trio PM orchestration policy into the workspace's CLAUDE.md. Idempotent — appends a marker-guarded block; re-running upgrades in place. Run once per workspace after installing the plugin. The policy tells Claude when to dispatch ask-agy.sh / ask-codex.sh and how to handle NEED RESEARCH round-trips.
+description: Install (or upgrade) the dev-trio PM orchestration policy into the workspace's CLAUDE.md. Idempotent — appends a marker-guarded block; re-running upgrades in place. Run once per workspace after installing the plugin. The policy tells Claude when to dispatch ask-researcher.sh / ask-reviewer.sh and how to handle NEED RESEARCH round-trips.
 disable-model-invocation: true
 allowed-tools: Read Edit Write
 ---
@@ -22,6 +22,12 @@ The block is guarded by:
 ```
 
 so re-running the skill replaces the block in place (no duplication). The rest of `CLAUDE.md` is untouched.
+
+**Re-run after every plugin upgrade that changes the policy.** The block is a
+copy, so upgrading dev-trio does not update it. dev-trio 0.7.0 renamed the
+wrappers (`ask-codex.sh` → `ask-reviewer.sh`, `ask-agy.sh` → `ask-researcher.sh`)
+with no shim: a stale block dispatches command names that no longer exist. After
+re-running, start a fresh session so the new block is in context.
 
 ## Steps
 

@@ -2,7 +2,7 @@
 # ralph-meta.sh — single-shot post-run audit for a previous Ralph session.
 #
 # Inspects ralph-*-<TS>.log files + git history since a given timestamp, calls
-# ask-codex.sh once with a focused review brief, and writes a categorized
+# ask-reviewer.sh once with a focused review brief, and writes a categorized
 # audit Markdown. Optionally re-queues retry candidates into a BACKLOG.md.
 #
 # This is NOT a loop — it's a one-pass audit you run after Ralph finishes
@@ -19,7 +19,7 @@
 #   --base-ref REF                git ref to compare against (default: HEAD's
 #                                 first commit before SINCE; falls back to HEAD~10)
 #
-# Prerequisites: dev-trio plugin installed (provides ask-codex.sh on PATH).
+# Prerequisites: dev-trio plugin installed (provides ask-reviewer.sh on PATH).
 
 set -uo pipefail
 
@@ -48,8 +48,8 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-# Cross-plugin dependency check: ask-codex.sh comes from the dev-trio plugin.
-command -v ask-codex.sh >/dev/null 2>&1 || { echo "ERROR: ralph-meta requires the dev-trio plugin (ask-codex.sh not on PATH). Install: /plugin install dev-trio@pandas-studio" >&2; exit 2; }
+# Cross-plugin dependency check: ask-reviewer.sh comes from the dev-trio plugin.
+command -v ask-reviewer.sh >/dev/null 2>&1 || { echo "ERROR: ralph-meta requires the dev-trio plugin (ask-reviewer.sh not on PATH). Install: /plugin install dev-trio@pandas-studio" >&2; exit 2; }
 
 TEAM=$(detect_team) || exit 2
 LOG_DIR=$(init_log_dir)
@@ -227,23 +227,23 @@ ralph_log "  ralph commits found: ${#RALPH_COMMITS[@]}"
 } > "$META_LOG"
 
 ralph_log "audit brief written: $META_LOG"
-ralph_log "calling ask-codex.sh ..."
+ralph_log "calling ask-reviewer.sh ..."
 
 # Pass the brief as a focus argument (codex reads the file via the focus text)
 FOCUS="Audit ralph run since $SINCE for team $TEAM. Read this brief: $(cat "$META_LOG"). Inspect the actual commits via git show, then categorize each into shipped / revert / retry-with-context per the format in the brief."
 
 CODEX_OUT="$LOG_DIR/ralph-meta-$TS-codex.log"
-# ask-codex.sh writes the authoritative final review verbatim to a
+# ask-reviewer.sh writes the authoritative final review verbatim to a
 # codex-<ts>.final.md (via `--output-last-message`) and the full streamed
 # transcript — bracketed by `=== RESPONSE ===` / `=== END (rc=N) ===` markers —
 # to codex-<ts>.log, both under the dev-trio plugin's workspace log dir (e.g.
-# $PWD/.dev-trio/log/<team>/). Neither lands on stdout, so we capture ask-codex's
+# $PWD/.dev-trio/log/<team>/). Neither lands on stdout, so we capture ask-reviewer's
 # stderr and scrape the `(log: <path>, final: <path>, rc=<n>)` line it prints
 # there. Prefer the .final.md (clean, and empty when codex died before emitting
 # its review — which is exactly when the streamed transcript degrades into the
 # echoed role prompt); fall back to the === RESPONSE === section of the log.
 CODEX_STDERR=$(mktemp -t ralph-meta-stderr.XXXXXX)
-( AGENT_TEAM="$TEAM" ask-codex.sh "$FOCUS" 2>"$CODEX_STDERR" ) | tee "$CODEX_OUT" >/dev/null || true
+( AGENT_TEAM="$TEAM" ask-reviewer.sh "$FOCUS" 2>"$CODEX_STDERR" ) | tee "$CODEX_OUT" >/dev/null || true
 cat "$CODEX_STDERR" >> "$CODEX_OUT"
 DEV_CODEX_LOG=$(awk -F'[(),]' '/^\(log: / { for (i=1; i<=NF; i++) { if ($i ~ /log: /) { sub(/^[[:space:]]*log:[[:space:]]*/, "", $i); print $i; exit } } }' "$CODEX_STDERR")
 DEV_CODEX_FINAL=$(awk -F'[(),]' '/^\(log: / { for (i=1; i<=NF; i++) { if ($i ~ /final: /) { sub(/^[[:space:]]*final:[[:space:]]*/, "", $i); print $i; exit } } }' "$CODEX_STDERR")
@@ -262,10 +262,10 @@ fi
   echo "Source: \`$META_LOG\`"
   echo "Codex output: \`$CODEX_OUT\`"
   if [ -n "$DEV_CODEX_LOG" ]; then
-    echo "ask-codex log: \`$DEV_CODEX_LOG\`"
+    echo "ask-reviewer log: \`$DEV_CODEX_LOG\`"
   fi
   if [ -n "$DEV_CODEX_FINAL" ] && [ -s "$DEV_CODEX_FINAL" ]; then
-    echo "ask-codex final: \`$DEV_CODEX_FINAL\`"
+    echo "ask-reviewer final: \`$DEV_CODEX_FINAL\`"
   fi
   echo
   echo "---"
@@ -273,7 +273,7 @@ fi
   if [ -n "$RESPONSE_BODY" ]; then
     printf '%s\n' "$RESPONSE_BODY"
   else
-    echo "_(no response body extracted — could not locate ask-codex.sh's log file. Inspect \`$CODEX_OUT\` for raw output.)_"
+    echo "_(no response body extracted — could not locate ask-reviewer.sh's log file. Inspect \`$CODEX_OUT\` for raw output.)_"
   fi
 } > "$AUDIT_MD"
 

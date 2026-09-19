@@ -2,7 +2,7 @@
 name: review
 description: One-shot Codex review. Default scope = uncommitted working-tree changes. Optional --with-research <file>, --with-spec <file> and --with-context <file> for context injection. Streaming output lands in the bottom-right dashboard pane; chat-side surfaces the verdict (SHIP/NEEDS-FIX/DISCUSS) + Blocker/Major counts and handles NEED RESEARCH and NEED CONTEXT blocks.
 disable-model-invocation: true
-allowed-tools: Bash(ask-codex.sh:*) Bash(ask-agy.sh:*) Bash(gh pr view:*) Bash(gh pr diff:*) Bash(gh pr checks:*) Bash(gh issue view:*) Bash(gh run view:*) Bash(git:*) Bash(cat:*) Bash(ls:*) Bash(date:*) Bash(mkdir:*) Bash(echo:*) Bash(sed:*) Read
+allowed-tools: Bash(ask-reviewer.sh:*) Bash(ask-researcher.sh:*) Bash(gh pr view:*) Bash(gh pr diff:*) Bash(gh pr checks:*) Bash(gh issue view:*) Bash(gh run view:*) Bash(git:*) Bash(cat:*) Bash(ls:*) Bash(date:*) Bash(mkdir:*) Bash(echo:*) Bash(sed:*) Read
 argument-hint: [focus] [--with-research <file>] [--with-spec <file>] [--with-context <file>] [--no-memories]
 ---
 
@@ -23,7 +23,7 @@ You are the **PM**. Codex is the reviewer (bottom-right pane). You dispatch one 
   - `review HEAD~2..HEAD`
   - `review only the changes to src/auth/`
 
-**You must parse `$ARGUMENTS` yourself and assemble the bash command with explicit shell quoting.** Do NOT write `ask-codex.sh $ARGUMENTS` — unquoted expansion word-splits the focus across multiple shell args, and `ask-codex.sh` rejects extra positionals with rc=2.
+**You must parse `$ARGUMENTS` yourself and assemble the bash command with explicit shell quoting.** Do NOT write `ask-reviewer.sh $ARGUMENTS` — unquoted expansion word-splits the focus across multiple shell args, and `ask-reviewer.sh` rejects extra positionals with rc=2.
 
 Algorithm:
 
@@ -51,22 +51,22 @@ git merge-base <baseRefOid> <headRefOid>
 If either commit is missing locally, tell the user which one and ask before fetching (`git fetch <remote> pull/55/head` for the head — it works for fork PRs — and the base branch from the base repository's remote, which is not necessarily `origin`). Do not fetch without asking. Then dispatch with a range focus:
 
 ```bash
-ask-codex.sh --with-context "$CFILE" "review <merge-base>..<headRefOid> (PR #55)"
+ask-reviewer.sh --with-context "$CFILE" "review <merge-base>..<headRefOid> (PR #55)"
 ```
 
 ## 2 · Dispatch
 
-Single Bash call (blocking, ~30–120 s depending on diff size). `ask-codex.sh` is on the plugin's `bin/` PATH while the plugin is active. **Wrap FOCUS in double quotes** so it stays a single positional argument; the `--with-*` flag pairs go through as their own argv slots.
+Single Bash call (blocking, ~30–120 s depending on diff size). `ask-reviewer.sh` is on the plugin's `bin/` PATH while the plugin is active. **Wrap FOCUS in double quotes** so it stays a single positional argument; the `--with-*` flag pairs go through as their own argv slots.
 
 Concrete shapes (these are what you actually invoke):
 
 ```bash
-ask-codex.sh                                              # $ARGUMENTS empty → default scope
-ask-codex.sh "focus on src/agent.py concurrency"          # focus only
-ask-codex.sh --with-research notes.md "concurrency focus" # flag before focus
-ask-codex.sh "focus on auth flow" --with-spec docs/auth.md  # flag after focus
-ask-codex.sh --with-spec docs/rfcs/0004.md --with-research notes.md "review against the spec"
-ask-codex.sh --no-memories "fresh-eyes pass over the branch"   # no Codex memory summary
+ask-reviewer.sh                                              # $ARGUMENTS empty → default scope
+ask-reviewer.sh "focus on src/agent.py concurrency"          # focus only
+ask-reviewer.sh --with-research notes.md "concurrency focus" # flag before focus
+ask-reviewer.sh "focus on auth flow" --with-spec docs/auth.md  # flag after focus
+ask-reviewer.sh --with-spec docs/rfcs/0004.md --with-research notes.md "review against the spec"
+ask-reviewer.sh --no-memories "fresh-eyes pass over the branch"   # no Codex memory summary
 ```
 
 Worked example — if `$ARGUMENTS = "focus on src/agent.py concurrency --with-spec docs/agent.md"`:
@@ -74,7 +74,7 @@ Worked example — if `$ARGUMENTS = "focus on src/agent.py concurrency --with-sp
 1. Tokens: `focus on src/agent.py concurrency --with-spec docs/agent.md`
 2. `--with-spec` consumes itself + `docs/agent.md` → SPEC = `docs/agent.md`
 3. Remaining tokens joined → FOCUS = `focus on src/agent.py concurrency`
-4. Invoke: `ask-codex.sh --with-spec docs/agent.md "focus on src/agent.py concurrency"`
+4. Invoke: `ask-reviewer.sh --with-spec docs/agent.md "focus on src/agent.py concurrency"`
 
 **Streaming output is already visible in the bottom-right pane — do not duplicate it in the chat.** Acknowledge that it's running and wait.
 
@@ -109,7 +109,7 @@ Color the framing — 🟢 SHIP / 🔴 NEEDS-FIX / 🟡 DISCUSS — to match the
 If the exact `.final.md` path reported by the same successful invocation contains a `## NEED RESEARCH` section after the verdict, Codex needs Antigravity's help before the review can finalize. Do this:
 
 1. Surface the questions to the user. Confirm before fetching (research costs latency and tokens).
-2. On confirmation, run each question through `ask-agy.sh` and concatenate the answers into a temp file. `ask-agy.sh` prints only the answer on stdout (the `=== RESPONSE ===` markers go to its log file), and exits with the researcher's rc:
+2. On confirmation, run each question through `ask-researcher.sh` and concatenate the answers into a temp file. `ask-researcher.sh` prints only the answer on stdout (the `=== RESPONSE ===` markers go to its log file), and exits with the researcher's rc:
    ```bash
    RTS=$(date +%Y%m%d-%H%M%S)
    RFILE="$PWD/.dev-trio/log/${AGENT_TEAM:-default}/research-$RTS.md"
@@ -119,10 +119,10 @@ If the exact `.final.md` path reported by the same successful invocation contain
      echo "# Research for codex review @ $RTS"
      for q in "<question 1>" "<question 2>"; do
        echo; echo "## Q: $q"; echo
-       # </dev/null: ask-agy.sh reads a non-terminal stdin as extra context.
-       if ! ask-agy.sh "$q" </dev/null; then
+       # </dev/null: ask-researcher.sh reads a non-terminal stdin as extra context.
+       if ! ask-researcher.sh "$q" </dev/null; then
          RESEARCH_FAILED=1
-         echo "(research failed for this question — see the ask-agy log; do not treat the text above as findings)"
+         echo "(research failed for this question — see the ask-researcher log; do not treat the text above as findings)"
        fi
      done
    } > "$RFILE"
@@ -168,7 +168,7 @@ If the user approves a replacement: deleting code you have already fixed round a
 
 ## Constraints
 
-- **Do not call `codex` directly.** `ask-codex.sh` is the only entry point — it handles role-prompt loading, trust-boundary tag stripping, `codex exec --output-last-message` capture, and RFC 0004 manifest emission (`dev-trio-review` variant).
+- **Do not call `codex` directly.** `ask-reviewer.sh` is the only entry point — it handles role-prompt loading, trust-boundary tag stripping, `codex exec --output-last-message` capture, and RFC 0004 manifest emission (`dev-trio-review` variant).
 - **Use the exact `.review.json` result path printed by this invocation.** The wrapper, manifest and dashboard share this parsed result. Missing/failed results mean the verdict is unavailable; never infer it from raw logs, prompt examples or `latest` artifacts.
 - **Only an `ok` result carries a verdict.** Invocation and parse failures retain `null`; a token found in prose or a role-prompt example is not a review result.
 - **Do not paste the full Codex output back to chat.** Verdict line + Blocker/Major bullets only. The full text is in the pane and on disk.

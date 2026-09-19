@@ -7,13 +7,13 @@ description: Run an independent dev-trio code review from Codex, using authentic
 
 Codex is the PM/coder; the selected external CLI is the reviewer. Resolve the
 plugin root two directories above this skill directory and use the shared
-[ask-codex.sh](../../bin/ask-codex.sh). Its legacy filename does not select a
+[ask-reviewer.sh](../../bin/ask-reviewer.sh). Its filename names the role, not a
 model. Never call a raw CLI to bypass its authentication check or logging.
 
 From the user's workspace:
 
 ```bash
-DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/ask-codex.sh" "<focus>" </dev/null
+DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/ask-reviewer.sh" "<focus>" </dev/null
 ```
 
 Omit focus for the full working tree, including untracked files. Preserve

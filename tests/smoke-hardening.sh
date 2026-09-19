@@ -60,7 +60,7 @@ assert_ok test -n "$(git -C "$LOCKWT" status --porcelain)"
 rm -f "$(git -C "$LOCKWT" rev-parse --absolute-git-dir)/index.lock"
 unset TEAM
 
-# ask-codex.sh --no-memories must reach codex as a config override, and must be
+# ask-reviewer.sh --no-memories must reach codex as a config override, and must be
 # refused for a model that has no equivalent switch (before anything is spawned).
 STUB_CLI="$TMP/stub-cli"
 cat > "$STUB_CLI" <<'STUB'
@@ -88,7 +88,7 @@ run_ask_codex() {
     CODEX_CLI="$STUB_CLI" CLAUDE_CLI="$STUB_CLI" STUB_ARGV="$TMP/argv" \
     AGENT_TEAM=smoke TMUX="" DEV_TRIO_LOG_DIR="$TMP/log" \
     AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" \
-    "$@" "$ROOT/dev-trio/bin/ask-codex.sh" "${ASK_ARGS[@]}" >/dev/null 2>&1)
+    "$@" "$ROOT/dev-trio/bin/ask-reviewer.sh" "${ASK_ARGS[@]}" >/dev/null 2>&1)
 }
 final_path() { printf '%s/log/smoke/%s' "$TMP" "$(readlink "$TMP/log/smoke/latest-codex.final.md")"; }
 # Compare argv slot by slot (one per line) so a merged "-c features.memories=false"
@@ -228,8 +228,8 @@ assert_eq "$(git -C "$CB" log --oneline feature | wc -l | tr -d ' ')" "1"
 git -C "$DRV" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "ralph iter 1: smoke"
 git -C "$DRV" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "unrelated"
 mkdir -p "$TMP/meta-bin"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/meta-bin/ask-codex.sh"
-chmod +x "$TMP/meta-bin/ask-codex.sh"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/meta-bin/ask-reviewer.sh"
+chmod +x "$TMP/meta-bin/ask-reviewer.sh"
 (cd "$DRV" && env PATH="$TMP/meta-bin:$PATH" AGENT_TEAM=smoke TMUX="" RALPH_TRIO_WORKSPACE="$TMP/rw" \
   "$ROOT/ralph-trio/bin/ralph-meta.sh" --since "1 hour ago" >/dev/null 2>"$TMP/meta.err" </dev/null) || true
 assert_eq "$(sed -n 's/.*ralph commits found: //p' "$TMP/meta.err")" "1"
@@ -385,7 +385,7 @@ run_worker() {
       "$ROOT/$wrapper" "question" > "$TMP/worker.out" 2>/dev/null </dev/null ) || rc=$?
   echo "$rc"
 }
-for wrapper in debate-conductor/lib/ask-generator.sh debate-conductor/lib/ask-critic.sh dev-trio/bin/ask-agy.sh; do
+for wrapper in debate-conductor/lib/ask-generator.sh debate-conductor/lib/ask-critic.sh dev-trio/bin/ask-researcher.sh; do
   assert_eq "$(run_worker "$wrapper" denied)" "5"
   assert_eq "$(run_worker "$wrapper" answer)" "0"
   assert_ok grep -q '^Verdict: RECONSIDER$' "$TMP/worker.out"
@@ -660,7 +660,7 @@ run_agy_fixed_second() {
   ( cd "$TMP" && env -u DEV_TRIO_RESEARCHER_MODEL -u DEV_TRIO_PM_HOST TMUX='' AGENT_TEAM=worker \
       PATH="$TMP/fixed-date:$PATH" AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" \
       DEV_TRIO_LOG_DIR="$TMP/agy-naming" RESEARCHER_CLI="$TMP/worker-cli/answer" \
-      "$ROOT/dev-trio/bin/ask-agy.sh" "question" > /dev/null 2>&1 </dev/null ) || rc=$?
+      "$ROOT/dev-trio/bin/ask-researcher.sh" "question" > /dev/null 2>&1 </dev/null ) || rc=$?
   echo "$rc"
 }
 assert_eq "$(run_agy_fixed_second)" "0"
