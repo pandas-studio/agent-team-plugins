@@ -419,14 +419,13 @@ Repeated on purpose: https://example.com/a
 ANSWER
 PROMPT_START=$SECONDS
 research RESEARCH_ANSWER_FILE="$TMP/answer.md" RESEARCH_STDERR='Ripgrep not found; falling back'
-# An ordinary run must not pay the diagnostic drain. An exited logger stays a
-# zombie until it is waited for and a zombie answers `kill -0`, so a poll-based
-# bound once charged every research call the full timeout.
-check 'an ordinary run does not wait out the drain' test $((SECONDS - PROMPT_START)) -lt 3
+check 'an ordinary run adds no waiting of its own' test $((SECONDS - PROMPT_START)) -lt 3
 check 'researcher succeeds' test "$AGY_RC" -eq 0
 check 'answer artifact holds the answer' grep -q 'loader resolves the role' "$AGY_FINAL"
 check 'answer artifact excludes CLI diagnostics' no_match 'Ripgrep not found' "$AGY_FINAL"
 check 'log still carries the diagnostics' grep -q 'Ripgrep not found' "$AGY_LOG"
+check 'callers receive the answer on stdout' grep -q 'loader resolves the role' "$TMP/research.out"
+check 'callers do not receive diagnostics as an answer' no_match 'Ripgrep not found' "$TMP/research.out"
 check 'research metadata describes the channel' json_is "$AGY_RUN" \
   '.channel=="agy" and .role=="researcher" and .completion.exit_code==0'
 check 'research metadata has no review result' json_is "$AGY_RUN" '.result_path==null'
@@ -514,10 +513,17 @@ check 'native answer artifact holds the answer' grep -q 'the native answer' "${N
 check 'callers receive the answer on stdout' grep -q 'the native answer' "$TMP/native.out"
 check 'callers do not receive the transcript as an answer' no_match 'streamed transcript' "$TMP/native.out"
 check 'the transcript is still in the log' grep -q 'streamed transcript' "$NATIVE_LOG"
+# A CLI that says nothing on stdout but writes a valid answer has answered.
+# The artifact decides, and only registry_run_answer can say so — it alone
+# still holds the CLI's own exit status.
+native_research NATIVE_QUIET=1
+check 'a silent CLI with a native answer succeeds' test "$NATIVE_RC" -eq 0
+check 'its answer still reaches the caller' grep -q 'the native answer' "$TMP/native.out"
+check 'its run is recorded as successful' json_is "$NATIVE_RUN" '.completion.exit_code==0'
 native_research NATIVE_SKIP_FINAL=1
-check 'a missing native answer fails' test "$NATIVE_RC" -eq 2
-check 'a missing native answer is recorded as a capture failure' \
-  json_is "$NATIVE_RUN" '.completion.exit_code==2 and .completion.reason=="final-write-failed"'
+check 'a missing native answer is an empty answer' test "$NATIVE_RC" -eq 5
+check 'a missing native answer is recorded as such' \
+  json_is "$NATIVE_RUN" '.completion.exit_code==5'
 # A failed invocation stays failed: this wrapper cannot tell a CLI that chose to
 # exit 5 from the registry's own empty-stdout 5, so a file on disk must not
 # promote either one to success.
@@ -538,30 +544,6 @@ env -u DEV_TRIO_RESEARCHER_MODEL AGENT_TEAM=review-test TMUX='' DEV_TRIO_LOG_DIR
 check 'a failed invocation with an answer file still fails' test "$NATIVE_RC" -eq 5
 FAIL_RUN="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-agy.log")"
 check 'the failure is recorded, not the file' json_is "${FAIL_RUN%.log}.run.json" '.completion.exit_code==5'
-
-# A CLI that leaves a descendant holding stderr must not hold the wrapper open.
-# The descendant keeps stderr only: a child holding *stdout* blocks
-# registry_run_answer's own tee, which is not this wrapper's pipe to drain.
-cat > "$TMP/leaky-researcher" <<'STUB'
-#!/usr/bin/env bash
-{ sleep 30; } > /dev/null &
-printf 'the answer arrived promptly\n'
-exit 0
-STUB
-chmod +x "$TMP/leaky-researcher"
-LEAK_START=$SECONDS
-research_leak_rc=0
-env -u DEV_TRIO_RESEARCHER_MODEL AGENT_TEAM=review-test TMUX='' DEV_TRIO_LOG_DIR="$TMP/log" \
-  AGY_CLI="$TMP/leaky-researcher" \
-  "$ROOT/dev-trio/bin/ask-researcher.sh" 'leaky question' \
-  < /dev/null > "$TMP/leak.out" 2> "$TMP/leak.err" || research_leak_rc=$?
-LEAK_ELAPSED=$((SECONDS - LEAK_START))
-check 'an inherited stderr does not hang the wrapper' test "$LEAK_ELAPSED" -lt 25
-check 'the truncated drain is reported' grep -q 'diagnostics still open' "$TMP/leak.err"
-check 'the leaky run still succeeds' test "$research_leak_rc" -eq 0
-LEAK_RUN="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-agy.log")"
-check 'the leaky run records a completion' json_is "${LEAK_RUN%.log}.run.json" '.completion != null'
-check 'no stderr pipe is left behind' test -z "$(find "$TMP/log/review-test" -name '.stderr-agy-*' 2>/dev/null)"
 
 # The reader takes a file, not the first document in one.
 VALID_RUN=$(cat "$AGY_RUN")

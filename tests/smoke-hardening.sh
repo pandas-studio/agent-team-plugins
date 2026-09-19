@@ -425,6 +425,45 @@ assert_eq "$(answer_rc answer PATH="$TMP/failing-tee:$PATH")" "6"
 assert_eq "$(answer_rc broken PATH="$TMP/failing-tee:$PATH")" "9"
 assert_eq "$(answer_rc answer TMPDIR="$TMP/no-such-dir")" "6"
 
+# With an answer path, the artifact — not stdout — decides. A two-argument call
+# keeps the behaviour above, which is what debate-conductor's generator and
+# critic rely on; the assertions before this line are that contract.
+answer_rc_captured() {
+  local stub="$1" rc=0
+  shift
+  rm -f "$TMP/captured.md"
+  ( env "$@" REGISTRY_CMD_OVERRIDE="$TMP/worker-cli/$stub" \
+      AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" \
+      bash -c 'set -euo pipefail; . "$1/dev-trio/lib/registry.sh"; registry_run_answer agy question "$2"' \
+      _ "$ROOT" "$TMP/captured.md" \
+      > "$TMP/answer.out" 2>/dev/null </dev/null ) || rc=$?
+  echo "$rc"
+}
+assert_eq "$(answer_rc_captured partial)" "0"
+assert_eq "$(cat "$TMP/captured.md")" "no newline"
+# Captured from stdout alone: a caller's own 2>&1 merge never reaches it.
+printf '#!/bin/sh\necho "the answer"\necho "a diagnostic" >&2\n' > "$TMP/worker-cli/noisy"
+chmod +x "$TMP/worker-cli/noisy"
+assert_eq "$(answer_rc_captured noisy)" "0"
+assert_eq "$(cat "$TMP/captured.md")" "the answer"
+# Nothing said, nothing captured.
+assert_eq "$(answer_rc_captured blank)" "5"
+# A nonzero CLI status is never promoted by an artifact on disk.
+printf '#!/bin/sh\necho "an answer that must not rescue the status"\nexit 5\n' > "$TMP/worker-cli/answer-then-5"
+chmod +x "$TMP/worker-cli/answer-then-5"
+assert_eq "$(answer_rc_captured answer-then-5)" "5"
+# An answer path that cannot be written is a capture failure, not an empty answer.
+answer_rc_to() {
+  local stub="$1" dest="$2" rc=0
+  shift 2
+  ( env "$@" REGISTRY_CMD_OVERRIDE="$TMP/worker-cli/$stub" \
+      AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" \
+      bash -c 'set -euo pipefail; . "$1/dev-trio/lib/registry.sh"; registry_run_answer agy question "$2"' \
+      _ "$ROOT" "$dest" > /dev/null 2>/dev/null </dev/null ) || rc=$?
+  echo "$rc"
+}
+assert_eq "$(answer_rc_to answer "$TMP/no-such-dir/answer.md")" "6"
+
 # The private copy of the answer is removed on exit and when the process group
 # is interrupted mid-answer.
 mkdir -p "$TMP/answer-tmp"

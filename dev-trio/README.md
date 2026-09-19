@@ -222,16 +222,21 @@ an abort, published from the wrapper's EXIT trap, so an interrupted run does not
 read as live forever. Unlike the RFC 0004 manifest, this file exists while the
 run is live and is written for nested dispatches too.
 
-**Researcher answer.** `agy-<TS>-<PID>.final.md` holds the answer on its own:
-the model's own last message when it supports native capture, otherwise the
-run's stdout, with the CLI's diagnostics left in the log. The wrapper's own
-stdout is the answer in both paths — under native capture the CLI's streamed
-transcript goes only to the log, and the answer is emitted once it exists —
-so a caller that injects this wrapper's output injects the answer. A run that
-otherwise succeeded but captured no answer exits **2**. A failed invocation
-stays failed: the wrapper cannot tell a CLI that chose to exit 5 from
-`registry_run_answer`'s own empty-stdout 5, so an artifact on disk never
-promotes a nonzero code to success.
+**Researcher answer.** `agy-<TS>-<PID>.final.md` holds the answer on its own,
+captured by `registry_run_answer`: the model's own last message when it defines
+`final_args`, otherwise that function's existing copy of stdout — stdout alone,
+so a caller's `2>&1` merge never reaches it. The wrapper's stdout is that
+answer, and the transcript goes to the log, which the pane and the dashboard
+follow while the run is live. A caller that injects this wrapper's output
+injects the answer.
+
+Capture lives in the library because only there is the CLI's own exit status
+still in hand. A caller sees one number and cannot tell a CLI that chose to
+exit 5 from the library judging stdout empty. The exit codes: the model's own,
+which an artifact on disk never promotes; **5** when it exits 0 leaving no
+answer; **6** when the answer could not be captured or inspected. Passing no
+answer path keeps the previous stdout-only behaviour, which is what
+debate-conductor's generator and critic use.
 
 `<team>` resolution (priority order):
 

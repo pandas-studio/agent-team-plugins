@@ -323,17 +323,41 @@ registry_run() {
   fi
 }
 
-# registry_run_answer ID PROMPT — registry_run for a role whose answer is its
-# stdout, streamed unchanged as it arrives (stderr stays on stderr).
+# registry_run_answer ID PROMPT [ANSWER_PATH] — registry_run for a role whose
+# output is an answer, streamed unchanged as it arrives (stderr stays on stderr).
+#
+# With ANSWER_PATH, this function also *captures* the answer there, and judges
+# the run by that artifact rather than by stdout:
+#
+#   native capture   the model defines final_args, so the CLI writes its own
+#                    last message to ANSWER_PATH. Its streamed stdout is a
+#                    transcript, not the answer, and is not inspected.
+#   stdout capture   the model has no final_args, so the copy of stdout this
+#                    function already keeps is written to ANSWER_PATH. It is
+#                    stdout alone — a caller's `2>&1` merge never reaches it.
+#
+# Capture belongs here because only here is the CLI's own exit status still in
+# hand. A caller sees one number and cannot tell a CLI that chose to exit 5
+# from this function judging stdout empty; a caller that tried to settle the
+# question from a file on disk would either hide a real failure or, as measured,
+# report a CLI that exited 0 and wrote a valid answer without printing anything
+# as a failed run and drop its answer.
 #
 # Returns, in priority order:
-#   the model's exit code, when it is nonzero;
-#   6 when the model exited 0 but its stdout could not be inspected (the
-#     temp file could not be created or written, or grep failed);
-#   5 when the model exited 0 with no non-whitespace stdout — agy's print mode
-#     soft-denies a tool it cannot prompt for, prints guidance on stderr only
-#     and still exits 0, and that must not pass for an answer;
+#   the model's exit code, when it is nonzero — an artifact never promotes it;
+#   6 when the model exited 0 but the answer could not be inspected or captured
+#     (the temp file could not be created or written, grep failed, or
+#     ANSWER_PATH could not be written);
+#   5 when the model exited 0 and produced no answer — with ANSWER_PATH, the
+#     artifact is missing or holds nothing but whitespace; without it, stdout
+#     was empty. agy's print mode soft-denies a tool it cannot prompt for,
+#     prints guidance on stderr only and still exits 0, and that must not pass
+#     for an answer;
 #   0 otherwise.
+#
+# Without ANSWER_PATH the behaviour is unchanged: stdout is the answer and is
+# inspected as before.
+#
 # registry_run must report the CLI's status itself, not rely on errexit.
 #
 # A copy of stdout goes to a private temp file that the subshell removes on
@@ -342,7 +366,7 @@ registry_run() {
 # whoever signals the process group. SIGKILL can leave the file behind.
 registry_run_answer() {
   if [ "$#" -lt 2 ]; then
-    echo "registry_run_answer: usage: registry_run_answer ID PROMPT" >&2
+    echo "registry_run_answer: usage: registry_run_answer ID PROMPT [ANSWER_PATH]" >&2
     return 2
   fi
   (
@@ -352,6 +376,7 @@ registry_run_answer() {
     trap 'exit 143' TERM
     trap 'exit 129' HUP
     set +e
+    answer_path="${3:-}"
     tmp="$(umask 077 && mktemp "${TMPDIR:-/tmp}/registry-answer.XXXXXX")" || {
       echo "registry_run_answer: cannot create a temp file to inspect the answer" >&2
       exit 6
@@ -366,11 +391,27 @@ registry_run_answer() {
       echo "registry_run_answer: tee failed (rc=${statuses[1]}); the answer could not be inspected" >&2
       exit 6
     fi
-    grep -q '[^[:space:]]' "$tmp"
+    # What the answer is, and where to look for it.
+    inspect="$tmp"
+    if [ -n "$answer_path" ]; then
+      if registry_has_final "$1"; then
+        inspect="$answer_path"
+      elif ! cat "$tmp" > "$answer_path"; then
+        echo "registry_run_answer: could not capture the answer to $answer_path" >&2
+        exit 6
+      else
+        inspect="$answer_path"
+      fi
+    fi
+    if [ -n "$answer_path" ] && { [ ! -f "$inspect" ] || [ ! -r "$inspect" ]; }; then
+      echo "registry: model '$1' exited 0 without leaving an answer at $inspect — treating as failure (rc=5)" >&2
+      exit 5
+    fi
+    grep -q '[^[:space:]]' "$inspect"
     case "$?" in
       0) exit 0 ;;
       1)
-        echo "registry: model '$1' exited 0 with no output on stdout — treating as failure (rc=5)" >&2
+        echo "registry: model '$1' exited 0 with no answer — treating as failure (rc=5)" >&2
         exit 5
         ;;
       *)
