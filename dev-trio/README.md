@@ -200,14 +200,43 @@ Per-team log namespace. Each invocation writes to:
 
 ```
 $PWD/.dev-trio/log/<team>/
-├── agy-<TS>-<PID>.log      # raw Antigravity output + framing
+├── agy-<TS>-<PID>.log      # raw researcher output + framing
+├── agy-<TS>-<PID>.final.md      # the answer alone
 ├── codex-<TS>-<PID>.log    # raw reviewer output + framing
 ├── codex-<TS>-<PID>.final.md    # unchanged final response
 ├── codex-<TS>-<PID>.review.json # common parsed review result
+├── <name>-<TS>-<PID>.run.json   # per-invocation run metadata (dashboard)
 ├── latest-agy.log          # symlink to most recent agy run
+├── latest-agy.final.md     # symlink to its answer
 ├── latest-codex.log        # symlink to most recent codex run
 └── <name>-<TS>.manifest.json   # RFC 0004 typed run manifest
 ```
+
+**Run metadata.** Every invocation publishes `<stem>.run.json` (`lib/runstate.sh`)
+atomically beside its log: `channel` (`agy`/`codex` — the log stream, never a
+model), `role`, the resolved `model`, `team`, `started_at`, `pid`, `pm_host`,
+`nested`, the absolute artifact paths, and the `inputs` the wrapper was given.
+A second atomic rewrite of the same file adds `completion`
+(`ended_at`, `exit_code`, `verdict`, `reason`) when the run ends — including on
+an abort, published from the wrapper's EXIT trap, so an interrupted run does not
+read as live forever. Unlike the RFC 0004 manifest, this file exists while the
+run is live and is written for nested dispatches too.
+
+**Researcher answer.** `agy-<TS>-<PID>.final.md` holds the answer on its own,
+captured by `registry_run_answer`: the model's own last message when it defines
+`final_args`, otherwise that function's existing copy of stdout — stdout alone,
+so a caller's `2>&1` merge never reaches it. The wrapper's stdout is that
+answer, and the transcript goes to the log, which the pane and the dashboard
+follow while the run is live. A caller that injects this wrapper's output
+injects the answer.
+
+Capture lives in the library because only there is the CLI's own exit status
+still in hand. A caller sees one number and cannot tell a CLI that chose to
+exit 5 from the library judging stdout empty. The exit codes: the model's own,
+which an artifact on disk never promotes; **5** when it exits 0 leaving no
+answer; **6** when the answer could not be captured or inspected. Passing no
+answer path keeps the previous stdout-only behaviour, which is what
+debate-conductor's generator and critic use.
 
 `<team>` resolution (priority order):
 
@@ -222,7 +251,7 @@ Override the log root with `DEV_TRIO_LOG_DIR=/path/to/logs`.
 
 Two side panes run a flicker-free dashboard showing **distilled key points only** — the full raw output stays in the Claude (PM) pane and on disk. Each side pane shows:
 
-- **Antigravity**: query, status, *answer lead* (first paragraph), sources cited count
+- **Antigravity**: query, status, *answer lead* (first paragraph of the answer artifact), distinct cited URLs
 - **Codex**: focus, status, **verdict box** (color-coded), findings counts, **Blocker/Major text** (when present)
 
 ```bash
@@ -243,7 +272,24 @@ Color legend (codex verdict):
 - `q` — quit
 - `Ctrl-C` — also quits
 
-The wrappers append `=== END (rc=N) ===` to each log when the run finishes; that's how the dashboard distinguishes ⏳ running... from ✓ done / ✗ failed. Rendering only happens when content actually changes (cksum-based skip), and uses cursor-home + per-line erase instead of a full screen clear, so there's no visible flicker.
+Every value the dashboard renders comes from the run's `.run.json` and
+`.review.json`; it never parses the log body, where the text under review sits
+next to the wrapper's own `=== ... ===` framing and could otherwise forge the
+model, the start time or the completion state. Untrusted text is stripped of
+escape sequences and control characters and rendered behind a `│` gutter, so it
+cannot repaint the pane or pass for a dashboard field.
+
+The states are distinct: no runs yet · a latest link pointing at a missing log ·
+**legacy** (a log with no metadata beside it — the start time is read from the
+filename and nothing else is claimed) · unreadable metadata · metadata that
+describes another run, or a run outside this team's directory · metadata too
+large to load · ⏳ running · ✓ done / ✗ failed. Only the selected log's own
+siblings are read, whatever paths the metadata names. Rendering only happens
+when content actually changes (cksum-based skip), and uses cursor-home +
+per-line erase instead of a full screen clear, so there's no visible flicker.
+
+`dashboard.sh <channel> --once` renders a single frame and exits — for scripts
+and tests rather than a pane.
 
 **Raw fallback** (when the dashboard misbehaves or you want unfiltered output):
 

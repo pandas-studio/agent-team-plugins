@@ -22,6 +22,8 @@
 # redefines codex-no-memories.
 #
 # Result: sibling *.review.json contains verdict, findings and failure status.
+# Sibling *.run.json carries this invocation's metadata for the dashboard
+# (model, start time, inputs, completion) — see lib/runstate.sh.
 # Exit: 0 parsed review (any valid verdict), 3 parse failure after a successful
 # invocation; reviewer failures keep their original nonzero exit code.
 # DEV_TRIO_REVIEW_PROFILE=spec additionally permits OUT-OF-SCOPE for spec-trio.
@@ -69,6 +71,8 @@ unset _REGISTRY_LIB
 
 # shellcheck source=../lib/review-result.sh
 . "$PLUGIN_ROOT/lib/review-result.sh" || exit 2
+# shellcheck source=../lib/runstate.sh
+. "$PLUGIN_ROOT/lib/runstate.sh" || exit 2
 REVIEW_PROFILE="${DEV_TRIO_REVIEW_PROFILE:-default}"
 case "$REVIEW_PROFILE" in
   default|spec) ;;
@@ -203,22 +207,23 @@ LOG="$LOG_DIR/codex-$TS.log"
 # wrapper parses into the shared review result. See `--output-last-message` below.
 FINAL="$LOG_DIR/codex-$TS.final.md"
 RESULT="$LOG_DIR/codex-$TS.review.json"
+RUNSTATE_LOG=""
 cleanup_review() {
-  [ -z "${RESULT_TMP:-}" ] || rm -f "$RESULT_TMP"
-  [ -z "${LATEST_TMP:-}" ] || rm -f "$LATEST_TMP"
-  manifest_cleanup
+  _cleanup_rc=$?
+  # Backstop for an abort (INT/TERM/errexit): a run whose completion is never
+  # published would otherwise read as live forever on the dashboard. This is a
+  # no-op once a real completion has been published, and it runs *first* so a
+  # failing cleanup step cannot take the handler down before it records one.
+  if [ -n "$RUNSTATE_LOG" ]; then
+    runstate_complete "$RUNSTATE_LOG" exit_code="$_cleanup_rc" reason=aborted 2>/dev/null || true
+  fi
+  [ -z "${RESULT_TMP:-}" ] || rm -f "$RESULT_TMP" || true
+  [ -z "${LATEST_TMP:-}" ] || rm -f "$LATEST_TMP" || true
+  manifest_cleanup || true
 }
 trap cleanup_review EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-# ln -sfn unlinks then creates and can fail under concurrent dispatch. Rename
-# a unique sibling link instead; readers see either complete target.
-LATEST_TMP="$LOG_DIR/.latest-codex-$TS"
-ln -s "codex-$TS.log" "$LATEST_TMP"
-mv -f "$LATEST_TMP" "$LOG_DIR/latest-codex.log"
-ln -s "codex-$TS.final.md" "$LATEST_TMP"
-mv -f "$LATEST_TMP" "$LOG_DIR/latest-codex.final.md"
-LATEST_TMP=""
 
 # Manifest lifecycle (RFC 0004 PR 10 — sha256 of post-injection prompt for
 # byte-exact replayability without writing the prompt to disk).
@@ -247,6 +252,54 @@ manifest_add_input kind=focus value="$FOCUS"
   echo "=== RESPONSE ==="
 } > "$LOG"
 
+# Structured run metadata for the dashboard — published before the latest-*
+# links, so a reader that follows a link always finds a described run rather
+# than a bare log it would have to parse. Values the dashboard renders come
+# from here, never from the log body, which carries untrusted text.
+RUNSTATE_ARGS=(
+  channel=codex
+  wrapper=ask-reviewer.sh
+  variant=dev-trio-review
+  team="$TEAM"
+  run_stem="codex-$TS"
+  started_display="$TS"
+  pid="$$"
+  role=reviewer
+  model="$REVIEWER_MODEL"
+  pm_host="$PM_HOST"
+  result_path="$RESULT"
+  final_path="$FINAL"
+  "input=focus:$FOCUS"
+)
+if registry_has_final "$REVIEWER_MODEL"; then
+  RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" final_source=native)
+else
+  RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" final_source=stdout)
+fi
+if manifest_is_nested; then
+  RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" nested=true)
+else
+  RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" nested=false)
+fi
+[ -z "$RESEARCH_FILE" ] || RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" "inputpath=research:$RESEARCH_FILE")
+[ -z "$SPEC_FILE" ]     || RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" "inputpath=spec:$SPEC_FILE")
+[ -z "$CONTEXT_FILE" ]  || RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" "inputpath=context:$CONTEXT_FILE")
+# A dashboard sidecar never changes this wrapper's outcome.
+if runstate_begin "$LOG" "${RUNSTATE_ARGS[@]}"; then
+  RUNSTATE_LOG="$LOG"
+else
+  echo "[ask-reviewer] run metadata unavailable; the dashboard will show this run as legacy" >&2
+fi
+
+# ln -sfn unlinks then creates and can fail under concurrent dispatch. Rename
+# a unique sibling link instead; readers see either complete target.
+LATEST_TMP="$LOG_DIR/.latest-codex-$TS"
+ln -s "codex-$TS.log" "$LATEST_TMP"
+mv -f "$LATEST_TMP" "$LOG_DIR/latest-codex.log"
+ln -s "codex-$TS.final.md" "$LATEST_TMP"
+mv -f "$LATEST_TMP" "$LOG_DIR/latest-codex.final.md"
+LATEST_TMP=""
+
 echo "[ask-reviewer] running ($REVIEWER_MODEL) — monitor: dashboard.sh codex  (raw: tail -F $LOG_DIR/latest-codex.log)" >&2
 RC=0
 # For models with native final-message capture (codex's --output-last-message),
@@ -270,6 +323,8 @@ result_output_failed() {
   manifest_finalize || true
   printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG" || true
   echo "[ask-reviewer] result write failed: $1 (log: $LOG, final: $FINAL, rc=$RC)" >&2
+  # Last, so nothing fallible can change the code after it is recorded.
+  [ -z "$RUNSTATE_LOG" ] || runstate_complete "$RUNSTATE_LOG" exit_code="$RC" reason=result-write-failed || true
   exit "$RC"
 }
 RESULT_TMP=$(mktemp "$RESULT.tmp.XXXXXX") || result_output_failed 'create result temporary file'
@@ -293,4 +348,8 @@ if [ "$RC" -ne 0 ]; then
   echo "[ask-reviewer] review failed: $ERROR (result: $RESULT)" >&2
 fi
 echo "(log: $LOG, final: $FINAL, result: $RESULT, rc=$RC)" >&2
+# Last, so nothing fallible runs after it: a completion recording rc=0 that the
+# caller never receives is worse than none at all (the EXIT trap then records
+# the real status).
+[ -z "$RUNSTATE_LOG" ] || runstate_complete "$RUNSTATE_LOG" exit_code="$RC" verdict="$VERDICT" reason=ok || true
 exit "$RC"

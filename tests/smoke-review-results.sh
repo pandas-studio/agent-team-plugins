@@ -22,6 +22,9 @@ check() {
 json_is() { jq -e "$2" "$1" >/dev/null; }
 no_receipt_result() { ! review_result_from_receipt "$1" "$2" >/dev/null; }
 no_match() { ! grep -q "$1" "$2"; }
+no_runstate_begin() { ! runstate_begin "$1" channel=codex wrapper=ask-reviewer.sh 2>/dev/null; }
+no_runstate_complete() { ! runstate_complete "$1" exit_code=0 2>/dev/null; }
+no_runstate_read() { ! runstate_read "$1" >/dev/null 2>&1; }
 fixture() {
   printf '## Verdict\n%s\n\n## Findings\n\n### Blocker\n- 없음.\n\n### Major\n- None.\n\n### Minor / Nit\n- 없음\n' "$1" > "$TMP/review.md"
 }
@@ -177,6 +180,10 @@ run_review() {
 dashboard() {
   printf q | env AGENT_TEAM=review-test TMUX='' TERM=dumb DEV_TRIO_LOG_DIR="$TMP/log" \
     "$@" bash "$ROOT/dev-trio/bin/dashboard.sh" codex > "$TMP/dashboard.out"
+}
+research_dashboard() {
+  env AGENT_TEAM=review-test TMUX='' TERM=dumb DEV_TRIO_LOG_DIR="$TMP/log" \
+    "$@" bash "$ROOT/dev-trio/bin/dashboard.sh" agy --once < /dev/null > "$TMP/dashboard.out"
 }
 for token in SHIP NEEDS-FIX DISCUSS; do
   for separator in ' — ' '. '; do
@@ -334,4 +341,218 @@ for result in "${results[@]}"; do
   check 'concurrent manifest complete' json_is "${result%.review.json}.manifest.json" '.verdict=="SHIP" and .ended_at!=null'
   check 'concurrent final intact' cmp -s "$TMP/review.md" "${result%.review.json}.final.md"
 done
+
+# ── run metadata (#69) ───────────────────────────────────────────────────────
+# Everything the dashboard renders comes from these files; the log body is
+# never parsed, so its framing can be quoted by the text under review.
+fixture 'SHIP — metadata run'
+run_review 0 DEV_TRIO_REVIEWER_MODEL=claude
+RUN="${LOG%.log}.run.json"
+check 'wrapper publishes run metadata' test -f "$RUN"
+check 'metadata names channel, role and resolved model' json_is "$RUN" \
+  '.channel=="codex" and .role=="reviewer" and .model=="claude" and .team=="review-test"'
+check 'metadata binds its own artifacts' json_is "$RUN" \
+  ".log_path==\"$LOG\" and .result_path==\"$RESULT\" and .final_path==\"$FINAL\""
+check 'metadata records completion once the run ends' json_is "$RUN" \
+  '.completion.exit_code==0 and .completion.verdict=="SHIP" and .completion.reason=="ok"'
+check 'standalone run is not marked nested' json_is "$RUN" '.nested==false'
+check 'metadata carries the focus it was given' json_is "$RUN" \
+  '(.inputs|map(select(.kind=="focus"))|length)==1'
+
+# A nested dispatch emits no manifest by contract, but the dashboard still has
+# to be able to describe it — so it does emit run metadata.
+manifest_init fixture-parent-run "$TMP/parent-run.log"
+PARENT_RUN_TMP="$MANIFEST_TMP"
+fixture 'SHIP — nested metadata'
+run_review 0 MANIFEST_PARENT_TMP="$PARENT_RUN_TMP"
+check 'nested dispatch still publishes run metadata' json_is "${LOG%.log}.run.json" '.nested==true'
+check 'nested dispatch emits no child manifest' test ! -e "$MANIFEST"
+manifest_finalize
+
+# The sidecar's own failure modes. It is a UI artifact: a failed write reports
+# itself and returns nonzero, and the wrappers keep going (they branch on that
+# rc rather than letting errexit take the review down with it).
+# shellcheck source=../dev-trio/lib/runstate.sh
+. "$ROOT/dev-trio/lib/runstate.sh"
+check 'begin into a missing directory fails' \
+  no_runstate_begin "$TMP/nonexistent-dir/codex-1.log"
+check 'failed begin leaves no metadata' test ! -e "$TMP/nonexistent-dir/codex-1.run.json"
+: > "$TMP/log/review-test/orphan-20000101-000000-1.log"
+check 'completing a run with no metadata fails' \
+  no_runstate_complete "$TMP/log/review-test/orphan-20000101-000000-1.log"
+check 'failed completion invents no metadata' \
+  test ! -e "$TMP/log/review-test/orphan-20000101-000000-1.run.json"
+# Malformed metadata yields nothing at all — never a half-populated frame.
+for bad in '{"schema_version": 1, "chan' '' '[]' '{"schema_version":2}'; do
+  printf '%s' "$bad" > "$TMP/bad.run.json"
+  check 'malformed metadata is unavailable' no_runstate_read "$TMP/bad.run.json"
+  check 'malformed metadata yields no output' test -z "$(runstate_read "$TMP/bad.run.json" || true)"
+done
+
+# ── researcher answer capture + dashboard (#69) ──────────────────────────────
+cat > "$TMP/researcher" <<'STUB'
+#!/usr/bin/env bash
+if [ -n "${RESEARCH_STDERR:-}" ]; then printf '%s\n' "$RESEARCH_STDERR" >&2; fi
+[ -z "${RESEARCH_ANSWER_FILE:-}" ] || cat "$RESEARCH_ANSWER_FILE"
+exit "${RESEARCH_RC:-0}"
+STUB
+chmod +x "$TMP/researcher"
+# Sets AGY_RC / AGY_LOG / AGY_FINAL / AGY_RUN for the invocation it just ran.
+research() {
+  AGY_RC=0
+  env -u DEV_TRIO_RESEARCHER_MODEL -u RESEARCHER_CLI -u AGY_CLI \
+    AGENT_TEAM=review-test TMUX='' DEV_TRIO_LOG_DIR="$TMP/log" \
+    AGY_CLI="$TMP/researcher" "$@" \
+    "$ROOT/dev-trio/bin/ask-researcher.sh" 'fixture question' \
+    < /dev/null > "$TMP/research.out" 2> "$TMP/research.err" || AGY_RC=$?
+  AGY_LOG="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-agy.log")"
+  AGY_FINAL="${AGY_LOG%.log}.final.md"
+  AGY_RUN="${AGY_LOG%.log}.run.json"
+}
+# Two distinct URLs, one of them repeated, two of them on a single line: a
+# line count gets this wrong in both directions.
+cat > "$TMP/answer.md" <<'ANSWER'
+The short answer is that the loader resolves the role before the binary.
+
+See https://example.com/a and https://example.com/b for the contract.
+Repeated on purpose: https://example.com/a
+ANSWER
+PROMPT_START=$SECONDS
+research RESEARCH_ANSWER_FILE="$TMP/answer.md" RESEARCH_STDERR='Ripgrep not found; falling back'
+check 'an ordinary run adds no waiting of its own' test $((SECONDS - PROMPT_START)) -lt 3
+check 'researcher succeeds' test "$AGY_RC" -eq 0
+check 'answer artifact holds the answer' grep -q 'loader resolves the role' "$AGY_FINAL"
+check 'answer artifact excludes CLI diagnostics' no_match 'Ripgrep not found' "$AGY_FINAL"
+check 'log still carries the diagnostics' grep -q 'Ripgrep not found' "$AGY_LOG"
+check 'callers receive the answer on stdout' grep -q 'loader resolves the role' "$TMP/research.out"
+check 'callers do not receive diagnostics as an answer' no_match 'Ripgrep not found' "$TMP/research.out"
+check 'research metadata describes the channel' json_is "$AGY_RUN" \
+  '.channel=="agy" and .role=="researcher" and .completion.exit_code==0'
+check 'research metadata has no review result' json_is "$AGY_RUN" '.result_path==null'
+research_dashboard
+check 'research dashboard shows the lead' grep -q 'loader resolves the role' "$TMP/dashboard.out"
+check 'research dashboard counts distinct citations' grep -q '2 unique' "$TMP/dashboard.out"
+check 'research dashboard reports completion' grep -q 'done' "$TMP/dashboard.out"
+
+# stderr-only: the CLI exits 0 having said nothing on stdout. That is not an
+# answer, and the empty artifact must not read as one.
+research RESEARCH_STDERR='permission denied for the web tool'
+check 'stderr-only research fails with the empty-answer code' test "$AGY_RC" -eq 5
+check 'stderr-only research leaves an empty answer artifact' test ! -s "$AGY_FINAL"
+check 'stderr-only research records its failure' json_is "$AGY_RUN" '.completion.exit_code==5'
+research_dashboard
+check 'dashboard says no answer was captured' grep -q 'No answer captured' "$TMP/dashboard.out"
+check 'dashboard does not report zero sources' no_match '0 unique' "$TMP/dashboard.out"
+
+# An aborted run publishes a completion from its EXIT trap, so it cannot read
+# as live forever.
+cat > "$TMP/slow-researcher" <<'STUB'
+#!/usr/bin/env bash
+: > "$RESEARCH_STARTED"
+sleep 30
+STUB
+chmod +x "$TMP/slow-researcher"
+env -u DEV_TRIO_RESEARCHER_MODEL AGENT_TEAM=review-test TMUX='' DEV_TRIO_LOG_DIR="$TMP/log" \
+  AGY_CLI="$TMP/slow-researcher" RESEARCH_STARTED="$TMP/started" \
+  "$ROOT/dev-trio/bin/ask-researcher.sh" 'aborted question' \
+  < /dev/null > /dev/null 2>&1 &
+slow_pid=$!
+waited=0
+while [ ! -f "$TMP/started" ] && [ "$waited" -lt 100 ]; do sleep 0.1; waited=$((waited + 1)); done
+check 'slow researcher started' test -f "$TMP/started"
+kill -TERM "$slow_pid" 2>/dev/null || true
+wait "$slow_pid" 2>/dev/null || true
+ABORTED_RUN="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-agy.log")"
+ABORTED_RUN="${ABORTED_RUN%.log}.run.json"
+check 'aborted run publishes a completion' json_is "$ABORTED_RUN" '.completion != null'
+check 'aborted run is recorded as aborted' json_is "$ABORTED_RUN" '.completion.reason=="aborted"'
+check 'aborted run records the signal exit code' json_is "$ABORTED_RUN" '.completion.exit_code==143'
+research_dashboard
+check 'aborted run is not reported as still running' no_match 'no completion recorded' "$TMP/dashboard.out"
+
+# Native answer capture. The artifact is authoritative: a CLI that claims a
+# native final and writes none has produced no answer, however it exited, and a
+# CLI that writes one while saying nothing on stdout has.
+cat > "$TMP/models.json" <<'MODELS'
+{"version":1,
+ "models":{"native-researcher":{"command":"true",
+   "env_command":"NATIVE_RESEARCHER_CLI",
+   "args":["{prompt}"],
+   "final_args":["--final","{final}","{prompt}"]}},
+ "roles":{}}
+MODELS
+cat > "$TMP/native-researcher" <<'STUB'
+#!/usr/bin/env bash
+final=""; prev=""
+for a in "$@"; do [ "$prev" = "--final" ] && final="$a"; prev="$a"; done
+[ -z "${NATIVE_SKIP_FINAL:-}" ] && printf 'the native answer
+' > "$final"
+[ -z "${NATIVE_QUIET:-}" ] && printf 'streamed transcript
+'
+exit 0
+STUB
+chmod +x "$TMP/native-researcher"
+native_research() {
+  NATIVE_RC=0
+  env -u DEV_TRIO_RESEARCHER_MODEL -u RESEARCHER_CLI -u AGY_CLI \
+    AGENT_TEAM=review-test TMUX='' DEV_TRIO_LOG_DIR="$TMP/log" \
+    AGENT_TEAM_MODELS_CONFIG="$TMP/models.json" \
+    DEV_TRIO_RESEARCHER_MODEL=native-researcher \
+    NATIVE_RESEARCHER_CLI="$TMP/native-researcher" "$@" \
+    "$ROOT/dev-trio/bin/ask-researcher.sh" 'native question' \
+    < /dev/null > "$TMP/native.out" 2> "$TMP/native.err" || NATIVE_RC=$?
+  NATIVE_LOG="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-agy.log")"
+  NATIVE_RUN="${NATIVE_LOG%.log}.run.json"
+}
+native_research
+check 'native capture succeeds' test "$NATIVE_RC" -eq 0
+check 'native capture is recorded as native' json_is "$NATIVE_RUN" '.final_source=="native" and .completion.exit_code==0'
+check 'native answer artifact holds the answer' grep -q 'the native answer' "${NATIVE_LOG%.log}.final.md"
+# ralph-trio and spec-trio inject the wrapper's STDOUT, so the answer — not the
+# CLI's streamed transcript — has to be what comes out of it.
+check 'callers receive the answer on stdout' grep -q 'the native answer' "$TMP/native.out"
+check 'callers do not receive the transcript as an answer' no_match 'streamed transcript' "$TMP/native.out"
+check 'the transcript is still in the log' grep -q 'streamed transcript' "$NATIVE_LOG"
+# A CLI that says nothing on stdout but writes a valid answer has answered.
+# The artifact decides, and only registry_run_answer can say so — it alone
+# still holds the CLI's own exit status.
+native_research NATIVE_QUIET=1
+check 'a silent CLI with a native answer succeeds' test "$NATIVE_RC" -eq 0
+check 'its answer still reaches the caller' grep -q 'the native answer' "$TMP/native.out"
+check 'its run is recorded as successful' json_is "$NATIVE_RUN" '.completion.exit_code==0'
+native_research NATIVE_SKIP_FINAL=1
+check 'a missing native answer is an empty answer' test "$NATIVE_RC" -eq 5
+check 'a missing native answer is recorded as such' \
+  json_is "$NATIVE_RUN" '.completion.exit_code==5'
+# A failed invocation stays failed: this wrapper cannot tell a CLI that chose to
+# exit 5 from the registry's own empty-stdout 5, so a file on disk must not
+# promote either one to success.
+cat > "$TMP/native-fail" <<'STUB'
+#!/usr/bin/env bash
+final=""; prev=""
+for a in "$@"; do [ "$prev" = "--final" ] && final="$a"; prev="$a"; done
+printf 'an answer that should not rescue the exit code\n' > "$final"
+exit 5
+STUB
+chmod +x "$TMP/native-fail"
+NATIVE_RC=0
+env -u DEV_TRIO_RESEARCHER_MODEL AGENT_TEAM=review-test TMUX='' DEV_TRIO_LOG_DIR="$TMP/log" \
+  AGENT_TEAM_MODELS_CONFIG="$TMP/models.json" DEV_TRIO_RESEARCHER_MODEL=native-researcher \
+  NATIVE_RESEARCHER_CLI="$TMP/native-fail" \
+  "$ROOT/dev-trio/bin/ask-researcher.sh" 'failing question' \
+  < /dev/null > "$TMP/native-fail.out" 2>&1 || NATIVE_RC=$?
+check 'a failed invocation with an answer file still fails' test "$NATIVE_RC" -eq 5
+FAIL_RUN="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-agy.log")"
+check 'the failure is recorded, not the file' json_is "${FAIL_RUN%.log}.run.json" '.completion.exit_code==5'
+
+# The reader takes a file, not the first document in one.
+VALID_RUN=$(cat "$AGY_RUN")
+printf '%s\n{}\n' "$VALID_RUN" > "$TMP/two-docs.run.json"
+check 'a second appended document is not readable as the first' \
+  no_runstate_read "$TMP/two-docs.run.json"
+printf '%s' "$VALID_RUN" | jq -c '.inputs=[7]' > "$TMP/bad-inputs.run.json"
+check 'inputs that are not records are rejected' no_runstate_read "$TMP/bad-inputs.run.json"
+printf '%s' "$VALID_RUN" | jq -c 'del(.completion)' > "$TMP/no-completion.run.json"
+check 'metadata with no completion field is rejected' no_runstate_read "$TMP/no-completion.run.json"
+
 printf 'review-result smoke: %s assertions passed\n' "$PASS"
