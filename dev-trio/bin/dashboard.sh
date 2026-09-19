@@ -2,11 +2,20 @@
 # dashboard.sh — live, formatted summary view of researcher/reviewer runs.
 #
 # Usage:
-#   dashboard.sh agy       # render researcher status
-#   dashboard.sh codex     # render reviewer status
+#   dashboard.sh agy            # render researcher status
+#   dashboard.sh codex          # render reviewer status
+#   dashboard.sh codex --once   # render one frame and exit (tests, scripts)
 #
 # `agy` and `codex` are compatibility identifiers for the two log channels
-# (agy-*.log, codex-*.log), not the model that runs — the header shows that.
+# (agy-*.log, codex-*.log), not the model that runs — any CLI can fill any role
+# via the registry, and the header shows the model this run actually used.
+#
+# Every rendered value comes from the run's *.run.json (lib/runstate.sh) and
+# *.review.json (lib/review-result.sh), both written by the wrapper. This
+# script never parses the log body: the log interleaves the wrapper's framing
+# with untrusted text, so a focus or a model response could otherwise forge the
+# model, the start time or the completion state. A log with no run metadata
+# beside it is rendered as `legacy` — named, not guessed at.
 #
 # Run this in a side tmux pane. Re-renders only when the source log changes
 # (no flicker), and shows distilled key points — the full raw output stays
@@ -25,29 +34,38 @@ PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$PLUGIN_ROOT/lib/namespace.sh" || exit 2
 # shellcheck source=../lib/review-result.sh
 . "$PLUGIN_ROOT/lib/review-result.sh" || exit 2
+# shellcheck source=../lib/runstate.sh
+. "$PLUGIN_ROOT/lib/runstate.sh" || exit 2
 
-ROLE="${1:?usage: $0 agy|codex}"
+ROLE="${1:?usage: $0 agy|codex [--once]}"
+shift
+ONCE=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --once) ONCE=1; shift ;;
+    *) echo "usage: $0 agy|codex [--once]" >&2; exit 2 ;;
+  esac
+done
 
 case "$ROLE" in
   agy)
     ICON="🔍"; TITLE="Researcher"
-    WRAPPER="ask-researcher.sh"; WRAPPER_LEGACY="ask-agy.sh"
     HEADER_COLOR=$'\033[1;36m'   # bright cyan
     LABEL="Query"
     ;;
   codex)
     ICON="🧐"; TITLE="Reviewer"
-    WRAPPER="ask-reviewer.sh"; WRAPPER_LEGACY="ask-codex.sh"
     HEADER_COLOR=$'\033[1;35m'   # bright magenta
     LABEL="Focus"
     ;;
   *)
-    echo "usage: $0 agy|codex" >&2; exit 2 ;;
+    echo "usage: $0 agy|codex [--once]" >&2; exit 2 ;;
 esac
 
 # Team namespace — must match what wrappers use.
 TEAM=$(agent_team_detect_team) || exit 2
 LOG_DIR="${DEV_TRIO_LOG_DIR:-$PWD/.dev-trio/log}/$TEAM"
+case "$LOG_DIR" in /*) ;; *) LOG_DIR="$PWD/$LOG_DIR" ;; esac
 LATEST="$LOG_DIR/latest-$ROLE.log"
 
 RESET=$'\033[0m'
@@ -56,10 +74,70 @@ BOLD=$'\033[1m'
 GREEN=$'\033[1;32m'
 YELLOW=$'\033[1;33m'
 RED=$'\033[1;31m'
+GUTTER='│'   # untrusted text is rendered behind this, never bare
+
+# Byte and character policy for everything that originates in a model, in the
+# user's own input, or in a filename. In order: drop invalid UTF-8 (which also
+# repairs a partial character left by a byte-level cut), drop every C0 control
+# and DEL except tab and newline, then drop the UTF-8 encodings of the C1
+# controls U+0080-U+009F, which are valid UTF-8 and so pass iconv untouched.
+#
+# Only \011 (tab) and \012 (newline) survive. ESC (\033) is the obvious one to
+# remove, but carriage return (\015) matters just as much: it returns the cursor
+# to column 0, so a line of model text can be written over the gutter and over
+# whatever this script printed before it.
+_scrub() {
+  iconv -c -f UTF-8 -t UTF-8 2>/dev/null \
+    | LC_ALL=C tr -d '\000-\010\013-\037\177' \
+    | LC_ALL=C sed $'s/\302[\200-\237]//g'
+}
+
+# sanitize_line <max-chars> — a value rendered inside one of our own lines.
+# Newlines and tabs go too: such a value must not be able to fabricate a second
+# rendered line that looks like a dashboard field.
+sanitize_line() {
+  local max="$1" out
+  out=$(_scrub | LC_ALL=C tr -d '\011\012' | head -c $((max * 4)) | iconv -c -f UTF-8 -t UTF-8 2>/dev/null)
+  out=$(printf '%s' "$out" | fold -w "$max" | head -1)
+  printf '%s' "$out"
+}
+
+# sanitize_block — a multi-line value; newlines survive, controls do not.
+# Callers render the result behind $GUTTER.
+ANSWER_SCAN_KB=64
+ANSWER_SCAN_BYTES=$((ANSWER_SCAN_KB * 1024))
+sanitize_block() {
+  head -c "$ANSWER_SCAN_BYTES" | _scrub
+}
+
+# The team name and the log root come from the environment ($AGENT_TEAM,
+# $DEV_TRIO_LOG_DIR), which this process does not own, and both are rendered.
+# namespace.sh validates the team; nothing validates the log root, and this
+# script is not the place to decide which env values were checked elsewhere —
+# so both go through the same containment as model text.
+LOG_DIR_REAL=$(cd "$LOG_DIR" 2>/dev/null && pwd -P) || LOG_DIR_REAL="$LOG_DIR"
+TEAM_SHOWN=$(printf '%s' "$TEAM" | sanitize_line 48)
+LATEST_SHOWN=$(printf '%s' "$LATEST" | sanitize_line 120)
 
 cleanup() { printf '\033[?25h\033[H\033[2J'; exit 0; }   # show cursor + clear
 trap cleanup INT TERM
-printf '\033[?25l'   # hide cursor
+[ "$ONCE" = "1" ] || printf '\033[?25l'   # hide cursor
+
+# A frame is rebuilt on every poll, so the inputs it parses are bounded rather
+# than the output alone. Anything larger is named, not loaded.
+MAX_DOC_BYTES=$((1024 * 1024))
+
+# read_bounded <path> <limit> — echo the file's bytes, or fail if it is not a
+# regular file or exceeds the limit. Checking a size and then reopening the path
+# would let the file be replaced or grown in between, and would happily block on
+# a named pipe; this reads limit+1 bytes from one open and judges what it got.
+read_bounded() {
+  local path="$1" limit="$2" content
+  [ -f "$path" ] && [ -r "$path" ] || return 1
+  content=$(head -c $((limit + 1)) < "$path" 2>/dev/null) || return 1
+  [ "${#content}" -le "$limit" ] || return 2
+  printf '%s' "$content"
+}
 
 get_wrap_width() {
   local c
@@ -68,8 +146,29 @@ get_wrap_width() {
   echo $((c - 6))
 }
 
+# append_block <indent> <text> <max-lines> — fold and emit untrusted text behind
+# the gutter, marking truncation rather than silently dropping the rest.
+append_block() {
+  local indent="$1" text="$2" max_lines="$3"
+  local wrapped total shown line
+  wrapped=$(printf '%s\n' "$text" | fold -s -w $((WRAP_W - 2)))
+  total=$(printf '%s\n' "$wrapped" | wc -l | tr -d ' ')
+  shown=0
+  while IFS= read -r line; do
+    shown=$((shown + 1))
+    [ "$shown" -gt "$max_lines" ] && break
+    BUF+="${indent}${DIM}${GUTTER}${RESET} ${line}"$'\n'
+  done <<< "$wrapped"
+  if [ "$total" -gt "$max_lines" ]; then
+    BUF+="${indent}${DIM}${GUTTER} … $((total - max_lines)) more line(s) not shown${RESET}"$'\n'
+  fi
+}
+
 LAST_HASH=""
 PAUSED=0
+# A terminal never reaches EOF; any other stdin eventually does. See the poll
+# at the bottom of the loop.
+STDIN_LIVE=1
 
 while true; do
   if [ "$PAUSED" = "0" ]; then
@@ -77,152 +176,267 @@ while true; do
     # Freeze the latest log target for this frame. Every sibling artifact is
     # resolved from this path, never from an independently changing latest link.
     SOURCE="$LATEST"
+    LINK_TARGET=""
     if [ -L "$LATEST" ]; then
-      TARGET=$(readlink "$LATEST" 2>/dev/null) || TARGET=""
-      case "$TARGET" in
-        /*) SOURCE="$TARGET" ;;
-        *) SOURCE="$LOG_DIR/$TARGET" ;;
+      LINK_TARGET=$(readlink "$LATEST" 2>/dev/null) || LINK_TARGET=""
+      case "$LINK_TARGET" in
+        /*) SOURCE="$LINK_TARGET" ;;
+        *) SOURCE="$LOG_DIR/$LINK_TARGET" ;;
       esac
     fi
-    MODEL=""
-    if [ -f "$SOURCE" ]; then
-      MODEL=$(sed -n 's/^=== MODEL: \(.*\) ===$/\1/p' "$SOURCE" | head -1)
+
+    # ── Resolve exactly one state for this frame ────────────────────────────
+    STATE=""
+    STATE_DETAIL=""
+    RUN_JSON=""
+    if [ ! -e "$LATEST" ] && [ ! -L "$LATEST" ]; then
+      STATE="no-link"
+    elif [ ! -e "$SOURCE" ]; then
+      STATE="dangling"
+      STATE_DETAIL=$(printf '%s' "${LINK_TARGET:-$LATEST}" | sanitize_line 80)
+    else
+      RUN_PATH="$(runstate_path "$SOURCE")"
+      RUN_RAW=""
+      RUN_READ_RC=0
+      if [ -e "$RUN_PATH" ]; then
+        RUN_RAW=$(read_bounded "$RUN_PATH" "$MAX_DOC_BYTES") || RUN_READ_RC=$?
+      fi
+      if [ ! -e "$RUN_PATH" ]; then
+        STATE="legacy"
+      elif [ "$RUN_READ_RC" = "2" ]; then
+        # Bound the input before it is parsed, not after: everything below holds
+        # whole documents in shell variables and re-parses them every poll.
+        STATE="oversized"
+        STATE_DETAIL="run metadata"
+      elif [ "$RUN_READ_RC" != "0" ]; then
+        STATE="unreadable"
+      elif ! RUN_JSON=$(printf '%s' "$RUN_RAW" | runstate_read -); then
+        STATE="unreadable"
+        RUN_JSON=""
+      else
+        RUN_CHANNEL=$(printf '%s\n' "$RUN_JSON" | jq -r '.channel')
+        RUN_TEAM=$(printf '%s\n' "$RUN_JSON" | jq -r '.team')
+        RUN_LOG=$(printf '%s\n' "$RUN_JSON" | jq -r '.log_path')
+        # The metadata must describe *this* log. A valid run.json belonging to
+        # another invocation in the same directory is a mismatch, not a frame.
+        SOURCE_DIR=$(cd "$(dirname "$SOURCE")" 2>/dev/null && pwd -P) || SOURCE_DIR=""
+        RUN_LOG_DIR=$(cd "$(dirname "$RUN_LOG")" 2>/dev/null && pwd -P) || RUN_LOG_DIR=""
+        if [ -z "$SOURCE_DIR" ] || [ "$SOURCE_DIR" != "$LOG_DIR_REAL" ]; then
+          # A latest link may only name a run inside this team's directory.
+          # Matching a team string is not containment: another directory can
+          # carry the same team name in its metadata.
+          STATE="mismatch"
+          STATE_DETAIL="log is outside the team directory"
+        elif [ "$RUN_LOG_DIR" != "$LOG_DIR_REAL" ]; then
+          STATE="mismatch"
+          STATE_DETAIL="metadata names a log outside the team directory"
+        elif [ "$RUN_CHANNEL" != "$ROLE" ]; then
+          STATE="mismatch"
+          STATE_DETAIL="channel $(printf '%s' "$RUN_CHANNEL" | sanitize_line 24) != $ROLE"
+        elif [ "$RUN_TEAM" != "$TEAM" ]; then
+          STATE="mismatch"
+          STATE_DETAIL="team $(printf '%s' "$RUN_TEAM" | sanitize_line 40) != $TEAM"
+        elif [ ! "$RUN_LOG" -ef "$SOURCE" ] 2>/dev/null; then
+          STATE="mismatch"
+          STATE_DETAIL="metadata names another log: $(basename "$RUN_LOG" | sanitize_line 60)"
+        elif [ "$(printf '%s\n' "$RUN_JSON" | jq -r 'if (.completion // null) == null then "run" else "done" end')" = "run" ]; then
+          STATE="running"
+        else
+          STATE="done"
+        fi
+      fi
     fi
+
+    MODEL=""
+    if [ -n "$RUN_JSON" ]; then
+      MODEL=$(printf '%s\n' "$RUN_JSON" | jq -r '.model' | sanitize_line 40)
+    fi
+
     BUF=""
     BUF+="${HEADER_COLOR}═══════════════════════════════════════════════${RESET}"$'\n'
-    BUF+="${HEADER_COLOR}  ${ICON}  ${TITLE}${MODEL:+ · $MODEL}${RESET}  ${DIM}[team: ${TEAM}]${RESET}"$'\n'
+    BUF+="${HEADER_COLOR}  ${ICON}  ${TITLE}${MODEL:+ · $MODEL}${RESET}  ${DIM}[team: ${TEAM_SHOWN}]${RESET}"$'\n'
     BUF+="${HEADER_COLOR}═══════════════════════════════════════════════${RESET}"$'\n\n'
 
-    if [ ! -e "$SOURCE" ]; then
-      BUF+="  ${DIM}(no runs yet — waiting for first call)${RESET}"$'\n'
-      BUF+="  ${DIM}path: $LATEST${RESET}"$'\n\n'
-    else
-      # The wrapper writes its authoritative header as the log's first line,
-      # one run per file — so read that line and match it literally, rather
-      # than searching the body where research context can quote a header.
-      # The legacy spelling is accepted so logs written by a pre-0.7.0
-      # dev-trio still render a start time.
-      HEADER=$(head -1 "$SOURCE" 2>/dev/null)
-      TS=""
-      case "$HEADER" in
-        "=== $WRAPPER @ "*|"=== $WRAPPER_LEGACY @ "*)
-          TS=$(printf '%s\n' "$HEADER" | awk '{print $4}') ;;
-      esac
-      BUF+="  ${BOLD}Started:${RESET} ${TS:-unknown}"$'\n\n'
+    case "$STATE" in
+      no-link)
+        BUF+="  ${DIM}(no runs yet — waiting for first call)${RESET}"$'\n'
+        BUF+="  ${DIM}path: $LATEST_SHOWN${RESET}"$'\n\n'
+        ;;
+      dangling)
+        BUF+="  ${YELLOW}latest link points at a missing log${RESET}"$'\n'
+        BUF+="  ${DIM}target: ${STATE_DETAIL}${RESET}"$'\n\n'
+        ;;
+      oversized)
+        BUF+="  ${YELLOW}${STATE_DETAIL} is too large to render safely${RESET}"$'\n'
+        BUF+="  ${DIM}open the files directly; the dashboard will not load them${RESET}"$'\n\n'
+        ;;
+      unreadable)
+        BUF+="  ${YELLOW}run metadata unreadable — this run cannot be described${RESET}"$'\n'
+        BUF+="  ${DIM}file: $(basename "$(runstate_path "$SOURCE")" | sanitize_line 60)${RESET}"$'\n\n'
+        ;;
+      mismatch)
+        BUF+="  ${YELLOW}run metadata does not describe this log${RESET}"$'\n'
+        BUF+="  ${DIM}${STATE_DETAIL}${RESET}"$'\n\n'
+        ;;
+      legacy)
+        # No metadata: the only trustworthy value left is the path itself, so
+        # take the start time from the filename stem and claim nothing else.
+        REAL=$(basename "$SOURCE")
+        TS=""
+        case "$REAL" in
+          "$ROLE"-*.log)
+            TS="${REAL#"$ROLE"-}"
+            TS="${TS%.log}"
+            ;;
+        esac
+        BUF+="  ${BOLD}Started:${RESET} $(printf '%s' "${TS:-unknown}" | sanitize_line 40)"$'\n'
+        BUF+="  ${DIM}(legacy log — no run metadata; model, ${LABEL} and completion unavailable)${RESET}"$'\n\n'
+        ;;
+      running|done)
+        TS=$(printf '%s\n' "$RUN_JSON" | jq -r '.started_display' | sanitize_line 40)
+        BUF+="  ${BOLD}Started:${RESET} ${TS}"$'\n\n'
 
-      # Query/Focus body
-      if [ "$ROLE" = "agy" ]; then
-        BODY=$(awk '/^=== QUERY ===$/{flag=1; next} /^=== /{flag=0} flag' "$SOURCE" 2>/dev/null)
-      else
-        BODY=$(awk '/^=== FOCUS ===$/{flag=1; next} /^=== /{flag=0} flag' "$SOURCE" 2>/dev/null)
-      fi
-      BUF+="  ${BOLD}${LABEL}:${RESET}"$'\n'
-      if [ -n "$BODY" ]; then
-        WRAPPED=$(echo "$BODY" | fold -s -w "$WRAP_W" | head -5)
-        while IFS= read -r line; do BUF+="    $line"$'\n'; done <<< "$WRAPPED"
-      fi
-      BUF+=$'\n'
-
-      RESPONSE=""
-      RESULT_JSON=""
-      if [ "$ROLE" = "agy" ]; then
-        RESPONSE=$(awk '/^=== RESPONSE ===$/{flag=1; next} /^=== END /{flag=0} flag' "$SOURCE" 2>/dev/null)
-      fi
-
-      # Status (END marker = done)
-      DONE=0; RC=""
-      if grep -q '^=== END ' "$SOURCE" 2>/dev/null; then
-        DONE=1
-        RC=$(grep '^=== END ' "$SOURCE" | tail -1 | sed 's/.*rc=\([0-9]*\).*/\1/')
-        # END is published after the result; read in that order to avoid a
-        # transient missing-result frame when completion races this refresh.
-        if [ "$ROLE" = "codex" ]; then
-          RESULT_JSON=$(review_result_read "${SOURCE%.log}.review.json") || RESULT_JSON=""
+        BODY=$(printf '%s\n' "$RUN_JSON" \
+          | jq -r '(.inputs // []) | map(select(.kind == "focus" or .kind == "question")) | .[0].value // ""' \
+          | sanitize_block)
+        BUF+="  ${BOLD}${LABEL}:${RESET}"$'\n'
+        if [ -n "$BODY" ]; then
+          append_block "    " "$BODY" 5
         fi
-        if [ "$ROLE" = "codex" ] && [ -n "$RESULT_JSON" ]; then
-          RC=$(printf '%s\n' "$RESULT_JSON" | jq -r '.exit_code')
-        fi
-        if [ "$RC" = "0" ]; then
-          BUF+="  ${BOLD}Status:${RESET} ${GREEN}✓ done${RESET}"$'\n\n'
-        else
-          BUF+="  ${BOLD}Status:${RESET} ${RED}✗ failed (rc=$RC)${RESET}"$'\n\n'
-        fi
-      else
-        BUF+="  ${BOLD}Status:${RESET} ${YELLOW}⏳ running...${RESET}"$'\n\n'
-      fi
-
-      # ── Role-specific summary ────────────────────────────────────────────
-      if [ "$ROLE" = "agy" ] && [ "$DONE" = "1" ]; then
-        # Lead: first paragraph of answer (skip Antigravity CLI preamble lines)
-        LEAD=$(echo "$RESPONSE" | awk '
-          BEGIN { started=0 }
-          /^Ripgrep|^Falling back/ { next }
-          /^[^[:space:]]/ {
-            if (!started) started=1
-            if (started) print
-          }
-          started && /^$/ { exit }
-        ')
-        if [ -n "$LEAD" ]; then
-          BUF+="  ${BOLD}Answer (lead):${RESET}"$'\n'
-          WRAPPED=$(echo "$LEAD" | fold -s -w "$WRAP_W" | head -8)
+        REFS=$(printf '%s\n' "$RUN_JSON" \
+          | jq -r '(.inputs // []) | map(select(.path != null)) | .[] | "\(.kind): \(.path)"' 2>/dev/null)
+        if [ -n "$REFS" ]; then
+          shown=0
           while IFS= read -r line; do
-            BUF+="    ${line}"$'\n'
-          done <<< "$WRAPPED"
-          BUF+=$'\n'
-        fi
-
-        # Source count (URLs cited)
-        SRC_COUNT=$(echo "$RESPONSE" | grep -cE 'https?://' || true)
-        SRC_COUNT=${SRC_COUNT//[^0-9]/}; SRC_COUNT=${SRC_COUNT:-0}
-        BUF+="  ${BOLD}Sources cited:${RESET} ${SRC_COUNT}"$'\n\n'
-
-      elif [ "$ROLE" = "codex" ] && [ "$DONE" = "1" ]; then
-        if [ -z "$RESULT_JSON" ]; then
-          BUF+="  ${YELLOW}Review result unavailable — verdict and findings unknown.${RESET}"$'\n'
-        elif [ "$(printf '%s\n' "$RESULT_JSON" | jq -r '.status')" != "ok" ]; then
-          ERROR=$(printf '%s\n' "$RESULT_JSON" | jq -r '.error')
-          BUF+="  ${RED}Review failed: $ERROR${RESET}"$'\n'
-        else
-          VERDICT_LINE=$(printf '%s\n' "$RESULT_JSON" | jq -r '.verdict_line')
-          VERB=$(printf '%s\n' "$RESULT_JSON" | jq -r '.verdict')
-          case "$VERB" in
-            SHIP) VC="$GREEN" ;;
-            NEEDS-FIX|OUT-OF-SCOPE) VC="$RED" ;;
-            DISCUSS) VC="$YELLOW" ;;
-          esac
-          VWRAP=$(printf '%s\n' "$VERDICT_LINE" | fold -s -w $((WRAP_W - 8)))
-          FIRST=1
-          while IFS= read -r line; do
-            if [ "$FIRST" = "1" ]; then
-              BUF+="  ${VC}┃${RESET} ${BOLD}Verdict:${RESET} $line"$'\n'
-              FIRST=0
-            else
-              BUF+="  ${VC}┃${RESET}   $line"$'\n'
+            [ -z "$line" ] && continue
+            shown=$((shown + 1))
+            if [ "$shown" -gt 6 ]; then
+              BUF+="    ${DIM}+ … more referenced files${RESET}"$'\n'
+              break
             fi
-          done <<< "$VWRAP"
-          BUF+=$'\n'
-          BL=$(printf '%s\n' "$RESULT_JSON" | jq -r '.findings.blocker | if . == null then "?" else length end')
-          MJ=$(printf '%s\n' "$RESULT_JSON" | jq -r '.findings.major | if . == null then "?" else length end')
-          MN=$(printf '%s\n' "$RESULT_JSON" | jq -r '.findings.minor | if . == null then "?" else length end')
-          BUF+="  ${BOLD}Findings:${RESET} ${RED}${BL} blocker${RESET} · ${YELLOW}${MJ} major${RESET} · ${DIM}${MN} minor${RESET}"$'\n\n'
-          if [ "$BL" = "?" ] || [ "$MJ" = "?" ] || [ "$MN" = "?" ]; then
-            BUF+="  ${DIM}? = section missing; count unknown${RESET}"$'\n'
-          fi
-          BLMJ=$(printf '%s\n' "$RESULT_JSON" | jq -r '((.findings.blocker // []) + (.findings.major // []))[]')
-          if [ -n "$BLMJ" ]; then
-            BUF+="  ${BOLD}${RED}Blockers + Major:${RESET}"$'\n'
-            WRAPPED=$(printf '%s\n' "$BLMJ" | fold -s -w "$WRAP_W")
-            while IFS= read -r line; do
-              [ -n "$line" ] && BUF+="    $line"$'\n'
-            done <<< "$WRAPPED"
-            BUF+=$'\n'
+            BUF+="    ${DIM}+ $(printf '%s' "$line" | sanitize_line $((WRAP_W - 6)))${RESET}"$'\n'
+          done <<< "$REFS"
+        fi
+        BUF+=$'\n'
+
+        if [ "$STATE" = "running" ]; then
+          BUF+="  ${BOLD}Status:${RESET} ${YELLOW}⏳ running — no completion recorded yet${RESET}"$'\n\n'
+        else
+          RC=$(printf '%s\n' "$RUN_JSON" | jq -r '.completion.exit_code')
+          REASON=$(printf '%s\n' "$RUN_JSON" | jq -r '.completion.reason // "ok"' | sanitize_line 40)
+          if [ "$RC" = "0" ]; then
+            BUF+="  ${BOLD}Status:${RESET} ${GREEN}✓ done${RESET}"$'\n\n'
+          else
+            BUF+="  ${BOLD}Status:${RESET} ${RED}✗ failed (rc=$RC)${RESET}"
+            [ "$REASON" = "ok" ] || BUF+=" ${DIM}(${REASON})${RESET}"
+            BUF+=$'\n\n'
           fi
         fi
-      fi
 
-      REAL=$(basename "$SOURCE")
-      BUF+="  ${DIM}log: $REAL${RESET}"$'\n'
+        # ── Role-specific summary ──────────────────────────────────────────
+        # The metadata is trusted to describe its own run, not to point the
+        # dashboard at arbitrary files: only this log's own siblings are read.
+        STEM="${SOURCE%.log}"
+        FINAL_PATH=$(printf '%s\n' "$RUN_JSON" | jq -r '.final_path // ""')
+        RESULT_PATH=$(printf '%s\n' "$RUN_JSON" | jq -r '.result_path // ""')
+        [ "$FINAL_PATH"  = "$STEM.final.md" ]   || FINAL_PATH=""
+        [ "$RESULT_PATH" = "$STEM.review.json" ] || RESULT_PATH=""
+
+        if [ "$ROLE" = "agy" ] && [ "$STATE" = "done" ]; then
+          ANSWER=""
+          ANSWER_PARTIAL=0
+          if [ -n "$FINAL_PATH" ] && [ -f "$FINAL_PATH" ] && [ -r "$FINAL_PATH" ]; then
+            ANSWER_RAW=$(read_bounded "$FINAL_PATH" "$ANSWER_SCAN_BYTES") || ANSWER_PARTIAL=$?
+            if [ "$ANSWER_PARTIAL" = "2" ]; then
+              ANSWER_PARTIAL=1
+              ANSWER_RAW=$(head -c "$ANSWER_SCAN_BYTES" < "$FINAL_PATH" 2>/dev/null) || ANSWER_RAW=""
+            else
+              ANSWER_PARTIAL=0
+            fi
+            ANSWER=$(printf '%s' "$ANSWER_RAW" | sanitize_block)
+          fi
+          if [ -z "$ANSWER" ]; then
+            BUF+="  ${YELLOW}No answer captured — see the full log.${RESET}"$'\n'
+            BUF+="  ${BOLD}Sources cited:${RESET} —"$'\n\n'
+          else
+            # Lead: the answer's first non-empty paragraph, as written.
+            LEAD=$(printf '%s\n' "$ANSWER" | awk '
+              /[^[:space:]]/ { started=1; print; next }
+              started { exit }
+            ')
+            if [ -n "$LEAD" ]; then
+              BUF+="  ${BOLD}Answer (lead):${RESET}"$'\n'
+              append_block "    " "$LEAD" 8
+              BUF+=$'\n'
+            fi
+            # Distinct citations, not lines containing a URL: two links on one
+            # line are two, and the same link twice is one.
+            SRC_COUNT=$(printf '%s\n' "$ANSWER" \
+              | grep -oE 'https?://[^[:space:]<>")'"'"']+' \
+              | sed 's/[.,;:)]*$//' \
+              | sort -u | grep -c . )
+            SRC_COUNT=${SRC_COUNT//[^0-9]/}; SRC_COUNT=${SRC_COUNT:-0}
+            if [ "$ANSWER_PARTIAL" = "1" ]; then
+              BUF+="  ${BOLD}Sources cited:${RESET} ${SRC_COUNT} unique ${DIM}(first ${ANSWER_SCAN_KB}KB only)${RESET}"$'\n\n'
+            else
+              BUF+="  ${BOLD}Sources cited:${RESET} ${SRC_COUNT} unique"$'\n\n'
+            fi
+          fi
+
+        elif [ "$ROLE" = "codex" ] && [ "$STATE" = "done" ]; then
+          RESULT_JSON=""
+          if [ -n "$RESULT_PATH" ] && RESULT_RAW=$(read_bounded "$RESULT_PATH" "$MAX_DOC_BYTES"); then
+            RESULT_JSON=$(printf '%s' "$RESULT_RAW" | review_result_read /dev/stdin) || RESULT_JSON=""
+          fi
+          if [ -z "$RESULT_JSON" ]; then
+            BUF+="  ${YELLOW}Review result unavailable — verdict and findings unknown.${RESET}"$'\n'
+          elif [ "$(printf '%s\n' "$RESULT_JSON" | jq -r '.status')" != "ok" ]; then
+            ERROR=$(printf '%s\n' "$RESULT_JSON" | jq -r '.error' | sanitize_line $((WRAP_W - 18)))
+            BUF+="  ${RED}Review failed: $ERROR${RESET}"$'\n'
+          else
+            VERDICT_LINE=$(printf '%s\n' "$RESULT_JSON" | jq -r '.verdict_line' | sanitize_block)
+            VERB=$(printf '%s\n' "$RESULT_JSON" | jq -r '.verdict' | sanitize_line 16)
+            VC="$DIM"
+            case "$VERB" in
+              SHIP) VC="$GREEN" ;;
+              NEEDS-FIX|OUT-OF-SCOPE) VC="$RED" ;;
+              DISCUSS) VC="$YELLOW" ;;
+            esac
+            VWRAP=$(printf '%s\n' "$VERDICT_LINE" | fold -s -w $((WRAP_W - 8)) | head -6)
+            FIRST=1
+            while IFS= read -r line; do
+              if [ "$FIRST" = "1" ]; then
+                BUF+="  ${VC}┃${RESET} ${BOLD}Verdict:${RESET} $line"$'\n'
+                FIRST=0
+              else
+                BUF+="  ${VC}┃${RESET}   $line"$'\n'
+              fi
+            done <<< "$VWRAP"
+            BUF+=$'\n'
+            BL=$(printf '%s\n' "$RESULT_JSON" | jq -r '.findings.blocker | if . == null then "?" else length end')
+            MJ=$(printf '%s\n' "$RESULT_JSON" | jq -r '.findings.major | if . == null then "?" else length end')
+            MN=$(printf '%s\n' "$RESULT_JSON" | jq -r '.findings.minor | if . == null then "?" else length end')
+            BUF+="  ${BOLD}Findings:${RESET} ${RED}${BL} blocker${RESET} · ${YELLOW}${MJ} major${RESET} · ${DIM}${MN} minor${RESET}"$'\n\n'
+            if [ "$BL" = "?" ] || [ "$MJ" = "?" ] || [ "$MN" = "?" ]; then
+              BUF+="  ${DIM}? = section missing; count unknown${RESET}"$'\n'
+            fi
+            BLMJ=$(printf '%s\n' "$RESULT_JSON" \
+              | jq -r '((.findings.blocker // []) + (.findings.major // []))[]' \
+              | sanitize_block)
+            if [ -n "$BLMJ" ]; then
+              BUF+="  ${BOLD}${RED}Blockers + Major:${RESET}"$'\n'
+              append_block "    " "$BLMJ" 40
+              BUF+=$'\n'
+            fi
+          fi
+        fi
+
+        BUF+="  ${DIM}log: $(basename "$SOURCE" | sanitize_line 60)${RESET}"$'\n'
+        ;;
+    esac
+
+    if [ "$STATE" = "legacy" ]; then
+      BUF+="  ${DIM}log: $(basename "$SOURCE" | sanitize_line 60)${RESET}"$'\n'
     fi
 
     # Bottom control hint
@@ -238,9 +452,23 @@ while true; do
     fi
   fi
 
-  # Wait up to 1s for keypress (also serves as the polling cadence).
+  [ "$ONCE" = "1" ] && { printf '\033[?25h'; exit 0; }
+
+  # Wait up to 1s for a keypress (also the polling cadence). On bash 3.2 `read`
+  # returns 1 for a timeout AND for EOF, so the return code cannot tell them
+  # apart — a closed or redirected stdin would spin this loop at full speed.
+  # Decide on the stream instead: a terminal never reaches EOF, and for anything
+  # else an empty failed read means the input is finished, so stop reading it.
   KEY=""
-  IFS= read -rs -t 1 -n 1 KEY 2>/dev/null || true
+  if [ "$STDIN_LIVE" = "1" ]; then
+    if ! IFS= read -rs -t 1 -n 1 KEY 2>/dev/null; then
+      if [ -z "$KEY" ] && [ ! -t 0 ]; then
+        STDIN_LIVE=0
+      fi
+    fi
+  else
+    sleep 1
+  fi
   case "$KEY" in
     l)
       printf '\033[?25h\033[H\033[2J'

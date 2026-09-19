@@ -7,6 +7,7 @@
 #   1. Helpers and resolved role CLIs; Claude login for Codex PM; optional tmux.
 #   2. Plugin layout intact (ask-reviewer.sh / ask-researcher.sh / agent-team-models.sh /
 #      dashboard.sh / team-layout.sh / lib/manifest.sh / lib/registry.sh /
+#      lib/runstate.sh /
 #      lib/roles/*.md / lib/pm.md).
 #   3. Stub-CLI smoke: runs ask-researcher.sh against a tmp stub matching
 #      `agy -p "$2"` shape (with an isolated empty models config so the
@@ -77,7 +78,8 @@ echo
 echo "2. Plugin layout"
 for rel in bin/ask-reviewer.sh bin/ask-researcher.sh bin/agent-team-models.sh \
            bin/dashboard.sh bin/team-layout.sh \
-           lib/manifest.sh lib/registry.sh lib/host.sh lib/pm.md lib/pm-codex.md \
+           lib/manifest.sh lib/registry.sh lib/runstate.sh lib/host.sh \
+           lib/pm.md lib/pm-codex.md \
            lib/roles/researcher.md lib/roles/reviewer.md; do
   p="$PLUGIN_ROOT/$rel"
   if [ -f "$p" ]; then ok "$rel"
