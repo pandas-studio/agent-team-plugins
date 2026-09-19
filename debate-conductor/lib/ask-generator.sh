@@ -26,6 +26,8 @@ _REGISTRY_LIB="$SCRIPT_DIR/registry.sh"
 unset _REGISTRY_LIB
 # shellcheck source=host.sh
 . "$SCRIPT_DIR/host.sh"
+# shellcheck source=answer.sh
+. "$SCRIPT_DIR/answer.sh"
 
 TEAM=$(agent_team_detect_team) || exit 2
 LOG_BASE="${DEBATE_LOG_DIR:-$PWD/.debate-conductor/log}"
@@ -102,17 +104,17 @@ ln -sfn "gen-$TS.log" "$LOG_DIR/latest-gen.log"
 } > "$LOG"
 
 echo "[ask-generator] running ($MODEL) — monitor: tail -F $LOG_DIR/latest-gen.log" >&2
-# Force line-buffered stdio so output streams line-by-line through the pipeline
-# instead of being held in libc's full-buffer until generation completes.
-# Affects every stage (model CLI, tee, downstream sed/tee in debate.sh).
-LINEBUF=""
-command -v stdbuf >/dev/null 2>&1 && LINEBUF='stdbuf -oL'
-RC=0
-# The registry expands the model's argv template (e.g. agy -> `-p {prompt}`,
-# codex -> `exec --skip-git-repo-check {prompt}`) and resolves the binary:
-# GENERATOR_CLI legacy override > model env_command (AGY_CLI/...) > model command.
-REGISTRY_CMD_OVERRIDE="${GENERATOR_CLI:-}" registry_run_answer "$MODEL" "$PROMPT" 2>&1 | $LINEBUF tee -a "$LOG" || RC=$?
-printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG"
-echo
+# Only answer bytes go to stdout and the ordinary role log.
+RAW_LOG=""
+[ "${DEBATE_RAW_LOG:-0}" != 1 ] || RAW_LOG="$LOG_DIR/gen-$TS.raw.log"
+set +e
+REGISTRY_CMD_OVERRIDE="${GENERATOR_CLI:-}" debate_run_answer "$MODEL" "$PROMPT" "$RAW_LOG" | tee -a "$LOG"
+STATUSES=("${PIPESTATUS[@]}")
+set -e
+RC=${STATUSES[0]}
+if [ "$RC" -eq 0 ] && [ "${STATUSES[1]}" -ne 0 ]; then RC=6; fi
+if ! printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG"; then
+  [ "$RC" -ne 0 ] || RC=6
+fi
 echo "(log: $LOG, rc=$RC, model=$MODEL)" >&2
 exit "$RC"

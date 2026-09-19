@@ -1,0 +1,33 @@
+hook: PreToolUse
+hook: PreToolUse
+exec
+/bin/zsh -lc "printf TOOL_OUTPUT_SENTINEL" in /fixture/workspace
+TOOL_OUTPUT_SENTINEL
+hook: PostToolUse
+hook: PostToolUse
+hook: PreToolUse
+hook: PreToolUse
+exec
+/bin/zsh -lc "printf TOOL_OUTPUT_SENTINEL" in /fixture/workspace
+TOOL_OUTPUT_SENTINEL
+hook: PostToolUse
+hook: PostToolUse
+hook: PreToolUse
+hook: PreToolUse
+exec
+/bin/zsh -lc "printf TOOL_OUTPUT_SENTINEL" in /fixture/workspace
+TOOL_OUTPUT_SENTINEL
+hook: PostToolUse
+hook: PostToolUse
+hook: PreToolUse
+hook: PreToolUse
+exec
+/bin/zsh -lc "printf TOOL_OUTPUT_SENTINEL" in /fixture/workspace
+TOOL_OUTPUT_SENTINEL
+hook: PostToolUse
+hook: PostToolUse
+codex
+CONSOLE_ANSWER_SENTINEL
+Verdict: STRENGTHEN
+tokens used
+123

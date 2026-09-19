@@ -12,3 +12,7 @@
 .spec-trio/
 .agent-team/
 runtime/.venv/
+
+# Python test and lint artifacts
+__pycache__/
+.ruff_cache/

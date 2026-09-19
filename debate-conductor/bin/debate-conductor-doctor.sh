@@ -78,7 +78,7 @@ for rel in .claude-plugin/plugin.json .codex-plugin/plugin.json \
            bin/debate.sh bin/tail-role.sh bin/team-3pane.sh \
            bin/install-pm.py \
            lib/ask-generator.sh lib/ask-critic.sh lib/pm.md \
-           lib/host.sh lib/index.sh lib/debate-result.sh lib/pm-codex.md \
+           lib/host.sh lib/namespace.sh lib/answer.sh lib/index.sh lib/debate-result.sh lib/pm-codex.md \
            lib/roles/generator.md lib/roles/critic.md \
            claude-skills/bootstrap/SKILL.md claude-skills/run/SKILL.md \
            claude-skills/continue/SKILL.md claude-skills/install-pm/SKILL.md \
@@ -118,9 +118,8 @@ echo "Stub generator draft for the convergence smoke."
 STUB
   chmod +x "$STUB_GEN"
 
-  # Critic stub: invoked as `codex exec --skip-git-repo-check "$PROMPT"`. Args
-  # are ignored; the verdict it emits is driven by $STUB_VERDICT so one stub
-  # drives all three smoke cases.
+  # Critic stub: honor native final capture when requested. The verdict is
+  # driven by $STUB_VERDICT so one stub drives all three smoke cases.
   STUB_CRIT="$TMPDIR_SMOKE/stub-crit.sh"
   cat > "$STUB_CRIT" <<'STUB'
 #!/usr/bin/env bash
@@ -128,6 +127,13 @@ if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ] && [ "${3:-}" = "--json" ]; 
   echo '{"loggedIn": true, "authMethod": "fixture"}'
   exit 0
 fi
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --output-last-message ]; then
+    exec > "$2"
+    break
+  fi
+  shift
+done
 echo "## Verdict"
 case "${STUB_VERDICT:-STRENGTHEN}" in
   STRENGTHEN)

@@ -114,6 +114,13 @@ Generator and Critic resolve through the shared model registry (the [marketplace
 
 `--primary-gen` / `--primary-crit` accept any registered model id (run `agent-team-models list`); generator and critic must differ. With no critic specified, Claude host still defaults to "the other one" (codex unless gen=codex, then agy). Codex host defaults to Claude unless that would duplicate the generator. The legacy `DEBATE_PRIMARY_GEN` env var also keeps working.
 
+For models declaring `final_args`, `GENERATOR_CLI` and `CRITIC_CLI` wrappers
+must forward all arguments to the selected CLI (for example, `exec codex "$@"`).
+Codex receives `--output-last-message <path>` before the prompt. Wrappers that
+assume a fixed prompt position must be updated; a successful CLI exit without
+a native final-answer file fails with rc=5 and an explicit capture diagnostic.
+There is no fallback to console output.
+
 When a `GENERATOR_CLI` or `CRITIC_CLI` wrapper is used with the `claude` model,
 it must handle `auth status --json`; Codex host mode probes that command before
 creating or retargeting a debate log.
@@ -157,6 +164,28 @@ $PWD/.debate-conductor/log/<team>/
 `<team>` is the tmux window's `@team-name` option (default: `debate-conductor`), so multiple windows in the same workspace produce isolated log streams.
 
 Override the log location with `DEBATE_LOG_DIR=/path/to/logs`.
+
+Role logs and round transcripts contain the answer, not the CLI's diagnostic
+console output. Adapters declaring `final_args` (including Codex) publish their
+native final answer only after successful completion. The pane shows the
+attempt header while it waits. Missing or whitespace-only final answers fail
+with rc=5; console text is never used as a fallback. Adapters without
+`final_args` continue streaming stdout and must emit answer text only on that
+channel. Their stderr is excluded. Role-wrapper capture/logging failures use rc=6 unless
+the model itself already failed, in which case its exit code takes precedence.
+The existing reserved stream framing byte is still removed from answers.
+
+Raw CLI diagnostics are discarded by default, on both success and failure.
+This is an intentional privacy tradeoff: a transient provider error cannot be
+recovered afterward unless debugging was enabled for that invocation.
+For a debugging invocation, set
+`DEBATE_RAW_LOG=1` to keep `gen-<TS>.raw.log` / `crit-<TS>.raw.log` alongside the
+ordinary role logs, with permissions 0600. For stdout-only adapters they also
+contain a copy of the answer. These files can contain tool output
+and unrelated file contents; they never feed the debate panes, verdict parser,
+or subsequent prompts. This switch also works with the standalone role
+wrappers. Historical logs are not rewritten: continuing an older debate can
+still reuse contaminated text already present in its round files.
 
 **Live panes follow per-role streams.** `debate.sh` appends every attempt of a role (a failed attempt, its retry, rounds added by `/continue`) to `stream-<role>.log`, which is never truncated or replaced. Each attempt ends with a record of its exit status, and the pane prints "attempt failed (rc=N)" after a failed one. The header and end record of an attempt carry the same attempt id, so a retry of the same round and model is told apart. A pane started with debate-conductor 0.5.9 or earlier skips these records (no round banners, no "attempt failed" lines): restart open panes after upgrading. Each pane runs one `tail` on its role's stream from the start, so it shows the whole debate once, in order, including a pane opened late. A new debate retargets `latest-debate`; the pane stops following the old stream before it prints "new debate run detected". A debate created before streams existed has no stream files: its pane says so, and shows only the rounds added by a later `/continue`. The round files remain the transcript of record.
 
@@ -204,8 +233,12 @@ debate-conductor/
 ├── lib/                       # internal — invoked by debate.sh / install-pm
 │   ├── ask-generator.sh       # Generator wrapper (any registered model)
 │   ├── ask-critic.sh          # Critic wrapper (any registered model)
+│   ├── answer.sh              # answer capture, validation, and opt-in diagnostics
 │   ├── registry.sh            # shared model registry + runner (vendored)
 │   ├── host.sh                # Claude/Codex PM defaults and CLI checks
+│   ├── namespace.sh           # shared team namespace resolution
+│   ├── index.sh               # attempt-ledger and completion queries
+│   ├── debate-result.sh       # per-invocation receipt writer and reader
 │   ├── pm.md                  # Claude PM orchestration policy
 │   ├── pm-codex.md            # Codex PM orchestration policy
 │   └── roles/
@@ -240,7 +273,7 @@ For one more release `debate.sh` also touches the older `.round-<N>-<role>[-mode
 
 **Context scope per round.** Each round prompt only includes the *immediately preceding* generator+critic pair — not the full transcript. So round 5 sees round 3 (your last draft) and round 4 (critic feedback), but not rounds 1–2. This keeps prompts bounded as round count grows; the trade-off is that early-round consensus or discoveries fade out unless re-stated. `/continue` follows the same rule.
 
-**A round needs an answer on stdout.** `ask-generator.sh` and `ask-critic.sh` exit **5** when the model CLI exits 0 but writes nothing except whitespace to stdout. For example, `agy -p` soft-denies a tool it cannot prompt for, prints guidance on stderr, and still exits 0. They exit **6** when the answer cannot be checked: the temp file cannot be created (the model is not run), or the model exits 0 but `tee` or the check fails. `debate.sh` stops on either code before recording the round as completed, so the guidance never becomes a draft or a critique. The failed attempt is still in the ledger, with its exit status.
+**A round needs a substantive answer.** `ask-generator.sh` and `ask-critic.sh` exit **5** when the CLI exits 0 but its native final-answer file is absent or whitespace-only, or a stdout-only adapter emits nothing except whitespace. They exit **6** for capture/logging failures, including an invalid or unreadable native final file, capture-directory creation failure, or failed `tee`/answer checks. A nonzero CLI exit takes precedence. `debate.sh` stops before marking either failure complete; the ledger retains the failed attempt's status. Native adapters never fall back to console output.
 
 **Stopping a debate.** A signal to the process group (Ctrl-C, a supervisor's `killpg`) reaches every process of the running round, SIGKILL included. INT, TERM or HUP sent to the `debate.sh` PID alone also stops the round at once: `debate.sh` sends TERM to the round's process tree, waits up to about 2 s for it to exit, then records the status (130 / 143 / 129) and dies from the same signal. Signalling the PID is best effort: a process that ignores TERM keeps running, and without `ps` on `PATH` `debate.sh` waits for the round to finish instead. A round ends when `debate.sh` marks it complete, and the `.done` sidecar is written first, before either end record: once it exists the round counts as complete and both end records say `rc=0` whatever happens next. A round interrupted before that point never gets a sidecar, even if its output was complete, so `/continue` runs it again — a trapped INT, TERM or HUP records the attempt with the signal's status (130 / 143 / 129), and a `kill -9` records nothing at all and leaves a `start` with no `end`. A run killed between the sidecar and the ledger write leaves the round complete in the sidecar alone, which is one of the reasons completion is read as the union of the two.
 
@@ -248,7 +281,7 @@ For one more release `debate.sh` also touches the older `.round-<N>-<role>[-mode
 
 There is no automatic recovery of a lock left behind, deliberately: a dead pid does not prove the writing stopped. A `kill -9` aimed at `debate.sh` alone leaves the round's model CLI, the `sed` filter and the `tee` processes running — still writing the round file and the stream — so reclaiming the debate on the strength of a missing pid would interleave two writers. Clearing such a lock is a manual step: the refusal prints the exact `rm -rf -- .../.lock`, to run once you have confirmed that nothing from that run — `debate.sh` and every process it started — is still writing in that directory.
 
-**Live streaming quality depends on the model CLI.** The cleaning filter runs unbuffered (`sed -u` where supported, otherwise `stdbuf -oL sed`, otherwise plain `sed`), and `tee` does not buffer, so cleaned output reaches the round file and the role stream line by line. But if the model CLI itself batches its stdout in user-space (some `codex` builds do this), a round may still appear in one chunk rather than streaming. That's outside this plugin's reach.
+**Live streaming quality depends on the adapter.** Native final-capture adapters publish only after successful completion. For stdout-only adapters, the stream-control filter removes the reserved RS byte and runs unbuffered (`sed -u` where supported, otherwise `stdbuf -oL sed`, otherwise plain `sed`). `tee` does not buffer, so answers can reach the round file and role stream line by line. A CLI that batches stdout can still delay display.
 
 **Convergence parsing is anchored, not fuzzy.** `--until-converged` only stops on a *standalone canonical* `Verdict: STRENGTHEN` line (the Critic role contract), taking the last such line in the round. A Critic round that errors out and echoes its role prompt contains the placeholders `Verdict: <STRENGTHEN | …>` and `<one of: STRENGTHEN / …>` — neither matches the anchor, so a failed round reads as not-converged and the debate keeps going rather than stopping on garbage. `debate-conductor-doctor.sh` covers all three paths (STRENGTHEN / RECONSIDER / placeholder) with stub CLIs.
 

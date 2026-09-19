@@ -31,6 +31,8 @@ _REGISTRY_LIB="$SCRIPT_DIR/registry.sh"
 unset _REGISTRY_LIB
 # shellcheck source=host.sh
 . "$SCRIPT_DIR/host.sh"
+# shellcheck source=answer.sh
+. "$SCRIPT_DIR/answer.sh"
 
 TEAM=$(agent_team_detect_team) || exit 2
 LOG_BASE="${DEBATE_LOG_DIR:-$PWD/.debate-conductor/log}"
@@ -104,16 +106,17 @@ ln -sfn "crit-$TS.log" "$LOG_DIR/latest-crit.log"
 } > "$LOG"
 
 echo "[ask-critic] running ($MODEL) — monitor: tail -F $LOG_DIR/latest-crit.log" >&2
-# Force line-buffered stdio so output streams line-by-line through the pipeline
-# instead of being held in libc's full-buffer until generation completes.
-LINEBUF=""
-command -v stdbuf >/dev/null 2>&1 && LINEBUF='stdbuf -oL'
-RC=0
-# The registry expands the model's argv template (codex -> `exec
-# --skip-git-repo-check {prompt}`, agy -> `-p {prompt}`) and resolves the
-# binary: CRITIC_CLI legacy override > model env_command (CODEX_CLI/...) > command.
-REGISTRY_CMD_OVERRIDE="${CRITIC_CLI:-}" registry_run_answer "$MODEL" "$PROMPT" 2>&1 | $LINEBUF tee -a "$LOG" || RC=$?
-printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG"
-echo
+# Only answer bytes go to stdout and the ordinary role log.
+RAW_LOG=""
+[ "${DEBATE_RAW_LOG:-0}" != 1 ] || RAW_LOG="$LOG_DIR/crit-$TS.raw.log"
+set +e
+REGISTRY_CMD_OVERRIDE="${CRITIC_CLI:-}" debate_run_answer "$MODEL" "$PROMPT" "$RAW_LOG" | tee -a "$LOG"
+STATUSES=("${PIPESTATUS[@]}")
+set -e
+RC=${STATUSES[0]}
+if [ "$RC" -eq 0 ] && [ "${STATUSES[1]}" -ne 0 ]; then RC=6; fi
+if ! printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG"; then
+  [ "$RC" -ne 0 ] || RC=6
+fi
 echo "(log: $LOG, rc=$RC, model=$MODEL)" >&2
 exit "$RC"

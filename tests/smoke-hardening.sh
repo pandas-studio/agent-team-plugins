@@ -372,13 +372,25 @@ git -C "$TMP/unborn" -c user.name=t -c user.email=t@t commit -qm first
 assert_eq "$(bash -c '. "$1/spec-trio/lib/spec-helpers.sh"; collect_changed_paths "$2" "$3"' \
   _ "$ROOT" "$TMP/unborn" "$EMPTY_TREE")" "outside.txt"
 
-# A worker CLI that exits 0 with nothing on stdout has not answered: agy's print
-# mode soft-denies a tool, prints guidance on stderr only and still exits 0.
-# Every stdout-answer wrapper must fail (rc=5), keep real answers and real exit
-# codes, and debate.sh must not mark such a round complete.
+# A worker CLI that exits 0 without an answer has not succeeded: agy's print
+# mode can soft-deny a tool and emit only stderr; a native-capture adapter can
+# omit its final-answer file. Both paths must fail (rc=5), preserve real answers
+# and CLI exit codes, and leave the debate round incomplete.
 mkdir -p "$TMP/worker-cli"
 printf '#!/bin/sh\necho "no output produced — auto-denied" >&2\nexit 0\n' > "$TMP/worker-cli/denied"
-printf '#!/bin/sh\necho progress >&2\necho "## Verdict"\necho "Verdict: RECONSIDER"\n' > "$TMP/worker-cli/answer"
+cat > "$TMP/worker-cli/answer" <<'STUB'
+#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --output-last-message ]; then
+    printf '## Verdict\nVerdict: RECONSIDER\n' > "$2"
+    break
+  fi
+  shift
+done
+echo progress >&2
+echo "## Verdict"
+echo "Verdict: RECONSIDER"
+STUB
 printf '#!/bin/sh\necho boom >&2\nexit 9\n' > "$TMP/worker-cli/broken"
 chmod +x "$TMP/worker-cli/denied" "$TMP/worker-cli/answer" "$TMP/worker-cli/broken"
 run_worker() {
@@ -1384,7 +1396,10 @@ stop_tail
 assert_eq "$(count "$TMP/view-tricky.out" 'Round 1 · Generator')" "1"
 assert_eq "$(count "$TMP/view-tricky.out" 'Round 3 · Generator')" "1"
 assert_eq "$(count "$TMP/view-tricky.out" 'TRICKY-START')" "2"
-assert_eq "$(count "$TMP/view-tricky.out" '<!-- debate-round')" "0"
+assert_eq "$(count "$TMP/view-tricky.out" '<!-- debate-round')" "0" || {
+  cat "$TMP/view-tricky.out" >&2
+  exit 1
+}
 assert_eq "$(count "$TMP/view-tricky.out" 'rsbyte')" "2"
 # Only debate.sh's records carry \x1e (two headers, two end records), each at the
 # start of a line: the end record after the unterminated answer starts its own.
