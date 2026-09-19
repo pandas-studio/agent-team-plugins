@@ -22,6 +22,13 @@ for plugin in dev-trio debate-conductor ralph-trio spec-trio; do
   assert_fail agent_team_validate_id "../escape" team
   assert_fail agent_team_validate_id "bad/name" team
   assert_fail agent_team_validate_id "bad name" team
+  # grep matches per line, so a multi-line value once passed the pattern check
+  # and became a path component. Every copy of the lib must reject it.
+  assert_fail agent_team_validate_id "good
+EVIL" team
+  assert_fail agent_team_validate_id "$(printf 'good\rEVIL')" team
+  assert_fail env AGENT_TEAM="good
+EVIL" bash -c ". '$ROOT/$plugin/lib/namespace.sh'; agent_team_detect_team"
 
   # An explicit AGENT_TEAM is a chosen identifier: fail loudly, never guess.
   assert_fail env AGENT_TEAM="../escape" bash -c ". '$ROOT/$plugin/lib/namespace.sh'; agent_team_detect_team"

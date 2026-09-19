@@ -379,6 +379,16 @@ class HostTests(unittest.TestCase):
         self.assertIn("PWNED", out)
         self.assertNotIn("\x1b[31m", out)
 
+    def test_a_multiline_team_name_is_refused_outright(self):
+        """It used to pass validation: grep matched one line of it."""
+        result = subprocess.run(
+            [str(self.plugin / "bin/dashboard.sh"), "codex", "--once"],
+            cwd=self.workspace, env=self.env | dict(AGENT_TEAM="good\nEVIL"),
+            input="", text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("must not contain line breaks", result.stderr)
+        self.assertNotIn("EVIL", result.stdout)
+
     def test_dashboard_refuses_oversized_metadata(self):
         """Documents are bounded before they are loaded, not after."""
         name = "codex-20260918-090000-22222.log"

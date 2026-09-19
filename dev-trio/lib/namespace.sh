@@ -11,6 +11,15 @@ agent_team_validate_id() {
     printf 'ERROR: %s must be at most %s characters: %s\n' "$label" "$max_len" "$value" >&2
     return 2
   fi
+  # grep is line-oriented, so `^...$` would match any *line* of a multi-line
+  # value and let "good\nEVIL" through as a path component. Reject line breaks
+  # first; everything below is then a single line, as the pattern assumes.
+  case "$value" in
+    *$'\n'*|*$'\r'*)
+      printf 'ERROR: %s must not contain line breaks: %s\n' "$label" "$value" >&2
+      return 2
+      ;;
+  esac
   if ! printf '%s' "$value" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
     printf 'ERROR: %s must match [A-Za-z0-9][A-Za-z0-9._-]*: %s\n' "$label" "$value" >&2
     return 2
