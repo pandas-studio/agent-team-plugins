@@ -15,7 +15,11 @@
 # Override log root via DEV_TRIO_LOG_DIR=/abs/path.
 #
 # Exit: the model's own code, which an artifact never promotes; 5 when it exits
-# 0 leaving no answer; 6 when the answer could not be captured or inspected.
+# 0 leaving no answer; 6 when the answer could not be captured or inspected —
+# which includes a transcript that opened and then could not be written, since
+# the captured copy travels through the same descriptor. A log that cannot be
+# opened at all is best-effort: it is reported on stderr and the run proceeds
+# without a transcript.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -214,9 +218,22 @@ RC=0
 # own `registry_run "$@" | tee "$tmp"`, which this cannot reach — #71 stays
 # open for that half.
 #
+# The log is opened once, on fd 8, the way debate-conductor's boundary opens
+# fd 9. A bare `>> "$LOG"` on the call would make an unopenable log skip the
+# model entirely — bash fails the redirection and never runs the command — so
+# a transcript problem would decide the answer. Falling back to /dev/null keeps
+# logging best-effort, as the pipeline's `tee` failure was. A log that opens
+# and then fails to *write* is not isolated: the copy inside
+# registry_run_answer writes through this fd, so it reports 6, and the header's
+# exit contract says so.
+#
 # errexit is lifted around the call so the 5/6 answer codes survive as $RC.
+if ! exec 8>>"$LOG"; then
+  echo "[ask-researcher] the transcript could not be logged; $LOG may be incomplete" >&2
+  exec 8>/dev/null
+fi
 set +e
-REGISTRY_CMD_OVERRIDE="${RESEARCHER_CLI:-}" registry_run_answer "$RESEARCHER_MODEL" "$PROMPT" "$FINAL" >> "$LOG" 2>&1
+REGISTRY_CMD_OVERRIDE="${RESEARCHER_CLI:-}" registry_run_answer "$RESEARCHER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8
 RC=$?
 set -e
 
@@ -227,7 +244,8 @@ if [ "$RC" -eq 0 ]; then
   cat "$FINAL" || true
 fi
 manifest_finalize
-printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG"
+printf '\n=== END (rc=%d) ===\n' "$RC" >&8 || true
+exec 8>&-
 echo || true
 echo "(log: $LOG, final: $FINAL, rc=$RC)" >&2 || true
 [ -z "$RUNSTATE_LOG" ] || runstate_complete "$RUNSTATE_LOG" exit_code="$RC" reason=ok || true
