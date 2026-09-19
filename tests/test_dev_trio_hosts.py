@@ -432,6 +432,42 @@ class HostTests(unittest.TestCase):
                 self.assertIn(expected, out)
                 self.assertNotIn("Status:", out)
 
+    def test_dashboard_never_shows_a_previous_run_s_answer(self):
+        """A snapshot outlives the frame; a failed read must not leave it readable.
+
+        The answer file can stop being a readable regular file between frames.
+        Reusing the bytes already in the snapshot would show one run's answer
+        under another run's heading.
+        """
+        logdir = self.logdir()
+        first = "agy-20260918-090000-11111"
+        (logdir / f"{first}.log").write_text("=== ask-researcher.sh @ x ===\n")
+        (logdir / f"{first}.final.md").write_text("THE FIRST RUN ANSWER\n")
+        doc = dict(self.run_json(f"{first}.log"), channel="agy",
+                   wrapper="ask-researcher.sh", variant="dev-trio-research",
+                   role="researcher", result_path=None,
+                   final_path=str(logdir / f"{first}.final.md"),
+                   inputs=[dict(kind="question", value="q")],
+                   completion=dict(ended_at="2026-09-18T09:00:01+09:00",
+                                   exit_code=0, verdict=None, reason="ok"))
+        (logdir / f"{first}.run.json").write_text(json.dumps(doc))
+        (logdir / "latest-agy.log").symlink_to(f"{first}.log")
+        self.assertIn("THE FIRST RUN ANSWER", self.dashboard("agy"))
+
+        # A second run whose answer file is not readable as a regular file.
+        second = "agy-20260918-100000-22222"
+        (logdir / f"{second}.log").write_text("=== ask-researcher.sh @ x ===\n")
+        os.mkfifo(logdir / f"{second}.final.md")
+        doc2 = dict(doc, run_stem=second, started_display="20260918-100000-22222",
+                    log_path=str(logdir / f"{second}.log"),
+                    final_path=str(logdir / f"{second}.final.md"))
+        (logdir / f"{second}.run.json").write_text(json.dumps(doc2))
+        (logdir / "latest-agy.log").unlink()
+        (logdir / "latest-agy.log").symlink_to(f"{second}.log")
+        out = self.dashboard("agy")
+        self.assertNotIn("THE FIRST RUN ANSWER", out)
+        self.assertIn("No answer captured", out)
+
     def test_dashboard_accepts_a_document_at_the_exact_limit(self):
         """limit bytes render; limit+1 do not."""
         valid = self.valid_doc()

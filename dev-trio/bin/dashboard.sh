@@ -152,6 +152,9 @@ ANSWER_SNAP="$DASH_TMPDIR/answer.txt"
 # single-document rule is enforced over exactly the bytes that were accepted.
 read_bounded() {
   local path="$1" limit="$2" dest="$3" bytes
+  # Empty the snapshot first: it outlives the frame, and a caller that reads it
+  # after a failed copy would otherwise be shown the previous run's bytes.
+  : > "$dest" 2>/dev/null || return 1
   [ -f "$path" ] && [ -r "$path" ] || return 1
   head -c $((limit + 1)) < "$path" > "$dest" 2>/dev/null || return 1
   bytes=$(wc -c < "$dest" 2>/dev/null) || return 1
@@ -354,24 +357,34 @@ while true; do
         fi
 
         # ── Role-specific summary ──────────────────────────────────────────
-        # The metadata is trusted to describe its own run, not to point the
-        # dashboard at arbitrary files: only this log's own siblings are read.
+        # The metadata says which artifacts this run has; where they are is not
+        # its call. Every wrapper writes them beside the log under the same
+        # stem, so derive them from the log this frame is pinned to and open
+        # nothing the metadata names. Comparing its paths as strings instead
+        # would drop an answer whenever the two processes spell one directory
+        # differently — /var against /private/var is enough.
         STEM="${SOURCE%.log}"
-        FINAL_PATH=$(printf '%s\n' "$RUN_JSON" | jq -r '.final_path // ""')
-        RESULT_PATH=$(printf '%s\n' "$RUN_JSON" | jq -r '.result_path // ""')
-        [ "$FINAL_PATH"  = "$STEM.final.md" ]   || FINAL_PATH=""
-        [ "$RESULT_PATH" = "$STEM.review.json" ] || RESULT_PATH=""
+        FINAL_PATH=""
+        RESULT_PATH=""
+        [ "$(printf '%s\n' "$RUN_JSON" | jq -r 'if .final_path  == null then 0 else 1 end')" = "0" ] \
+          || FINAL_PATH="$STEM.final.md"
+        [ "$(printf '%s\n' "$RUN_JSON" | jq -r 'if .result_path == null then 0 else 1 end')" = "0" ] \
+          || RESULT_PATH="$STEM.review.json"
 
         if [ "$ROLE" = "agy" ] && [ "$STATE" = "done" ]; then
           ANSWER=""
           ANSWER_PARTIAL=0
-          if [ -n "$FINAL_PATH" ] && [ -f "$FINAL_PATH" ] && [ -r "$FINAL_PATH" ]; then
-            read_bounded "$FINAL_PATH" "$ANSWER_SCAN_BYTES" "$ANSWER_SNAP" || ANSWER_PARTIAL=$?
-            # An answer, unlike a document, is still useful truncated — rc 2
-            # leaves the prefix in the snapshot and only marks the count partial.
-            [ "$ANSWER_PARTIAL" = "2" ] && ANSWER_PARTIAL=1
-            if [ "$ANSWER_PARTIAL" != "1" ]; then ANSWER_PARTIAL=0; fi
-            ANSWER=$(sanitize_block < "$ANSWER_SNAP")
+          if [ -n "$FINAL_PATH" ]; then
+            ANSWER_READ_RC=0
+            read_bounded "$FINAL_PATH" "$ANSWER_SCAN_BYTES" "$ANSWER_SNAP" || ANSWER_READ_RC=$?
+            # An answer, unlike a document, is still useful truncated: rc 2
+            # leaves the prefix and only marks the citation count partial. rc 1
+            # is no answer at all — the source vanished or stopped being a
+            # readable regular file between frames — and must not be rendered.
+            case "$ANSWER_READ_RC" in
+              0) ANSWER=$(sanitize_block < "$ANSWER_SNAP") ;;
+              2) ANSWER_PARTIAL=1; ANSWER=$(sanitize_block < "$ANSWER_SNAP") ;;
+            esac
           fi
           if [ -z "$ANSWER" ]; then
             BUF+="  ${YELLOW}No answer captured — see the full log.${RESET}"$'\n'
