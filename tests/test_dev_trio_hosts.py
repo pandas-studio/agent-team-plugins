@@ -5,6 +5,7 @@ import json
 import os
 import re
 from pathlib import Path
+import selectors
 import shutil
 import subprocess
 import sys
@@ -218,6 +219,56 @@ class HostTests(unittest.TestCase):
             capture_output=True, timeout=timeout)
         self.assertEqual(result.returncode, expect_rc, result.stderr)
         return result.stdout
+
+    def open_pane(self, role, **env):
+        """A long-lived dashboard, the way a tmux pane runs one."""
+        pane = subprocess.Popen(
+            [str(self.plugin / "bin/dashboard.sh"), role],
+            cwd=self.workspace, env=self.env | env, stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        def close():
+            pane.kill()
+            for stream in (pane.stdin, pane.stdout, pane.stderr):
+                try:
+                    stream.close()
+                except (OSError, ValueError):
+                    pass
+        self.addCleanup(close)
+        pane._seen = ""
+        return pane
+
+    def pane_wait(self, pane, marker, timeout=15):
+        """Read frames until `marker` is drawn; return everything seen so far."""
+        selector = selectors.DefaultSelector()
+        selector.register(pane.stdout, selectors.EVENT_READ)
+        try:
+            deadline = time.monotonic() + timeout
+            while marker not in pane._seen:
+                if time.monotonic() > deadline:
+                    self.fail(f"{marker!r} was never drawn; saw:\n{pane._seen}")
+                for _ in selector.select(0.5):
+                    pane._seen += os.read(pane.stdout.fileno(), 1 << 16).decode(
+                        "utf-8", "replace")
+        finally:
+            selector.close()
+        return pane._seen
+
+    def pane_quit(self, pane):
+        """Send q, then return the LAST frame the pane drew.
+
+        Frames are separated by the cursor-home escape, so the final chunk is
+        what a viewer is actually looking at — earlier frames legitimately hold
+        earlier runs.
+        """
+        pane.stdin.write("q")
+        pane.stdin.flush()
+        pane.wait(timeout=15)
+        pane._seen += pane.stdout.read()
+        # The quit path emits its own cursor-home + clear, so the last chunk is
+        # not a frame. A drawn frame always ends with the control hint.
+        frames = [f for f in pane._seen.split("\x1b[H") if "controls:" in f]
+        self.assertTrue(frames, pane._seen)
+        return frames[-1]
 
     def rendered_field(self, out, label):
         """The remainder of the single line carrying `label`, escapes stripped."""
@@ -452,7 +503,11 @@ class HostTests(unittest.TestCase):
                                    exit_code=0, verdict=None, reason="ok"))
         (logdir / f"{first}.run.json").write_text(json.dumps(doc))
         (logdir / "latest-agy.log").symlink_to(f"{first}.log")
-        self.assertIn("THE FIRST RUN ANSWER", self.dashboard("agy"))
+
+        # One pane across both runs: a fresh process per frame would start with
+        # an empty snapshot, which is the state this guards against.
+        pane = self.open_pane("agy")
+        self.pane_wait(pane, "THE FIRST RUN ANSWER")
 
         # A second run whose answer file is not readable as a regular file.
         second = "agy-20260918-100000-22222"
@@ -464,9 +519,10 @@ class HostTests(unittest.TestCase):
         (logdir / f"{second}.run.json").write_text(json.dumps(doc2))
         (logdir / "latest-agy.log").unlink()
         (logdir / "latest-agy.log").symlink_to(f"{second}.log")
-        out = self.dashboard("agy")
-        self.assertNotIn("THE FIRST RUN ANSWER", out)
-        self.assertIn("No answer captured", out)
+        self.pane_wait(pane, "20260918-100000-22222")
+        frame = self.pane_quit(pane)
+        self.assertIn("No answer captured", frame)
+        self.assertNotIn("THE FIRST RUN ANSWER", frame)
 
     def test_a_pane_opened_before_the_first_run_renders_it(self):
         """/dev-trio:bootstrap opens the panes before anything has run.
@@ -477,29 +533,30 @@ class HostTests(unittest.TestCase):
         against a canonical path, so the containment check rejected every run
         for the life of the pane.
         """
-        logroot = self.workspace / "." / "late-logs"
+        # A plain string: Path would normalise the "./" away, and that spelling
+        # is the whole point — it is what startup resolution used to preserve.
+        logroot = f"{self.workspace}/./late-logs"
+        self.assertIn("/./", logroot)
         self.assertFalse((self.workspace / "late-logs").exists())
-        env = self.env | dict(DEV_TRIO_LOG_DIR=str(logroot))
-        pane = subprocess.Popen(
-            [str(self.plugin / "bin/dashboard.sh"), "agy"],
-            cwd=self.workspace, env=env, stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        try:
-            deadline = time.monotonic() + 10
-            while not (self.workspace / "late-logs").exists():
-                result = subprocess.run(
-                    [str(self.plugin / "bin/ask-researcher.sh"), "a question"],
-                    cwd=self.workspace, env=env, input="", text=True,
-                    capture_output=True, timeout=20)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                break
-            # Let the still-running pane poll at least once more.
-            time.sleep(2.5)
-            out, _ = pane.communicate("q", timeout=20)
-        finally:
-            pane.kill()
-        self.assertNotIn("outside the team directory", out)
-        self.assertIn("done", out)
+        env = dict(DEV_TRIO_LOG_DIR=logroot)
+
+        pane = self.open_pane("agy", **env)
+        # The pane must be up, and have rendered the empty state, before
+        # anything creates the directory.
+        self.pane_wait(pane, "no runs yet")
+        self.assertFalse((self.workspace / "late-logs").exists())
+
+        result = subprocess.run(
+            [str(self.plugin / "bin/ask-researcher.sh"), "a question"],
+            cwd=self.workspace, env=self.env | env, input="", text=True,
+            capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.workspace / "late-logs").exists())
+
+        self.pane_wait(pane, "Status:")
+        frame = self.pane_quit(pane)
+        self.assertNotIn("outside the team directory", frame)
+        self.assertIn("done", frame)
 
     def test_dashboard_accepts_a_document_at_the_exact_limit(self):
         """limit bytes render; limit+1 do not."""
