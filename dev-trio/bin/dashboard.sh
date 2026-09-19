@@ -119,24 +119,45 @@ LOG_DIR_REAL=$(cd "$LOG_DIR" 2>/dev/null && pwd -P) || LOG_DIR_REAL="$LOG_DIR"
 TEAM_SHOWN=$(printf '%s' "$TEAM" | sanitize_line 48)
 LATEST_SHOWN=$(printf '%s' "$LATEST" | sanitize_line 120)
 
-cleanup() { printf '\033[?25h\033[H\033[2J'; exit 0; }   # show cursor + clear
+DASH_TMPDIR=""   # set below; declared here so the traps are safe under set -u
+_dash_discard_snapshots() { [ -z "$DASH_TMPDIR" ] || rm -rf "$DASH_TMPDIR"; }
+cleanup() { _dash_discard_snapshots; printf '\033[?25h\033[H\033[2J'; exit 0; }
 trap cleanup INT TERM
+trap _dash_discard_snapshots EXIT
 [ "$ONCE" = "1" ] || printf '\033[?25l'   # hide cursor
 
 # A frame is rebuilt on every poll, so the inputs it parses are bounded rather
 # than the output alone. Anything larger is named, not loaded.
 MAX_DOC_BYTES=$((1024 * 1024))
 
-# read_bounded <path> <limit> — echo the file's bytes, or fail if it is not a
-# regular file or exceeds the limit. Checking a size and then reopening the path
-# would let the file be replaced or grown in between, and would happily block on
-# a named pipe; this reads limit+1 bytes from one open and judges what it got.
+# Per-frame snapshots. A reader that must bound what it loads has to hold the
+# bytes somewhere; a file rather than a shell variable, because command
+# substitution strips trailing newlines and ${#var} counts characters, not
+# bytes. A document padded with a megabyte of newlines and a second JSON value
+# appended measured 736 "characters" that way, passing both the size limit and
+# the single-document rule.
+DASH_TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/dev-trio-dashboard.XXXXXX") || exit 2
+chmod 700 "$DASH_TMPDIR" 2>/dev/null || true
+RUN_SNAP="$DASH_TMPDIR/run.json"
+RESULT_SNAP="$DASH_TMPDIR/result.json"
+ANSWER_SNAP="$DASH_TMPDIR/answer.txt"
+
+# read_bounded <path> <limit> <dest> — copy at most limit+1 bytes of a regular
+# file into dest from one open, then judge the copy's real byte count.
+#   rc 0  the whole source is in dest, within the limit
+#   rc 1  not a readable regular file, or the copy failed
+#   rc 2  the source exceeds the limit; dest holds a prefix, never a document
+# Sizing a path and then reopening it would let the file be replaced or grown in
+# between, and would block on a named pipe. Parsing happens against dest, so the
+# single-document rule is enforced over exactly the bytes that were accepted.
 read_bounded() {
-  local path="$1" limit="$2" content
+  local path="$1" limit="$2" dest="$3" bytes
   [ -f "$path" ] && [ -r "$path" ] || return 1
-  content=$(head -c $((limit + 1)) < "$path" 2>/dev/null) || return 1
-  [ "${#content}" -le "$limit" ] || return 2
-  printf '%s' "$content"
+  head -c $((limit + 1)) < "$path" > "$dest" 2>/dev/null || return 1
+  bytes=$(wc -c < "$dest" 2>/dev/null) || return 1
+  bytes=${bytes//[^0-9]/}
+  [ -n "$bytes" ] || return 1
+  [ "$bytes" -le "$limit" ] || return 2
 }
 
 get_wrap_width() {
@@ -196,10 +217,9 @@ while true; do
       STATE_DETAIL=$(printf '%s' "${LINK_TARGET:-$LATEST}" | sanitize_line 80)
     else
       RUN_PATH="$(runstate_path "$SOURCE")"
-      RUN_RAW=""
       RUN_READ_RC=0
       if [ -e "$RUN_PATH" ]; then
-        RUN_RAW=$(read_bounded "$RUN_PATH" "$MAX_DOC_BYTES") || RUN_READ_RC=$?
+        read_bounded "$RUN_PATH" "$MAX_DOC_BYTES" "$RUN_SNAP" || RUN_READ_RC=$?
       fi
       if [ ! -e "$RUN_PATH" ]; then
         STATE="legacy"
@@ -210,7 +230,7 @@ while true; do
         STATE_DETAIL="run metadata"
       elif [ "$RUN_READ_RC" != "0" ]; then
         STATE="unreadable"
-      elif ! RUN_JSON=$(printf '%s' "$RUN_RAW" | runstate_read -); then
+      elif ! RUN_JSON=$(runstate_read "$RUN_SNAP"); then
         STATE="unreadable"
         RUN_JSON=""
       else
@@ -346,14 +366,12 @@ while true; do
           ANSWER=""
           ANSWER_PARTIAL=0
           if [ -n "$FINAL_PATH" ] && [ -f "$FINAL_PATH" ] && [ -r "$FINAL_PATH" ]; then
-            ANSWER_RAW=$(read_bounded "$FINAL_PATH" "$ANSWER_SCAN_BYTES") || ANSWER_PARTIAL=$?
-            if [ "$ANSWER_PARTIAL" = "2" ]; then
-              ANSWER_PARTIAL=1
-              ANSWER_RAW=$(head -c "$ANSWER_SCAN_BYTES" < "$FINAL_PATH" 2>/dev/null) || ANSWER_RAW=""
-            else
-              ANSWER_PARTIAL=0
-            fi
-            ANSWER=$(printf '%s' "$ANSWER_RAW" | sanitize_block)
+            read_bounded "$FINAL_PATH" "$ANSWER_SCAN_BYTES" "$ANSWER_SNAP" || ANSWER_PARTIAL=$?
+            # An answer, unlike a document, is still useful truncated — rc 2
+            # leaves the prefix in the snapshot and only marks the count partial.
+            [ "$ANSWER_PARTIAL" = "2" ] && ANSWER_PARTIAL=1
+            if [ "$ANSWER_PARTIAL" != "1" ]; then ANSWER_PARTIAL=0; fi
+            ANSWER=$(sanitize_block < "$ANSWER_SNAP")
           fi
           if [ -z "$ANSWER" ]; then
             BUF+="  ${YELLOW}No answer captured — see the full log.${RESET}"$'\n'
@@ -385,8 +403,8 @@ while true; do
 
         elif [ "$ROLE" = "codex" ] && [ "$STATE" = "done" ]; then
           RESULT_JSON=""
-          if [ -n "$RESULT_PATH" ] && RESULT_RAW=$(read_bounded "$RESULT_PATH" "$MAX_DOC_BYTES"); then
-            RESULT_JSON=$(printf '%s' "$RESULT_RAW" | review_result_read /dev/stdin) || RESULT_JSON=""
+          if [ -n "$RESULT_PATH" ] && read_bounded "$RESULT_PATH" "$MAX_DOC_BYTES" "$RESULT_SNAP"; then
+            RESULT_JSON=$(review_result_read "$RESULT_SNAP") || RESULT_JSON=""
           fi
           if [ -z "$RESULT_JSON" ]; then
             BUF+="  ${YELLOW}Review result unavailable — verdict and findings unknown.${RESET}"$'\n'

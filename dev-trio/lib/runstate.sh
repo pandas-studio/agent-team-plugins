@@ -256,15 +256,13 @@ runstate_complete() {
   _runstate_publish "$dst" "$doc"
 }
 
-# runstate_read <run_json_path> | runstate_read -
+# runstate_read <run_json_path>
 #   Print the document iff it satisfies the schema, else print nothing and
 #   return nonzero. A caller MUST treat a nonzero rc as "metadata unavailable"
 #   and never fall back to parsing the log for the same values.
 #
-#   `-` validates a document on stdin instead of opening a path. A reader that
-#   must bound what it loads has already read the bytes by the time it can
-#   judge them, and reopening the path to parse it would reintroduce exactly
-#   the swap it bounded against.
+#   A caller that has to bound what it loads passes the path of its own bounded
+#   copy, so the checks below run over exactly the bytes it accepted.
 # Slurped so the whole document is one value: a second document appended after
 # a valid one must not be readable as "the first one".
 _RUNSTATE_READ_FILTER='
@@ -313,10 +311,6 @@ _RUNSTATE_READ_FILTER='
 
 runstate_read() {
   local src="${1:-}"
-  if [ "$src" = "-" ]; then
-    jq -sce "$_RUNSTATE_READ_FILTER" 2>/dev/null
-    return
-  fi
   [ -n "$src" ] && [ -f "$src" ] && [ -r "$src" ] || return 1
   jq -sce "$_RUNSTATE_READ_FILTER" "$src" 2>/dev/null
 }

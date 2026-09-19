@@ -389,15 +389,58 @@ class HostTests(unittest.TestCase):
         self.assertIn("must not contain line breaks", result.stderr)
         self.assertNotIn("EVIL", result.stdout)
 
-    def test_dashboard_refuses_oversized_metadata(self):
-        """Documents are bounded before they are loaded, not after."""
+    LIMIT = 1024 * 1024   # MAX_DOC_BYTES in dashboard.sh
+
+    def bounded_case(self, body):
+        """Render one frame against a run.json holding exactly `body` bytes."""
         name = "codex-20260918-090000-22222.log"
-        (self.logdir() / name).write_text("=== ask-reviewer.sh @ x ===\n")
-        (self.logdir() / "latest-codex.log").symlink_to(name)
-        (self.logdir() / "codex-20260918-090000-22222.run.json").write_text("a" * (2 << 20))
-        out = self.dashboard("codex")
+        logdir = self.logdir()
+        (logdir / name).write_text("=== ask-reviewer.sh @ x ===\n")
+        link = logdir / "latest-codex.log"
+        if not link.is_symlink():
+            link.symlink_to(name)
+        (logdir / "codex-20260918-090000-22222.run.json").write_bytes(body)
+        return self.dashboard("codex")
+
+    def valid_doc(self):
+        doc = self.run_json("codex-20260918-090000-22222.log")
+        doc["completion"] = dict(ended_at="2026-09-18T09:00:01+09:00", exit_code=0,
+                                 verdict="SHIP", reason="ok")
+        return json.dumps(doc).encode()
+
+    def test_dashboard_bounds_metadata_by_bytes_read(self):
+        """The limit is over bytes actually read, not over a shell string.
+
+        Command substitution strips trailing newlines and ${#var} counts
+        characters, so a document padded with a megabyte of newlines and a
+        second value appended once measured 736 "characters" — passing both the
+        size limit and the single-document rule.
+        """
+        valid = self.valid_doc()
+        pad = b"\n" * self.LIMIT
+        cases = (
+            ("the reported exploit", valid + pad + b"{}\n", "too large to render safely"),
+            ("newline padding alone", valid + pad, "too large to render safely"),
+            ("two documents, unpadded", valid + b"\n{}\n", "run metadata unreadable"),
+            # Multibyte: well under the limit in characters, over it in bytes.
+            ("multibyte over the byte limit",
+             valid + ("한" * self.LIMIT).encode(), "too large to render safely"),
+        )
+        for label, body, expected in cases:
+            with self.subTest(case=label):
+                out = self.bounded_case(body)
+                self.assertIn(expected, out)
+                self.assertNotIn("Status:", out)
+
+    def test_dashboard_accepts_a_document_at_the_exact_limit(self):
+        """limit bytes render; limit+1 do not."""
+        valid = self.valid_doc()
+        at_limit = valid + b" " * (self.LIMIT - len(valid))
+        self.assertEqual(len(at_limit), self.LIMIT)
+        out = self.bounded_case(at_limit)
+        self.assertIn("done", self.rendered_field(out, "Status:"))
+        out = self.bounded_case(at_limit + b" ")
         self.assertIn("too large to render safely", out)
-        self.assertNotIn("Status:", out)
 
     def test_dashboard_marks_a_legacy_log(self):
         """A log with no run metadata is named legacy, never parsed for values."""
