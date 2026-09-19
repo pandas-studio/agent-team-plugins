@@ -559,7 +559,9 @@ STUB
 chmod +x "$TMP/leaky-researcher"
 LEAK_START=$SECONDS
 leak_rc=0
-env -u DEV_TRIO_RESEARCHER_MODEL AGENT_TEAM=review-test TMUX='' DEV_TRIO_LOG_DIR="$TMP/log" \
+env -u DEV_TRIO_RESEARCHER_MODEL -u RESEARCHER_CLI -u AGY_CLI \
+  AGENT_TEAM=review-test TMUX='' DEV_TRIO_LOG_DIR="$TMP/log" \
+  AGENT_TEAM_MODELS_CONFIG="$TMP/models.json" DEV_TRIO_RESEARCHER_MODEL=agy \
   AGY_CLI="$TMP/leaky-researcher" \
   "$ROOT/dev-trio/bin/ask-researcher.sh" 'leaky question' \
   < /dev/null > "$TMP/leak.out" 2> "$TMP/leak.err" || leak_rc=$?

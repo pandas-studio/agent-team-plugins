@@ -19,9 +19,11 @@
 # and, narrowly, when the transcript opened and then failed to be written, e.g.
 # the disk filled mid-run: the captured copy travels through the same
 # descriptor, so its `tee` fails and the answer is not inspected. A log that
-# cannot be *opened* costs nothing: it is reported on stderr and the run
-# proceeds without a transcript (measured, both the old pipeline and this
-# shape: the answer survives, rc 0).
+# cannot be *reopened* for the transcript costs nothing: it is reported on
+# stderr and the run proceeds without one (measured, both the old pipeline and
+# this shape: the answer survives, rc 0). Creating the log in the first place
+# is not covered — the header write above still aborts the wrapper under
+# errexit, as it did before this change.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
