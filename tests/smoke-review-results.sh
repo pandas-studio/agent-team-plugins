@@ -305,6 +305,219 @@ for invocation_rc in 0 7; do
   check 'artifact failure leaves manifest null' json_is "${failed_log%.log}.manifest.json" '.verdict==null and .ended_at!=null'
 done
 
+# #71: a pipeline ends when every process holding its write end closes it, not
+# when the CLI exits. This wrapper appends its transcript through a descriptor,
+# so a CLI that leaves a descendant holding either stream has no pipe of this
+# wrapper's to hold — on the native and the stdout-capture path alike.
+#
+# The descendant blocks on a release file rather than a sleep, and records its
+# own exit. The reproducer is then "the wrapper returned first", which says what
+# the fix changed without asserting a wall-clock threshold on a loaded machine.
+# Its watchdog keeps the old shape failing rather than hanging.
+cat > "$TMP/leaky-reviewer" <<'STUB'
+#!/usr/bin/env bash
+final=""; prev=""
+for a in "$@"; do
+  [ "$prev" != "--output-last-message" ] || final="$a"
+  prev="$a"
+done
+hold() {
+  waited=0
+  while [ ! -e "$LEAK_RELEASE" ] && [ "$waited" -lt 40 ]; do
+    sleep 0.2
+    waited=$((waited + 1))
+  done
+  [ -z "${LEAK_LATE:-}" ] || printf 'late descendant text\n' >&3
+  : > "$LEAK_DONE"
+}
+# fd 3 is the held stream, so a late write lands where the wrapper would have
+# been waiting. Only the named stream is inherited; the other goes to /dev/null.
+case "${LEAK_STREAM:-stderr}" in
+  stderr) hold 3>&2 >/dev/null & ;;
+  stdout) hold 3>&1 2>/dev/null & ;;
+esac
+[ -z "$final" ] || cp "$TEST_REVIEW_FILE" "$final"
+cat "$TEST_REVIEW_FILE"
+exit "${TEST_REVIEW_RC:-0}"
+STUB
+chmod +x "$TMP/leaky-reviewer"
+fixture 'SHIP — leaked descendant'
+leak_release() {
+  : > "$TMP/leak-release"
+  waited=0
+  while [ ! -e "$TMP/leak-done" ] && [ "$waited" -lt 40 ]; do
+    sleep 0.2
+    waited=$((waited + 1))
+  done
+}
+leak_review() {
+  rm -f "$TMP/leak-release" "$TMP/leak-done"
+  leak_rc=0
+  invoke CODEX_CLI="$TMP/leaky-reviewer" CLAUDE_CLI="$TMP/leaky-reviewer" \
+    LEAK_RELEASE="$TMP/leak-release" LEAK_DONE="$TMP/leak-done" "$@" \
+    > "$TMP/leak.out" 2> "$TMP/leak.err" || leak_rc=$?
+  leak_returned_first=0
+  [ -e "$TMP/leak-done" ] || leak_returned_first=1
+  leak_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-codex.log")"
+  leak_release
+}
+for leak_model in codex claude; do
+  for leak_stream in stderr stdout; do
+    leak_review DEV_TRIO_REVIEWER_MODEL="$leak_model" LEAK_STREAM="$leak_stream"
+    check "a leaked $leak_stream does not hold the wrapper open ($leak_model)" \
+      test "$leak_returned_first" -eq 1
+    # Expected to hold before this change too — evidence of no regression, not
+    # of the fix.
+    check "the leaky run still succeeds ($leak_model/$leak_stream)" test "$leak_rc" -eq 0
+    check "the leaky run answers on stdout ($leak_model/$leak_stream)" \
+      grep -q 'SHIP — leaked descendant' "$TMP/leak.out"
+    check "the transcript reached the log ($leak_model/$leak_stream)" \
+      grep -q 'SHIP — leaked descendant' "$leak_log"
+    check "the leaky run records a completion ($leak_model/$leak_stream)" \
+      json_is "${leak_log%.log}.run.json" '.completion.exit_code==0'
+    check "the leaky run publishes a verdict ($leak_model/$leak_stream)" \
+      json_is "${leak_log%.log}.review.json" '.verdict=="SHIP"'
+  done
+done
+# A failed invocation keeps its own status through the replay.
+leak_review DEV_TRIO_REVIEWER_MODEL=codex LEAK_STREAM=stdout TEST_REVIEW_RC=7
+check 'a leaked descendant cannot rewrite a failed rc' test "$leak_rc" -eq 7
+check 'a failed leaky invocation still returns first' test "$leak_returned_first" -eq 1
+# The replay is the frozen transcript: the header and the END marker belong to
+# the log, not to stdout, and the wrapper adds exactly one blank line after it.
+leak_review DEV_TRIO_REVIEWER_MODEL=codex LEAK_STREAM=stderr
+check 'the replay excludes the log header' no_match '=== RESPONSE ===' "$TMP/leak.out"
+check 'the replay excludes the end marker' no_match '=== END (rc=' "$TMP/leak.out"
+# The oracle is the fixture the stub printed, not a re-parse of the log: the
+# replay is those bytes verbatim plus the wrapper's own trailing newline. A
+# transcript with CRLF, no final newline and a literal marker keeps the replay
+# honest where the extractor normalizes.
+printf '## Verdict\r\nSHIP — byte exact\r\n\r\n## Findings\r\n\r\n### Blocker\r\n- None.\r\n=== END (rc=9) ===\nno final newline' > "$TMP/bytes-review.md"
+leak_review DEV_TRIO_REVIEWER_MODEL=codex LEAK_STREAM=stderr TEST_REVIEW_FILE="$TMP/bytes-review.md"
+cat "$TMP/bytes-review.md" > "$TMP/bytes-expected"
+printf '\n' >> "$TMP/bytes-expected"
+check 'the replay is the transcript byte for byte' cmp -s "$TMP/bytes-expected" "$TMP/leak.out"
+# Both sides carry one trailing blank line: the log's comes from the newline
+# that opens the END marker, stdout's from the wrapper's own trailing echo.
+fixture 'SHIP — leaked descendant'
+leak_review DEV_TRIO_REVIEWER_MODEL=codex LEAK_STREAM=stderr
+awk '/^=== RESPONSE ===$/ { inblk=1; next } /^=== END \(rc=/ { inblk=0; next } inblk' \
+  "$leak_log" > "$TMP/leak.logged"
+check 'the replay is exactly the logged transcript' cmp -s "$TMP/leak.logged" "$TMP/leak.out"
+# What a descendant writes after its parent exited is not part of the review.
+leak_review DEV_TRIO_REVIEWER_MODEL=claude LEAK_STREAM=stdout LEAK_LATE=1
+# Without these two, the assertions below would pass on a descendant that never
+# ran: the release helper times out silently.
+check 'the late descendant finished' test -e "$TMP/leak-done"
+check 'the late descendant did write' grep -q 'late descendant text' "$leak_log"
+check 'a late descendant write stays out of stdout' no_match 'late descendant text' "$TMP/leak.out"
+check 'a late descendant write stays out of the final' \
+  no_match 'late descendant text' "${leak_log%.log}.final.md"
+check 'a late descendant write does not truncate the review' \
+  grep -q 'SHIP — leaked descendant' "${leak_log%.log}.final.md"
+# A review that quotes the log's own markers parses the way it always has: the
+# extractor resets at a second header and stops at an END line, and the frozen
+# transcript is fed through it rather than used as the final directly.
+printf '## Verdict\nDISCUSS — discarded by the reset\n=== RESPONSE ===\n' > "$TMP/marker-review.md"
+printf '## Verdict\nSHIP — after the reset\n\n## Findings\n\n### Blocker\n- None.\n' >> "$TMP/marker-review.md"
+printf '=== END (rc=0) ===\ntrailing console noise\n' >> "$TMP/marker-review.md"
+leak_review DEV_TRIO_REVIEWER_MODEL=claude LEAK_STREAM=stderr TEST_REVIEW_FILE="$TMP/marker-review.md"
+check 'a quoted header resets the synthesized final' \
+  json_is "${leak_log%.log}.review.json" '.verdict=="SHIP"'
+check 'a quoted end marker stops the synthesized final' \
+  no_match 'trailing console noise' "${leak_log%.log}.final.md"
+check 'the replay keeps what the extractor dropped' \
+  grep -q 'trailing console noise' "$TMP/leak.out"
+fixture 'SHIP — leaked descendant'
+
+# A replay that cannot be written is not a failed review.
+closed_rc=0
+invoke CODEX_CLI="$TMP/leaky-reviewer" CLAUDE_CLI="$TMP/leaky-reviewer" \
+  LEAK_RELEASE="$TMP/leak-release" LEAK_DONE="$TMP/leak-done2" \
+  DEV_TRIO_REVIEWER_MODEL=codex LEAK_STREAM=stderr >&- 2> "$TMP/closed.err" || closed_rc=$?
+check 'a closed stdout does not fail the review' test "$closed_rc" -eq 0
+closed_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-codex.log")"
+check 'a closed stdout still publishes the result' \
+  json_is "${closed_log%.log}.review.json" '.verdict=="SHIP" and .exit_code==0'
+# A snapshot that came up short must not be published as a review. Injected with
+# a `head` shim: the wrapper copies the frozen range through it, so truncating
+# that copy leaves a prefix that still parses — a verdict line with its findings
+# missing — which is exactly what must be rejected instead.
+mkdir -p "$TMP/headshim"
+cat > "$TMP/headshim/head" <<'SHIM'
+#!/bin/sh
+/usr/bin/head "$@" | /usr/bin/head -c "${HEAD_SHIM_BYTES:-20}"
+SHIM
+chmod +x "$TMP/headshim/head"
+printf '## Verdict\nSHIP — prefix only\n\n## Findings\n\n### Blocker\n- A real one.\n' > "$TMP/short-review.md"
+short_rc=0
+invoke CODEX_CLI="$TMP/leaky-reviewer" CLAUDE_CLI="$TMP/leaky-reviewer" \
+  LEAK_RELEASE="$TMP/short-release" LEAK_DONE="$TMP/short-done" LEAK_STREAM=stderr \
+  DEV_TRIO_REVIEWER_MODEL=claude TEST_REVIEW_FILE="$TMP/short-review.md" \
+  PATH="$TMP/headshim:$PATH" HEAD_SHIM_BYTES=24 \
+  > "$TMP/short.out" 2> "$TMP/short.err" || short_rc=$?
+: > "$TMP/short-release"
+check 'a short transcript capture is not a review' test "$short_rc" -eq 3
+check 'a short capture is reported' grep -q 'could not be captured in full' "$TMP/short.err"
+short_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-codex.log")"
+check 'a short capture publishes no verdict' \
+  json_is "${short_log%.log}.review.json" '.verdict==null and .exit_code==3'
+check 'a short capture leaves no partial final' test ! -s "${short_log%.log}.final.md"
+fixture 'SHIP — leaked descendant'
+
+# A log that becomes unopenable between the header and the run falls back to an
+# out-of-band transcript rather than /dev/null, because the pipeline it replaces
+# still delivered the review on stdout in that case (`tee -a` reports the open
+# failure, then keeps copying and draining). Injected through a `wc` shim: the
+# wrapper's first count is where it takes the transcript offset, so the log is
+# swapped for a directory right after it and restored at the second count, in
+# time for the END append.
+mkdir -p "$TMP/wcshim"
+cat > "$TMP/wcshim/wc" <<'SHIM'
+#!/bin/sh
+count=$(/usr/bin/wc "$@")
+if [ -n "${WC_SHIM_DIR:-}" ]; then
+  target="$WC_SHIM_DIR/$(readlink "$WC_SHIM_DIR/latest-codex.log")"
+  if [ ! -e "$WC_SHIM_FIRED" ]; then
+    : > "$WC_SHIM_FIRED"
+    rm -f "$target" && mkdir "$target"
+  elif [ -d "$target" ]; then
+    rmdir "$target" && : > "$target"
+  fi
+fi
+printf '%s\n' "$count"
+SHIM
+chmod +x "$TMP/wcshim/wc"
+rm -f "$TMP/wc-fired"
+fixture 'SHIP — out of band'
+oob_rc=0
+invoke CODEX_CLI="$TMP/leaky-reviewer" CLAUDE_CLI="$TMP/leaky-reviewer" \
+  LEAK_RELEASE="$TMP/oob-release" LEAK_DONE="$TMP/oob-done" LEAK_STREAM=stderr \
+  DEV_TRIO_REVIEWER_MODEL=claude PATH="$TMP/wcshim:$PATH" \
+  WC_SHIM_DIR="$TMP/log/review-test" WC_SHIM_FIRED="$TMP/wc-fired" \
+  > "$TMP/oob.out" 2> "$TMP/oob.err" || oob_rc=$?
+: > "$TMP/oob-release"
+check 'an unopenable log does not fail the review' test "$oob_rc" -eq 0
+check 'an unopenable log falls back out of band' grep -q 'keeping it out of band' "$TMP/oob.err"
+check 'the out-of-band transcript still reaches stdout' \
+  grep -q 'SHIP — out of band' "$TMP/oob.out"
+oob_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-codex.log")"
+check 'the out-of-band run still publishes a verdict' \
+  json_is "${oob_log%.log}.review.json" '.verdict=="SHIP" and .exit_code==0'
+check 'the out-of-band transcript is not left beside the logs' \
+  test -z "$(find "$TMP/log/review-test" -name '*.transcript.*' -print -quit)"
+fixture 'SHIP — leaked descendant'
+
+# An ordinary run pays nothing for the bound — the failure mode the first
+# attempt at this issue shipped with.
+fixture 'SHIP — ordinary run'
+ORDINARY_START=$SECONDS
+run_review 0
+# 5 s is where the first attempt at this issue landed — it charged every
+# ordinary call the whole drain deadline. An ordinary stubbed run here is ~0.3 s,
+# so the threshold catches that failure with room to spare on a loaded runner.
+check 'an ordinary run does not wait out a bound' test $((SECONDS - ORDINARY_START)) -lt 5
+
 # A nested dispatcher adds only its role to the parent manifest.
 # shellcheck source=../dev-trio/lib/manifest.sh
 . "$ROOT/dev-trio/lib/manifest.sh"
@@ -549,7 +762,9 @@ check 'the failure is recorded, not the file' json_is "${FAIL_RUN%.log}.run.json
 # when the CLI exits. This wrapper discards the streamed copy, so its transcript
 # is a plain append and a leaked descendant has no pipe of this wrapper's to
 # hold. A descendant holding *stdout* still blocks inside registry_run_answer's
-# own tee, which is not this wrapper's to drain — that half of #71 stays open.
+# own tee (lib/registry.sh), which is not this wrapper's to drain. Every caller
+# of that function traverses the pipe, native capture included, and it is the
+# last instance of #71 now that ask-reviewer.sh logs on a descriptor too.
 cat > "$TMP/leaky-researcher" <<'STUB'
 #!/usr/bin/env bash
 { sleep 10; } > /dev/null &

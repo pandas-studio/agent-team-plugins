@@ -219,6 +219,8 @@ cleanup_review() {
   fi
   [ -z "${RESULT_TMP:-}" ] || rm -f "$RESULT_TMP" || true
   [ -z "${LATEST_TMP:-}" ] || rm -f "$LATEST_TMP" || true
+  [ -z "${TRANSCRIPT_TMP:-}" ] || rm -f "$TRANSCRIPT_TMP" || true
+  [ -z "${TRANSCRIPT_SNAP:-}" ] || rm -f "$TRANSCRIPT_SNAP" || true
   manifest_cleanup || true
 }
 trap cleanup_review EXIT
@@ -304,13 +306,114 @@ echo "[ask-reviewer] running ($REVIEWER_MODEL) — monitor: dashboard.sh codex  
 RC=0
 # For models with native final-message capture (codex's --output-last-message),
 # the registry's final_args template writes the structured review to $FINAL
-# regardless of how stdout is buffered/streamed; `tee` keeps the full transcript
-# in $LOG. Legacy REVIEWER_CLI still overrides the binary.
-REGISTRY_CMD_OVERRIDE="${REVIEWER_CLI:-}" registry_run "$REVIEWER_MODEL" "$PROMPT" "$FINAL" 2>&1 | tee -a "$LOG" || RC=$?
+# regardless of how stdout is buffered/streamed. Legacy REVIEWER_CLI still
+# overrides the binary.
+#
+# The transcript is written straight to the log on a descriptor rather than
+# through `2>&1 | tee -a "$LOG"`. The pipe was not free: a pipeline ends when
+# *every* process holding its write end closes it, not when the CLI exits, so a
+# CLI that leaves a background descendant holding its stdout or stderr held this
+# wrapper open for as long as that descendant lived (#71) — both halves, on both
+# capture paths. Measured with a stub that leaks a descendant for 10 s: 10.27 s
+# through the pipeline on each of the four combinations, 0.2 s through this
+# redirection, with an ordinary run unchanged.
+#
+# What the wrapper preserves is the status the CLI returned: there is no `tee`
+# stage between the CLI and the descriptor to turn a log failure into a wrapper
+# failure, the way `registry_run_answer` can. That is not the same as saying
+# logging cannot affect the review — with a direct redirection a mid-run write
+# failure now reaches the CLI itself, which may abort its own output or exit
+# before writing its native final, where a `tee` would have absorbed it and kept
+# draining the producer.
+#
+# A log that cannot be *opened* falls back to a private temp transcript, not to
+# /dev/null. Measured under /bin/bash 3.2.57: `tee -a` on an unopenable path
+# reports the failure and exits 1 but keeps copying to stdout and draining its
+# input, so the old shape still delivered the review; a /dev/null fallback would
+# have lost it, and for a model without native capture the transcript is the
+# only copy there is. The fallback is close to unreachable — the header write at
+# the top of this run already created $LOG under errexit — but that is exactly
+# where the pipeline was not worse.
+#
+# Removing the pipeline also removes the wait for a leaked descendant, which
+# settles what the review *is*: the bytes present when the CLI returned. The
+# range is frozen then, and both the synthesized final and the stdout replay
+# read that range, so a descendant that outlives its parent — it still holds its
+# own copy of fd 8, which closing this one cannot revoke — no longer decides
+# when this wrapper finishes. The boundary is the sampled length, not the exit
+# itself: anything written in the moment between the two is inside it.
+#
+# errexit is lifted around the call so the CLI's own status survives as $RC.
+TRANSCRIPT_PATH="$LOG"
+TRANSCRIPT_OFFSET="$(wc -c < "$LOG")" || TRANSCRIPT_OFFSET=""
+if ! exec 8>>"$LOG"; then
+  TRANSCRIPT_TMP="$(mktemp "$LOG.transcript.XXXXXX")" || TRANSCRIPT_TMP=""
+  if [ -n "$TRANSCRIPT_TMP" ] && exec 8>>"$TRANSCRIPT_TMP"; then
+    echo "[ask-reviewer] the transcript could not be logged to $LOG; keeping it out of band" >&2
+    TRANSCRIPT_PATH="$TRANSCRIPT_TMP"
+    TRANSCRIPT_OFFSET=0
+  else
+    echo "[ask-reviewer] the transcript could not be logged; $LOG may be incomplete" >&2
+    exec 8>/dev/null
+    TRANSCRIPT_OFFSET=""
+  fi
+fi
+set +e
+REGISTRY_CMD_OVERRIDE="${REVIEWER_CLI:-}" registry_run "$REVIEWER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8
+RC=$?
+set -e
+TRANSCRIPT_END=""
+[ -z "$TRANSCRIPT_OFFSET" ] || TRANSCRIPT_END="$(wc -c < "$TRANSCRIPT_PATH")" || TRANSCRIPT_END=""
+# The transcript replay is this wrapper's stdout — ralph-meta keeps it as the
+# raw-output artifact it falls back to when it cannot locate the log. It is
+# emitted once, at the end, from the frozen range; a replay that fails must not
+# disturb a review that already exists in $FINAL/$RESULT.
+# The frozen range, on stdout. `tail`/`head` both read a regular file here, so
+# neither reintroduces a pipe a leaked descendant could hold open.
+transcript_range() {
+  [ -n "$TRANSCRIPT_OFFSET" ] && [ -n "$TRANSCRIPT_END" ] || return 1
+  [ "$TRANSCRIPT_END" -gt "$TRANSCRIPT_OFFSET" ] || return 1
+  tail -c "+$((TRANSCRIPT_OFFSET + 1))" "$TRANSCRIPT_PATH" \
+    | head -c "$((TRANSCRIPT_END - TRANSCRIPT_OFFSET))"
+}
+# This wrapper's stdout is the transcript — ralph-meta keeps it as the raw-output
+# artifact it falls back to when it cannot locate the log. It is replayed once,
+# at the end, and a replay that fails must not disturb a review that already
+# exists in $FINAL/$RESULT.
+TRANSCRIPT_EMITTED=0
+emit_transcript() {
+  [ "$TRANSCRIPT_EMITTED" -eq 0 ] || return 0
+  TRANSCRIPT_EMITTED=1
+  transcript_range 2>/dev/null || true
+  return 0
+}
 # Only adapters without native final capture synthesize a final. A missing
 # native final is an error, even if stdout contains a plausible verdict.
-if ! registry_has_final "$REVIEWER_MODEL" && [ ! -s "$FINAL" ]; then
-  registry_extract_response "$LOG" > "$FINAL" 2>/dev/null || true
+#
+# The frozen range is fed to the same extractor as before rather than used as
+# the final directly: that function resets its buffer at a second
+# `=== RESPONSE ===` and stops at an `=== END (rc=` line, so a review quoting
+# either marker parses the way it always has. The snapshot is given the opening
+# marker the extractor keys on, which is also what lets the out-of-band fallback
+# — a transcript with no header at all — go through the same path.
+if ! registry_has_final "$REVIEWER_MODEL" && [ ! -s "$FINAL" ] \
+   && [ -n "$TRANSCRIPT_OFFSET" ] && [ -n "$TRANSCRIPT_END" ]; then
+  TRANSCRIPT_MARKER='=== RESPONSE ==='
+  if TRANSCRIPT_SNAP="$(mktemp "${TMPDIR:-/tmp}/ask-reviewer-transcript.XXXXXX")"; then
+    { printf '%s\n' "$TRANSCRIPT_MARKER"; transcript_range; } > "$TRANSCRIPT_SNAP" 2>/dev/null || true
+    # A snapshot that came up short — a full temp filesystem — would otherwise
+    # be extracted into a review that parses: a valid verdict line followed by
+    # findings that were never written. Leaving $FINAL absent instead routes it
+    # to the same rc=3 a missing native final gets.
+    if [ "$(wc -c < "$TRANSCRIPT_SNAP")" \
+         -eq "$((${#TRANSCRIPT_MARKER} + 1 + TRANSCRIPT_END - TRANSCRIPT_OFFSET))" ]; then
+      registry_extract_response "$TRANSCRIPT_SNAP" > "$FINAL" 2>/dev/null || true
+    else
+      echo "[ask-reviewer] the transcript could not be captured in full; no review was synthesized" >&2
+    fi
+    rm -f "$TRANSCRIPT_SNAP" || true
+    TRANSCRIPT_SNAP=""
+  fi
 fi
 INVOCATION_RC="$RC"
 result_output_failed() {
@@ -321,6 +424,10 @@ result_output_failed() {
   rm -f "$RESULT" 2>/dev/null || true
   manifest_set_verdict "" || true
   manifest_finalize || true
+  # The transcript is still this wrapper's stdout on the failure path, and this
+  # exits — without the replay here, a result-write failure would lose it.
+  emit_transcript
+  exec 8>&- || true
   printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG" || true
   echo "[ask-reviewer] result write failed: $1 (log: $LOG, final: $FINAL, rc=$RC)" >&2
   # Last, so nothing fallible can change the code after it is recorded.
@@ -341,8 +448,10 @@ if [ -n "$RECEIPT" ]; then
 fi
 manifest_finalize || result_output_failed 'finalize manifest'
 # Completion is published only after the final, result and manifest are ready.
+emit_transcript
+exec 8>&- || true
 printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG"
-echo
+echo || true
 if [ "$RC" -ne 0 ]; then
   ERROR=$(printf '%s\n' "$RESULT_JSON" | jq -r '.error')
   echo "[ask-reviewer] review failed: $ERROR (result: $RESULT)" >&2
