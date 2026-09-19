@@ -255,6 +255,24 @@ class DebateAnswerTests(unittest.TestCase):
         result = self.run_cli("lib/ask-critic.sh", "topic", TMPDIR=str(self.root / "absent"))
         self.assertEqual(result.returncode, 6, result.stderr)
         self.assertFalse(self.calls.exists())
+        # mktemp names the internal capture template in its own diagnostic.
+        self.assertNotIn("mkdtemp", result.stderr)
+        self.assertNotIn("debate-answer.", result.stderr)
+
+    def test_model_failure_status_survives_whatever_it_left_behind(self):
+        # registry_run_answer reports a failed model and an answerless run with
+        # the same 5, so an inspection delegated to it cannot tell them apart.
+        # A model that exits 5 keeps its own status in every artifact state.
+        modes = ["missing", "directory", "fifo", "dangling", "blank", "answer"]
+        if os.geteuid() != 0:  # Root can read mode-000 files, including in Docker.
+            modes.append("unreadable")
+        for mode in modes:
+            with self.subTest(mode=mode):
+                result = self.run_cli("lib/ask-critic.sh", "topic", timeout=10,
+                                      STUB_FINAL_MODE=mode, STUB_RC="5")
+                self.assertEqual(result.returncode, 5, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(list(self.capture.iterdir()), [])
 
     def test_existing_raw_log_is_not_overwritten_or_reused(self):
         raw = self.root / "existing.raw.log"

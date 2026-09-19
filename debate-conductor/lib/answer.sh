@@ -4,11 +4,14 @@
 # answer text on stdout. RAW_LOG, when supplied, is a fresh private debug log.
 # Return the CLI's failure first, else 5 for no answer or 6 for capture I/O.
 #
-# This is the debate-side boundary over registry_run_answer, not a second
-# implementation of it. The library inspects and validates the answer; what it
-# does not do is keep the CLI's console off the caller's stdout, and the round
-# file is built from that stdout (debate.sh: strip_cli_banner | tee "$OUT"),
-# which is what issue #67 reports. Everything below exists for that boundary.
+# The native path runs the CLI itself rather than calling registry_run_answer,
+# and the reason is the model's own exit status. The library reports "the model
+# failed" and "the model exited 0 leaving no answer" with the same 5, which is
+# right for its callers and wrong here: this side answers a third question --
+# whether the capture path itself is malformed (6). Delegating and mapping 5
+# back to 6 was measured to overwrite a model that exits 5 with a directory,
+# FIFO, dangling link or unreadable file in place (5 -> 6 in four modes).
+# What the library cannot be asked for is inspected here, and nothing else is.
 debate_run_answer() (
   local model="$1" prompt="$2" raw_log="${3:-}" capture_dir="" final="" rc=0
   local statuses=()
@@ -34,27 +37,30 @@ debate_run_answer() (
   fi
 
   if registry_has_final "$model"; then
-    capture_dir="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/debate-answer.XXXXXX")" || {
+    capture_dir="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/debate-answer.XXXXXX" 2>&9)" || {
       echo 'debate-answer: cannot create final-answer capture' >&2
       exit 6
     }
     final="$capture_dir/final"
-    # The library runs the CLI, captures natively and judges the artifact. Its
-    # stdout is the transcript and its diagnostics name $final, an internal
-    # path: both go to fd 9, never to the caller.
-    registry_run_answer "$model" "$prompt" "$final" >&9 2>&9
+    registry_run "$model" "$prompt" "$final" >&9 2>&9
     rc=$?
-    # The library reports a missing artifact and a malformed one alike (rc=5).
-    # A directory, FIFO, device, dangling link or unreadable file is a capture
-    # failure, not an answerless run, so it keeps this side's rc=6.
-    if [ "$rc" -eq 5 ] && { [ -e "$final" ] || [ -L "$final" ]; } &&
-       { [ ! -f "$final" ] || [ ! -r "$final" ]; }; then
-      rc=6
-    elif [ "$rc" -eq 5 ] && [ ! -e "$final" ] && [ ! -L "$final" ]; then
-      echo "debate-answer: model '$model' exited 0 but wrote no final-answer file; check CLI native-capture support and ensure *_CLI wrappers forward all arguments" >&2
+    if [ "$rc" -eq 0 ]; then
+      if [ ! -e "$final" ] && [ ! -L "$final" ]; then
+        rc=5
+        echo "debate-answer: model '$model' exited 0 but wrote no final-answer file; check CLI native-capture support and ensure *_CLI wrappers forward all arguments" >&2
+      elif [ ! -f "$final" ] || [ ! -r "$final" ]; then
+        # Reject FIFOs/devices/directories before grep can block or disclose
+        # an internal capture path. A dangling symlink is malformed, not absent.
+        rc=6
+      else
+        grep -q '[^[:space:]]' "$final" 2>/dev/null
+        case "$?" in
+          0) cat "$final" 2>/dev/null || rc=6 ;;
+          1) rc=5 ;;
+          *) rc=6 ;;
+        esac
+      fi
     fi
-    # Publication happens only after the library has validated the artifact.
-    [ "$rc" -ne 0 ] || cat "$final" 2>/dev/null || rc=6
   elif [ -n "$raw_log" ]; then
     registry_run_answer "$model" "$prompt" 2>&9 | tee -a "$raw_log"
     statuses=("${PIPESTATUS[@]}")
