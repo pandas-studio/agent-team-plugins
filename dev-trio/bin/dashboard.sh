@@ -115,7 +115,6 @@ sanitize_block() {
 # namespace.sh validates the team; nothing validates the log root, and this
 # script is not the place to decide which env values were checked elsewhere —
 # so both go through the same containment as model text.
-LOG_DIR_REAL=$(cd "$LOG_DIR" 2>/dev/null && pwd -P) || LOG_DIR_REAL="$LOG_DIR"
 TEAM_SHOWN=$(printf '%s' "$TEAM" | sanitize_line 48)
 LATEST_SHOWN=$(printf '%s' "$LATEST" | sanitize_line 120)
 
@@ -193,10 +192,20 @@ PAUSED=0
 # A terminal never reaches EOF; any other stdin eventually does. See the poll
 # at the bottom of the loop.
 STDIN_LIVE=1
+STDIN_INSTANT=0
 
 while true; do
   if [ "$PAUSED" = "0" ]; then
     WRAP_W=$(get_wrap_width)
+    # Canonical form of the team directory, resolved every frame. A pane is
+    # normally opened before the first call creates it (that is what
+    # /dev-trio:bootstrap does), and a name resolved once at startup would keep
+    # whatever spelling the environment supplied — a `./`, a `..`, a symlinked
+    # parent — while every later comparison is against a canonical path. Empty
+    # means the directory still does not exist, which the states below already
+    # render as "no runs yet"; containment is never checked against a name that
+    # was never resolved.
+    LOG_DIR_REAL=$(cd "$LOG_DIR" 2>/dev/null && pwd -P) || LOG_DIR_REAL=""
     # Freeze the latest log target for this frame. Every sibling artifact is
     # resolved from this path, never from an independently changing latest link.
     SOURCE="$LATEST"
@@ -244,7 +253,7 @@ while true; do
         # another invocation in the same directory is a mismatch, not a frame.
         SOURCE_DIR=$(cd "$(dirname "$SOURCE")" 2>/dev/null && pwd -P) || SOURCE_DIR=""
         RUN_LOG_DIR=$(cd "$(dirname "$RUN_LOG")" 2>/dev/null && pwd -P) || RUN_LOG_DIR=""
-        if [ -z "$SOURCE_DIR" ] || [ "$SOURCE_DIR" != "$LOG_DIR_REAL" ]; then
+        if [ -z "$LOG_DIR_REAL" ] || [ -z "$SOURCE_DIR" ] || [ "$SOURCE_DIR" != "$LOG_DIR_REAL" ]; then
           # A latest link may only name a run inside this team's directory.
           # Matching a team string is not containment: another directory can
           # carry the same team name in its metadata.
@@ -488,14 +497,25 @@ while true; do
   # Wait up to 1s for a keypress (also the polling cadence). On bash 3.2 `read`
   # returns 1 for a timeout AND for EOF, so the return code cannot tell them
   # apart — a closed or redirected stdin would spin this loop at full speed.
-  # Decide on the stream instead: a terminal never reaches EOF, and for anything
-  # else an empty failed read means the input is finished, so stop reading it.
+  #
+  # Tell them apart by how long the read took instead. A timeout costs about a
+  # second, so the clock moves; at EOF the read returns at once, over and over.
+  # A terminal never reaches EOF, so it is never a candidate. Treating any empty
+  # failed read as EOF would be wrong the other way: a pipe that is open but
+  # quiet — a driver that sends a key after a few seconds — would be abandoned
+  # after the first idle second.
   KEY=""
   if [ "$STDIN_LIVE" = "1" ]; then
+    _tick=$SECONDS
     if ! IFS= read -rs -t 1 -n 1 KEY 2>/dev/null; then
-      if [ -z "$KEY" ] && [ ! -t 0 ]; then
-        STDIN_LIVE=0
+      if [ -z "$KEY" ] && [ ! -t 0 ] && [ "$SECONDS" = "$_tick" ]; then
+        STDIN_INSTANT=$((STDIN_INSTANT + 1))
+        [ "$STDIN_INSTANT" -lt 5 ] || STDIN_LIVE=0
+      else
+        STDIN_INSTANT=0
       fi
+    else
+      STDIN_INSTANT=0
     fi
   else
     sleep 1

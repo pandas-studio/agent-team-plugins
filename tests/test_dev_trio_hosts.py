@@ -468,6 +468,39 @@ class HostTests(unittest.TestCase):
         self.assertNotIn("THE FIRST RUN ANSWER", out)
         self.assertIn("No answer captured", out)
 
+    def test_a_pane_opened_before_the_first_run_renders_it(self):
+        """/dev-trio:bootstrap opens the panes before anything has run.
+
+        The team directory therefore does not exist when the dashboard starts.
+        Resolving its canonical name once, at startup, kept whatever spelling
+        the environment gave — here a `./` — while every later comparison was
+        against a canonical path, so the containment check rejected every run
+        for the life of the pane.
+        """
+        logroot = self.workspace / "." / "late-logs"
+        self.assertFalse((self.workspace / "late-logs").exists())
+        env = self.env | dict(DEV_TRIO_LOG_DIR=str(logroot))
+        pane = subprocess.Popen(
+            [str(self.plugin / "bin/dashboard.sh"), "agy"],
+            cwd=self.workspace, env=env, stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 10
+            while not (self.workspace / "late-logs").exists():
+                result = subprocess.run(
+                    [str(self.plugin / "bin/ask-researcher.sh"), "a question"],
+                    cwd=self.workspace, env=env, input="", text=True,
+                    capture_output=True, timeout=20)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                break
+            # Let the still-running pane poll at least once more.
+            time.sleep(2.5)
+            out, _ = pane.communicate("q", timeout=20)
+        finally:
+            pane.kill()
+        self.assertNotIn("outside the team directory", out)
+        self.assertIn("done", out)
+
     def test_dashboard_accepts_a_document_at_the_exact_limit(self):
         """limit bytes render; limit+1 do not."""
         valid = self.valid_doc()
