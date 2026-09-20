@@ -652,7 +652,8 @@ class DebateHostTests(unittest.TestCase):
                          {"v": 1, "sequence": 3, "debate_dir": str(a)})
 
     def test_pruned_selection_allows_new_run_and_continue(self):
-        self.assertEqual(self.run_cli("debate.sh", "-n", "1", "A").returncode, 0)
+        self.assertEqual(self.run_cli("debate.sh", "-n", "1", "A",
+                                      PATH=self.date_shim("20260920-120000")).returncode, 0)
         a = self.latest_debate()
         self.assertEqual(self.run_cli("debate.sh", "-n", "1", "B").returncode, 0)
         b = self.latest_debate()
@@ -662,7 +663,9 @@ class DebateHostTests(unittest.TestCase):
         self.assertEqual(continued.returncode, 0, continued.stderr)
         self.assertEqual(json.loads(state.read_text())["sequence"], 3)
         shutil.rmtree(a)
-        new = self.run_cli("debate.sh", "-n", "1", "C")
+        # Distinct paths, even when all runs finish within one clock second.
+        new = self.run_cli("debate.sh", "-n", "1", "C",
+                           PATH=self.date_shim("20260920-120001"))
         self.assertEqual(new.returncode, 0, new.stderr)
         self.assertEqual(json.loads(state.read_text())["sequence"], 4)
 
