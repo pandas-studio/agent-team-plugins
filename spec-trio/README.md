@@ -204,9 +204,9 @@ model-free driver verification, or `bash scripts/check.sh` for the full sequenti
 check suite. Verification replaces external model CLIs with local fixtures.
 
 The verification harness allows 120 seconds per driver invocation, 60 seconds
-for the interrupt fixture to become ready, 30 seconds for interrupt shutdown,
-and 10 seconds to reap a forcibly stopped process. Slow or busy machines can
-multiply all four limits with a test-only environment variable:
+for readiness waits, 30 seconds for interrupt shutdown, and 10 seconds for
+process teardown checks, including reaping and process-status polling. Slow or
+busy machines can multiply all four limits with a test-only environment variable:
 
 ```bash
 SPEC_TRIO_TEST_TIMEOUT_SCALE=2 python3 spec-trio/tests/test_verification.py
@@ -234,17 +234,17 @@ Timeout and readiness failures report the test, phase, command, effective limit,
 and the first/last 4 KiB of each captured stream, with omitted byte counts.
 Successful results retain the full output. Supervisor internal failures are
 reported separately from driver exit codes, with their traceback in captured
-stderr; a genuine driver exit code `125` remains `125`.
+stderr and `returncode=None` when no driver result is available. A genuine driver
+exit code `125` remains `125`.
 
 Each invocation keeps a supervisor alive as its process-group leader until
 cleanup has signalled the group, then reaps it. This prevents a recycled PID
 from receiving a later cleanup signal, including when the driver exits before
-its children. A separate ownership pipe lets the supervisor terminate its group
-if the test runner is forcibly killed,
-both during driver execution and after driver completion. Child stdin is
-`/dev/null` (reads return EOF). Fixture Git and standalone coverage commands also
-use the scaled execution limit. Interrupt fixtures wait for a signal instead of
-expiring after a fixed sleep.
+its children. A separate ownership pipe lets the supervisor terminate its
+group if the test runner is forcibly killed, both during driver execution and
+after driver completion. Child stdin is `/dev/null` (reads return EOF). Fixture
+Git and standalone coverage commands also use the scaled execution limit.
+Interrupt fixtures wait for a signal instead of expiring after a fixed sleep.
 
 ## Architecture
 

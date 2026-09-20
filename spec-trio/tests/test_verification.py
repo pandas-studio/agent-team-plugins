@@ -167,7 +167,9 @@ class OwnedProcess:
     def reap(self, timeout):
         code = self.owner.wait(timeout=timeout)
         self.reaped = True
-        if self.returncode is None:
+        # A status failure has no driver result; do not substitute the
+        # supervisor's cleanup signal. Retain the fallback for timeouts.
+        if self.returncode is None and self.status_error is None:
             self.returncode = code
 
     def close(self):
@@ -399,10 +401,14 @@ class DriverProcessTests(unittest.TestCase):
                     "missing-command",
                 ):
                     self.assertIn(fragment, message)
+                self.assertIn("returncode=None", message)
+                self.assertNotIn("returncode=-9", message)
+                self.assertIsNone(driver.result().returncode)
                 self.assertTrue(driver.proc.reaped)
                 self.assertEqual(driver.proc.owner.returncode, -signal.SIGKILL)
 
     def fake_status_process(self):
+        # Keep these fields in sync with the state read by OwnedProcess.poll().
         proc = OwnedProcess.__new__(OwnedProcess)
         proc.returncode = None
         proc.status = b""
