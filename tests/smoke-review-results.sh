@@ -155,15 +155,17 @@ exit "${TEST_REVIEW_RC:-0}"
 STUB
 chmod +x "$TMP/reviewer"
 # Pin all model selection, role, namespace and output controls for fixtures.
+INVOKE_ENV=(
+  -u REVIEWER_CLI -u CODEX_CLI -u CLAUDE_CLI -u REVIEWER_ROLE_FILE
+  -u DEV_TRIO_REVIEW_PROFILE -u DEV_TRIO_REVIEW_RECEIPT -u MANIFEST_PARENT_TMP
+  -u TEST_MISSING_FINAL -u TEST_STDOUT_FILE -u TEST_REVIEW_RC
+  AGENT_TEAM=review-test TMUX='' AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json"
+  DEV_TRIO_LOG_DIR="$TMP/log" DEV_TRIO_REVIEWER_MODEL=codex
+  CODEX_CLI="$TMP/reviewer" CLAUDE_CLI="$TMP/reviewer"
+  TEST_REVIEW_FILE="$TMP/review.md"
+)
 invoke() {
-  env -u REVIEWER_CLI -u CODEX_CLI -u CLAUDE_CLI -u REVIEWER_ROLE_FILE \
-    -u DEV_TRIO_REVIEW_PROFILE -u DEV_TRIO_REVIEW_RECEIPT -u MANIFEST_PARENT_TMP \
-    -u TEST_MISSING_FINAL -u TEST_STDOUT_FILE -u TEST_REVIEW_RC \
-    AGENT_TEAM=review-test TMUX='' AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" \
-    DEV_TRIO_LOG_DIR="$TMP/log" DEV_TRIO_REVIEWER_MODEL=codex \
-    CODEX_CLI="$TMP/reviewer" CLAUDE_CLI="$TMP/reviewer" \
-    TEST_REVIEW_FILE="$TMP/review.md" "$@" \
-    "$ROOT/dev-trio/bin/ask-reviewer.sh" 'fixture review'
+  env "${INVOKE_ENV[@]}" "$@" "$ROOT/dev-trio/bin/ask-reviewer.sh" 'fixture review'
 }
 run_review() {
   local expected="$1" rc=0; shift
@@ -432,9 +434,14 @@ fixture 'SHIP — leaked descendant'
 
 # A replay that cannot be written is not a failed review.
 closed_rc=0
+# Its own handshake files: reusing the shared pair would let a descendant see a
+# release left by an earlier block and exit before the wrapper even returned.
+rm -f "$TMP/closed-release" "$TMP/closed-done"
 invoke CODEX_CLI="$TMP/leaky-reviewer" CLAUDE_CLI="$TMP/leaky-reviewer" \
-  LEAK_RELEASE="$TMP/leak-release" LEAK_DONE="$TMP/leak-done2" \
+  LEAK_RELEASE="$TMP/closed-release" LEAK_DONE="$TMP/closed-done" \
   DEV_TRIO_REVIEWER_MODEL=codex LEAK_STREAM=stderr >&- 2> "$TMP/closed.err" || closed_rc=$?
+check 'the closed-stdout descendant really held' test ! -e "$TMP/closed-done"
+: > "$TMP/closed-release"
 check 'a closed stdout does not fail the review' test "$closed_rc" -eq 0
 closed_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-codex.log")"
 check 'a closed stdout still publishes the result' \

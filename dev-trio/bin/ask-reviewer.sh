@@ -217,6 +217,19 @@ cleanup_review() {
   if [ -n "$RUNSTATE_LOG" ]; then
     runstate_complete "$RUNSTATE_LOG" exit_code="$_cleanup_rc" reason=aborted 2>/dev/null || true
   fi
+  # An interrupted run still owes the caller what the CLI produced. After the
+  # completion above, so a failure here cannot cost the dashboard its record,
+  # and before the out-of-band transcript is removed — that is the only copy.
+  if [ "${TRANSCRIPT_EMITTED:-1}" -eq 0 ]; then
+    emit_transcript || true
+    # The replay above is best-effort on this path. An out-of-band transcript is
+    # the only copy of what the CLI produced, so an abort keeps it and says
+    # where; a run that replayed has it in the log and does not need it.
+    if [ -n "${TRANSCRIPT_TMP:-}" ] && [ -s "$TRANSCRIPT_TMP" ]; then
+      echo "[ask-reviewer] interrupted; the transcript is at $TRANSCRIPT_TMP" >&2
+      TRANSCRIPT_TMP=""
+    fi
+  fi
   [ -z "${RESULT_TMP:-}" ] || rm -f "$RESULT_TMP" || true
   [ -z "${LATEST_TMP:-}" ] || rm -f "$LATEST_TMP" || true
   [ -z "${TRANSCRIPT_TMP:-}" ] || rm -f "$TRANSCRIPT_TMP" || true
@@ -346,24 +359,9 @@ RC=0
 # errexit is lifted around the call so the CLI's own status survives as $RC.
 TRANSCRIPT_PATH="$LOG"
 TRANSCRIPT_OFFSET="$(wc -c < "$LOG")" || TRANSCRIPT_OFFSET=""
-if ! exec 8>>"$LOG"; then
-  TRANSCRIPT_TMP="$(mktemp "$LOG.transcript.XXXXXX")" || TRANSCRIPT_TMP=""
-  if [ -n "$TRANSCRIPT_TMP" ] && exec 8>>"$TRANSCRIPT_TMP"; then
-    echo "[ask-reviewer] the transcript could not be logged to $LOG; keeping it out of band" >&2
-    TRANSCRIPT_PATH="$TRANSCRIPT_TMP"
-    TRANSCRIPT_OFFSET=0
-  else
-    echo "[ask-reviewer] the transcript could not be logged; $LOG may be incomplete" >&2
-    exec 8>/dev/null
-    TRANSCRIPT_OFFSET=""
-  fi
-fi
-set +e
-REGISTRY_CMD_OVERRIDE="${REVIEWER_CLI:-}" registry_run "$REVIEWER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8
-RC=$?
-set -e
+# Declared before the call, not after it: the EXIT trap reads them on an abort,
+# and under `set -u` an unset one would take the handler down.
 TRANSCRIPT_END=""
-[ -z "$TRANSCRIPT_OFFSET" ] || TRANSCRIPT_END="$(wc -c < "$TRANSCRIPT_PATH")" || TRANSCRIPT_END=""
 # The transcript replay is this wrapper's stdout — ralph-meta keeps it as the
 # raw-output artifact it falls back to when it cannot locate the log. It is
 # emitted once, at the end, from the frozen range; a replay that fails must not
@@ -384,9 +382,31 @@ TRANSCRIPT_EMITTED=0
 emit_transcript() {
   [ "$TRANSCRIPT_EMITTED" -eq 0 ] || return 0
   TRANSCRIPT_EMITTED=1
+  # An abort never reached the freeze below, so take the length now. What the
+  # CLI managed to produce before the signal is still owed to the caller — the
+  # pipeline this replaces had already streamed it.
+  [ -n "$TRANSCRIPT_END" ] || [ -z "$TRANSCRIPT_OFFSET" ] \
+    || TRANSCRIPT_END="$(wc -c < "$TRANSCRIPT_PATH" 2>/dev/null)" || TRANSCRIPT_END=""
   transcript_range 2>/dev/null || true
   return 0
 }
+if ! exec 8>>"$LOG"; then
+  TRANSCRIPT_TMP="$(mktemp "$LOG.transcript.XXXXXX")" || TRANSCRIPT_TMP=""
+  if [ -n "$TRANSCRIPT_TMP" ] && exec 8>>"$TRANSCRIPT_TMP"; then
+    echo "[ask-reviewer] the transcript could not be logged to $LOG; keeping it out of band" >&2
+    TRANSCRIPT_PATH="$TRANSCRIPT_TMP"
+    TRANSCRIPT_OFFSET=0
+  else
+    echo "[ask-reviewer] the transcript could not be logged; $LOG may be incomplete" >&2
+    exec 8>/dev/null
+    TRANSCRIPT_OFFSET=""
+  fi
+fi
+set +e
+REGISTRY_CMD_OVERRIDE="${REVIEWER_CLI:-}" registry_run "$REVIEWER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8
+RC=$?
+set -e
+[ -z "$TRANSCRIPT_OFFSET" ] || TRANSCRIPT_END="$(wc -c < "$TRANSCRIPT_PATH")" || TRANSCRIPT_END=""
 # Only adapters without native final capture synthesize a final. A missing
 # native final is an error, even if stdout contains a plausible verdict.
 #
