@@ -29,6 +29,15 @@ fixture() {
   printf '## Verdict\n%s\n\n## Findings\n\n### Blocker\n- 없음.\n\n### Major\n- None.\n\n### Minor / Nit\n- 없음\n' "$1" > "$TMP/review.md"
 }
 parse() { review_result_parse "$TMP/review.md" "${1:-0}" "${2:-default}" > "$TMP/parsed.json"; }
+contradictory_fixture() {
+  local severity="$1" marker="$2" order="$3" repeated="${4:-no}" first second
+  printf '## Verdict\nSHIP — inspect the findings\n## Findings\n### %s\n' "$severity" > "$TMP/review.md"
+  first="$marker"; second='A real finding.'
+  if [ "$order" = finding-first ]; then first='A real finding.'; second="$marker"; fi
+  printf -- '- %s\n' "$first" >> "$TMP/review.md"
+  [ "$repeated" != yes ] || printf '## What I checked\n- inspected\n## Findings\n### %s\n' "$severity" >> "$TMP/review.md"
+  printf -- '- %s\n' "$second" >> "$TMP/review.md"
+}
 for token in SHIP NEEDS-FIX DISCUSS; do
   for separator in ' — ' '. '; do
     fixture "$token${separator}reason"
@@ -38,8 +47,10 @@ for token in SHIP NEEDS-FIX DISCUSS; do
     check 'result reader agrees' review_result_read "$TMP/parsed.json" >/dev/null
   done
 done
-fixture 'NEEDS-FIX — findings'
-cat >> "$TMP/review.md" <<'REVIEW'
+cat > "$TMP/review.md" <<'REVIEW'
+## Verdict
+NEEDS-FIX — findings
+## Findings
 ### Blocker
 - None of the writes are atomic.
 - 없음. 이 문장은 실제 finding입니다.
@@ -48,8 +59,6 @@ cat >> "$TMP/review.md" <<'REVIEW'
 ### Major
 - none found
 ### Minor / Nit
-- NONE
-- nOnE.
 - 없음!
 ## What I checked
 - not a finding
@@ -63,6 +72,105 @@ cp "$TMP/crlf.md" "$TMP/review.md"
 parse
 check 'CRLF matches findings' json_is "$TMP/parsed.json" '(.findings.blocker|length)==4'
 check 'CRLF source preserved' cmp -s "$TMP/crlf.md" "$TMP/review.md"
+# Empty markers and real findings contradict each other, regardless of order
+# or repeated headings. These are lexical checks, not verdict-based filtering.
+for severity in Blocker Major 'Minor / Nit'; do
+  case "$severity" in Blocker) key=blocker ;; Major) key=major ;; *) key=minor ;; esac
+  for marker in 'None.' none NONE nOnE. 없음 없음. 'None. ' $'nOnE.\t' '없음 ' $'없음.\t'; do
+    for order in empty-first finding-first; do
+      contradictory_fixture "$severity" "$marker" "$order"
+      parse
+      check "$severity $marker $order fails closed" json_is "$TMP/parsed.json" \
+        ".status==\"parse-failed\" and .exit_code==3 and .verdict==null and .verdict_line==null and .findings=={blocker:null,major:null,minor:null} and (.error|contains(\"$key\"))"
+    done
+  done
+  for order in empty-first finding-first; do
+    contradictory_fixture "$severity" 'None.' "$order" yes
+    parse
+    check "$severity $order across repeated headings fails closed" json_is "$TMP/parsed.json" \
+      ".status==\"parse-failed\" and .exit_code==3 and .findings=={blocker:null,major:null,minor:null} and (.error|contains(\"$key\"))"
+  done
+done
+for indent in ' ' '  ' '   '; do
+  for content in '- A real finding.' '- None.'; do
+    printf '## Verdict\nSHIP — indentation must not hide findings\n## Findings\n### Major\n%s%s\n' "$indent" "$content" > "$TMP/review.md"
+    parse
+    check 'noncanonical indentation fails instead of reporting zero findings' json_is "$TMP/parsed.json" '.status=="parse-failed" and .exit_code==3 and .verdict==null and .findings=={blocker:null,major:null,minor:null} and (.error|contains("major"))'
+  done
+  printf '## Verdict\nSHIP — resolved explanation\n## Findings\n### Major\n- None.\n\n%sThe prior concern is resolved:\n%s- Normal completion is preserved.\n' "$indent" "$indent" > "$TMP/review.md"
+  parse
+  check 'indented resolved explanation is rejected' json_is "$TMP/parsed.json" '.status=="parse-failed" and (.error|contains("column 0"))'
+done
+printf '## Verdict\nSHIP — nested bullets are ambiguous\n## Findings\n### Major\n- A real finding.\n  - Supporting detail.\n' > "$TMP/review.md"
+parse
+check 'nested bullets fail instead of inflating finding counts' json_is "$TMP/parsed.json" '.status=="parse-failed" and .findings.major==null'
+for bullet in '* A real finding.' '+ A real finding.' '1. A real finding.' '12) A real finding.' $'-\tA real finding.' '* None.'; do
+  for indent in '' '  '; do
+    printf '## Verdict\nSHIP — unsupported list markers must not hide findings\n## Findings\n### Major\n- None.\n%s%s\n' "$indent" "$bullet" > "$TMP/review.md"
+    parse
+    check 'alternate list markers fail instead of bypassing the guard' json_is "$TMP/parsed.json" '.status=="parse-failed" and .exit_code==3 and .verdict==null and .findings.major==null and (.error|contains("noncanonical major"))'
+  done
+done
+printf '## Verdict\nSHIP — a genuine alternate-marker finding\n## Findings\n### Major\n* A real finding.\n' > "$TMP/review.md"
+parse
+check 'an alternate-marker finding without an empty marker is still rejected' json_is "$TMP/parsed.json" '.status=="parse-failed" and .findings.major==null'
+for surrounding in empty-marker finding; do
+  fixture 'SHIP — blank bullets have no content'
+  if [ "$surrounding" = finding ]; then
+    printf '## Verdict\nSHIP — a real finding\n## Findings\n### Major\n- A real finding.\n' > "$TMP/review.md"
+  fi
+  printf -- '- \n- \t\n  - \t\n* \n+\t\n1. \n2)\t\n' >> "$TMP/review.md"
+  parse
+  check 'blank bullets do not create contradictions or counts' json_is "$TMP/parsed.json" ".status==\"ok\" and (.findings.major|length)==$([ "$surrounding" = finding ] && printf 1 || printf 0)"
+done
+printf '## Verdict\nSHIP — explicit contradictory fixture\n## Findings\n### Major\n- None.\n- A real finding.\n' > "$TMP/review.md"
+parse 0 spec
+check 'spec profile also rejects contradictory findings' json_is "$TMP/parsed.json" '.status=="parse-failed" and .profile=="spec"'
+printf '## Verdict\nSHIP — explicit failed invocation fixture\n## Findings\n### Major\n- A real finding.\n- None.\n' > "$TMP/review.md"
+parse 7
+check 'invocation failure precedes contradictory findings' json_is "$TMP/parsed.json" '.status=="invocation-failed" and .exit_code==7'
+for marker in 'None.' none NONE nOnE. 없음 없음.; do
+  for whitespace in '' ' ' $'\t' $' \t'; do
+    printf '## Verdict\r\nSHIP — empty markers with trailing whitespace\r\n## Findings\r\n### Major\r\n- None.\r\n- %s%s\r\n' "$marker" "$whitespace" > "$TMP/review.md"
+    cp "$TMP/review.md" "$TMP/marker-original.md"
+    parse
+    check 'trailing whitespace does not turn empty markers into findings' json_is "$TMP/parsed.json" '.status=="ok" and .findings=={blocker:null,major:[],minor:null}'
+    check 'whitespace and CRLF in the source remain byte-identical' cmp -s "$TMP/marker-original.md" "$TMP/review.md"
+  done
+done
+printf '## Verdict\nSHIP — real findings retain their whitespace\n## Findings\n### Major\n- None. extra  \n- 없음. 실제 finding\t\n' > "$TMP/review.md"
+parse
+check 'near-match findings retain trailing spaces and tabs' json_is "$TMP/parsed.json" '.status=="ok" and .findings.major==["- None. extra  ","- 없음. 실제 finding\t"]'
+cat > "$TMP/review.md" <<'REVIEW'
+## Verdict
+SHIP — inspect without inferring counts from the verdict
+## Findings
+### Blocker
+- None.
+- NONE
+- 없음
+### Major
+- A real finding.
+### Major
+- Another real finding.
+### Minor / Nit
+REVIEW
+parse
+check 'repeated compatible sections and SHIP findings remain supported' json_is "$TMP/parsed.json" '.status=="ok" and .findings=={blocker:[],major:["- A real finding.","- Another real finding."],minor:[]}'
+fixture 'SHIP — examples are not findings'
+cat >> "$TMP/review.md" <<'REVIEW'
+> - A quoted example.
+    - An indented example.
+	- A tab-indented code example.
+```markdown
+- A fenced example.
+```
+## What I checked
+- Normal completion is preserved.
+- Group identity remains owned.
+REVIEW
+parse
+check 'examples and checked explanations do not contradict empty markers' json_is "$TMP/parsed.json" '.status=="ok" and .findings=={blocker:[],major:[],minor:[]}'
 printf '## Verdict\nSHIP — reason\n' > "$TMP/review.md"
 parse
 check 'missing findings are unknown' json_is "$TMP/parsed.json" '.verdict == "SHIP" and .findings == {blocker:null,major:null,minor:null}'
@@ -190,6 +298,54 @@ research_dashboard() {
   env AGENT_TEAM=review-test TMUX='' TERM=dumb DEV_TRIO_LOG_DIR="$TMP/log" \
     "$@" bash "$ROOT/dev-trio/bin/dashboard.sh" agy --once < /dev/null > "$TMP/dashboard.out"
 }
+# #83: a resolved explanation after None must not become Major findings.
+# Both model adapters use the fixed reviewer channel named codex; this loop
+# exercises native-final versus stdout capture, not different log channels.
+cat > "$TMP/resolved-review.md" <<'REVIEW'
+## Verdict
+SHIP — the earlier concern is resolved.
+## Findings
+### Blocker
+- None.
+### Major
+- None.
+
+The prior concern is resolved:
+- Normal completion is preserved.
+- Group identity remains owned.
+
+### Minor / Nit
+- Optional documentation cleanup.
+REVIEW
+for model in codex claude; do
+  cp "$TMP/resolved-review.md" "$TMP/review.md"
+  receipt=$(review_receipt_create "$TMP/receipt")
+  run_review 3 DEV_TRIO_REVIEWER_MODEL="$model" DEV_TRIO_REVIEW_RECEIPT="$receipt"
+  check "$model contradiction preserves the final Markdown" cmp -s "$TMP/review.md" "$FINAL"
+  check "$model contradiction leaves verdict and findings unknown" json_is "$RESULT" '.status=="parse-failed" and .invocation_rc==0 and .verdict==null and .findings=={blocker:null,major:null,minor:null} and (.error|contains("major"))'
+  check "$model contradiction leaves manifest verdict null" json_is "$MANIFEST" '.verdict==null and .ended_at!=null'
+  check "$model manifest links the exact failed result" json_is "$MANIFEST" ".inputs | any(.kind==\"review-result\" and .path==\"$RESULT\" and (.sha256|length)==64)"
+  review_result_from_receipt "$receipt" 3 > "$TMP/receipt-result.json"
+  check "$model receipt agrees with failed result" json_is "$TMP/receipt-result.json" ".status==\"parse-failed\" and .result_path==\"$RESULT\" and .final_path==\"$FINAL\""
+  dashboard
+  check "$model dashboard exposes contradictory findings" grep -q 'Review failed:.*major' "$TMP/dashboard.out"
+  check "$model dashboard does not display a verdict" no_match 'Verdict:' "$TMP/dashboard.out"
+  check "$model dashboard does not display finding counts" no_match 'Findings:' "$TMP/dashboard.out"
+  sed '/^- Normal completion/s/^/  /; /^- Group identity/s/^/  /' "$TMP/resolved-review.md" > "$TMP/review.md"
+  run_review 3 DEV_TRIO_REVIEWER_MODEL="$model"
+  check "$model indented explanation reports the format error" json_is "$RESULT" '.status=="parse-failed" and .findings.major==null and (.error|contains("column 0"))'
+  check "$model indented explanation preserves the final" cmp -s "$TMP/review.md" "$FINAL"
+  check "$model indented explanation leaves manifest verdict null" json_is "$MANIFEST" '.verdict==null'
+  dashboard
+  check "$model dashboard reports indentation failure" grep -q 'Review failed:.*major' "$TMP/dashboard.out"
+  check "$model dashboard does not report zero findings for indented bullets" no_match 'Findings:' "$TMP/dashboard.out"
+  fixture 'SHIP — the earlier concern is resolved'
+  printf '## What I checked\n- Normal completion is preserved.\n- Group identity remains owned.\n' >> "$TMP/review.md"
+  run_review 0 DEV_TRIO_REVIEWER_MODEL="$model"
+  check "$model corrected placement has empty findings" json_is "$RESULT" '.status=="ok" and .verdict=="SHIP" and .findings=={blocker:[],major:[],minor:[]}'
+  dashboard
+  check "$model corrected placement displays zero majors" grep -q '0 major' "$TMP/dashboard.out"
+done
 for token in SHIP NEEDS-FIX DISCUSS; do
   for separator in ' — ' '. '; do
     for model in codex claude; do
