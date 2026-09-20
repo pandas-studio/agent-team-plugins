@@ -155,7 +155,10 @@ exit "${TEST_REVIEW_RC:-0}"
 STUB
 chmod +x "$TMP/reviewer"
 # Pin all model selection, role, namespace and output controls for fixtures.
+# Host-specific authentication is covered by test_dev_trio_hosts.py; an ambient
+# Codex PM must not ask these response-only stubs to authenticate as Claude.
 INVOKE_ENV=(
+  -u DEV_TRIO_PM_HOST
   -u REVIEWER_CLI -u CODEX_CLI -u CLAUDE_CLI -u REVIEWER_ROLE_FILE
   -u DEV_TRIO_REVIEW_PROFILE -u DEV_TRIO_REVIEW_RECEIPT -u MANIFEST_PARENT_TMP
   -u TEST_MISSING_FINAL -u TEST_STDOUT_FILE -u TEST_REVIEW_RC
@@ -925,7 +928,8 @@ cat > "$TMP/slow-researcher" <<'STUB'
 sleep 30
 STUB
 chmod +x "$TMP/slow-researcher"
-env -u DEV_TRIO_RESEARCHER_MODEL AGENT_TEAM=review-test TMUX='' DEV_TRIO_LOG_DIR="$TMP/log" \
+env -u DEV_TRIO_RESEARCHER_MODEL -u RESEARCHER_CLI -u AGY_CLI \
+  AGENT_TEAM=review-test TMUX='' DEV_TRIO_LOG_DIR="$TMP/log" \
   AGY_CLI="$TMP/slow-researcher" RESEARCH_STARTED="$TMP/started" \
   "$ROOT/dev-trio/bin/ask-researcher.sh" 'aborted question' \
   < /dev/null > /dev/null 2>&1 &
@@ -1009,7 +1013,8 @@ exit 5
 STUB
 chmod +x "$TMP/native-fail"
 NATIVE_RC=0
-env -u DEV_TRIO_RESEARCHER_MODEL AGENT_TEAM=review-test TMUX='' DEV_TRIO_LOG_DIR="$TMP/log" \
+env -u DEV_TRIO_RESEARCHER_MODEL -u RESEARCHER_CLI -u AGY_CLI \
+  AGENT_TEAM=review-test TMUX='' DEV_TRIO_LOG_DIR="$TMP/log" \
   AGENT_TEAM_MODELS_CONFIG="$TMP/models.json" DEV_TRIO_RESEARCHER_MODEL=native-researcher \
   NATIVE_RESEARCHER_CLI="$TMP/native-fail" \
   "$ROOT/dev-trio/bin/ask-researcher.sh" 'failing question' \

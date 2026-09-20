@@ -231,6 +231,17 @@ leave a completed run looking live. Legacy logs without run metadata continue
 to show completion as unavailable. This policy covers the final append;
 logging failures during model execution retain their existing behavior.
 
+[ralph-trio's `ralph-meta.sh`](../ralph-trio/bin/ralph-meta.sh) also uses END to
+bound its raw-log fallback when no usable `.final.md` exists. Without END, that
+fallback reads through EOF and can include
+late output from a descendant of the model CLI. It is raw diagnostic text;
+use the invocation's final/result artifacts for the authoritative review.
+
+This final-append policy is specific to dev-trio. The
+[debate-conductor role wrappers](../debate-conductor/README.md#logs) treat a
+failed END append as a logging failure: a successful model run becomes rc=6,
+while an already nonzero model exit code is preserved.
+
 **Reviewer transcript.** The reviewer CLI writes straight into
 `codex-<TS>-<PID>.log` on a descriptor, which `tail -F` follows as the review is
 produced. The dashboard does not read it — it renders from the run's `*.run.json`
