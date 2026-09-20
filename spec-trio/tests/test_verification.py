@@ -3,17 +3,141 @@
 
 import hashlib
 import json
+import math
 import os
+import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 DRIVER = ROOT / "spec-trio/bin/spec-trio.sh"
+
+
+# Test harness budgets only; never change the driver's --max-runtime clock.
+TIMEOUT_SCALE_ENV = "SPEC_TRIO_TEST_TIMEOUT_SCALE"
+TIMEOUTS = {"execution": 120, "ready": 60, "interrupt": 30, "cleanup": 10}
+
+
+def timeout_scale():
+    raw = os.environ.get(TIMEOUT_SCALE_ENV, "1")
+    try:
+        scale = float(raw)
+    except ValueError:
+        scale = 0
+    if scale <= 0 or not math.isfinite(scale * max(TIMEOUTS.values())):
+        raise ValueError(
+            f"{TIMEOUT_SCALE_ENV} must be a finite positive number "
+            f"with finite timeouts; got {raw!r}"
+        )
+    return scale
+
+
+class DriverProcess:
+    def __init__(self, proc, stdout, stderr, scale, test_id):
+        self.proc = proc
+        self.stdout = stdout
+        self.stderr = stderr
+        self.limits = {phase: seconds * scale for phase, seconds in TIMEOUTS.items()}
+        self.test_id = test_id
+        self.cleaned = False
+        self.cleanup_error = ""
+
+    def result(self):
+        def snapshot(stream):
+            # Even if cleanup fails, read only the current file size without
+            # moving an offset shared with a surviving writer.
+            fd = stream.fileno()
+            return os.pread(fd, os.fstat(fd).st_size, 0).decode(
+                "utf-8", errors="replace"
+            )
+
+        return subprocess.CompletedProcess(
+            self.proc.args,
+            self.proc.returncode,
+            snapshot(self.stdout),
+            snapshot(self.stderr),
+        )
+
+    def cleanup(self):
+        if self.cleaned:
+            return self.cleanup_error
+        self.cleaned = True
+        # A leader may already have exited while children still hold output open.
+        try:
+            os.killpg(self.proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError as exc:
+            self.cleanup_error = f"process group cleanup failed: {exc}"
+        try:
+            self.proc.wait(timeout=self.limits["cleanup"])
+        except subprocess.TimeoutExpired:
+            self.cleanup_error += f" process reap exceeded {self.limits['cleanup']:g}s"
+        return self.cleanup_error
+
+    def failure(self, phase, reason):
+        cleanup_error = self.cleanup()
+        result = self.result()
+        return AssertionError(
+            f"{self.test_id}: {phase}: {reason} "
+            f"(limit={self.limits[phase]:g}s, returncode={result.returncode})\n"
+            f"command: {shlex.join(self.proc.args)}\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}\n"
+            f"{cleanup_error}"
+        )
+
+    def wait(self, phase="execution"):
+        try:
+            self.proc.wait(timeout=self.limits[phase])
+        except subprocess.TimeoutExpired:
+            raise self.failure(phase, "timed out") from None
+        # Stop any descendants even if the leader has already exited.
+        if self.cleanup():
+            raise self.failure("cleanup", "could not finish process cleanup")
+        return self.result()
+
+    def wait_ready(self, path):
+        deadline = time.monotonic() + self.limits["ready"]
+        while True:
+            if self.proc.poll() is not None:
+                raise self.failure("ready", "driver exited before readiness")
+            if path.exists():
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise self.failure("ready", "timed out waiting for readiness")
+            time.sleep(min(0.05, remaining))
+
+
+@contextmanager
+def driver_process(args, *, cwd, env, scale, test_id):
+    # File-backed capture avoids a full pipe during readiness waits and avoids
+    # unbounded communicate() when an orphan inherits the output descriptors.
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        proc = subprocess.Popen(
+            args,
+            cwd=cwd,
+            env=env,
+            stdout=stdout,
+            stderr=stderr,
+            start_new_session=True,
+        )
+        driver = DriverProcess(proc, stdout, stderr, scale, test_id)
+        try:
+            yield driver
+        finally:
+            cleanup_error = driver.cleanup()
+            if cleanup_error and sys.exc_info()[0] is None:
+                raise driver.failure("cleanup", "could not finish process cleanup")
+
 
 STUB = r"""#!/usr/bin/env python3
 import os, sys, json, signal, time, subprocess
@@ -48,7 +172,8 @@ if role == 'planner':
 elif role == 'coder':
     if os.environ.get('INTERRUPT'):
         (state / 'ready').touch()
-        time.sleep(30)
+        while True:
+            signal.pause()
     Path('file.txt').write_text('good\n' if not os.environ.get('RETRY_TEST') or n > 1 else 'bad\n')
     if os.environ.get('COMMIT_RETRY') and n == 1:
         Path('retained.txt').write_text('first implementation remains\n')
@@ -76,7 +201,221 @@ else:
 """
 
 
+class DriverProcessTests(unittest.TestCase):
+    def test_timeout_scale_default_and_overrides(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(timeout_scale(), 1)
+            for value, expected in (("2", 2), ("0.5", 0.5)):
+                os.environ[TIMEOUT_SCALE_ENV] = value
+                self.assertEqual(timeout_scale(), expected)
+
+    def test_invalid_timeout_scales(self):
+        for value in ("0", "-1", "", "invalid", "nan", "inf", "-inf", "1e308"):
+            with (
+                self.subTest(value=value),
+                mock.patch.dict(os.environ, {TIMEOUT_SCALE_ENV: value}),
+                self.assertRaisesRegex(ValueError, TIMEOUT_SCALE_ENV),
+            ):
+                timeout_scale()
+
+    def fake_driver(self, scale=1):
+        proc = mock.Mock(
+            args=["fixture", "argument with spaces"], pid=12345, returncode=7
+        )
+        proc.poll.return_value = None
+        streams = []
+        with ExitStack() as stack:
+            for content in ("partial output ✓".encode(), b"partial error"):
+                stream = stack.enter_context(tempfile.TemporaryFile())
+                stream.write(content)
+                stream.flush()
+                streams.append(stream)
+            self.addCleanup(stack.pop_all().close)
+        return DriverProcess(proc, *streams, scale, self.id())
+
+    def test_output_snapshot_preserves_writer_offset(self):
+        driver = self.fake_driver()
+        fd = driver.stdout.fileno()
+        position = os.lseek(fd, 0, os.SEEK_CUR)
+        self.assertEqual(driver.result().stdout, "partial output ✓")
+        self.assertEqual(os.lseek(fd, 0, os.SEEK_CUR), position)
+        driver.stdout.write(b" later output")
+        driver.stdout.flush()
+        self.assertEqual(driver.result().stdout, "partial output ✓ later output")
+
+    def test_wait_budgets_and_completed_process_contract(self):
+        for phase, seconds in (("execution", 240), ("interrupt", 60)):
+            with self.subTest(phase=phase), mock.patch.object(os, "killpg"):
+                driver = self.fake_driver(scale=2)
+                result = driver.wait(phase)
+                self.assertIsInstance(result, subprocess.CompletedProcess)
+                self.assertEqual(result.returncode, 7)
+                self.assertEqual(result.stdout, "partial output ✓")
+                self.assertEqual(result.stderr, "partial error")
+                self.assertEqual(
+                    driver.proc.wait.call_args_list,
+                    [mock.call(timeout=seconds), mock.call(timeout=20)],
+                )
+
+    def test_timeout_reports_output_and_bounds_cleanup(self):
+        driver = self.fake_driver(scale=2)
+        driver.proc.wait.side_effect = [
+            subprocess.TimeoutExpired(driver.proc.args, 240),
+            subprocess.TimeoutExpired(driver.proc.args, 20),
+        ]
+        with mock.patch.object(os, "killpg") as kill:
+            with self.assertRaises(AssertionError) as caught:
+                driver.wait()
+            kill.assert_called_once_with(12345, signal.SIGKILL)
+            # A second cleanup must not signal a potentially recycled PID.
+            driver.cleanup()
+            kill.assert_called_once()
+        message = str(caught.exception)
+        for fragment in (
+            self.id(),
+            "execution",
+            "limit=240s",
+            "fixture 'argument with spaces'",
+            "partial output ✓",
+            "partial error",
+            "process reap exceeded 20s",
+        ):
+            self.assertIn(fragment, message)
+        self.assertEqual(
+            driver.proc.wait.call_args_list,
+            [mock.call(timeout=240), mock.call(timeout=20)],
+        )
+
+    def test_ready_wait_uses_scaled_monotonic_deadline(self):
+        driver = self.fake_driver(scale=2)
+        ready = mock.Mock()
+        ready.exists.return_value = False
+        with (
+            mock.patch.object(time, "monotonic", side_effect=[100, 101, 220]),
+            mock.patch.object(time, "sleep") as sleep,
+            mock.patch.object(os, "killpg"),
+        ):
+            with self.assertRaisesRegex(AssertionError, "ready:.*limit=120s"):
+                driver.wait_ready(ready)
+            sleep.assert_called_once_with(0.05)
+
+    def test_ready_early_exit_reports_output(self):
+        driver = self.fake_driver()
+        driver.proc.poll.return_value = 7
+        with (
+            mock.patch.object(os, "killpg", side_effect=ProcessLookupError),
+            self.assertRaises(AssertionError) as caught,
+        ):
+            driver.wait_ready(mock.Mock())
+        for fragment in ("exited before readiness", "returncode=7", "partial error"):
+            self.assertIn(fragment, str(caught.exception))
+
+    def test_file_capture_preserves_large_output_and_nonzero_exit(self):
+        with driver_process(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; print('o' * 200000); "
+                    "print('e' * 200000, file=sys.stderr); sys.exit(7)"
+                ),
+            ],
+            cwd=ROOT,
+            env=os.environ.copy(),
+            scale=timeout_scale(),
+            test_id=self.id(),
+        ) as driver:
+            result = driver.wait()
+        self.assertEqual(result.returncode, 7)
+        self.assertEqual(result.stdout, "o" * 200000 + "\n")
+        self.assertEqual(result.stderr, "e" * 200000 + "\n")
+
+    def assert_process_stopped(self, pid):
+        deadline = time.monotonic() + 10 * timeout_scale()
+        while True:
+            status = subprocess.run(
+                ["ps", "-o", "stat=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=10 * timeout_scale(),
+                check=False,
+            )
+            self.assertIn(status.returncode, (0, 1), status.stderr)
+            # An orphan may be a zombie until the OS reaps it; it cannot run or
+            # retain output descriptors. Both Linux and macOS expose Z via ps.
+            if not status.stdout.strip() or status.stdout.lstrip().startswith("Z"):
+                return
+            if time.monotonic() >= deadline:
+                self.fail(f"descendant {pid} survived process-group cleanup")
+            time.sleep(0.05)
+
+    def check_descendant_cleanup(self, *, early_exit):
+        with tempfile.TemporaryDirectory(prefix="spec harness ") as tmp:
+            root = Path(tmp)
+            ready = root / "ready"
+            child_ready = root / "child-ready"
+            child = (
+                "import os, signal, sys\nfrom pathlib import Path\n"
+                "print('child stderr', file=sys.stderr, flush=True)\n"
+                "ready = Path(sys.argv[1])\n"
+                "ready.with_suffix('.tmp').write_text(str(os.getpid()))\n"
+                "ready.with_suffix('.tmp').replace(ready)\n"
+                "while True: signal.pause()\n"
+            )
+            parent = (
+                "import subprocess, sys, time, signal\nfrom pathlib import Path\n"
+                f"subprocess.Popen([sys.executable, '-c', {child!r}, {str(child_ready)!r}])\n"
+                f"while not Path({str(child_ready)!r}).exists(): time.sleep(0.01)\n"
+                "print('parent stdout', flush=True)\n"
+                f"Path({str(ready)!r}).touch()\n"
+                + ("sys.exit(7)\n" if early_exit else "while True: signal.pause()\n")
+            )
+            with driver_process(
+                [sys.executable, "-c", parent],
+                cwd=root,
+                env=os.environ.copy(),
+                scale=timeout_scale(),
+                test_id=self.id(),
+            ) as driver:
+                # Independent fallback cleanup also protects the test runner if
+                # a regression disables the harness's process-group kill.
+                try:
+                    if early_exit:
+                        result = driver.wait()
+                        self.assertEqual(result.returncode, 7)
+                        self.assertIn("parent stdout", result.stdout)
+                        self.assertIn("child stderr", result.stderr)
+                    else:
+                        driver.wait_ready(ready)
+                        # The fixture is known to be alive and signal-blocked.
+                        # Expire immediately, without a load-sensitive sleep.
+                        driver.limits["execution"] = 0
+                        with self.assertRaises(AssertionError) as caught:
+                            driver.wait()
+                        self.assertIn("execution: timed out", str(caught.exception))
+                        self.assertIn("parent stdout", str(caught.exception))
+                        self.assertIn("child stderr", str(caught.exception))
+                        self.assertEqual(driver.proc.returncode, -signal.SIGKILL)
+                    self.assert_process_stopped(int(child_ready.read_text()))
+                finally:
+                    try:
+                        os.killpg(driver.proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    def test_real_timeout_kills_descendant_and_preserves_output(self):
+        self.check_descendant_cleanup(early_exit=False)
+
+    def test_exited_leader_with_output_inheriting_child_does_not_hang(self):
+        self.check_descendant_cleanup(early_exit=True)
+
+
 class VerificationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Read from the parent before setUp removes SPEC_TRIO_* from child env.
+        cls.timeout_scale = timeout_scale()
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="spec-verification-")
         self.addCleanup(self.tmp.cleanup)
@@ -179,16 +518,18 @@ class VerificationTests(unittest.TestCase):
             extra = tuple(x for x in extra if x != "--research")
         return result + list(extra)
 
-    def run_driver(self, *extra, test=True):
-        self.result = subprocess.run(
+    def start_driver(self, *extra, test=True):
+        return driver_process(
             self.args(*extra, test=test),
             cwd=self.repo,
             env=self.env,
-            text=True,
-            capture_output=True,
-            timeout=40,
-            check=False,
+            scale=self.timeout_scale,
+            test_id=self.id(),
         )
+
+    def run_driver(self, *extra, test=True):
+        with self.start_driver(*extra, test=test) as driver:
+            self.result = driver.wait()
         return self.result
 
     def rc(self, expected):
@@ -725,32 +1066,12 @@ class VerificationTests(unittest.TestCase):
 
     def test_interrupt_retains_pending_task(self):
         self.env["INTERRUPT"] = "1"
-        proc = subprocess.Popen(
-            self.args(),
-            cwd=self.repo,
-            env=self.env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
-        try:
-            deadline = time.monotonic() + 15
-            while (
-                not (self.state / "ready").exists()
-                and time.monotonic() < deadline
-                and proc.poll() is None
-            ):
-                time.sleep(0.05)
-            self.assertTrue((self.state / "ready").exists())
-            os.killpg(proc.pid, signal.SIGINT)
-            _, err = proc.communicate(timeout=10)
-            self.assertEqual(proc.returncode, 130, err)
+        with self.start_driver() as driver:
+            driver.wait_ready(self.state / "ready")
+            os.killpg(driver.proc.pid, signal.SIGINT)
+            self.result = driver.wait("interrupt")
+            self.rc(130)
             self.pending()
-        finally:
-            if proc.poll() is None:
-                os.killpg(proc.pid, signal.SIGKILL)
-                proc.communicate()
 
     def test_coverage_uses_complete_identifier(self):
         (self.repo / "file.txt").write_text("changed\n")
@@ -786,4 +1107,8 @@ class VerificationTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    try:
+        timeout_scale()
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
     unittest.main()

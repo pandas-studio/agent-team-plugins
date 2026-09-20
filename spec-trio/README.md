@@ -197,6 +197,34 @@ bash $PLUGIN_ROOT/tests/smoke-pr5.sh
 
 The smoke auto-discovers a sibling `dev-trio` plugin checkout and prepends its `bin/` to PATH; you don't need dev-trio installed if you're in a sibling-checkout layout.
 
+## Verification tests
+
+From the repository root, run `python3 spec-trio/tests/test_verification.py` for
+model-free driver verification, or `bash scripts/check.sh` for the full sequential
+check suite. Verification replaces external model CLIs with local fixtures.
+
+The verification harness allows 120 seconds per driver invocation, 60 seconds
+for the interrupt fixture to become ready, 30 seconds for interrupt shutdown,
+and 10 seconds to reap a forcibly stopped process. Slow or busy machines can
+multiply all four limits with a test-only environment variable:
+
+```bash
+SPEC_TRIO_TEST_TIMEOUT_SCALE=2 python3 spec-trio/tests/test_verification.py
+SPEC_TRIO_TEST_TIMEOUT_SCALE=2 bash scripts/check.sh
+```
+
+The default multiplier is `1`. It must be a finite positive number producing
+finite timeouts; empty, zero, negative, and nonnumeric values are errors. This
+setting applies only to the spec verification harness, not to the driver's
+`--max-runtime`, other suites, or the controlled clock used to test runtime caps.
+Tests still finish as soon as their work completes; the limits add no delay.
+
+Timeout and readiness failures report the test, phase, command, effective limit,
+and captured stdout/stderr. Each invocation owns a process group that the
+harness cleans up before collecting output, including when its leader has
+already exited. Interrupt fixtures wait for a signal instead of expiring after
+a fixed sleep.
+
 ## Architecture
 
 ```
