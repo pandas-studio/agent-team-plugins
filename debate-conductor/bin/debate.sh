@@ -984,9 +984,10 @@ trap 'record_attempt_end "$?"; release_lock' EXIT
 # attempt itself — and never longer: the caller's cleanup runs after it (#66).
 # Needs ps (see below).
 stop_attempt() {
-  local roots table new tree="" i=0 p pstat
-  # shellcheck disable=SC2046,SC2005  # one line of PIDs
-  roots="$(echo $(jobs -p))"
+  local roots jobs_out table new tree="" i=0 p pstat
+  # Joined with parameter expansion for the reason given at attempt_running (#66).
+  jobs_out=$(jobs -p)
+  roots="${jobs_out//$'\n'/ }"
   [ -n "$roots" ] || return 0
   while [ "$i" -lt 50 ]; do
     if ! table="$(ps -A -o pid= -o ppid= -o stat= 2>/dev/null)"; then
@@ -1048,11 +1049,45 @@ stop_attempt() {
 ATTEMPT_WAIT_STEP=0.5
 sleep 0.01 2>/dev/null || ATTEMPT_WAIT_STEP=1
 
+# ATTEMPT_WAIT_POLL: whether wait_attempt steps instead of waiting once. The two
+# defects here sit on opposite bash versions, and each mechanism cures one and
+# causes the other (measured, one container / one machine per column):
+#
+#                          bash 3.2.57, 400 trials   bash 5.2.21, 3000 trials
+#   plain `wait`           2 late (#57)              0 late, 0 rc=2
+#   stepped poll           0 late                    0 late, 10 rc=2 (#66)
+#
+# #57 is a bash 3.2 `wait` that misses a trapped signal arriving as it starts;
+# the poll is its workaround. #66 is the parse race the poll itself opens: every
+# command substitution in the loop is re-parsed on each expansion, and a signal
+# landing in that parse leaves bash unable to parse the trap string, so on_signal
+# never runs. Flattening the substitutions took it from 0.32% to 0.10% (64 and 20
+# in 20000) — narrower, not closed. So poll only where the poll is needed.
+#
+# 3.x and below, not "not 5": bash 4 is untested for #57, and the two failures
+# are not equal. #57 costs latency; #66 skips stop_attempt, record_attempt_end
+# and release_lock, leaving the #45 lock behind. The untested version gets the
+# cheaper failure mode. Overridable so the tests can drive both paths.
+if [ -z "${ATTEMPT_WAIT_POLL:-}" ]; then
+  if [ "${BASH_VERSINFO[0]}" -le 3 ]; then ATTEMPT_WAIT_POLL=1; else ATTEMPT_WAIT_POLL=0; fi
+fi
+
 # attempt_running PID: is that job still running? `kill -0` is not used: once the
 # attempt is reaped its PID can be reused by an unrelated process, and the wait
 # below would then follow that one. Read like stop_attempt reads `jobs -p`.
+#
+# The PIDs are joined with parameter expansion, not `$(echo $(jobs -rp))` (#66).
+# A signal delivered while bash is parsing a nested command substitution leaves
+# it unable to parse the trap string: the trap does not run and bash exits 2
+# with `trap: unexpected EOF while looking for matching `)'`. wait_attempt calls
+# this in a loop precisely while a TERM can arrive, so the nesting sat in the
+# one place that costs the most — on_signal, and with it stop_attempt,
+# record_attempt_end and release_lock, was skipped. Measured on bash 5.2.21:
+# 10/1000 trials exited 2 with the nesting, 0/500 without.
 attempt_running() {
-  case " $(echo $(jobs -rp)) " in
+  local running
+  running=$(jobs -rp)
+  case " ${running//$'\n'/ } " in
     *" $1 "*) return 0 ;;
     *) return 1 ;;
   esac
@@ -1066,11 +1101,16 @@ attempt_running() {
 # for a plain wait, not proved from bash internals. A stopped attempt is waited
 # on as before. The final `wait` takes the attempt's status, so a failed attempt
 # still stops debate.sh through errexit.
+#
+# Where that `wait` does not miss the signal the steps are pure cost and open
+# #66 instead, so ATTEMPT_WAIT_POLL decides — see its comment above.
 wait_attempt() {
-  while attempt_running "$1"; do
-    sleep "$ATTEMPT_WAIT_STEP" &
-    wait "$!"
-  done
+  if [ "$ATTEMPT_WAIT_POLL" = 1 ]; then
+    while attempt_running "$1"; do
+      sleep "$ATTEMPT_WAIT_STEP" &
+      wait "$!"
+    done
+  fi
   wait "$1"
 }
 

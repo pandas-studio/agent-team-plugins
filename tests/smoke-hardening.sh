@@ -1283,10 +1283,18 @@ assert_eq "$(rcsplit_case 9 1)" "stream=rc=0  ledger=rc=0 "
 awk '$0 ~ /^(attempt_running|wait_attempt|stop_attempt)\(\) \{$/ { f = 1 } f { print } f && $0 == "}" { f = 0 }' \
   "$ROOT/debate-conductor/bin/debate.sh" > "$TMP/wait57-funcs.sh"
 assert_eq "$(grep -c '^wait_attempt() {\|^attempt_running() {\|^stop_attempt() {' "$TMP/wait57-funcs.sh")" "3"
+# The gate is extracted too, so the assertion below reads debate.sh's own value
+# rather than a copy of its condition that could drift from it (#66).
+awk '/^if \[ -z "\$\{ATTEMPT_WAIT_POLL/ { f = 1 } f { print } f && $0 == "fi" { exit }' \
+  "$ROOT/debate-conductor/bin/debate.sh" > "$TMP/wait57-gate.sh"
+assert_eq "$(grep -c 'BASH_VERSINFO' "$TMP/wait57-gate.sh")" "1"
 cat > "$TMP/wait57.sh" <<'WAIT57'
 set -euo pipefail
 . "$1"
 ATTEMPT_WAIT_STEP=0.2
+# Both paths of the #66 gate are driven from here; 1 keeps the pre-gate behavior
+# for the cases written against the stepped wait.
+ATTEMPT_WAIT_POLL="${ATTEMPT_WAIT_POLL:-1}"
 case "$2" in
   status0)  ( exit 0 ) & wait_attempt "$!"; echo "rc=$?" ;;
   status7)  ( exit 7 ) & rc=0; wait_attempt "$!" || rc=$?; echo "rc=$rc" ;;
@@ -1313,11 +1321,17 @@ case "$2" in
 esac
 WAIT57
 wait57() { /bin/bash "$TMP/wait57.sh" "$TMP/wait57-funcs.sh" "$1" 2>&1; }
-assert_eq "$(wait57 status0)" "rc=0"
-assert_eq "$(wait57 status7)" "rc=7"
-# reaped runs in the python driver below, with a timeout: a liveness regression
-# would hang it here instead of failing.
-assert_eq "$(wait57 errexit; echo "exit=$?")" "exit=7"
+# Both sides of the gate must return the attempt's status and keep errexit, so
+# every one of these runs twice (#66).
+for POLL in 1 0; do
+  export ATTEMPT_WAIT_POLL="$POLL"
+  assert_eq "poll=$POLL $(wait57 status0)" "poll=$POLL rc=0"
+  assert_eq "poll=$POLL $(wait57 status7)" "poll=$POLL rc=7"
+  # reaped runs in the python driver below, with a timeout: a liveness regression
+  # would hang it here instead of failing.
+  assert_eq "poll=$POLL $(wait57 errexit; echo "exit=$?")" "poll=$POLL exit=7"
+done
+unset ATTEMPT_WAIT_POLL
 # Cleanup and bounded latency, timed outside the shell under test: the parent
 # sends TERM only once a sleep step is actually running, and inspects the
 # process group before its own safety-net kill.
@@ -1368,19 +1382,43 @@ reaped = trial("reaped", timeout=10)[0]
 # 3. Isolated trials: a TERM racing the start of the wait must never delay the exit
 #    by the length of the attempt. Measured 5/400 late with a plain `wait`. The race
 #    is a bash 3.2 one (0/300 on 5.2), and a loaded Linux runner could exceed the
-#    threshold without it, so only macOS runs the full batch and asserts latency.
+#    threshold without it, so only macOS asserts latency.
+#    The exit status is asserted on both, and Linux runs the larger batch: it is
+#    where #66 lives, a trial costs ~1 ms, and 25 trials missed the pre-gate rate
+#    four runs out of five. 500 is ~0.6 s.
+#    The stderr of a trial is kept rather than dropped: #66 cost two days because
+#    the failure printed only a set of exit codes, while the cause was one line on
+#    the stderr this loop used to send to DEVNULL. No apostrophes in this block:
+#    bash 3.2 parses the heredoc inside the command substitution around it.
 strict = platform.system() == "Darwin"
+# Which side of the gate this bash uses, and whether debate.sh agrees. The batch
+# runs the path that is actually configured: the stepped poll is only reachable
+# on bash 3.x, and forcing it on bash 5 would reintroduce the #66 window the gate
+# exists to avoid — 0.10% a trial, which over a batch this size is most runs.
+major = int(subprocess.run(["/bin/bash", "-c", "echo ${BASH_VERSINFO[0]}"],
+                           capture_output=True, text=True).stdout.strip())
+want = "1" if major <= 3 else "0"
+gate = subprocess.run(["/bin/bash", "-c", f". {tmp}/wait57-gate.sh; echo $ATTEMPT_WAIT_POLL"],
+                      capture_output=True, text=True).stdout.strip()
+gate_ok = int(gate == want)
+env = dict(os.environ, ATTEMPT_WAIT_POLL=want)
 late = 0
 codes = set()
-for _ in range(400 if strict else 25):
+errs = set()
+for _ in range(400 if strict else 500):
     t0 = time.monotonic()
-    q = subprocess.Popen(["/bin/bash", f"{tmp}/wait57.sh", f"{tmp}/wait57-funcs.sh", "race"],
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
-    try:
-        codes.add(q.wait(timeout=10))
-    except subprocess.TimeoutExpired:
-        codes.add("timeout")
+    with open(f"{tmp}/race-err.txt", "w") as eh:
+        q = subprocess.Popen(["/bin/bash", f"{tmp}/wait57.sh", f"{tmp}/wait57-funcs.sh", "race"],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=eh,
+                             start_new_session=True, env=env)
+        try:
+            code = q.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            code = "timeout"
+    codes.add(code)
+    if str(code) != "143":
+        lines = open(f"{tmp}/race-err.txt").read().strip().splitlines()
+        errs.add(lines[0][:120] if lines else "(no stderr)")
     if strict and time.monotonic() - t0 >= 1.5:
         late += 1
     try:
@@ -1388,9 +1426,9 @@ for _ in range(400 if strict else 25):
     except (ProcessLookupError, PermissionError):
         pass
 print(f"stepped={int(stepped)} rc={rc} left={left} reaped=[{reaped}] "
-      f"codes={sorted(str(c) for c in codes)} late={late}")
+      f"codes={sorted(str(c) for c in codes)} late={late} err={sorted(errs)} gate_ok={gate_ok}")
 PYWAIT
-)" "stepped=1 rc=143 left=0 reaped=[rc=5] codes=['143'] late=0"
+)" "stepped=1 rc=143 left=0 reaped=[rc=5] codes=['143'] late=0 err=[] gate_ok=1"
 
 # 3b. stop_attempt is bounded even when a root ignores TERM (#66): it returns
 #     while that root is still running, rather than waiting out its lifetime with
