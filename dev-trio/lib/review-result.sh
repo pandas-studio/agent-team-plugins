@@ -87,9 +87,25 @@ review_result_parse() {
         if (section != "") emit("section", section)
         next
       }
-      if (section != "" && line ~ /^- /) {
-        if (tolower(line) ~ /^- none\.?$/ || line == "- 없음" || line == "- 없음.") next
-        emit(section, line)
+      if (section != "" && candidate ~ /^([-*+]|[0-9]+[.)])([[:blank:]]|$)/) {
+        content = candidate
+        sub(/^([-*+]|[0-9]+[.)])[[:blank:]]*/, "", content)
+        if (content !~ /[^[:space:]]/) next
+        # Do not silently drop indented findings or count nested detail bullets
+        # as independent findings. The structured format requires column 0.
+        if (candidate != line || candidate !~ /^- /) {
+          problem = "noncanonical " section " finding bullet: use dash-space bullets at column 0"
+          next
+        }
+        # Remember each severity across repeated headings: an explicit empty
+        # marker cannot coexist with a finding in the aggregated result.
+        if (tolower(line) ~ /^- none\.?[[:space:]]*$/ || line ~ /^- 없음\.?[[:space:]]*$/) {
+          empty[section] = 1
+        } else {
+          found[section] = 1
+          emit(section, line)
+        }
+        if (empty[section] && found[section]) problem = "contradictory " section " findings: empty marker mixed with finding bullets"
       }
     }
     END {
