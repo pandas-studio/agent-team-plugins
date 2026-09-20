@@ -365,6 +365,20 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(self.link.resolve(), self.dirs["A"])
         self.assertFalse(self.lock.is_symlink())
 
+    def test_integer_sleep_fallback_preserves_lock_timeout(self):
+        self.lock.symlink_to("host=gone pid=999999 run=fixture")
+        proc = subprocess.run(
+            [BASH, "-c", ('set -euo pipefail; . "$1"; '
+             'sleep() { if [ "$1" = 0.1 ]; then return 1; fi; '
+             '[ "$1" = 1 ] || return 9; SECONDS=$((SECONDS + 5)); }; '
+             'debate_selection_publish "$2" "$3"'),
+             "publish", str(PLUGIN / "lib/selection.sh"), str(self.team), str(self.dirs["A"])],
+            env=self.env, capture_output=True, text=True, check=False, timeout=10)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("selection lock busy", proc.stderr)
+        self.assertEqual(os.readlink(self.lock), "host=gone pid=999999 run=fixture")
+        self.assertFalse(self.state.exists())
+
     def test_stranded_lock_is_not_reclaimed(self):
         self.lock.symlink_to("host=gone pid=999999 run=fixture")
         # Advance bash's elapsed counter through a shell sleep shim, avoiding

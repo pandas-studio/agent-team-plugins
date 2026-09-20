@@ -79,7 +79,7 @@ debate_selection_publish() (
             rm -f "$latest" || rollback_rc=$?
           fi
           if [ "$rollback_rc" != 0 ]; then
-            [ -z "$tmp" ] || rm -f "$tmp" || echo "debate: remove temporary snapshot after recovery: $tmp" >&2
+            [ -z "$tmp" ] || rm -f "$tmp" || echo "debate: could not remove temporary snapshot; remove it during recovery: $tmp" >&2
             echo "debate: selection rollback failed; retained $lock for manual recovery" >&2
             return 1
           fi
@@ -109,7 +109,7 @@ debate_selection_publish() (
     fi
     # A failed ln followed by an absent lock can mean the winner already
     # released it. Retry instead of mistaking that race for a permission error.
-    sleep 0.1
+    sleep 0.1 2>/dev/null || sleep 1 || exit 1
   done
 
   # Read committed state under the lock. A missing JSON is a legacy baseline;

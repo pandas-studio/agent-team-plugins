@@ -613,8 +613,8 @@ fi
 if [ -n "$CONTINUE_FROM" ]; then
   mkdir -p "$DEBATE_DIR"
 else
-  # Allocated (and locked) only once the preflight above passed, so a refused
-  # preflight refusal leaves no debate directory behind.
+  # Allocated (and locked) only once the preflight above passed, so a failed
+  # preflight leaves no debate directory behind.
   allocate_debate_dir
   acquire_lock "$DEBATE_DIR"
 fi
