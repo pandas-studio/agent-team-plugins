@@ -579,6 +579,38 @@ for interrupt_signal in TERM INT; do
   check "an interrupted run publishes no review ($interrupt_signal)" \
     test ! -f "${interrupted_log%.log}.review.json"
 done
+# The three together: the log unopenable, the run interrupted, and a stdout that
+# cannot take the replay. Nothing else holds those bytes, so the wrapper keeps
+# the out-of-band transcript and says where it is — retention cannot depend on
+# the replay having worked.
+fixture 'SHIP — nowhere else to go'
+rm -f "$TMP/wc-fired-oob" "$TMP/oob2-ready" "$TMP/oob2-release"
+set -m
+env "${INVOKE_ENV[@]}" CODEX_CLI="$TMP/slow-reviewer" CLAUDE_CLI="$TMP/slow-reviewer" \
+  SLOW_READY="$TMP/oob2-ready" SLOW_RELEASE="$TMP/oob2-release" \
+  DEV_TRIO_REVIEWER_MODEL=claude PATH="$TMP/wcshim:$PATH" \
+  WC_SHIM_DIR="$TMP/log/review-test" WC_SHIM_FIRED="$TMP/wc-fired-oob" \
+  "$ROOT/dev-trio/bin/ask-reviewer.sh" 'fixture review' \
+  >&- 2> "$TMP/oob2.err" &
+oob2_pid=$!
+waited=0
+while [ ! -e "$TMP/oob2-ready" ] && [ "$waited" -lt 150 ]; do
+  sleep 0.2
+  waited=$((waited + 1))
+done
+check 'the stub was running when signalled (out of band)' test -e "$TMP/oob2-ready"
+kill -TERM -"$oob2_pid" 2>/dev/null || kill -TERM "$oob2_pid" 2>/dev/null || true
+: > "$TMP/oob2-release"
+oob2_rc=0
+wait "$oob2_pid" || oob2_rc=$?
+set +m
+check 'an interrupted out-of-band run keeps the signal status' test "$oob2_rc" -eq 143
+check 'the retained transcript is reported' grep -q 'the transcript is at' "$TMP/oob2.err"
+OOB2_KEPT=$(sed -n 's/.*the transcript is at //p' "$TMP/oob2.err" | tail -1)
+check 'the retained transcript exists' test -s "$OOB2_KEPT"
+check 'the retained transcript holds what the CLI produced' \
+  grep -q 'SHIP — nowhere else to go' "$OOB2_KEPT"
+rm -f "$OOB2_KEPT"
 fixture 'SHIP — leaked descendant'
 
 # An ordinary run pays nothing for the bound — the failure mode the first

@@ -208,6 +208,7 @@ LOG="$LOG_DIR/codex-$TS.log"
 FINAL="$LOG_DIR/codex-$TS.final.md"
 RESULT="$LOG_DIR/codex-$TS.review.json"
 RUNSTATE_LOG=""
+REVIEW_PUBLISHED=0
 cleanup_review() {
   _cleanup_rc=$?
   # Backstop for an abort (INT/TERM/errexit): a run whose completion is never
@@ -220,15 +221,17 @@ cleanup_review() {
   # An interrupted run still owes the caller what the CLI produced. After the
   # completion above, so a failure here cannot cost the dashboard its record,
   # and before the out-of-band transcript is removed — that is the only copy.
-  if [ "${TRANSCRIPT_EMITTED:-1}" -eq 0 ]; then
-    emit_transcript || true
-    # The replay above is best-effort on this path. An out-of-band transcript is
-    # the only copy of what the CLI produced, so an abort keeps it and says
-    # where; a run that replayed has it in the log and does not need it.
-    if [ -n "${TRANSCRIPT_TMP:-}" ] && [ -s "$TRANSCRIPT_TMP" ]; then
-      echo "[ask-reviewer] interrupted; the transcript is at $TRANSCRIPT_TMP" >&2
-      TRANSCRIPT_TMP=""
-    fi
+  # A signal outside the call's own window exits through here without having
+  # replayed. Best-effort: ordinary redirection applies on those paths.
+  [ "${TRANSCRIPT_EMITTED:-1}" -ne 0 ] || emit_transcript || true
+  # Retention does not depend on the replay having worked. An out-of-band
+  # transcript is the only copy of what the CLI produced — the log could not be
+  # opened — so any run that ends without publishing a review keeps it and says
+  # where. A published run has been read and does not need it.
+  if [ "${REVIEW_PUBLISHED:-0}" -eq 0 ] && [ -n "${TRANSCRIPT_TMP:-}" ] \
+     && [ -s "$TRANSCRIPT_TMP" ]; then
+    echo "[ask-reviewer] no review was published; the transcript is at $TRANSCRIPT_TMP" >&2
+    TRANSCRIPT_TMP=""
   fi
   [ -z "${RESULT_TMP:-}" ] || rm -f "$RESULT_TMP" || true
   [ -z "${LATEST_TMP:-}" ] || rm -f "$LATEST_TMP" || true
@@ -502,4 +505,5 @@ echo "(log: $LOG, final: $FINAL, result: $RESULT, rc=$RC)" >&2
 # caller never receives is worse than none at all (the EXIT trap then records
 # the real status).
 [ -z "$RUNSTATE_LOG" ] || runstate_complete "$RUNSTATE_LOG" exit_code="$RC" verdict="$VERDICT" reason=ok || true
+REVIEW_PUBLISHED=1
 exit "$RC"
