@@ -515,11 +515,11 @@ check 'the out-of-band transcript is not left beside the logs' \
   test -z "$(find "$TMP/log/review-test" -name '*.transcript.*' -print -quit)"
 fixture 'SHIP — leaked descendant'
 
-# An interrupted run owes the caller what the CLI produced and no review. The
-# signal has to land while the CLI is running, which is where the wrapper's own
-# redirections are in effect: a replay from the EXIT trap there writes into the
-# log instead of stdout (measured), so the wrapper records the signal and
-# replays once the call has returned.
+# An interrupted run owes the caller no review and no transcript on stdout — it
+# names its artifacts. The signal has to land while the CLI is running, which is
+# where the wrapper's own redirections are in effect: a handler firing there
+# writes into the log instead of stderr (measured), so the wrapper records the
+# signal and reports once the call has returned.
 cat > "$TMP/slow-reviewer" <<'STUB'
 #!/usr/bin/env bash
 cat "$TEST_REVIEW_FILE"

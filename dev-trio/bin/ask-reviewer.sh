@@ -218,13 +218,12 @@ cleanup_review() {
   if [ -n "$RUNSTATE_LOG" ]; then
     runstate_complete "$RUNSTATE_LOG" exit_code="$_cleanup_rc" reason=aborted 2>/dev/null || true
   fi
-  # An interrupted run still owes the caller what the CLI produced. After the
-  # completion above, so a failure here cannot cost the dashboard its record,
-  # and before the out-of-band transcript is removed — that is the only copy.
-  # Retention does not depend on the replay having worked. An out-of-band
-  # transcript is the only copy of what the CLI produced — the log could not be
-  # opened — so any run that ends without publishing a review keeps it and says
-  # where. A published run has been read and does not need it.
+  # After the completion above, so a failure here cannot cost the dashboard its
+  # record. An out-of-band transcript is the only copy of what the CLI produced
+  # — the log could not be opened — so any run that ends without publishing a
+  # review keeps it and says where. A published run has been read and does not
+  # need it. The condition is this run's own flag, not the presence of a result
+  # file: an interrupted run must not be talked out of keeping its only copy.
   if [ "${REVIEW_PUBLISHED:-0}" -eq 0 ] && [ -n "${TRANSCRIPT_TMP:-}" ] \
      && [ -s "$TRANSCRIPT_TMP" ]; then
     echo "[ask-reviewer] no review was published; the transcript is at $TRANSCRIPT_TMP" >&2
@@ -359,13 +358,16 @@ RC=0
 # errexit is lifted around the call so the CLI's own status survives as $RC.
 TRANSCRIPT_PATH="$LOG"
 TRANSCRIPT_OFFSET="$(wc -c < "$LOG")" || TRANSCRIPT_OFFSET=""
-# Declared before the call, not after it: the EXIT trap reads them on an abort,
-# and under `set -u` an unset one would take the handler down.
+# Declared before the call so the range is always a defined pair: a run that
+# ends before the freeze below skips the replay on an empty bound rather than
+# reading an unset variable under `set -u`.
 TRANSCRIPT_END=""
-# The transcript replay is this wrapper's stdout — ralph-meta keeps it as the
-# raw-output artifact it falls back to when it cannot locate the log. It is
-# emitted once, at the end, from the frozen range; a replay that fails must not
-# disturb a review that already exists in $FINAL/$RESULT.
+# The transcript replay is this wrapper's stdout. ralph-meta.sh tees it to a
+# file it names in its audit and falls back to in prose when it cannot locate
+# the log — it reads the review itself from the artifacts, not from here. The
+# replay is emitted once, after the review is published, from the frozen range,
+# and a replay that fails must not disturb a review that already exists in
+# $FINAL/$RESULT.
 # The frozen range, on stdout. `tail`/`head` both read a regular file here, so
 # neither reintroduces a pipe a leaked descendant could hold open.
 transcript_range() {
@@ -400,12 +402,13 @@ if ! exec 8>>"$LOG"; then
 fi
 # For the duration of the call the signal traps record rather than exit. A trap
 # that fires while the call is running executes with its `>&8 2>&8` still in
-# effect — measured: anything the EXIT trap echoes lands in the log, not on
-# stdout — so a replay from there would write the transcript into the
-# transcript. Recording the signal instead returns to ordinary redirection,
-# where the caller's stdout is fd 1 again, and the replay below is the same one
-# a successful run does. Nothing extra is handed to the CLI: a descriptor of
-# the caller's stdout is exactly what a leaked descendant must not be given.
+# effect — measured: anything such a handler echoes lands in the log, not on
+# stderr — so an interrupted run would report its artifacts into the transcript
+# it is trying to point at. Recording the signal instead returns to ordinary
+# redirection, where the caller's stderr is fd 2 again, and the artifact line
+# below reaches the caller. Nothing extra is handed to the CLI: a descriptor of
+# the caller's own streams is exactly what a leaked descendant must not be
+# given, which is why a saved duplicate was rejected for this.
 SIGNAL_RC=0
 trap 'SIGNAL_RC=130' INT
 trap 'SIGNAL_RC=143' TERM
