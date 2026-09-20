@@ -64,20 +64,20 @@ def watch_owner(timeout):
     if select.select([owner_fd], [], [], timeout)[0] and not os.read(owner_fd, 1):
         # The runner closed its sole writer (including on SIGKILL). Signal our
         # current group from inside it; no external/recycled identifier is used.
-        os.killpg(0, signal.SIGKILL)
+        os.kill(0, signal.SIGKILL)
 watch_owner(0)
 try:
     child = subprocess.Popen(sys.argv[3:], stdin=subprocess.DEVNULL)
     while child.poll() is None:
         watch_owner(0.1)
-    rc = child.returncode
+    status = f"exit:{child.returncode}\n".encode()
 except BaseException:
     traceback.print_exc()
-    rc = 125
+    status = b"error\n"
 try:
-    os.write(int(sys.argv[1]), (str(rc) + '\n').encode())
+    os.write(int(sys.argv[1]), status)
 except BrokenPipeError:
-    os.killpg(0, signal.SIGKILL)
+    os.kill(0, signal.SIGKILL)
 os.close(int(sys.argv[1]))
 while True:
     watch_owner(None)
@@ -93,6 +93,7 @@ class OwnedProcess:
         self.status_fd, writer = os.pipe()
         owner_reader = self.owner_writer = None
         self.status = b""
+        self.status_error = None
         self.reaped = False
         try:
             owner_reader, self.owner_writer = os.pipe()
@@ -125,16 +126,30 @@ class OwnedProcess:
 
     def poll(self, timeout=0):
         """Observe a result, blocking at most one second per call."""
+        if self.status_error is not None:
+            raise RuntimeError(self.status_error)
         if self.returncode is None:
             # Keep very large valid scales within the OS timeout range.
             readable, _, _ = select.select([self.status_fd], [], [], min(timeout, 1))
             if readable:
                 chunk = os.read(self.status_fd, 64)
-                if not chunk:
-                    raise RuntimeError("supervisor exited without a driver result")
                 self.status += chunk
-                if b"\n" in self.status:
-                    self.returncode = int(self.status.split(b"\n", 1)[0])
+                if not chunk:
+                    self.status_error = (
+                        "supervisor exited without a complete driver result"
+                    )
+                elif self.status == b"error\n":
+                    self.status_error = (
+                        "supervisor internal failure (see captured stderr)"
+                    )
+                elif len(self.status) >= 64 or b"\n" in self.status:
+                    match = re.fullmatch(rb"exit:(-?[0-9]+)\n", self.status)
+                    if len(self.status) < 64 and match:
+                        self.returncode = int(match[1])
+                    else:
+                        self.status_error = "invalid supervisor status message"
+                if self.status_error is not None:
+                    raise RuntimeError(self.status_error)
         return self.returncode
 
     def wait(self, timeout):
@@ -341,10 +356,112 @@ else:
 
 
 class DriverProcessTests(unittest.TestCase):
+    def test_driver_exit_codes_are_not_supervisor_errors(self):
+        for code in (0, 7, 125):
+            with (
+                self.subTest(code=code),
+                driver_process(
+                    [sys.executable, "-c", f"raise SystemExit({code})"],
+                    cwd=ROOT,
+                    env=os.environ.copy(),
+                    scale=CONFIGURED_SCALE,
+                    test_id=self.id(),
+                ) as driver,
+            ):
+                result = driver.wait()
+                self.assertEqual(result.returncode, code)
+                self.assertEqual(result.stderr, "")
+                self.assertTrue(driver.proc.reaped)
+
+    def test_supervisor_failure_preserves_traceback_and_cleans_up(self):
+        for phase in ("execution", "ready"):
+            with (
+                self.subTest(phase=phase),
+                tempfile.TemporaryDirectory(prefix="spec supervisor failure ") as tmp,
+                driver_process(
+                    [str(Path(tmp) / "missing-command")],
+                    cwd=ROOT,
+                    env=os.environ.copy(),
+                    scale=CONFIGURED_SCALE,
+                    test_id=self.id(),
+                ) as driver,
+            ):
+                with self.assertRaises(AssertionError) as caught:
+                    if phase == "ready":
+                        driver.wait_ready(Path(tmp) / "ready")
+                    else:
+                        driver.wait()
+                message = str(caught.exception)
+                for fragment in (
+                    f"{phase}: supervisor internal failure",
+                    "Traceback (most recent call last)",
+                    "FileNotFoundError",
+                    "missing-command",
+                ):
+                    self.assertIn(fragment, message)
+                self.assertTrue(driver.proc.reaped)
+                self.assertEqual(driver.proc.owner.returncode, -signal.SIGKILL)
+
+    def fake_status_process(self):
+        proc = OwnedProcess.__new__(OwnedProcess)
+        proc.returncode = None
+        proc.status = b""
+        proc.status_error = None
+        proc.status_fd = 123  # All reads/selects are mocked; no real descriptor.
+        return proc
+
+    def test_status_pipe_accumulates_partial_exit_messages(self):
+        for code in (0, 7, 125, -signal.SIGTERM):
+            proc = self.fake_status_process()
+            chunks = [b"ex", b"it:", str(code).encode(), b"\n"]
+            with (
+                self.subTest(code=code),
+                mock.patch.object(select, "select", return_value=([123], [], [])),
+                mock.patch.object(os, "read", side_effect=chunks) as read,
+            ):
+                for _ in chunks[:-1]:
+                    self.assertIsNone(proc.poll())
+                self.assertEqual(proc.poll(), code)
+                self.assertEqual(proc.poll(), code)
+                self.assertEqual(read.call_count, len(chunks))
+
+    def test_status_pipe_reports_internal_errors_and_invalid_messages(self):
+        cases = (
+            ([b"err", b"or\n"], "supervisor internal failure"),
+            ([b""], "without a complete driver result"),
+            ([b"exit:12", b""], "without a complete driver result"),
+            ([b"125\n"], "invalid supervisor status"),
+            ([b"exit:abc\n"], "invalid supervisor status"),
+            ([b"exit:7\nextra"], "invalid supervisor status"),
+            ([b"x" * 64], "invalid supervisor status"),
+        )
+        for chunks, message in cases:
+            proc = self.fake_status_process()
+            with (
+                self.subTest(chunks=chunks),
+                mock.patch.object(select, "select", return_value=([123], [], [])),
+                mock.patch.object(os, "read", side_effect=chunks) as read,
+            ):
+                for _ in chunks[:-1]:
+                    self.assertIsNone(proc.poll())
+                for _ in range(2):
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        proc.poll()
+                self.assertIsNone(proc.returncode)
+                self.assertEqual(read.call_count, len(chunks))
+
     def test_timeout_scale_default_and_overrides(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertEqual(timeout_scale(), 1)
-            for value, expected in (("2", 2), ("0.5", 0.5), ("0.1", 0.1), ("1e1", 10)):
+            for value, expected in (
+                ("2", 2),
+                ("0.5", 0.5),
+                ("0.1", 0.1),
+                ("1e1", 10),
+                ("1e+1", 10),
+                ("1e-1", 0.1),
+                ("01.0E+1", 10),
+            ):
                 os.environ[TIMEOUT_SCALE_ENV] = value
                 self.assertEqual(timeout_scale(), expected)
 
@@ -363,6 +480,11 @@ class DriverProcessTests(unittest.TestCase):
             "1e-300",
             "0.099",
             "2\n",
+            "+1",
+            ".5",
+            "1.",
+            "１",
+            "١",
         ):
             with (
                 self.subTest(value=value),
@@ -482,7 +604,7 @@ class DriverProcessTests(unittest.TestCase):
                 watcher = (
                     "import os, signal, time\nfrom pathlib import Path\n"
                     f"while not Path({str(stop)!r}).exists(): time.sleep(0.01)\n"
-                    "os.killpg(0, signal.SIGKILL)\n"
+                    "os.kill(0, signal.SIGKILL)\n"
                 )
                 child = (
                     "import os, json, signal, subprocess, sys\nfrom pathlib import Path\n"
@@ -500,7 +622,7 @@ class DriverProcessTests(unittest.TestCase):
                     f"cwd={str(root)!r}, env=os.environ.copy(), scale=t.CONFIGURED_SCALE, "
                     "test_id='parent death fixture') as driver:\n"
                     + (
-                        "    driver.proc.wait(timeout=120 * t.CONFIGURED_SCALE)\n"
+                        "    driver.proc.wait(timeout=t.TIMEOUTS['execution'] * t.CONFIGURED_SCALE)\n"
                         if finished
                         else f"    driver.wait_ready(Path({str(ready)!r}))\n"
                     )
@@ -519,7 +641,7 @@ class DriverProcessTests(unittest.TestCase):
                     start_new_session=True,
                 )
                 try:
-                    deadline = time.monotonic() + 60 * CONFIGURED_SCALE
+                    deadline = time.monotonic() + TIMEOUTS["ready"] * CONFIGURED_SCALE
                     while (
                         not state.exists()
                         and proc.poll() is None
@@ -535,14 +657,14 @@ class DriverProcessTests(unittest.TestCase):
                         )
                     pids = json.loads(state.read_text())
                     proc.kill()
-                    proc.wait(timeout=10 * CONFIGURED_SCALE)
+                    proc.wait(timeout=TIMEOUTS["cleanup"] * CONFIGURED_SCALE)
                     for pid in pids:
                         self.assert_process_stopped(pid)
                 finally:
                     stop.touch()
                     if proc.poll() is None:
                         proc.kill()
-                    proc.wait(timeout=10 * CONFIGURED_SCALE)
+                    proc.wait(timeout=TIMEOUTS["cleanup"] * CONFIGURED_SCALE)
                     if state.exists():
                         for pid in json.loads(state.read_text()):
                             self.assert_process_stopped(pid)
@@ -569,7 +691,9 @@ class DriverProcessTests(unittest.TestCase):
             ["bash", str(ROOT / "scripts/check.sh")],
         )
         with tempfile.TemporaryDirectory(prefix="spec preflight ") as tmp:
-            # If check.sh reaches any suite or source scan, this trap records it.
+            # The marker detects whether check.sh reached the source scan.
+            # exit 99 inside process substitution does not abort check.sh under
+            # set -e; marker absence, not the stub exit code, is the assertion.
             marker = Path(tmp) / "scan-started"
             find = Path(tmp) / "find"
             find.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\nexit 99\n")
@@ -586,7 +710,7 @@ class DriverProcessTests(unittest.TestCase):
                         env=env,
                         text=True,
                         capture_output=True,
-                        timeout=120 * CONFIGURED_SCALE,
+                        timeout=TIMEOUTS["execution"] * CONFIGURED_SCALE,
                         check=False,
                     )
                     self.assertNotEqual(result.returncode, 0)
@@ -608,7 +732,9 @@ class DriverProcessTests(unittest.TestCase):
             scale=CONFIGURED_SCALE,
             test_id=self.id(),
         ) as driver:
-            self.assertEqual(driver.proc.wait(timeout=120 * CONFIGURED_SCALE), 7)
+            self.assertEqual(
+                driver.proc.wait(timeout=TIMEOUTS["execution"] * CONFIGURED_SCALE), 7
+            )
             # The actual driver exited, but the supervisor is still a live
             # session leader; no reaped identifier is signalled later.
             self.assertEqual(os.getpgid(driver.proc.owner.pid), driver.proc.owner.pid)
@@ -734,14 +860,14 @@ class DriverProcessTests(unittest.TestCase):
             ["ps", "-o", "stat=", "-p", str(pid)],
             capture_output=True,
             text=True,
-            timeout=10 * CONFIGURED_SCALE,
+            timeout=TIMEOUTS["cleanup"] * CONFIGURED_SCALE,
             check=False,
         )
         self.assertIn(status.returncode, (0, 1), status.stderr)
         return status.stdout.strip()
 
     def assert_process_stopped(self, pid):
-        deadline = time.monotonic() + 10 * CONFIGURED_SCALE
+        deadline = time.monotonic() + TIMEOUTS["cleanup"] * CONFIGURED_SCALE
         while True:
             status = self.process_status(pid)
             # An orphan may be a zombie until the OS reaps it; it cannot run or
@@ -815,7 +941,7 @@ class DriverProcessTests(unittest.TestCase):
 class VerificationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        # Read from the parent before setUp removes SPEC_TRIO_* from child env.
+        # Alias the setting already captured and validated at module import.
         cls.timeout_scale = CONFIGURED_SCALE
 
     def setUp(self):

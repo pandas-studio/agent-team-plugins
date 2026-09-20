@@ -213,27 +213,38 @@ SPEC_TRIO_TEST_TIMEOUT_SCALE=2 python3 spec-trio/tests/test_verification.py
 SPEC_TRIO_TEST_TIMEOUT_SCALE=2 bash scripts/check.sh
 ```
 
-The default multiplier is `1`; the minimum is `0.1`. Use decimal notation
-(e.g. `0.5`) or scientific notation (e.g. `2e0`) producing finite timeouts.
-Whitespace, underscores, empty values, and smaller or nonfinite values are errors.
+The default multiplier is `1`; the minimum is `0.1`. The accepted grammar is
+`[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?`, matching the entire value. Use ASCII
+digits with no leading sign and at least one digit on each side of a decimal
+point, if present. Scientific notation permits a sign on the exponent: `0.5`,
+`2e0`, `1e+1`, and `1e-1` are valid examples. Leading zeros are allowed.
+Whitespace, underscores, empty values, non-ASCII digits, leading signs (such as
+`+1`), `.5`, and `1.` are invalid. The value must be at least `0.1`, and all
+scaled timeouts must be finite.
+
 Direct execution, unittest import/discovery, and `check.sh` validate this setting
 before running test fixtures (discovery reports invalid settings as a module
 loading error). `python3 spec-trio/tests/test_verification.py --check-config`
-validates the setting alone. This
-setting applies only to the spec verification harness, not to the driver's
-`--max-runtime`, other suites, or the controlled clock used to test runtime caps.
-Tests still finish as soon as their work completes; the limits add no delay.
+validates the setting alone. This setting applies only to the spec verification
+harness, not to the driver's `--max-runtime`, other suites, or the controlled
+clock used to test runtime caps. Tests still finish as soon as their work
+completes; the limits add no delay.
 
 Timeout and readiness failures report the test, phase, command, effective limit,
 and the first/last 4 KiB of each captured stream, with omitted byte counts.
-Successful results retain the full output. Each invocation keeps a supervisor
-alive as its process-group leader until cleanup has signalled the group, then
-reaps it. This prevents a recycled PID from receiving a later cleanup signal,
-including when the driver exits before its children. A separate ownership pipe
-lets the supervisor terminate its group if the test runner is forcibly killed,
-both during driver execution and after driver completion. Child stdin is `/dev/null` (reads return EOF).
-Fixture Git and standalone coverage commands also use the scaled execution limit.
-Interrupt fixtures wait for a signal instead of expiring after a fixed sleep.
+Successful results retain the full output. Supervisor internal failures are
+reported separately from driver exit codes, with their traceback in captured
+stderr; a genuine driver exit code `125` remains `125`.
+
+Each invocation keeps a supervisor alive as its process-group leader until
+cleanup has signalled the group, then reaps it. This prevents a recycled PID
+from receiving a later cleanup signal, including when the driver exits before
+its children. A separate ownership pipe lets the supervisor terminate its group
+if the test runner is forcibly killed,
+both during driver execution and after driver completion. Child stdin is
+`/dev/null` (reads return EOF). Fixture Git and standalone coverage commands also
+use the scaled execution limit. Interrupt fixtures wait for a signal instead of
+expiring after a fixed sleep.
 
 ## Architecture
 
