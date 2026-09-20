@@ -244,7 +244,9 @@ class DebateHostTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("resuming from round 1", result.stderr)
         self.assertEqual(self.latest_debate(), first_dir)
-        self.assertEqual(len(list(first_dir.glob(".round-*.done"))), 2)
+        self.assertEqual(list(first_dir.glob(".round-*.done")), [])
+        self.assertEqual([r["round"] for r in self.index_records(first_dir)
+                          if r["t"] == "end" and r["rc"] == 0], [1, 2])
         prompts = self.generator_prompts()
         self.assertEqual(len(prompts), 1)
         self.assertIn("SAVED-CONTEXT-MARKER", prompts[0])
@@ -813,12 +815,10 @@ class DebateHostTests(unittest.TestCase):
                  if f.startswith("<!-- debate-round: 1 gen")]), 2)
 
     def test_continue_resumes_from_the_ledger_without_any_sidecar(self):
-        # The one test that fails if the ledger is never written and the union
-        # quietly answers from `.done`.
+        # Successful runs must create only ledger completion records.
         self.assertEqual(self.run_cli("debate.sh", "-n", "2", "t").returncode, 0)
         debate = self.latest_debate()
-        for sidecar in Path(debate).glob(".round-*.done"):
-            sidecar.unlink()
+        self.assertEqual(self.sidecars(debate), [])
 
         result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "2", "t")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -826,45 +826,322 @@ class DebateHostTests(unittest.TestCase):
         self.assertTrue((debate / "round-3-gen.md").exists())
         self.assertTrue((debate / "round-4-crit.md").exists())
 
-    def test_continue_falls_back_to_sidecars_without_a_ledger(self):
-        self.assertEqual(self.run_cli("debate.sh", "-n", "2", "t").returncode, 0)
+    def test_legacy_continuation_refuses_without_changing_the_debate(self):
+        self.assertEqual(self.run_cli("debate.sh", "--rotate", "-n", "2", "t").returncode, 0)
         debate = self.latest_debate()
-        (debate / "index.jsonl").unlink()
+        records = self.index_records(debate)
+        (debate / ".round-1-gen-agy.done").touch()
+        (debate / ".round-2-crit-codex.done").touch()
+        # Make overwriting detectable even when a retry emits the same stub answer.
+        (debate / "round-1-gen-agy.md").write_text("ORIGINAL FINISHED DRAFT\n")
+        ledger = debate / "index.jsonl"
+        for history in (None, [], [dict(records[0], round=3)],
+                        [dict(records[1], role="crit")],
+                        [dict(r, round=4, role="crit") for r in records]):
+            with self.subTest(history=history):
+                if ledger.exists():
+                    ledger.unlink()
+                if history is not None:
+                    ledger.write_text("".join(json.dumps(r) + "\n" for r in history))
+                before = self.snapshot(debate)
+                calls = self.recorded()
+                # Continuing an older debate must not retarget the team's viewer.
+                latest = debate.parent / "latest-debate"
+                latest.unlink()
+                latest.symlink_to("debate-some-other-run")
+                result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t")
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("start a fresh debate", result.stderr)
+                self.assertEqual(self.snapshot(debate), before)
+                self.assertEqual(self.recorded(), calls)
+                self.assertEqual(os.readlink(latest), "debate-some-other-run")
 
+    def test_ledger_missing_without_sidecars_is_also_refused(self):
+        self.assertEqual(self.run_cli("debate.sh", "-n", "1", "t").returncode, 0)
+        debate = self.latest_debate()
+        ledger = debate / "index.jsonl"
+        ledger.unlink()
+        for directory in (False, True):
+            with self.subTest(directory=directory):
+                if directory:
+                    ledger.mkdir()
+                before = self.snapshot(debate)
+                result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t")
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("readable", result.stderr)
+                self.assertEqual(self.snapshot(debate), before)
+
+    def test_unreadable_ledger_is_refused_before_mutation(self):
+        self.assertEqual(self.run_cli("debate.sh", "-n", "1", "t").returncode, 0)
+        debate = self.latest_debate()
+        before = self.snapshot(debate)
+        calls = self.recorded()
+        tools = self.root / "unreadable-ledger"
+        tools.mkdir()
+        shim = tools / "jq"
+        # Deterministic read error, including in root-owned Linux containers.
+        shim.write_text(f"#!{sys.executable}\n"
+                        "import os, sys\n"
+                        "if any(a.endswith('/index.jsonl') for a in sys.argv[1:]):\n"
+                        "    sys.exit(1)\n"
+                        f"os.execv({shutil.which('jq')!r}, ['jq'] + sys.argv[1:])\n")
+        shim.chmod(0o755)
+        result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t",
+                              PATH=str(tools) + os.pathsep + self.env["PATH"])
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("readable attempt ledger", result.stderr)
+        self.assertEqual(self.snapshot(debate), before)
+        self.assertEqual(self.recorded(), calls)
+
+    def test_fully_indexed_debate_keeps_existing_sidecars_but_writes_none(self):
+        self.assertEqual(self.run_cli("debate.sh", "--rotate", "-n", "2", "t").returncode, 0)
+        debate = self.latest_debate()
+        for name in (".round-1-gen-agy.done", ".round-2-crit-codex.done"):
+            (debate / name).write_text("legacy sidecar\n")
+        original = self.snapshot(debate)
+        result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "2", "t")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name, body in original:
+            if name.startswith(("round-", ".round-")):
+                self.assertEqual((debate / name).read_bytes(), body)
+        self.assertEqual(self.sidecars(debate), [".round-1-gen-agy.done", ".round-2-crit-codex.done"])
+        self.assertEqual([r["round"] for r in self.index_records(debate)
+                          if r["t"] == "end" and r["rc"] == 0], [1, 2, 3, 4])
+
+    def test_no_completed_ledger_refuses_existing_later_output(self):
+        self.assertEqual(self.run_cli("debate.sh", "--rotate", "-n", "2", "t").returncode, 0)
+        debate = self.latest_debate()
+        ledger = debate / "index.jsonl"
+        starts = "".join(json.dumps(r) + "\n" for r in self.index_records(debate)
+                         if r["t"] == "start")
+        calls = self.recorded()
+        latest = debate.parent / "latest-debate"
+        latest.unlink()
+        latest.symlink_to("debate-other")
+        for contents in ("", starts, "torn ledger\n"):
+            for rounds in ("1", "2"):
+                with self.subTest(contents=contents, rounds=rounds):
+                    ledger.write_text(contents)
+                    before = self.snapshot(debate)
+                    result = self.run_cli("debate.sh", "--continue-from", str(debate),
+                                          "-n", rounds, "t")
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("contains output", result.stderr)
+                    self.assertEqual(self.snapshot(debate), before)
+                    self.assertEqual(self.recorded(), calls)
+                    self.assertEqual(os.readlink(latest), "debate-other")
+
+    def test_partial_ledger_refuses_output_beyond_next_retry(self):
+        self.assertEqual(self.run_cli("debate.sh", "-n", "4", "t").returncode, 0)
+        debate = self.latest_debate()
+        records = self.index_records(debate)
+        ledger = debate / "index.jsonl"
+        ledger.write_text("".join(json.dumps(r) + "\n" for r in records if r["round"] == 1))
+        before = self.snapshot(debate)
+        calls = self.recorded()
+        result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("beyond retry round 2", result.stderr)
+        self.assertEqual(self.snapshot(debate), before)
+        self.assertEqual(self.recorded(), calls)
+        # An interrupted next round remains retryable once later output is absent.
+        for path in (debate / "round-3-gen.md", debate / "round-4-crit.md"):
+            path.write_text("")
+        first = (debate / "round-1-gen.md").read_bytes()
         result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn("resuming from round 1", result.stderr)
-        self.assertTrue((debate / "round-3-gen.md").exists())
-        # No migration: the rebuilt ledger holds only what this run did.
-        self.assertEqual(sorted(r["round"] for r in self.index_records(debate)), [3, 3])
+        self.assertEqual((debate / "round-1-gen.md").read_bytes(), first)
+        self.assertEqual(self.index_records(debate)[-1]["round"], 2)
 
-    def test_legacy_debate_survives_a_failed_first_indexed_continuation(self):
-        # The regression test for the blocker: with an if/else reader instead of
-        # a union, the second continuation resumes at round 1 and the pre-touch
-        # loop truncates the finished transcripts.
-        self.assertEqual(self.run_cli("debate.sh", "-n", "2", "t").returncode, 0)
+    def test_empty_ledger_can_retry_first_round(self):
+        self.assertEqual(self.run_cli("debate.sh", "-n", "4", "t", STUB_RC="9").returncode, 9)
         debate = self.latest_debate()
-        (debate / "index.jsonl").unlink()
-        original = {name: (debate / name).read_bytes()
-                    for name in ("round-1-gen.md", "round-2-crit.md")}
-
-        failed = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t",
-                              STUB_RC="9")
-        self.assertNotEqual(failed.returncode, 0)
-        self.assertEqual([r["t"] for r in self.index_records(debate)], ["start", "end"])
-
+        self.assertEqual((debate / "round-2-crit.md").stat().st_size, 0)
+        (debate / "index.jsonl").write_text("")
         result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn("resuming from round 1", result.stderr)
-        for name, body in original.items():
-            self.assertEqual((debate / name).read_bytes(), body, f"{name} was overwritten")
+        self.assertIn("resuming from round 1", result.stderr)
+        self.assertEqual(self.index_records(debate)[-1]["rc"], 0)
+
+    def inject_debate_hooks(self, hooks):
+        """Inject faults into the installed fixture, without production test hooks."""
+        script = (PLUGIN / "bin/debate.sh").read_text()
+        marker = "# Always forward the resolved per-round model"
+        self.assertEqual(script.count(marker), 1)
+        (self.plugin / "bin/debate.sh").write_text(script.replace(marker, hooks + "\n" + marker))
+
+    def test_ledger_write_failures_stop_before_next_round_and_receipt(self):
+        self.inject_debate_hooks(r'''
+eval "real_$(declare -f index_append)"
+index_append() {
+  case "$FAULT_STAGE:$1" in
+    start:*'"t":"start"'*|end:*'"t":"end"'*) return 1 ;;
+  esac
+  real_index_append "$@"
+}
+''')
+        for stage, model_rc, expected in (("start", "0", 1), ("end", "0", 1), ("end", "9", 9)):
+            with self.subTest(stage=stage, model_rc=model_rc):
+                calls = len(self.recorded())
+                receipt = self.receipt_path()
+                result = self.run_cli("debate.sh", "-n", "2", "t", FAULT_STAGE=stage,
+                                      STUB_RC=model_rc, DEBATE_RECEIPT=str(receipt))
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertIn(f"cannot record attempt {stage}", result.stderr)
+                debate = self.latest_debate()
+                self.assertFalse(self.lock_of(debate).is_symlink())
+                self.assertFalse(receipt.exists())
+                self.assertEqual(self.sidecars(debate), [])
+                self.assertEqual(len(self.recorded()) - calls, 0 if stage == "start" else 1)
+                rows = self.index_records(debate)
+                self.assertEqual([r["t"] for r in rows], [] if stage == "start" else ["start"])
+                ends = [f for f in self.stream_frames(debate, "gen") if "-end:" in f]
+                self.assertEqual(len(ends), 1)
+                self.assertIn(f" rc={1 if stage == 'start' else model_rc} ", ends[0])
+                if stage == "end":
+                    self.assertIn(VERDICT, (debate / "round-1-gen.md").read_text())
+                # The same directory remains resumable after repairing recording.
+                retry = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t",
+                                     FAULT_STAGE="none")
+                self.assertEqual(retry.returncode, 0, retry.stderr)
+                self.assertEqual(self.index_records(debate)[-1]["round"], 1)
+
+    def test_signal_exit_and_lock_cleanup_survive_a_failed_ledger_end(self):
+        self.inject_debate_hooks(r'''
+eval "real_$(declare -f index_append)"
+index_append() {
+  case "$1" in *'"t":"end"'*) return 1 ;; esac
+  real_index_append "$@"
+}
+''')
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(signal=sig.name):
+                proc, _ready, release = self.start_blocked_debate("-n", "2", "t")
+                debate = self.latest_debate()
+                proc.send_signal(sig)
+                _out, err = proc.communicate(timeout=30)
+                self.assertEqual(proc.returncode, -sig, err)
+                self.assertIn("cannot record attempt end", err)
+                self.assertFalse(self.lock_of(debate).is_symlink())
+                self.assertEqual([r["t"] for r in self.index_records(debate)], ["start"])
+                ends = [f for f in self.stream_frames(debate, "gen") if "-end:" in f]
+                self.assertEqual(len(ends), 1)
+                self.assertIn(f" rc={128 + sig} ", ends[0])
+                release.touch()
+
+    def test_signals_around_completion_keep_ledger_and_stream_status_consistent(self):
+        self.inject_debate_hooks(r'''
+fault_fired=""
+fault_signal() {
+  if [ "$FAULT_POINT" = "$1" ] && [ -z "$fault_fired" ]; then
+    fault_fired=1
+    kill -s "$FAULT_SIGNAL" "$$"
+  fi
+}
+eval "real_$(declare -f complete_attempt)"
+eval "real_$(declare -f index_append)"
+eval "real_$(declare -f stream_attempt_end)"
+complete_attempt() {
+  fault_signal before-status
+  real_complete_attempt "$@"
+}
+index_append() {
+  case "$1" in *'"t":"end"'*) fault_signal before-ledger ;; esac
+  real_index_append "$@" || return $?
+  case "$1" in *'"t":"end"'*) fault_signal after-ledger ;; esac
+}
+stream_attempt_end() {
+  fault_signal before-stream
+  real_stream_attempt_end "$@"
+  fault_signal after-stream
+}
+''')
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            for point in ("before-status", "before-ledger", "after-ledger", "before-stream", "after-stream"):
+                with self.subTest(signal=sig.name, point=point):
+                    receipt = self.receipt_path()
+                    result = self.run_cli("debate.sh", "-n", "2", "t", FAULT_POINT=point,
+                                          FAULT_SIGNAL=sig.name[3:], DEBATE_RECEIPT=str(receipt))
+                    self.assertEqual(result.returncode, -sig, result.stderr)
+                    debate = self.latest_debate()
+                    rows = self.index_records(debate)
+                    self.assertEqual([r["t"] for r in rows], ["start", "end"])
+                    expected = 128 + sig if point == "before-status" else 0
+                    self.assertEqual(rows[-1]["rc"], expected)
+                    ends = [f for f in self.stream_frames(debate, "gen") if "-end:" in f]
+                    self.assertEqual(len(ends), 1)
+                    self.assertIn(f" rc={expected} id={rows[-1]['id']} ", ends[0])
+                    self.assertEqual(self.stream_frames(debate, "crit"), [])
+                    self.assertFalse(self.lock_of(debate).is_symlink())
+                    self.assertFalse(receipt.exists())
+                    self.assertEqual(self.sidecars(debate), [])
+
+    def test_sigkill_completion_depends_on_the_ledger_end(self):
+        self.inject_debate_hooks(r'''
+eval "real_$(declare -f index_append)"
+index_append() {
+  case "$1" in
+    *'"t":"end"'*)
+      case "$FAULT_POINT" in
+        before) kill -s KILL "$$" ;;
+        torn) printf '{"v":1,"t":"end"' >> "$DEBATE_DIR/index.jsonl"; kill -s KILL "$$" ;;
+      esac ;;
+  esac
+  real_index_append "$@" || return $?
+  case "$FAULT_POINT:$1" in after:*'"t":"end"'*) kill -s KILL "$$" ;; esac
+}
+''')
+        for point in ("before", "torn", "after"):
+            with self.subTest(point=point):
+                receipt = self.receipt_path()
+                result = self.run_cli("debate.sh", "-n", "2", "t", FAULT_POINT=point,
+                                      DEBATE_RECEIPT=str(receipt))
+                self.assertEqual(result.returncode, -signal.SIGKILL, result.stderr)
+                debate = self.latest_debate()
+                self.assertTrue(self.lock_of(debate).is_symlink())
+                self.assertFalse(receipt.exists())
+                self.assertEqual(self.sidecars(debate), [])
+                self.assertEqual(len(self.stream_frames(debate, "gen")), 1)
+                original = (debate / "round-1-gen.md").read_bytes()
+                # The pipeline finished before the injected kill: no writer remains.
+                self.lock_of(debate).unlink()
+                retry = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t",
+                                     FAULT_POINT="none", STUB_RESPONSE="RETRY ANSWER\n")
+                self.assertEqual(retry.returncode, 0, retry.stderr)
+                rows = []
+                for line in (debate / "index.jsonl").read_text().splitlines():
+                    try:
+                        rows.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        self.assertEqual(point, "torn")
+                self.assertEqual(rows[-1]["round"], 2 if point == "after" else 1)
+                self.assertEqual(rows[-1]["rc"], 0)
+                if point == "after":
+                    self.assertEqual((debate / "round-1-gen.md").read_bytes(), original)
+                else:
+                    self.assertIn("RETRY ANSWER", (debate / "round-1-gen.md").read_text())
+
+    def test_signal_before_next_generator_header_preserves_completed_rounds(self):
+        self.inject_debate_hooks(r'''
+eval "real_$(declare -f stream_header)"
+stream_header() {
+  if [ "$CUR_ATTEMPT_ROUND" = 3 ]; then kill -s TERM "$$"; fi
+  real_stream_header "$@"
+}
+''')
+        result = self.run_cli("debate.sh", "-n", "3", "t")
+        self.assertEqual(result.returncode, -signal.SIGTERM, result.stderr)
+        debate = self.latest_debate()
+        ends = [r for r in self.index_records(debate) if r["t"] == "end"]
+        self.assertEqual([(r["round"], r["rc"]) for r in ends], [(1, 0), (2, 0)])
+        self.assertEqual(len(self.stream_frames(debate, "gen")), 2)
+        self.assertFalse(self.lock_of(debate).is_symlink())
 
     def test_a_torn_final_ledger_line_is_ignored_and_does_not_glue(self):
         self.assertEqual(self.run_cli("debate.sh", "-n", "2", "t").returncode, 0)
         debate = self.latest_debate()
         # Only the ledger may answer, or a tolerant reader is not what is tested.
-        for sidecar in Path(debate).glob(".round-*.done"):
-            sidecar.unlink()
+        self.assertEqual(self.sidecars(debate), [])
         with (debate / "index.jsonl").open("a") as handle:
             handle.write('{"v":1,"t":"end","id":"x","round":9,"role":"gen","rc":0,"fi')
 
@@ -884,8 +1161,7 @@ class DebateHostTests(unittest.TestCase):
         # Only the ledger may answer, and the garbage has to sit *before* the
         # record that decides the resume point — appended last, a reader that
         # simply stops at it would still look correct.
-        for sidecar in Path(debate).glob(".round-*.done"):
-            sidecar.unlink()
+        self.assertEqual(self.sidecars(debate), [])
         path = debate / "index.jsonl"
         lines = path.read_text().splitlines()
         path.write_text("\n".join(lines[:-1] + ["not json at all", "[1,2,3]", lines[-1]]) + "\n")
@@ -915,8 +1191,8 @@ class DebateHostTests(unittest.TestCase):
             text=True, capture_output=True, timeout=120,
         )
         self.assertEqual(probe.returncode, 0, probe.stderr)
-        # 1 from a sidecar, 2 from the ledger, 500 from neither.
-        self.assertEqual(probe.stdout.strip(), "1:0 2:0 500:1", probe.stderr)
+        # Sidecars cannot make round 1 complete; only round 2 is in the ledger.
+        self.assertEqual(probe.stdout.strip(), "1:1 2:0 500:1", probe.stderr)
 
     def test_killed_run_leaves_a_start_with_no_end_and_the_round_reruns(self):
         # SIGKILL is the only signal that runs no trap, which is what makes the
@@ -1182,12 +1458,12 @@ class DebateHostTests(unittest.TestCase):
         # Malformed lines are skipped, not fatal.
         got = ask(["not json", end("round-2-crit.md")])
         self.assertEqual((got.returncode, got.stdout.strip()), (0, "round-2-crit.md"))
-        # No ledger at all: the sidecar's own name carries the rotation form.
+        # No ledger: a sidecar supplies neither completion nor a filename.
         got = ask(None, sidecars=(".round-2-crit-codex.done",))
-        self.assertEqual((got.returncode, got.stdout.strip()), (0, "round-2-crit-codex.md"))
-        # A ledger that says nothing about *this* round still falls back.
+        self.assertEqual((got.returncode, got.stdout.strip()), (0, ""))
+        # No successful record for this round: there is no sidecar fallback.
         got = ask([end("round-4-crit.md", rnd=4)], sidecars=(".round-2-crit.done",))
-        self.assertEqual((got.returncode, got.stdout.strip()), (0, "round-2-crit.md"))
+        self.assertEqual((got.returncode, got.stdout.strip()), (0, ""))
         # A disagreeing sidecar does not override an answer the ledger gave.
         got = ask([end("round-2-crit.md")], sidecars=(".round-2-crit-codex.done",))
         self.assertEqual((got.returncode, got.stdout.strip()), (0, "round-2-crit.md"))
