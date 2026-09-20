@@ -134,11 +134,15 @@ completed_round_file() {
 # debate_index_can_continue DIR: compatibility gate, called under the writer
 # lock before any transcript or metadata is changed. Sidecars are inspected
 # only to refuse incomplete legacy histories, never as completion evidence.
-# A partially indexed debate is just as unsafe as one with no ledger: even a
-# single old completed round could otherwise be overwritten by the pre-touch.
+# Refuse any legacy sidecar whose completion the ledger cannot confirm.
 debate_index_can_continue() {
   local dir="$1" idx f base n rest role completed
   idx="$(debate_index_file "$dir")"
+  # Direct library callers may not have loaded registry.sh, which also checks jq.
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "debate: install jq to validate the attempt ledger before continuing" >&2
+    return 2
+  fi
   if [ ! -f "$idx" ] || [ ! -r "$idx" ] || ! jq -Rn 'inputs | empty' "$idx" >/dev/null 2>&1; then
     echo "debate: $dir needs a readable attempt ledger; start a fresh debate instead of continuing" >&2
     return 2
@@ -160,11 +164,36 @@ debate_index_can_continue() {
     completed="$(jq -rRn --arg n "$n" --arg role "$role" '
       any(inputs | (fromjson? // empty) | select(type == "object");
           .t == "end" and .rc == 0 and .round == ($n | tonumber) and .role == $role)
-    ' "$idx" 2>/dev/null)" || return 2
+    ' "$idx" 2>/dev/null)" || {
+      echo "debate: cannot validate $base against the attempt ledger; start a fresh debate instead of continuing" >&2
+      return 2
+    }
     if [ "$completed" != true ]; then
       echo "debate: $base has no successful ledger record; start a fresh debate instead of continuing this legacy history" >&2
       return 2
     fi
+  done
+  return 0
+}
+
+# Only the next round may be retried. Output beyond it implies missing
+# completion history, even if this invocation requests fewer rounds.
+debate_index_can_resume_at() {
+  local dir="$1" start_round="$2" f base n rest
+  for f in "$dir"/round-*.md; do
+    [ -s "$f" ] || continue
+    base="${f##*/}"
+    rest="${base#round-}"
+    n="${rest%%-*}"
+    case "$n" in ''|*[!0-9]*) continue ;; esac
+    [ "$n" -gt "$start_round" ] || continue
+    rest="${rest#"$n-"}"
+    case "$rest" in
+      gen.md|gen-*.md|crit.md|crit-*.md)
+        echo "debate: $base contains output beyond retry round $start_round without complete ledger history; start a fresh debate instead of continuing" >&2
+        return 2
+        ;;
+    esac
   done
   return 0
 }

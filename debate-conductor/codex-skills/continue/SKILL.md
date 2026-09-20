@@ -1,7 +1,6 @@
 ---
 name: continue
-description: Continue the most recent debate from Codex by appending more rounds to the
-same transcript directory.
+description: Continue the most recent debate from Codex by appending more rounds to the same transcript directory.
 ---
 
 # Continue a Debate from Codex
@@ -22,9 +21,9 @@ DEBATE_CONDUCTOR_PM_HOST=codex "<plugin-root>/bin/debate.sh" --continue-from "<d
 
 Default extra rounds to `2` when the user does not specify a number. Rounds
 continue after the last completed one, which `debate.sh` reads from the
-debate's append-only attempt ledger `index.jsonl` (never edit or delete it); if round 1
-never completed, `debate.sh`
-resumes at round 1 and reuses the round-1 context saved in `context.md`. `debate.sh`
+debate's append-only attempt ledger `index.jsonl` (never edit or delete it). If
+round 1 never completed and later rounds contain no output, `debate.sh` resumes
+at round 1 and reuses the round-1 context saved in `context.md`. `debate.sh`
 persists and reuses the transcript's model pair and any saved rotation unless
 this invocation supplies explicit model flags/env vars. Start a fresh debate to
 change model pairs inside rotation or to change whether rotation is enabled.
@@ -38,6 +37,7 @@ no critic round completed, say so. Never infer completion from `.done` sidecars 
 transcript filenames; if the completed round has no unambiguous recorded filename,
 report that the verdict cannot be determined.
 
-Continuation refuses a missing or unreadable ledger, or legacy sidecar completions
-absent from the ledger. Report the refusal and start a fresh debate if requested. Do not
-migrate, delete sidecars, or fabricate ledger records.
+Continuation refuses a missing or unreadable ledger, legacy sidecar completions
+absent from the ledger, or nonempty transcripts beyond the next retry round.
+Report the refusal and start a fresh debate if requested. Do not migrate, delete
+sidecars, or fabricate ledger records.

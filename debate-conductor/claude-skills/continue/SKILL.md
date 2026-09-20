@@ -2,12 +2,12 @@
 description: Extend the most recent debate by N more rounds in the same `debate-<TS>/` dir. Round numbering continues; tail panes pick up new rounds without retarget. Reads topic from prior debate's topic.txt.
 disable-model-invocation: true
 allowed-tools: Bash(debate.sh:*) Bash(ls:*) Bash(cat:*) Bash(readlink:*) Read Glob
-argument-hint: [extra-rounds]
+argument-hint: "[extra-rounds]"
 ---
 
 # Continue a debate
 
-Extend the most recent debate in the workspace by `$ARGUMENTS` more rounds (default 2). New rounds (N+1, N+2, ...) are appended to the existing `debate-<TS>/` directory, where N is the last *completed* round. If round 1 itself never completed (for example its generator call failed), `debate.sh` reports "resuming from round 1" and runs rounds 1..E, reusing the round-1 context saved in `context.md`. The middle/right panes will pick them up as new round files appear; the `── new debate run detected — re-tailing ──` separator does **not** fire because the `latest-debate` symlink does not retarget.
+Extend the most recent debate in the workspace by `$ARGUMENTS` more rounds (default 2). New rounds (N+1, N+2, ...) are appended to the existing `debate-<TS>/` directory, where N is the last *completed* round. If round 1 itself never completed (for example its generator call failed) and later rounds contain no output, `debate.sh` reports "resuming from round 1" and runs rounds 1..E, reusing the round-1 context saved in `context.md`. The middle/right panes will pick them up as new round files appear; the `── new debate run detected — re-tailing ──` separator does **not** fire because the `latest-debate` symlink does not retarget.
 
 ## 1 · Resolve the prior debate
 
@@ -62,4 +62,4 @@ Use `Glob` to enumerate **all** `round-*.md` files in `<real-dir>` (not just the
 - **Do not start a new `debate-<TS>/` dir.** If the user wants a fresh debate on a different topic, they should use `/debate-conductor:run` instead — tell them so rather than silently switching.
 - **Each new round only sees the immediately preceding generator+critic pair**, not the full transcript. If the user expects round 6 to remember round 1's framing, prompt them to restate it as part of the topic — the engine intentionally keeps prompts bounded as the debate grows.
 
-Continuation refuses a missing or unreadable ledger, or legacy sidecar completions absent from the ledger. Report the refusal and start a fresh debate if requested. Do not migrate, delete sidecars, or fabricate ledger records.
+Continuation refuses a missing or unreadable ledger, legacy sidecar completions absent from the ledger, or nonempty transcripts beyond the next retry round. Report the refusal and start a fresh debate if requested. Do not migrate, delete sidecars, or fabricate ledger records.

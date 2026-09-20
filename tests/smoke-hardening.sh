@@ -546,11 +546,16 @@ assert_ok grep -qx 'Verdict: RECONSIDER' "$GEN_DENIED_DIR/round-1-gen.md"
     "$ROOT/debate-conductor/bin/debate.sh" -n 6 "smoke: long-denied" > /dev/null 2>&1 </dev/null ) || true
 LONG_DIR="$(cd "$TMP/debate-log/long-denied/latest-debate" && pwd -P)"
 assert_eq "$(ls "$LONG_DIR" | grep -c '^round-')" "6"
-# Kept: a later round with content, and files that are not round transcripts.
+# Later output with missing ledger history must block continuation, even
+# outside the requested range. Non-transcript files do not block it.
 printf 'kept\n' > "$LONG_DIR/round-5-gen.md"
 : > "$LONG_DIR/round-9-notes.md"
+assert_eq "$(continue_debate long-denied "$LONG_DIR")" "2"
+assert_ok grep -q 'contains output beyond retry round 1' "$TMP/continue.err"
+assert_eq "$(cat "$LONG_DIR/round-5-gen.md")" "kept"
+: > "$LONG_DIR/round-5-gen.md"
 assert_eq "$(continue_debate long-denied "$LONG_DIR")" "0"
-assert_eq "$(ls "$LONG_DIR" | grep '^round-' | tr '\n' ' ')" "round-1-gen.md round-2-crit.md round-5-gen.md round-9-notes.md "
+assert_eq "$(ls "$LONG_DIR" | grep '^round-' | tr '\n' ' ')" "round-1-gen.md round-2-crit.md round-9-notes.md "
 assert_eq "$(completed_rounds long-denied)" "2"
 # A debate dir that never started (no topic.txt) is still refused.
 mkdir -p "$TMP/debate-log/never-started/debate-20260101-000000"

@@ -908,9 +908,55 @@ class DebateHostTests(unittest.TestCase):
         self.assertEqual([r["round"] for r in self.index_records(debate)
                           if r["t"] == "end" and r["rc"] == 0], [1, 2, 3, 4])
 
-    def test_empty_ledger_can_retry_first_round(self):
-        self.assertEqual(self.run_cli("debate.sh", "-n", "1", "t", STUB_RC="9").returncode, 9)
+    def test_no_completed_ledger_refuses_existing_later_output(self):
+        self.assertEqual(self.run_cli("debate.sh", "--rotate", "-n", "2", "t").returncode, 0)
         debate = self.latest_debate()
+        ledger = debate / "index.jsonl"
+        starts = "".join(json.dumps(r) + "\n" for r in self.index_records(debate)
+                         if r["t"] == "start")
+        calls = self.recorded()
+        latest = debate.parent / "latest-debate"
+        latest.unlink()
+        latest.symlink_to("debate-other")
+        for contents in ("", starts, "torn ledger\n"):
+            for rounds in ("1", "2"):
+                with self.subTest(contents=contents, rounds=rounds):
+                    ledger.write_text(contents)
+                    before = self.snapshot(debate)
+                    result = self.run_cli("debate.sh", "--continue-from", str(debate),
+                                          "-n", rounds, "t")
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("contains output", result.stderr)
+                    self.assertEqual(self.snapshot(debate), before)
+                    self.assertEqual(self.recorded(), calls)
+                    self.assertEqual(os.readlink(latest), "debate-other")
+
+    def test_partial_ledger_refuses_output_beyond_next_retry(self):
+        self.assertEqual(self.run_cli("debate.sh", "-n", "4", "t").returncode, 0)
+        debate = self.latest_debate()
+        records = self.index_records(debate)
+        ledger = debate / "index.jsonl"
+        ledger.write_text("".join(json.dumps(r) + "\n" for r in records if r["round"] == 1))
+        before = self.snapshot(debate)
+        calls = self.recorded()
+        result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("beyond retry round 2", result.stderr)
+        self.assertEqual(self.snapshot(debate), before)
+        self.assertEqual(self.recorded(), calls)
+        # An interrupted next round remains retryable once later output is absent.
+        for path in (debate / "round-3-gen.md", debate / "round-4-crit.md"):
+            path.write_text("")
+        first = (debate / "round-1-gen.md").read_bytes()
+        result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((debate / "round-1-gen.md").read_bytes(), first)
+        self.assertEqual(self.index_records(debate)[-1]["round"], 2)
+
+    def test_empty_ledger_can_retry_first_round(self):
+        self.assertEqual(self.run_cli("debate.sh", "-n", "4", "t", STUB_RC="9").returncode, 9)
+        debate = self.latest_debate()
+        self.assertEqual((debate / "round-2-crit.md").stat().st_size, 0)
         (debate / "index.jsonl").write_text("")
         result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t")
         self.assertEqual(result.returncode, 0, result.stderr)

@@ -346,6 +346,7 @@ if [ -n "$CONTINUE_FROM" ]; then
     exit 2
   fi
   START_ROUND=$((LAST_ROUND + 1))
+  debate_index_can_resume_at "$DEBATE_DIR" "$START_ROUND" || exit 2
   END_ROUND=$((LAST_ROUND + ROUNDS))
 else
   TS=$(date +%Y%m%d-%H%M%S)
