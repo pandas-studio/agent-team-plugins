@@ -255,7 +255,11 @@ if [ "$RC" -eq 0 ]; then
   cat "$FINAL" || true
 fi
 manifest_finalize
-printf '\n=== END (rc=%d) ===\n' "$RC" >&8 || true
+# As in ask-reviewer, END is best-effort framing; the answer and run metadata
+# determine the outcome even when this final log write fails.
+if ! printf '\n=== END (rc=%d) ===\n' "$RC" >&8; then
+  echo "[ask-researcher] final log append failed; $LOG may be incomplete" >&2 || true
+fi
 exec 8>&-
 echo || true
 echo "(log: $LOG, final: $FINAL, rc=$RC)" >&2 || true

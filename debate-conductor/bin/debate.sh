@@ -195,7 +195,7 @@ LOG_BASE="${DEBATE_LOG_DIR:-$PWD/.debate-conductor/log}"
 LOG_DIR="$LOG_BASE/$TEAM"
 
 # ── One writer per debate ───────────────────────────────────────────────────
-# Everything under a debate directory (round files, `.done` sidecars, the role
+# Everything under a debate directory (round files, the attempt ledger, role
 # streams, models.json) has exactly one writer. Without that, two
 # `--continue-from` runs read the same completed rounds, pick the same next
 # round, truncate the same round files and interleave appends into the streams.
@@ -330,17 +330,11 @@ if [ -n "$CONTINUE_FROM" ]; then
   # Take the writer lock before reading any completion state: the round this
   # run picks, and every file it then writes, must be decided under it.
   acquire_lock "$DEBATE_DIR"
-  # LAST_ROUND counts only *completed* rounds: those the attempt ledger
-  # (`index.jsonl`) holds an rc=0 end record for, or — for a debate that
-  # predates the ledger, or one whose best-effort index write failed — those
-  # with a `.round-N-...done` sidecar. lib/index.sh answers from both; see the
-  # note there on why it is a union and not a fallback. Pre-touched files and
-  # crashed-mid-round attempts are in neither, so /continue resumes from the
-  # failed round, not after it.
-  #
-  # With no sidecar at all, round 1 itself failed. topic.txt is written only
-  # after preflight created the dir, so its presence means this debate started:
-  # resume at round 1. Without it there is nothing to resume.
+  # Refuse sidecar-only and mixed legacy histories before the pre-touch loop
+  # can overwrite their completed transcripts. The lock is released on refusal.
+  debate_index_can_continue "$DEBATE_DIR" || exit 2
+  # Only successful ledger ends advance the resume point. Empty/start-only
+  # ledgers can retry round 1 when the saved topic shows the debate started.
   LAST_ROUND="$(last_completed_round "$DEBATE_DIR")"
   if [ -z "$LAST_ROUND" ]; then
     [ -f "$DEBATE_DIR/topic.txt" ] || { echo "no completed round in $DEBATE_DIR — start a fresh debate with /run instead of /continue" >&2; exit 2; }
@@ -355,6 +349,7 @@ if [ -n "$CONTINUE_FROM" ]; then
     exit 2
   fi
   START_ROUND=$((LAST_ROUND + 1))
+  debate_index_can_resume_at "$DEBATE_DIR" "$START_ROUND" || exit 2
   END_ROUND=$((LAST_ROUND + ROUNDS))
 else
   TS=$(date +%Y%m%d-%H%M%S)
@@ -617,11 +612,14 @@ else
   # preflight leaves no debate directory behind.
   allocate_debate_dir
   acquire_lock "$DEBATE_DIR"
+  # Create the ledger before any attempt can fail. A fresh run interrupted
+  # before its first start record can then be distinguished from a legacy run.
+  : > "$DEBATE_DIR/index.jsonl" || { echo "debate: cannot create the attempt ledger" >&2; exit 1; }
 fi
 # Per-role live streams for tail-role.sh: append-only, never truncated or
 # replaced, so `tail -F` on one file sees every attempt, retries included.
 # Created before latest-debate moves so a viewer switching to this debate finds
-# them. A debate created before streams existed gets them on its next continue;
+# them. An indexed debate missing its streams gets new ones on continuation;
 # its earlier rounds stay in the round files only.
 for _role in gen crit; do : >> "$DEBATE_DIR/stream-$_role.log"; done
 selection_rc=0
@@ -630,8 +628,8 @@ if [ "$selection_rc" != 0 ]; then
   # Remove only our new, unselected allocation. A committed selection or a
   # failed rollback can still point at it; retain that directory for recovery.
   if [ -z "$CONTINUE_FROM" ] && [ "$(readlink "$LOG_DIR/latest-debate" 2>/dev/null || true)" != "${DEBATE_DIR##*/}" ]; then
-    for _role in gen crit; do
-      [ -s "$DEBATE_DIR/stream-$_role.log" ] || rm -f "$DEBATE_DIR/stream-$_role.log"
+    for _file in stream-gen.log stream-crit.log index.jsonl; do
+      [ -s "$DEBATE_DIR/$_file" ] || rm -f "$DEBATE_DIR/$_file"
     done
     release_lock
     rmdir "$DEBATE_DIR" || echo "debate: retained nonempty allocation: $DEBATE_DIR" >&2
@@ -680,10 +678,8 @@ for _r in $(seq "$START_ROUND" "$END_ROUND"); do
 done
 
 # A resume shorter than the original run leaves that run's placeholders past
-# END_ROUND behind: empty, no `.done` sidecar, never written. They would pose
-# as the latest rounds to anything listing round files (the continue skills
-# summarise the most recent critic round), so drop them. Anything with content
-# or a sidecar is kept.
+# END_ROUND behind: empty, no successful ledger end, never written. Remove
+# these unused placeholders; keep any file with content or a successful end.
 if [ -n "$CONTINUE_FROM" ]; then
   for _f in "$DEBATE_DIR"/round-*.md; do
     [ -e "$_f" ] || continue
@@ -719,23 +715,6 @@ print_header() {
 # come only from the \x1e headers written by stream_header.
 print_marker() {
   printf '<!-- debate-round: %s %s %s -->\n' "$1" "$2" "$3"
-}
-
-# Completion sentinel: a hidden sidecar `.round-N-role[-model].done` written
-# alongside the .md transcript after a round's wrapper exits 0. Sidecar (vs
-# in-transcript marker) so the transcript itself still ends on the canonical
-# `Verdict: ...` / draft body line — preserving SKILL.md's "bottom of the
-# last critic round" parsing path and the critic role contract that the
-# final output line is the verdict. /continue's LAST_ROUND scans these
-# sidecars; crash/CLI-failure rounds leave the .md but no .done, so resume
-# happens *from* that round, not after it.
-# round_done_file OUT: the `.done` sidecar of round file OUT.
-round_done_file() {
-  local base="${1##*/}"
-  printf '%s/.%s.done' "${1%/*}" "${base%.md}"
-}
-write_round_end() {
-  touch "$(round_done_file "$2")"
 }
 
 # Convergence parser (--until-converged). Echoes the Critic's verdict token by
@@ -813,7 +792,6 @@ stream_header() {
 # means none.
 CUR_ATTEMPT_ROUND=""
 CUR_ATTEMPT_ROLE=""
-CUR_ATTEMPT_DONE=""
 CUR_ATTEMPT_ID=""
 CUR_ATTEMPT_HEADER=""
 CUR_ATTEMPT_PUBLISHED=""
@@ -838,13 +816,14 @@ ATTEMPT_SEQ=0
 # index_append LINE: append one record to the ledger. Borrows stream_record's
 # rule that a record always starts a line — without it a torn line left by a
 # crash glues onto the next record, and the fragment can swallow a whole start
-# record. Best effort, like the stream: the callers treat a failure as "this
-# attempt is not in the ledger", which reads as incomplete and runs again.
+# record. A failed append stops the normal path: without a successful end,
+# the attempt is incomplete and must not be followed by another round.
 index_append() {
-  local idx
+  local idx last
   idx="$(debate_index_file "$DEBATE_DIR")"
-  if [ -s "$idx" ] && [ -n "$(tail -c 1 "$idx")" ]; then
-    printf '\n' >> "$idx" || return 1
+  if [ -s "$idx" ]; then
+    last="$(tail -c 1 "$idx")" || return 1
+    if [ -n "$last" ]; then printf '\n' >> "$idx" || return 1; fi
   fi
   printf '%s\n' "$1" >> "$idx" || return 1
 }
@@ -892,7 +871,6 @@ index_end() {
 begin_attempt() {
   ATTEMPT_SEQ=$((ATTEMPT_SEQ + 1))
   CUR_ATTEMPT_ROUND="$1"
-  CUR_ATTEMPT_DONE="$(round_done_file "$4")"
   CUR_ATTEMPT_ID="$ATTEMPT_RUN.$ATTEMPT_SEQ"
   CUR_ATTEMPT_HEADER="<!-- debate-round: $1 $2 $3 id=$CUR_ATTEMPT_ID -->"
   CUR_ATTEMPT_FILE="${4##*/}"
@@ -908,36 +886,27 @@ begin_attempt() {
   # start record is on disk", or an end record could stand alone. A signal
   # between the append and the flag leaves a start with no end, which is an
   # incomplete attempt: the round runs again.
-  if index_start "$3"; then CUR_ATTEMPT_INDEXED=1; fi
+  if index_start "$3"; then
+    CUR_ATTEMPT_INDEXED=1
+  else
+    echo "debate: cannot record attempt start in $DEBATE_DIR/index.jsonl" >&2
+    return 1
+  fi
 }
 
-# complete_attempt ROUND ROLE OUT: the pipeline succeeded. `.done` first, so a
-# failure to write it is still recorded by the EXIT trap as a failed attempt.
-# End records go to the stream only; round files keep the verdict last.
+# complete_attempt: the pipeline succeeded. Freeze its status before either
+# end writer can be interrupted. Only a successful ledger append makes this
+# completion survive SIGKILL; a trapped signal reuses the frozen status.
 complete_attempt() {
-  write_round_end "$1" "$3"
+  CUR_ATTEMPT_RC=0
   record_attempt_end 0
 }
 
-# record_attempt_end RC: write the end record for the attempt in progress, once.
-# A signal can run this from on_signal while complete_attempt is part way
-# through it (#50), so it decides from what is on disk:
-#   - once `.done` exists the attempt completed: a record written from here on
-#     says rc=0, whatever RC is (debate.sh still dies from the signal);
-#   - when the attempt's header may not have been published (a signal inside
-#     begin_attempt), it is written only if the stream ends with that exact
-#     header: nothing but this record can follow the header before
-#     begin_attempt marks it published, and the id rules out an earlier
-#     attempt's header. A header never published gets no record (#52);
-#   - when the role stream already ends with this attempt's own end record
-#     (its id, one numeric rc), it is not written again. A record of another
-#     attempt, or one without an id, does not count.
-# Stream records stay best effort: a stream that cannot be read is not written
-# to (rather than risk a second record), and a failed write is ignored.
-#
-# This is the stream half only. It owns no shared state: `rc` arrives already
-# normalised and it never clears CUR_ATTEMPT_ROLE, so its early returns cannot
-# stop the ledger half from running or make a re-entry skip a pending record.
+# stream_attempt_end RC: best-effort diagnostic end, using the already selected
+# status. A header not yet marked published is recognized by its exact id at
+# the stream tail (#52); an existing end for this attempt is not duplicated.
+# This helper owns no attempt state, so a failed stream read or write cannot
+# affect ledger completion. Round transcripts keep their verdict as the last line.
 stream_attempt_end() {
   local rc="$1" role="$CUR_ATTEMPT_ROLE" stream last prefix suffix code
   [ -n "$role" ] || return 0
@@ -964,31 +933,32 @@ stream_attempt_end() {
   stream_record "$role" "<!-- debate-round-end: $CUR_ATTEMPT_ROUND $role rc=$rc id=$CUR_ATTEMPT_ID -->" || true
 }
 
-# record_attempt_end RC: close the attempt in progress in both records, once.
-# It owns the shared state the two writers read, so that the `.done`-forces-0
-# normalisation happens exactly once: it is the only thing guaranteeing the
-# stream and the ledger can never disagree about an attempt's status. Neither
-# writer's failure stops the other — the ledger is the authoritative record and
-# must not be skipped because a best-effort stream read failed.
+# record_attempt_end RC: select one status and close the attempt, ledger first.
+# Signals can re-enter between the writes (#50); the frozen status outlives
+# either writer so both records always agree. A ledger failure is returned to
+# the normal path, but never stops the diagnostic write or trap cleanup.
 record_attempt_end() {
-  local rc="$1"
+  local rc="$1" write_rc=0
   [ -n "$CUR_ATTEMPT_ROLE" ] || return 0
   if [ -n "$CUR_ATTEMPT_RC" ]; then
-    # A re-entry — a signal landing between the two writes, or inside
-    # complete_attempt (#50). The status was already decided and one of the
-    # records may already carry it; deciding again would split them.
     rc="$CUR_ATTEMPT_RC"
   else
-    [ ! -e "$CUR_ATTEMPT_DONE" ] || rc=0
     CUR_ATTEMPT_RC="$rc"
   fi
+  if [ -n "$CUR_ATTEMPT_INDEXED" ]; then
+    index_end "$rc" || write_rc=1
+  fi
   stream_attempt_end "$rc" || true
-  [ -z "$CUR_ATTEMPT_INDEXED" ] || index_end "$rc" || true
   CUR_ATTEMPT_ROLE=""
   CUR_ATTEMPT_INDEXED=""
   CUR_ATTEMPT_RC=""
+  if [ "$write_rc" -ne 0 ]; then
+    echo "debate: cannot record attempt end in $DEBATE_DIR/index.jsonl" >&2
+  fi
+  return "$write_rc"
 }
-trap 'record_attempt_end "$?"; release_lock' EXIT
+# Keep the incoming exit status even if recording fails; always release the lock.
+trap 'record_attempt_end "$?" || true; release_lock' EXIT
 # stop_attempt: terminate the running attempt and every process it started, as
 # far as they can be found. Background commands start with SIGINT ignored, so
 # they are always sent TERM. The attempt's processes are this shell's jobs that
@@ -1137,7 +1107,7 @@ wait_attempt() {
 # EXIT trap would see status 0 after TERM or HUP (measured).
 on_signal() {
   stop_attempt || true
-  record_attempt_end "$2"
+  record_attempt_end "$2" || true
   release_lock
   trap - "$1" EXIT
   kill -s "$1" "$$"
@@ -1195,7 +1165,7 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
     fi
     # Unconditional, so a failed attempt stops debate.sh through errexit.
     wait_attempt "$!"
-    complete_attempt "$r" gen "$OUT"
+    complete_attempt
   else
     CRIT_MODEL=$(round_model "$r" crit)
     OUT=$(round_file "$r" crit "$CRIT_MODEL")
@@ -1211,7 +1181,7 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
       } | strip_stream_controls | tee "$OUT" | tee -a "$DEBATE_DIR/stream-crit.log"
     ) <&0 &
     wait_attempt "$!"
-    complete_attempt "$r" crit "$OUT"
+    complete_attempt
     # Convergence check runs only on Critic (even) rounds: a STRENGTHEN verdict
     # means the position is sound, so stop before spending another gen/crit pair.
     if [ "$UNTIL_CONVERGED" = "1" ] && [ "$(critic_verdict "$OUT")" = "STRENGTHEN" ]; then
@@ -1222,7 +1192,7 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
 done
 
 # Converge-mode epilogue. The pre-touched-but-unused round files past the
-# convergence point have no `.done` sidecar (so /continue already ignores them),
+# convergence point have no successful ledger end (so /continue ignores them),
 # but empty round-N.md files clutter the dir and the live panes — remove them.
 if [ "$UNTIL_CONVERGED" = "1" ]; then
   if [ -n "$CONVERGED" ]; then

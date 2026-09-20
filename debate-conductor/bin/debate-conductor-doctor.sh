@@ -16,10 +16,8 @@
 #      c. placeholder → an errored Critic round that only echoes the role-prompt
 #         placeholders (`Verdict: <STRENGTHEN | ...>`) must NOT be read as a
 #         STRENGTHEN — guards the canonical-tail anchor against false positives.
-#      Completion is read from the attempt ledger *alone* here, not from the
-#      union lib/index.sh serves callers. These are fresh debates this script
-#      just ran, so the ledger must be complete for them — and reading the union
-#      would let the `.done` sidecars answer for a ledger that is never written.
+#      Completion is read from the attempt ledger, the sole completion record.
+#      These fresh debates must record every successful round.
 #
 # Stub smokes are *necessary but not sufficient* — anything touching the live
 # panes (tail-role.sh) or real verdict text needs a real-CLI dry-run on top.
@@ -198,8 +196,7 @@ STUB
     [ "$rc" -eq 0 ] || note "stderr: $(head -3 "$TMPDIR_SMOKE/codex-host.err" 2>/dev/null)"
   }
 
-  # Highest completed round, from the attempt ledger only — see the note in the
-  # header on why this is not the union that lib/index.sh serves debate.sh.
+  # Highest completed round, from the same ledger the driver uses.
   last_done_round() {
     _index_completed_rounds "$1" "" | sort -n | tail -1
   }

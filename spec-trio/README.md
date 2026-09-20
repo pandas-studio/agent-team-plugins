@@ -197,6 +197,44 @@ bash $PLUGIN_ROOT/tests/smoke-pr5.sh
 
 The smoke auto-discovers a sibling `dev-trio` plugin checkout and prepends its `bin/` to PATH; you don't need dev-trio installed if you're in a sibling-checkout layout.
 
+## Verification tests
+
+From the repository root, run `python3 spec-trio/tests/test_verification.py` for
+model-free driver verification, or `bash scripts/check.sh` for the full sequential
+check suite. Verification replaces external model CLIs with local fixtures.
+
+The verification harness allows 120 seconds per driver invocation, 60 seconds
+for the interrupt fixture to become ready, 30 seconds for interrupt shutdown,
+and 10 seconds to reap a forcibly stopped process. Slow or busy machines can
+multiply all four limits with a test-only environment variable:
+
+```bash
+SPEC_TRIO_TEST_TIMEOUT_SCALE=2 python3 spec-trio/tests/test_verification.py
+SPEC_TRIO_TEST_TIMEOUT_SCALE=2 bash scripts/check.sh
+```
+
+The default multiplier is `1`; the minimum is `0.1`. Use decimal notation
+(e.g. `0.5`) or scientific notation (e.g. `2e0`) producing finite timeouts.
+Whitespace, underscores, empty values, and smaller or nonfinite values are errors.
+Direct execution, unittest import/discovery, and `check.sh` validate this setting
+before running test fixtures (discovery reports invalid settings as a module
+loading error). `python3 spec-trio/tests/test_verification.py --check-config`
+validates the setting alone. This
+setting applies only to the spec verification harness, not to the driver's
+`--max-runtime`, other suites, or the controlled clock used to test runtime caps.
+Tests still finish as soon as their work completes; the limits add no delay.
+
+Timeout and readiness failures report the test, phase, command, effective limit,
+and the first/last 4 KiB of each captured stream, with omitted byte counts.
+Successful results retain the full output. Each invocation keeps a supervisor
+alive as its process-group leader until cleanup has signalled the group, then
+reaps it. This prevents a recycled PID from receiving a later cleanup signal,
+including when the driver exits before its children. A separate ownership pipe
+lets the supervisor terminate its group if the test runner is forcibly killed,
+both during driver execution and after driver completion. Child stdin is `/dev/null` (reads return EOF).
+Fixture Git and standalone coverage commands also use the scaled execution limit.
+Interrupt fixtures wait for a signal instead of expiring after a fixed sleep.
+
 ## Architecture
 
 ```

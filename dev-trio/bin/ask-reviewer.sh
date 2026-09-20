@@ -463,9 +463,17 @@ if ! registry_has_final "$REVIEWER_MODEL" && [ ! -s "$FINAL" ] \
   fi
 fi
 INVOCATION_RC="$RC"
+finish_review_log() {
+  # The result and run metadata carry the outcome. A missing END marker must
+  # not replace it with a logging error or prevent completion publication.
+  if ! printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG"; then
+    echo "[ask-reviewer] final log append failed; $LOG may be incomplete" >&2 || true
+  fi
+}
 result_output_failed() {
   # An I/O failure is not a successful review. Preserve a failed invocation's
-  # rc, otherwise use 2, and finish the log so dashboards do not stay running.
+  # rc, otherwise use 2. Completion metadata tells the dashboard it has ended,
+  # even if the best-effort END append fails too.
   RC="$INVOCATION_RC"
   [ "$RC" -ne 0 ] || RC=2
   rm -f "$RESULT" 2>/dev/null || true
@@ -475,7 +483,7 @@ result_output_failed() {
   # exits — without the replay here, a result-write failure would lose it.
   emit_transcript
   exec 8>&- || true
-  printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG" || true
+  finish_review_log
   echo "[ask-reviewer] result write failed: $1 (log: $LOG, final: $FINAL, rc=$RC)" >&2
   # Last, so nothing fallible can change the code after it is recorded.
   [ -z "$RUNSTATE_LOG" ] || runstate_complete "$RUNSTATE_LOG" exit_code="$RC" reason=result-write-failed || true
@@ -497,7 +505,7 @@ manifest_finalize || result_output_failed 'finalize manifest'
 # Completion is published only after the final, result and manifest are ready.
 emit_transcript
 exec 8>&- || true
-printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG"
+finish_review_log
 echo || true
 if [ "$RC" -ne 0 ]; then
   ERROR=$(printf '%s\n' "$RESULT_JSON" | jq -r '.error')
