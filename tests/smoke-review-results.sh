@@ -515,6 +515,72 @@ check 'the out-of-band transcript is not left beside the logs' \
   test -z "$(find "$TMP/log/review-test" -name '*.transcript.*' -print -quit)"
 fixture 'SHIP — leaked descendant'
 
+# An interrupted run owes the caller what the CLI produced and no review. The
+# signal has to land while the CLI is running, which is where the wrapper's own
+# redirections are in effect: a replay from the EXIT trap there writes into the
+# log instead of stdout (measured), so the wrapper records the signal and
+# replays once the call has returned.
+cat > "$TMP/slow-reviewer" <<'STUB'
+#!/usr/bin/env bash
+cat "$TEST_REVIEW_FILE"
+: > "$SLOW_READY"
+waited=0
+while [ ! -e "$SLOW_RELEASE" ] && [ "$waited" -lt 150 ]; do
+  sleep 0.2
+  waited=$((waited + 1))
+done
+exit 0
+STUB
+chmod +x "$TMP/slow-reviewer"
+# `cmd &` keeps $! on the wrapper itself; backgrounding the invoke function
+# would make it a subshell, and the signal would never reach the wrapper. Job
+# control is on for the launch because a background job in a non-interactive
+# shell inherits SIGINT ignored, and bash will not trap a signal that was
+# ignored on entry — so without it the INT case would signal nothing and the
+# run would simply succeed. With it the job leads its own process group and is
+# signalled the way a terminal signals a foreground job.
+interrupt_review() {
+  local signal="$1"; shift
+  rm -f "$TMP/slow-ready" "$TMP/slow-release"
+  set -m
+  env "${INVOKE_ENV[@]}" CODEX_CLI="$TMP/slow-reviewer" CLAUDE_CLI="$TMP/slow-reviewer" \
+    SLOW_READY="$TMP/slow-ready" SLOW_RELEASE="$TMP/slow-release" "$@" \
+    "$ROOT/dev-trio/bin/ask-reviewer.sh" 'fixture review' \
+    > "$TMP/interrupted.out" 2> "$TMP/interrupted.err" &
+  interrupted_pid=$!
+  waited=0
+  while [ ! -e "$TMP/slow-ready" ] && [ "$waited" -lt 150 ]; do
+    sleep 0.2
+    waited=$((waited + 1))
+  done
+  interrupted_ready=0
+  [ ! -e "$TMP/slow-ready" ] || interrupted_ready=1
+  kill -"$signal" -"$interrupted_pid" 2>/dev/null || kill -"$signal" "$interrupted_pid" 2>/dev/null || true
+  : > "$TMP/slow-release"
+  interrupted_rc=0
+  wait "$interrupted_pid" || interrupted_rc=$?
+  set +m
+  interrupted_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-codex.log")"
+}
+fixture 'SHIP — interrupted'
+for interrupt_signal in TERM INT; do
+  interrupt_review "$interrupt_signal"
+  check "the stub was running when signalled ($interrupt_signal)" test "$interrupted_ready" -eq 1
+  check "an interrupted run replays the transcript ($interrupt_signal)" \
+    grep -q 'SHIP — interrupted' "$TMP/interrupted.out"
+  check "the replay does not land in the log instead ($interrupt_signal)" \
+    test "$(grep -c 'SHIP — interrupted' "$interrupted_log")" -eq 1
+  expected_rc=143
+  [ "$interrupt_signal" != INT ] || expected_rc=130
+  check "an interrupted run keeps the signal's status ($interrupt_signal)" \
+    test "$interrupted_rc" -eq "$expected_rc"
+  check "an interrupted run records an aborted completion ($interrupt_signal)" \
+    json_is "${interrupted_log%.log}.run.json" ".completion.reason==\"aborted\" and .completion.exit_code==$expected_rc"
+  check "an interrupted run publishes no review ($interrupt_signal)" \
+    test ! -f "${interrupted_log%.log}.review.json"
+done
+fixture 'SHIP — leaked descendant'
+
 # An ordinary run pays nothing for the bound — the failure mode the first
 # attempt at this issue shipped with.
 fixture 'SHIP — ordinary run'

@@ -402,11 +402,32 @@ if ! exec 8>>"$LOG"; then
     TRANSCRIPT_OFFSET=""
   fi
 fi
+# For the duration of the call the signal traps record rather than exit. A trap
+# that fires while the call is running executes with its `>&8 2>&8` still in
+# effect — measured: anything the EXIT trap echoes lands in the log, not on
+# stdout — so a replay from there would write the transcript into the
+# transcript. Recording the signal instead returns to ordinary redirection,
+# where the caller's stdout is fd 1 again, and the replay below is the same one
+# a successful run does. Nothing extra is handed to the CLI: a descriptor of
+# the caller's stdout is exactly what a leaked descendant must not be given.
+SIGNAL_RC=0
+trap 'SIGNAL_RC=130' INT
+trap 'SIGNAL_RC=143' TERM
 set +e
 REGISTRY_CMD_OVERRIDE="${REVIEWER_CLI:-}" registry_run "$REVIEWER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8
 RC=$?
 set -e
+trap 'exit 130' INT
+trap 'exit 143' TERM
 [ -z "$TRANSCRIPT_OFFSET" ] || TRANSCRIPT_END="$(wc -c < "$TRANSCRIPT_PATH")" || TRANSCRIPT_END=""
+# An interrupted run owes the caller what the CLI produced — the pipeline this
+# replaces had already streamed it — and owes it no review: a result parsed
+# from a partial transcript would be worse than none. The EXIT trap records the
+# abort.
+if [ "$SIGNAL_RC" -ne 0 ]; then
+  emit_transcript
+  exit "$SIGNAL_RC"
+fi
 # Only adapters without native final capture synthesize a final. A missing
 # native final is an error, even if stdout contains a plausible verdict.
 #
