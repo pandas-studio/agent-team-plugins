@@ -222,6 +222,15 @@ an abort, published from the wrapper's EXIT trap, so an interrupted run does not
 read as live forever. Unlike the RFC 0004 manifest, this file exists while the
 run is live and is written for nested dispatches too.
 
+Both wrappers append a final `=== END (rc=...) ===` log marker on a best-effort
+basis. If that append fails, they warn on stderr and preserve the resolved
+exit code and completion metadata; a published review keeps its verdict.
+Required result, receipt and manifest publication failures still fail the run.
+The dashboard uses `.run.json` for completion, so a missing END marker does not
+leave a completed run looking live. Legacy logs without run metadata continue
+to show completion as unavailable. This policy covers the final append;
+logging failures during model execution retain their existing behavior.
+
 **Reviewer transcript.** The reviewer CLI writes straight into
 `codex-<TS>-<PID>.log` on a descriptor, which `tail -F` follows as the review is
 produced. The dashboard does not read it — it renders from the run's `*.run.json`

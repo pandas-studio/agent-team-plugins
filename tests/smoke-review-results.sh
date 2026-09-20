@@ -307,6 +307,112 @@ for invocation_rc in 0 7; do
   check 'artifact failure leaves manifest null' json_is "${failed_log%.log}.manifest.json" '.verdict==null and .ended_at!=null'
 done
 
+# #75: fail only the final END write, after capture and result publication.
+# Closing printf's output forces a real write error without destroying the
+# readable transcript. BASH_ENV scopes the fault to the invoked wrapper tree.
+cat > "$TMP/fail-end-write.sh" <<'SHIM'
+printf() {
+  case "${1:-}" in
+    '\n=== END (rc=%d) ===\n')
+      : > "$END_FAILURE_FIRED"
+      builtin printf "$@" >&-
+      return $?
+      ;;
+  esac
+  builtin printf "$@"
+}
+SHIM
+END_FAILURE_ENV=(BASH_ENV="$TMP/fail-end-write.sh" END_FAILURE_FIRED="$TMP/end-write-fired")
+for model in codex claude; do
+  for outcome in success parse-failed invocation-failed; do
+    fixture 'SHIP — final log failure'
+    invocation_rc=0
+    expected_rc=0
+    expected_verdict='"SHIP"'
+    expected_status=ok
+    case "$outcome" in
+      parse-failed)
+        fixture 'MAYBE — invalid verdict'
+        expected_rc=3; expected_verdict=null; expected_status=parse-failed ;;
+      invocation-failed)
+        invocation_rc=9; expected_rc=9; expected_verdict=null; expected_status=invocation-failed ;;
+    esac
+    RECEIPT=$(review_receipt_create "$TMP/caller.log")
+    rm -f "$TMP/end-write-fired"
+    run_review "$expected_rc" "${END_FAILURE_ENV[@]}" DEV_TRIO_REVIEWER_MODEL="$model" \
+      TEST_REVIEW_RC="$invocation_rc" DEV_TRIO_REVIEW_RECEIPT="$RECEIPT"
+    check 'final log write fault was exercised' test -f "$TMP/end-write-fired"
+    check 'failed final write leaves END absent' no_match '^=== END (rc=' "$LOG"
+    check 'final log failure is reported' grep -q 'final log append failed' "$TMP/wrapper.err"
+    check 'final log failure preserves the result' json_is "$RESULT" \
+      ".verdict==$expected_verdict and .status==\"$expected_status\""
+    check 'final log failure preserves the manifest' json_is "$MANIFEST" \
+      ".verdict==$expected_verdict and .ended_at!=null"
+    check 'caller receipt agrees with wrapper status' review_result_from_receipt "$RECEIPT" "$expected_rc" >/dev/null
+    check 'final log failure still publishes real completion' json_is "${LOG%.log}.run.json" \
+      ".completion.exit_code==$expected_rc and .completion.verdict==$expected_verdict and .completion.reason==\"ok\""
+    dashboard
+    check 'missing END does not leave the dashboard running' no_match 'no completion recorded' "$TMP/dashboard.out"
+    check 'missing END does not report an abort' no_match 'aborted' "$TMP/dashboard.out"
+    if [ "$expected_rc" -eq 0 ]; then
+      check 'missing END still displays the verdict' grep -q 'SHIP — final log failure' "$TMP/dashboard.out"
+      check 'missing END still displays completion' grep -q 'done' "$TMP/dashboard.out"
+    else
+      check 'missing END still displays the real failure' grep -Fq "failed (rc=$expected_rc)" "$TMP/dashboard.out"
+    fi
+  done
+done
+
+# Required artifact publication must still fail even if END cannot be written.
+fixture 'SHIP — receipt failure with a broken log'
+for invocation_rc in 0 7; do
+  expected_rc=2
+  [ "$invocation_rc" -eq 0 ] || expected_rc="$invocation_rc"
+  actual_rc=0
+  rm -f "$TMP/end-write-fired"
+  invoke "${END_FAILURE_ENV[@]}" DEV_TRIO_REVIEW_RECEIPT="$TMP/missing/receipt" \
+    TEST_REVIEW_RC="$invocation_rc" > "$TMP/io.out" 2> "$TMP/io.err" || actual_rc=$?
+  failed_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-codex.log")"
+  check 'artifact failure also exercises the END fault' test -f "$TMP/end-write-fired"
+  check 'logging cannot mask an artifact failure' test "$actual_rc" -eq "$expected_rc"
+  check 'failed publication leaves no successful result' test ! -f "${failed_log%.log}.review.json"
+  check 'artifact failure warns about the incomplete log' grep -q 'final log append failed' "$TMP/io.err"
+  check 'artifact failure retains its completion reason' json_is "${failed_log%.log}.run.json" \
+    ".completion.exit_code==$expected_rc and .completion.verdict==null and .completion.reason==\"result-write-failed\""
+done
+
+# An actual failed open is distinct from printf failing on an open descriptor.
+# Swap the log for a directory after the final has been captured and the result
+# renamed, so both capture paths reach the same failing END redirection. This
+# also works when tests run as root, unlike making the file read-only.
+mkdir "$TMP/end-open-shim"
+cat > "$TMP/end-open-shim/mv" <<'SHIM'
+#!/bin/sh
+/bin/mv "$@" || exit $?
+for target do :; done
+case "$target" in
+  *.review.json)
+    log="${target%.review.json}.log"
+    /bin/mv "$log" "$log.saved" || exit $?
+    mkdir "$log"
+    ;;
+esac
+SHIM
+chmod +x "$TMP/end-open-shim/mv"
+fixture 'SHIP — log cannot reopen'
+for model in codex claude; do
+  run_review 0 PATH="$TMP/end-open-shim:$PATH" DEV_TRIO_REVIEWER_MODEL="$model"
+  check 'END open fault was exercised' test -d "$LOG"
+  check 'failed END open is reported' grep -q 'final log append failed' "$TMP/wrapper.err"
+  check 'failed END open retains completion' json_is "${LOG%.log}.run.json" \
+    '.completion.exit_code==0 and .completion.verdict=="SHIP" and .completion.reason=="ok"'
+  rmdir "$LOG"
+  mv "$LOG.saved" "$LOG"
+  check 'restored transcript has no END marker' no_match '^=== END (rc=' "$LOG"
+  dashboard
+  check 'dashboard retains the verdict after an open failure' grep -q 'SHIP — log cannot reopen' "$TMP/dashboard.out"
+done
+
 # #71: a pipeline ends when every process holding its write end closes it, not
 # when the CLI exits. This wrapper appends its transcript through a descriptor,
 # so a CLI that leaves a descendant holding either stream has no pipe of this
@@ -779,6 +885,37 @@ check 'stderr-only research records its failure' json_is "$AGY_RUN" '.completion
 research_dashboard
 check 'dashboard says no answer was captured' grep -q 'No answer captured' "$TMP/dashboard.out"
 check 'dashboard does not report zero sources' no_match '0 unique' "$TMP/dashboard.out"
+
+# Researcher completion follows the same best-effort END contract. Its stdout
+# remains the answer alone, including when logging a warning on stderr.
+for outcome in success empty-answer invocation-failed; do
+  answer_file="$TMP/answer.md"
+  invocation_rc=0
+  expected_rc=0
+  case "$outcome" in
+    empty-answer) answer_file=""; expected_rc=5 ;;
+    invocation-failed) invocation_rc=9; expected_rc=9 ;;
+  esac
+  rm -f "$TMP/end-write-fired"
+  research "${END_FAILURE_ENV[@]}" RESEARCH_ANSWER_FILE="$answer_file" RESEARCH_RC="$invocation_rc"
+  check 'research END write fault was exercised' test -f "$TMP/end-write-fired"
+  check 'research END failure preserves the exit code' test "$AGY_RC" -eq "$expected_rc"
+  check 'research END failure leaves the marker absent' no_match '^=== END (rc=' "$AGY_LOG"
+  check 'research END failure is reported' grep -q 'final log append failed' "$TMP/research.err"
+  check 'research END warning stays off stdout' no_match 'final log append failed' "$TMP/research.out"
+  check 'research END failure preserves completion' json_is "$AGY_RUN" \
+    ".completion.exit_code==$expected_rc and .completion.reason==\"ok\""
+  research_dashboard
+  check 'research without END does not remain running' no_match 'no completion recorded' "$TMP/dashboard.out"
+  if [ "$expected_rc" -eq 0 ]; then
+    check 'research END failure preserves the answer artifact' cmp -s "$TMP/answer.md" "$AGY_FINAL"
+    check 'research END failure preserves answer output' grep -q 'loader resolves the role' "$TMP/research.out"
+    check 'research END failure still displays completion' grep -q 'done' "$TMP/dashboard.out"
+  else
+    check 'research END failure still displays the real failure' grep -Fq "failed (rc=$expected_rc)" "$TMP/dashboard.out"
+    check 'failed research still emits no answer' test -z "$(tr -d '\n' < "$TMP/research.out")"
+  fi
+done
 
 # An aborted run publishes a completion from its EXIT trap, so it cannot read
 # as live forever.
