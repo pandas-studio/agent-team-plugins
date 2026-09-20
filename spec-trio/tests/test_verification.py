@@ -114,9 +114,10 @@ class OwnedProcess:
                 start_new_session=True,
             )
         except BaseException:
-            os.close(self.status_fd)
-            if self.owner_writer is not None:
-                os.close(self.owner_writer)
+            try:
+                self.close()
+            except OSError:
+                pass  # Preserve the process-creation failure.
             raise
         finally:
             os.close(writer)
@@ -126,6 +127,8 @@ class OwnedProcess:
     def poll(self, timeout=0):
         """Observe a result, blocking at most one second per call."""
         if self.returncode is None:
+            if self.status_fd is None:
+                raise RuntimeError("process control pipe already closed")
             # Keep very large valid scales within the OS timeout range.
             readable, _, _ = select.select([self.status_fd], [], [], min(timeout, 1))
             if readable:
@@ -294,7 +297,10 @@ def driver_process(args, *, cwd, env, scale, test_id):
         try:
             yield driver
         except BaseException:
-            cleanup_error = driver.cleanup()
+            try:
+                cleanup_error = driver.cleanup()
+            except BaseException as exc:  # noqa: BLE001 - preserve the body exception
+                cleanup_error = f"{type(exc).__name__}: {exc}"
             if cleanup_error:
                 print(
                     f"{test_id}: cleanup also failed: {cleanup_error}",
@@ -304,6 +310,13 @@ def driver_process(args, *, cwd, env, scale, test_id):
         else:
             if driver.cleanup():
                 raise driver.failure("cleanup", "could not finish process cleanup")
+        finally:
+            # Even KeyboardInterrupt during cleanup must release the sole
+            # ownership writer. close() is idempotent, including after errors.
+            try:
+                proc.close()
+            except OSError:
+                pass  # Never replace an exception already escaping cleanup.
 
 
 STUB = r"""#!/usr/bin/env python3
@@ -462,7 +475,7 @@ class DriverProcessTests(unittest.TestCase):
             driver_process(["fixture"], cwd=ROOT, env={}, scale=1, test_id=self.id()),
         ):
             pass
-        driver.proc.close.assert_called_once()
+        self.assertEqual(driver.proc.close.call_count, 2)
 
     def test_context_cleanup_does_not_mask_body_failure(self):
         driver = self.fake_driver()
@@ -474,7 +487,7 @@ class DriverProcessTests(unittest.TestCase):
             driver_process(["fixture"], cwd=ROOT, env={}, scale=1, test_id=self.id()),
         ):
             raise ValueError("original failure")
-        driver.proc.close.assert_called_once()
+        self.assertEqual(driver.proc.close.call_count, 2)
         self.assertIn(
             "cleanup also failed: process group cleanup failed: denied",
             stderr.getvalue(),
@@ -500,11 +513,17 @@ class DriverProcessTests(unittest.TestCase):
             with self.subTest(failures=failures):
                 proc = OwnedProcess.__new__(OwnedProcess)
                 proc.owner_writer, proc.status_fd = 101, 102
-                outcomes = [
-                    OSError("injected close failure") if fail else None
-                    for fail in failures
-                ]
-                with mock.patch.object(os, "close", side_effect=outcomes) as close:
+                failed_fds = {fd for fd, fail in zip((101, 102), failures) if fail}
+                real_close = os.close
+
+                def close_fd(fd, failed_fds=failed_fds, real_close=real_close):
+                    if fd in failed_fds:
+                        raise OSError("injected close failure")
+                    if fd not in (101, 102):
+                        return real_close(fd)
+                    return None
+
+                with mock.patch.object(os, "close", side_effect=close_fd) as close:
                     with self.assertRaises(OSError) as caught:
                         proc.close()
                     proc.close()
@@ -513,6 +532,103 @@ class DriverProcessTests(unittest.TestCase):
                 self.assertIsNone(proc.status_fd)
                 for name, failed in zip(("owner_writer", "status_fd"), failures):
                     self.assertEqual(name in str(caught.exception), failed)
+
+    def test_closed_control_pipe_reports_runtime_error_unless_result_known(self):
+        proc = OwnedProcess.__new__(OwnedProcess)
+        proc.status_fd = None
+        proc.returncode = None
+        with self.assertRaisesRegex(RuntimeError, "control pipe already closed"):
+            proc.poll()
+        proc.returncode = -signal.SIGTERM
+        self.assertEqual(proc.poll(), -signal.SIGTERM)
+
+    def test_process_creation_failure_closes_owned_descriptors(self):
+        proc = OwnedProcess.__new__(OwnedProcess)
+        original = RuntimeError("process creation failed")
+
+        def close_fd(fd):
+            if fd == 104:
+                raise OSError("owner close failed")
+
+        with (
+            mock.patch.object(os, "pipe", side_effect=[(101, 102), (103, 104)]),
+            mock.patch.object(os, "close", side_effect=close_fd) as close,
+            mock.patch.object(subprocess, "Popen", side_effect=original),
+            self.assertRaises(RuntimeError) as caught,
+        ):
+            proc.__init__(["fixture"], cwd=ROOT, env={}, stdout=None, stderr=None)
+        self.assertIs(caught.exception, original)
+        self.assertIsNone(proc.owner_writer)
+        self.assertIsNone(proc.status_fd)
+        self.assertEqual(
+            close.call_args_list, [mock.call(fd) for fd in (104, 101, 102, 103)]
+        )
+
+    def test_interrupted_cleanup_closes_descriptors_and_preserves_exception(self):
+        for phase in ("signal_group", "reap"):
+            for body_fails in (False, True):
+                with self.subTest(phase=phase, body_fails=body_fails):
+                    driver = self.fake_driver()
+                    interruption = KeyboardInterrupt("cleanup interrupted")
+                    getattr(driver.proc, phase).side_effect = interruption
+                    driver.proc.close.side_effect = OSError("close failed too")
+                    original = (
+                        ValueError("original test failure")
+                        if body_fails
+                        else interruption
+                    )
+                    with (
+                        mock.patch(
+                            __name__ + ".OwnedProcess", return_value=driver.proc
+                        ),
+                        mock.patch("sys.stderr", new_callable=io.StringIO),
+                        self.assertRaises(type(original)) as caught,
+                        driver_process(
+                            ["fixture"], cwd=ROOT, env={}, scale=1, test_id=self.id()
+                        ),
+                    ):
+                        if body_fails:
+                            raise original
+                    self.assertIs(caught.exception, original)
+                    driver.proc.close.assert_called_once()
+
+    def test_interrupted_reap_still_delivers_owner_eof(self):
+        proc = None
+        try:
+            with ExitStack() as patches:
+                interruption = KeyboardInterrupt("reap interrupted")
+                with (
+                    self.assertRaises(KeyboardInterrupt) as caught,
+                    driver_process(
+                        [sys.executable, "-c", "raise SystemExit(7)"],
+                        cwd=ROOT,
+                        env=os.environ.copy(),
+                        scale=CONFIGURED_SCALE,
+                        test_id=self.id(),
+                    ) as driver,
+                ):
+                    proc = driver.proc
+                    self.assertEqual(proc.wait(timeout=120 * CONFIGURED_SCALE), 7)
+                    patches.enter_context(mock.patch.object(proc, "signal_group"))
+                    patches.enter_context(
+                        mock.patch.object(proc, "reap", side_effect=interruption)
+                    )
+                self.assertIs(caught.exception, interruption)
+                self.assertIsNone(proc.owner_writer)
+                self.assertIsNone(proc.status_fd)
+                # The context's owner EOF is the only termination mechanism;
+                # this explicit wait collects the interrupted test's fixture.
+                OwnedProcess.reap(proc, timeout=10 * CONFIGURED_SCALE)
+                self.assertEqual(proc.owner.returncode, -signal.SIGKILL)
+        finally:
+            if proc is not None and not proc.reaped:
+                try:
+                    proc.close()
+                finally:
+                    try:
+                        OwnedProcess.reap(proc, timeout=10 * CONFIGURED_SCALE)
+                    except subprocess.TimeoutExpired:
+                        pass
 
     def test_combined_cleanup_errors_preserve_original_exception(self):
         for reap_error in (
@@ -546,6 +662,7 @@ class DriverProcessTests(unittest.TestCase):
                         mock.call.reap(timeout=10),
                         mock.call.close(),
                         mock.call.reap(timeout=10),
+                        mock.call.close(),
                     ],
                 )
 
@@ -559,7 +676,7 @@ class DriverProcessTests(unittest.TestCase):
         ):
             pass
         driver.proc.reap.assert_called_once_with(timeout=10)
-        driver.proc.close.assert_called_once()
+        self.assertEqual(driver.proc.close.call_count, 2)
 
     def test_reap_timeout_then_owner_eof_collects_supervisor(self):
         for body_fails in (False, True):
@@ -627,8 +744,13 @@ class DriverProcessTests(unittest.TestCase):
                     signal_group.assert_called_once_with(signal.SIGKILL)
                 finally:
                     if proc is not None and not proc.reaped:
-                        proc.close()
-                        OwnedProcess.reap(proc, timeout=10 * CONFIGURED_SCALE)
+                        try:
+                            proc.close()
+                        finally:
+                            try:
+                                OwnedProcess.reap(proc, timeout=10 * CONFIGURED_SCALE)
+                            except subprocess.TimeoutExpired:
+                                pass  # Keep the failed regression's assertion.
 
     def test_parent_death_terminates_supervisor_and_driver_tree(self):
         for finished in (False, True):
