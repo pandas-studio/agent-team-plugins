@@ -638,6 +638,77 @@ class DebateHostTests(unittest.TestCase):
             self.assertLess(time.monotonic(), deadline, f"{needle!r} never reached {path}")
             time.sleep(0.02)
 
+    def test_selection_publication_follows_runs_and_continues(self):
+        self.assertEqual(self.run_cli("debate.sh", "-n", "1", "A").returncode, 0)
+        a = self.latest_debate()
+        state = a.parent / "latest-debate.json"
+        self.assertEqual(json.loads(state.read_text())["sequence"], 1)
+        self.assertEqual(self.run_cli("debate.sh", "--continue-from", str(a), "-n", "1", "A").returncode, 0)
+        self.assertEqual(json.loads(state.read_text())["sequence"], 1)
+        self.assertEqual(self.run_cli("debate.sh", "-n", "1", "B").returncode, 0)
+        self.assertEqual(json.loads(state.read_text())["sequence"], 2)
+        self.assertEqual(self.run_cli("debate.sh", "--continue-from", str(a), "-n", "1", "A").returncode, 0)
+        self.assertEqual(json.loads(state.read_text()),
+                         {"v": 1, "sequence": 3, "debate_dir": str(a)})
+
+    def test_pruned_selection_allows_new_run_and_continue(self):
+        self.assertEqual(self.run_cli("debate.sh", "-n", "1", "A",
+                                      PATH=self.date_shim("20260920-120000")).returncode, 0)
+        a = self.latest_debate()
+        self.assertEqual(self.run_cli("debate.sh", "-n", "1", "B").returncode, 0)
+        b = self.latest_debate()
+        state = b.parent / "latest-debate.json"
+        shutil.rmtree(b)
+        continued = self.run_cli("debate.sh", "--continue-from", str(a), "-n", "1", "A")
+        self.assertEqual(continued.returncode, 0, continued.stderr)
+        self.assertEqual(json.loads(state.read_text())["sequence"], 3)
+        shutil.rmtree(a)
+        # Distinct paths, even when all runs finish within one clock second.
+        new = self.run_cli("debate.sh", "-n", "1", "C",
+                           PATH=self.date_shim("20260920-120001"))
+        self.assertEqual(new.returncode, 0, new.stderr)
+        self.assertEqual(json.loads(state.read_text())["sequence"], 4)
+
+    def test_failed_new_publication_removes_only_new_allocation(self):
+        self.assertEqual(self.run_cli("debate.sh", "-n", "1", "A").returncode, 0)
+        a = self.latest_debate()
+        team = a.parent
+        before = sorted(team.glob("debate-*"))
+        calls = self.recorded()
+        lock = team / ".latest-debate.lock"
+        lock.symlink_to("host=gone pid=999999 run=fixture")
+        refused = self.run_cli("debate.sh", "-n", "1", "B")
+        self.assertEqual(refused.returncode, 2, refused.stderr)
+        self.assertEqual(sorted(team.glob("debate-*")), before)
+        lock.unlink()
+        (team / "latest-debate.json").write_text("{broken")
+        refused = self.run_cli("debate.sh", "-n", "1", "C")
+        self.assertEqual(refused.returncode, 1, refused.stderr)
+        self.assertEqual(sorted(team.glob("debate-*")), before)
+        self.assertEqual(self.recorded(), calls)
+        self.assertTrue((a / "topic.txt").exists())
+
+    def test_failed_preflight_does_not_publish_selection(self):
+        self.assertEqual(self.run_cli("debate.sh", "-n", "1", "A").returncode, 0)
+        state = self.latest_debate().parent / "latest-debate.json"
+        before = state.read_bytes()
+        result = self.run_cli("debate.sh", "-n", "1", "B", GENERATOR_CLI="/missing/generator")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(state.read_bytes(), before)
+
+    def test_invalid_selection_prevents_model_dispatch_and_releases_writer(self):
+        self.assertEqual(self.run_cli("debate.sh", "-n", "1", "A").returncode, 0)
+        a = self.latest_debate()
+        state = a.parent / "latest-debate.json"
+        state.write_text("{broken")
+        before = self.recorded()
+        result = self.run_cli("debate.sh", "--continue-from", str(a), "-n", "1", "A")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid selection state", result.stderr)
+        self.assertEqual(self.recorded(), before)
+        self.assertFalse((a / ".lock").is_symlink())
+        self.assertFalse((a.parent / ".latest-debate.lock").is_symlink())
+
     def test_same_second_starts_get_distinct_debate_directories(self):
         path = self.date_shim("20260918-120000")
         first = self.run_cli("debate.sh", "-n", "1", "first topic", PATH=path)

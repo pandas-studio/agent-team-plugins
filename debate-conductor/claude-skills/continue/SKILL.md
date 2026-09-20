@@ -7,7 +7,7 @@ argument-hint: "[extra-rounds]"
 
 # Continue a debate
 
-Extend the most recent debate in the workspace by `$ARGUMENTS` more rounds (default 2). New rounds (N+1, N+2, ...) are appended to the existing `debate-<TS>/` directory, where N is the last *completed* round. If round 1 itself never completed (for example its generator call failed) and later rounds contain no output, `debate.sh` reports "resuming from round 1" and runs rounds 1..E, reusing the round-1 context saved in `context.md`. The middle/right panes will pick them up as new round files appear; the `── new debate run detected — re-tailing ──` separator does **not** fire because the `latest-debate` symlink does not retarget.
+Extend the most recent debate in the workspace by `$ARGUMENTS` more rounds (default 2). New rounds (N+1, N+2, ...) are appended to the existing `debate-<TS>/` directory, where N is the last *completed* round. If round 1 itself never completed (for example its generator call failed) and later rounds contain no output, `debate.sh` reports "resuming from round 1" and runs rounds 1..E, reusing the round-1 context saved in `context.md`. The middle/right panes follow appended per-role streams. Continuing the current directory leaves the selection sequence unchanged, so the `── new debate run detected — following it ──` separator does **not** fire.
 
 ## 1 · Resolve the prior debate
 
