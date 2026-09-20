@@ -222,6 +222,31 @@ an abort, published from the wrapper's EXIT trap, so an interrupted run does not
 read as live forever. Unlike the RFC 0004 manifest, this file exists while the
 run is live and is written for nested dispatches too.
 
+**Reviewer transcript.** The reviewer CLI writes straight into
+`codex-<TS>-<PID>.log` on a descriptor, which `tail -F` follows as the review is
+produced. The dashboard does not read it — it renders from the run's `*.run.json`
+(above), so what it shows is the run's status and verdict, not the console text.
+`ask-reviewer.sh` replays the transcript on its own stdout once, after the review
+is published.
+
+Nothing is piped: a pipeline only ends when every process holding its write end
+closes it, so a CLI that left a background descendant holding either stream used
+to hold the wrapper open long after the review existed. The wrapper samples the
+transcript's length when the CLI returns, and both the replay and the
+synthesized final read that frozen range — so a descendant that outlives its
+parent no longer decides when the wrapper finishes, and what it writes past the
+sampled length reaches the log but neither artifact. The cost is that the
+wrapper's own stdout is no longer live.
+
+An **interrupted** run (`SIGINT`/`SIGTERM` while the CLI is running) publishes no
+review — a result parsed from a partial transcript would be worse than none —
+and puts nothing on stdout. It prints `(log: …, final: …, rc=…)` on stderr and
+exits on the signal's own status, with the run's `*.run.json` recording
+`reason: aborted`. That line is what a caller reads: `ralph-meta.sh` takes the
+log path out of it and recovers the partial transcript from the log itself, so
+naming the artifacts serves it better than replaying bytes onto a stdout it may
+not have captured. `result:` is absent because no review exists.
+
 **Researcher answer.** `agy-<TS>-<PID>.final.md` holds the answer on its own,
 captured by `registry_run_answer`: the model's own last message when it defines
 `final_args`, otherwise that function's existing copy of stdout — stdout alone,
