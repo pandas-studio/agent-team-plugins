@@ -43,6 +43,7 @@
 #     ends with an end record carrying its exit status, both beginning with
 #     \x1e (never present in model output, which is filtered).
 #   - $LOG_DIR/latest-debate → symlink to most recent debate dir
+#   - $LOG_DIR/latest-debate.json — committed sequence and physical directory snapshot
 #   A fresh debate directory is allocated atomically, so two debates started in
 #   the same second get `debate-<TS>` and `debate-<TS>-1`. While a run is
 #   writing a debate it holds `debate-<TS>/.lock`; a second run on the same
@@ -90,6 +91,8 @@ _RESULT_LIB="$SCRIPT_DIR/../lib/debate-result.sh"
 unset _RESULT_LIB
 # shellcheck source=../lib/host.sh
 . "$SCRIPT_DIR/../lib/host.sh"
+# shellcheck source=../lib/selection.sh
+. "$SCRIPT_DIR/../lib/selection.sh"
 
 usage() {
   cat <<EOF
@@ -611,7 +614,7 @@ if [ -n "$CONTINUE_FROM" ]; then
   mkdir -p "$DEBATE_DIR"
 else
   # Allocated (and locked) only once the preflight above passed, so a refused
-  # run leaves no debate directory behind.
+  # preflight refusal leaves no debate directory behind.
   allocate_debate_dir
   acquire_lock "$DEBATE_DIR"
 fi
@@ -621,7 +624,20 @@ fi
 # them. A debate created before streams existed gets them on its next continue;
 # its earlier rounds stay in the round files only.
 for _role in gen crit; do : >> "$DEBATE_DIR/stream-$_role.log"; done
-ln -sfn "debate-$TS" "$LOG_DIR/latest-debate"
+selection_rc=0
+debate_selection_publish "$LOG_DIR" "$DEBATE_DIR" || selection_rc=$?
+if [ "$selection_rc" != 0 ]; then
+  # Remove only our new, unselected allocation. A committed selection or a
+  # failed rollback can still point at it; retain that directory for recovery.
+  if [ -z "$CONTINUE_FROM" ] && [ "$(readlink "$LOG_DIR/latest-debate" 2>/dev/null || true)" != "${DEBATE_DIR##*/}" ]; then
+    for _role in gen crit; do
+      [ -s "$DEBATE_DIR/stream-$_role.log" ] || rm -f "$DEBATE_DIR/stream-$_role.log"
+    done
+    release_lock
+    rmdir "$DEBATE_DIR" || echo "debate: retained nonempty allocation: $DEBATE_DIR" >&2
+  fi
+  exit "$selection_rc"
+fi
 
 # Persist topic for /continue. Don't overwrite on resume — original wins.
 [ ! -f "$DEBATE_DIR/topic.txt" ] && printf '%s\n' "$TOPIC" > "$DEBATE_DIR/topic.txt"

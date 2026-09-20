@@ -78,7 +78,7 @@ for rel in .claude-plugin/plugin.json .codex-plugin/plugin.json \
            bin/debate.sh bin/tail-role.sh bin/team-3pane.sh \
            bin/install-pm.py \
            lib/ask-generator.sh lib/ask-critic.sh lib/pm.md \
-           lib/host.sh lib/namespace.sh lib/answer.sh lib/index.sh lib/debate-result.sh lib/pm-codex.md \
+           lib/host.sh lib/namespace.sh lib/answer.sh lib/index.sh lib/debate-result.sh lib/selection.sh lib/pm-codex.md \
            lib/roles/generator.md lib/roles/critic.md \
            claude-skills/bootstrap/SKILL.md claude-skills/run/SKILL.md \
            claude-skills/continue/SKILL.md claude-skills/install-pm/SKILL.md \
