@@ -12,7 +12,7 @@
 # every query is a filter and never a join against `start`: a crash can destroy
 # a `start` line, and a completed round must still read as completed.
 #
-# Two invariants the whole design leans on, so writes can stay best effort:
+# Two reader invariants preserve completion across interrupted writes:
 #
 #   1. Readers are idempotent under duplicate records. Every query is a max or
 #      an any. Do not add a query that counts attempts or takes "the last end
@@ -21,19 +21,13 @@
 #      records alone; a `start` with no `end` is an incomplete attempt, and its
 #      round runs again.
 #
-# Completion is the union of this ledger and the `.round-N-…done` sidecars,
-# which debate.sh still writes for one release. The union is not belt and
-# braces: a debate that predates the ledger has its early rounds only in the
-# sidecars, and reading the ledger alone would call them incomplete and let the
-# pre-touch loop overwrite finished transcripts. The ledger may raise the resume
-# point, never lower it. When the sidecar write goes away, `_done_completed_rounds`
-# is deleted from this file and nothing else moves.
+# The ledger is the sole completion record. debate.sh refuses continuation
+# when a legacy sidecar records a completion the ledger does not contain;
+# sidecars are never used to advance the resume point or select a transcript.
 #
-# Sourced by debate.sh (under `set -euo pipefail`) and by
-# debate-conductor-doctor.sh (under `set -uo pipefail`), so no failing jq, grep
-# or ls may leak a status out of a function: the value-returning ones end on an
-# explicit `return 0`. The predicates are the exception — returning 0 whatever
-# happened is exactly how `round_is_complete` would claim every round is done.
+# Sourced under errexit/pipefail. Completion readers tolerate missing and
+# malformed records; predicates and the continuation gate must still return
+# failure when their condition is not met.
 #
 # Every function takes the debate directory as $1 rather than reading a global:
 # on the fresh-debate path the caller has no $DEBATE_DIR yet.
@@ -74,32 +68,10 @@ _index_completed_rounds() {
   return 0
 }
 
-# _done_completed_rounds DIR [ROLE]: the same answer from the `.done` sidecars,
-# which are `.round-<N>-<role>[-model].done`. Parsed by stripping rather than
-# with the older `sed -E 's@.*/\.round-([0-9]+)-.*@\1@'`, so a hand-made
-# `.round-abc-x.done` yields nothing instead of the literal "abc".
-_done_completed_rounds() {
-  local role="${2:-}" f base n rest
-  for f in "$1"/.round-*.done; do
-    [ -e "$f" ] || continue
-    base="${f##*/}"
-    rest="${base#.round-}"
-    n="${rest%%-*}"
-    case "$n" in ''|*[!0-9]*) continue ;; esac
-    [ "$n" -gt 0 ] || continue
-    if [ -n "$role" ]; then
-      rest="${rest#"$n-"}"
-      case "$rest" in "$role".done|"$role"-*.done) ;; *) continue ;; esac
-    fi
-    printf '%s\n' "$n"
-  done
-  return 0
-}
-
 # last_completed_round_of_role DIR ROLE: highest completed round for that role,
 # empty when there is none. Empty ROLE means any role.
 last_completed_round_of_role() {
-  { _index_completed_rounds "$1" "${2:-}"; _done_completed_rounds "$1" "${2:-}"; } \
+  _index_completed_rounds "$1" "${2:-}" \
     | sort -n | tail -1
   return 0
 }
@@ -119,7 +91,7 @@ last_completed_round() {
 # every query returned 141; at 4000 records it did not reproduce, the output
 # still fitting the pipe buffer. Redirecting instead keeps grep reading to EOF.
 round_is_complete() {
-  { _index_completed_rounds "$1" ""; _done_completed_rounds "$1" ""; } \
+  _index_completed_rounds "$1" "" \
     | grep -x -- "$2" >/dev/null
 }
 
@@ -132,13 +104,8 @@ round_is_complete() {
 # no matching `start` required, since a crash can destroy one. Identical
 # candidates are deduplicated; two *distinct* filenames for one completed round
 # are ambiguous, and this guesses at neither.
-#
-# Falling back per round to the `.done` sidecar's own name, which is where a
-# pre-ledger debate records the rotation form. A round with no usable ledger
-# candidate falls back even when other rounds have ledger entries — but a
-# sidecar never overrides a filename the ledger did give.
 completed_round_file() {
-  local dir="$1" round="$2" role="$3" idx names f base rest
+  local dir="$1" round="$2" role="$3" idx names
   idx="$(debate_index_file "$dir")"
   if [ -f "$idx" ] && command -v jq >/dev/null 2>&1; then
     # The count is taken inside jq, on the deduplicated array: counting lines in
@@ -161,21 +128,43 @@ completed_round_file() {
       *) printf '%s\n' "$names"; return 0 ;;
     esac
   fi
-  names=""
-  for f in "$dir"/.round-"$round"-*.done; do
+  return 0
+}
+
+# debate_index_can_continue DIR: compatibility gate, called under the writer
+# lock before any transcript or metadata is changed. Sidecars are inspected
+# only to refuse incomplete legacy histories, never as completion evidence.
+# A partially indexed debate is just as unsafe as one with no ledger: even a
+# single old completed round could otherwise be overwritten by the pre-touch.
+debate_index_can_continue() {
+  local dir="$1" idx f base n rest role completed
+  idx="$(debate_index_file "$dir")"
+  if [ ! -f "$idx" ] || [ ! -r "$idx" ] || ! jq -Rn 'inputs | empty' "$idx" >/dev/null 2>&1; then
+    echo "debate: $dir needs a readable attempt ledger; start a fresh debate instead of continuing" >&2
+    return 2
+  fi
+  for f in "$dir"/.round-*.done; do
     [ -e "$f" ] || continue
     base="${f##*/}"
-    rest="${base#.round-"$round"-}"
-    case "$rest" in "$role".done|"$role"-*.done) ;; *) continue ;; esac
-    base="${base#.}"
-    base="${base%.done}.md"
-    case "$names" in
-      "") names="$base" ;;
-      "$base") ;;
-      *) return 1 ;;
+    rest="${base#.round-}"
+    n="${rest%%-*}"
+    case "$n" in ''|*[!0-9]*) continue ;; esac
+    [ "$n" -gt 0 ] || continue
+    rest="${rest#"$n-"}"
+    case "$rest" in
+      gen.done|gen-*.done) role=gen ;;
+      crit.done|crit-*.done) role=crit ;;
+      *) continue ;;
     esac
+    # Decimal normalization also accepts zero-padded legacy round numbers.
+    completed="$(jq -rRn --arg n "$n" --arg role "$role" '
+      any(inputs | (fromjson? // empty) | select(type == "object");
+          .t == "end" and .rc == 0 and .round == ($n | tonumber) and .role == $role)
+    ' "$idx" 2>/dev/null)" || return 2
+    if [ "$completed" != true ]; then
+      echo "debate: $base has no successful ledger record; start a fresh debate instead of continuing this legacy history" >&2
+      return 2
+    fi
   done
-  [ -n "$names" ] || return 0
-  printf '%s\n' "$names"
   return 0
 }
