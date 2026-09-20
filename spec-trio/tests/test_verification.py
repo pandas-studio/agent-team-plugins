@@ -156,8 +156,20 @@ class OwnedProcess:
             self.returncode = code
 
     def close(self):
-        os.close(self.owner_writer)
-        os.close(self.status_fd)
+        errors = []
+        for name in ("owner_writer", "status_fd"):
+            fd = getattr(self, name)
+            if fd is None:
+                continue
+            # A failed close may already have released the descriptor. Never
+            # retry its number after another thread could have reused it.
+            setattr(self, name, None)
+            try:
+                os.close(fd)
+            except OSError as exc:
+                errors.append(f"{name}: {exc}")
+        if errors:
+            raise OSError("; ".join(errors))
 
 
 class DriverProcess:
@@ -204,10 +216,29 @@ class DriverProcess:
             pass
         except OSError as exc:
             errors.append(f"process group cleanup failed: {exc}")
+        collected = False
         try:
             self.proc.reap(timeout=self.limits["cleanup"])
+            collected = True
         except subprocess.TimeoutExpired:
             errors.append(f"process reap exceeded {self.limits['cleanup']:g}s")
+        except OSError as exc:
+            errors.append(f"process reap failed: {exc}")
+        try:
+            self.proc.close()
+        except OSError as exc:
+            errors.append(f"descriptor cleanup failed: {exc}")
+        if not collected:
+            # Owner EOF lets the supervisor kill its own group. Collect it
+            # explicitly, without another signal or reliance on Popen.__del__.
+            try:
+                self.proc.reap(timeout=self.limits["cleanup"])
+            except subprocess.TimeoutExpired:
+                errors.append(
+                    f"final process reap exceeded {self.limits['cleanup']:g}s"
+                )
+            except OSError as exc:
+                errors.append(f"final process reap failed: {exc}")
         self.cleanup_error = "; ".join(errors)
         return self.cleanup_error
 
@@ -261,21 +292,18 @@ def driver_process(args, *, cwd, env, scale, test_id):
         proc = OwnedProcess(args, cwd=cwd, env=env, stdout=stdout, stderr=stderr)
         driver = DriverProcess(proc, stdout, stderr, scale, test_id)
         try:
-            try:
-                yield driver
-            except BaseException:
-                cleanup_error = driver.cleanup()
-                if cleanup_error:
-                    print(
-                        f"{test_id}: cleanup also failed: {cleanup_error}",
-                        file=sys.stderr,
-                    )
-                raise
-            else:
-                if driver.cleanup():
-                    raise driver.failure("cleanup", "could not finish process cleanup")
-        finally:
-            proc.close()
+            yield driver
+        except BaseException:
+            cleanup_error = driver.cleanup()
+            if cleanup_error:
+                print(
+                    f"{test_id}: cleanup also failed: {cleanup_error}",
+                    file=sys.stderr,
+                )
+            raise
+        else:
+            if driver.cleanup():
+                raise driver.failure("cleanup", "could not finish process cleanup")
 
 
 STUB = r"""#!/usr/bin/env python3
@@ -419,7 +447,8 @@ class DriverProcessTests(unittest.TestCase):
         driver.proc.reap.side_effect = subprocess.TimeoutExpired(driver.proc.args, 10)
         self.assertEqual(
             driver.cleanup(),
-            "process group cleanup failed: denied; process reap exceeded 10s",
+            "process group cleanup failed: denied; process reap exceeded 10s; "
+            "final process reap exceeded 10s",
         )
 
     def test_context_exit_reports_cleanup_failure_and_closes_status(self):
@@ -465,6 +494,141 @@ class DriverProcessTests(unittest.TestCase):
                 ),
             ):
                 pass
+
+    def test_descriptor_close_failures_attempt_both_without_retrying(self):
+        for failures in ((True, False), (False, True), (True, True)):
+            with self.subTest(failures=failures):
+                proc = OwnedProcess.__new__(OwnedProcess)
+                proc.owner_writer, proc.status_fd = 101, 102
+                outcomes = [
+                    OSError("injected close failure") if fail else None
+                    for fail in failures
+                ]
+                with mock.patch.object(os, "close", side_effect=outcomes) as close:
+                    with self.assertRaises(OSError) as caught:
+                        proc.close()
+                    proc.close()
+                self.assertEqual(close.call_args_list, [mock.call(101), mock.call(102)])
+                self.assertIsNone(proc.owner_writer)
+                self.assertIsNone(proc.status_fd)
+                for name, failed in zip(("owner_writer", "status_fd"), failures):
+                    self.assertEqual(name in str(caught.exception), failed)
+
+    def test_combined_cleanup_errors_preserve_original_exception(self):
+        for reap_error in (
+            subprocess.TimeoutExpired(["fixture"], 10),
+            OSError("injected reap failure"),
+        ):
+            with self.subTest(reap_error=reap_error):
+                driver = self.fake_driver()
+                driver.proc.signal_group.side_effect = PermissionError("denied")
+                driver.proc.reap.side_effect = reap_error
+                driver.proc.close.side_effect = OSError("injected close failure")
+                original = ValueError("original failure")
+                with (
+                    mock.patch(__name__ + ".OwnedProcess", return_value=driver.proc),
+                    mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+                    self.assertRaises(ValueError) as caught,
+                    driver_process(
+                        ["fixture"], cwd=ROOT, env={}, scale=1, test_id=self.id()
+                    ) as context_driver,
+                ):
+                    raise original
+                self.assertIs(caught.exception, original)
+                self.assertIn("process group cleanup failed: denied", stderr.getvalue())
+                self.assertIn("descriptor cleanup failed", stderr.getvalue())
+                self.assertIn("final process reap", stderr.getvalue())
+                context_driver.cleanup()
+                self.assertEqual(
+                    driver.proc.method_calls,
+                    [
+                        mock.call.signal_group(signal.SIGKILL),
+                        mock.call.reap(timeout=10),
+                        mock.call.close(),
+                        mock.call.reap(timeout=10),
+                    ],
+                )
+
+    def test_close_failure_fails_successful_context(self):
+        driver = self.fake_driver()
+        driver.proc.close.side_effect = OSError("injected close failure")
+        with (
+            mock.patch(__name__ + ".OwnedProcess", return_value=driver.proc),
+            self.assertRaisesRegex(AssertionError, "descriptor cleanup failed"),
+            driver_process(["fixture"], cwd=ROOT, env={}, scale=1, test_id=self.id()),
+        ):
+            pass
+        driver.proc.reap.assert_called_once_with(timeout=10)
+        driver.proc.close.assert_called_once()
+
+    def test_reap_timeout_then_owner_eof_collects_supervisor(self):
+        for body_fails in (False, True):
+            with self.subTest(body_fails=body_fails), ExitStack() as patches:
+                proc = None
+                original = ValueError("original failure")
+                patches.enter_context(
+                    mock.patch("sys.stderr", new_callable=io.StringIO)
+                )
+                try:
+                    with (
+                        self.assertRaises(
+                            ValueError if body_fails else AssertionError
+                        ) as caught,
+                        driver_process(
+                            [sys.executable, "-c", "raise SystemExit(7)"],
+                            cwd=ROOT,
+                            env=os.environ.copy(),
+                            scale=CONFIGURED_SCALE,
+                            test_id=self.id(),
+                        ) as driver,
+                    ):
+                        proc = driver.proc
+                        self.assertEqual(proc.wait(timeout=120 * CONFIGURED_SCALE), 7)
+                        real_reap = proc.reap
+                        attempts = []
+
+                        def reap(
+                            *,
+                            timeout,
+                            proc=proc,
+                            attempts=attempts,
+                            real_reap=real_reap,
+                        ):
+                            attempts.append(timeout)
+                            if len(attempts) == 1:
+                                raise subprocess.TimeoutExpired(proc.args, timeout)
+                            self.assertIsNone(proc.owner_writer)
+                            self.assertIsNone(proc.status_fd)
+                            return real_reap(timeout)
+
+                        # Suppress the first group signal so only owner EOF
+                        # can stop the supervisor; inject timeout without sleeping.
+                        signal_group = patches.enter_context(
+                            mock.patch.object(proc, "signal_group")
+                        )
+                        patches.enter_context(
+                            mock.patch.object(proc, "reap", side_effect=reap)
+                        )
+                        if body_fails:
+                            raise original
+                    if body_fails:
+                        self.assertIs(caught.exception, original)
+                    else:
+                        self.assertIn("process reap exceeded", str(caught.exception))
+                    self.assertTrue(proc.reaped)
+                    self.assertEqual(proc.owner.returncode, -signal.SIGKILL)
+                    self.assertEqual(proc.returncode, 7)
+                    # Unlike a stopped/zombie check, this proves wait collected
+                    # the child before context exit, with Popen still referenced.
+                    with self.assertRaises(ChildProcessError):
+                        os.waitpid(proc.owner.pid, os.WNOHANG)
+                    driver.cleanup()
+                    self.assertEqual(attempts, [10 * CONFIGURED_SCALE] * 2)
+                    signal_group.assert_called_once_with(signal.SIGKILL)
+                finally:
+                    if proc is not None and not proc.reaped:
+                        proc.close()
+                        OwnedProcess.reap(proc, timeout=10 * CONFIGURED_SCALE)
 
     def test_parent_death_terminates_supervisor_and_driver_tree(self):
         for finished in (False, True):
@@ -684,7 +848,11 @@ class DriverProcessTests(unittest.TestCase):
         ):
             self.assertIn(fragment, str(caught.exception))
         driver.proc.wait.assert_called_once_with(timeout=240)
-        driver.proc.reap.assert_called_once_with(timeout=20)
+        self.assertEqual(
+            driver.proc.reap.call_args_list,
+            [mock.call(timeout=20), mock.call(timeout=20)],
+        )
+        driver.proc.close.assert_called_once()
 
     def test_ready_wait_uses_scaled_monotonic_deadline(self):
         driver = self.fake_driver(scale=2)
