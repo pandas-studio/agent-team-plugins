@@ -1301,6 +1301,15 @@ case "$2" in
   cleanup)  trap 'stop_attempt; exit 143' TERM
             ( sleep 30 ) <&0 &
             wait_attempt "$!" ;;
+  ignore)   rm -f "$1.ready"
+            ( trap '' TERM; : > "$1.ready"
+              i=0; while [ $i -lt 80 ]; do sleep 0.1; i=$((i+1)); done ) <&0 &
+            pid=$!
+            i=0
+            while [ ! -f "$1.ready" ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done
+            stop_attempt
+            if kill -0 "$pid" 2>/dev/null; then echo "bounded=1"; else echo "bounded=0"; fi
+            kill -9 "$pid" 2>/dev/null || true ;;
 esac
 WAIT57
 wait57() { /bin/bash "$TMP/wait57.sh" "$TMP/wait57-funcs.sh" "$1" 2>&1; }
@@ -1382,6 +1391,16 @@ print(f"stepped={int(stepped)} rc={rc} left={left} reaped=[{reaped}] "
       f"codes={sorted(str(c) for c in codes)} late={late}")
 PYWAIT
 )" "stepped=1 rc=143 left=0 reaped=[rc=5] codes=['143'] late=0"
+
+# 3b. stop_attempt is bounded even when a root ignores TERM (#66): it returns
+#     while that root is still running, rather than waiting out its lifetime with
+#     record_attempt_end and release_lock behind it. Asserted as "stop_attempt
+#     returned before the root did", not as a wall-clock threshold: the budget is
+#     20 sleeps of 0.1 s plus a ps and a grep each, which a loaded runner stretches
+#     — the suite already carries two load-sensitive failures. The child publishes
+#     readiness after installing its TERM-ignore trap, so it cannot be stopped
+#     before the trap exists and fail this for the wrong reason.
+assert_eq "$(wait57 ignore)" "bounded=1"
 
 # 4. Model text cannot draw a banner or move text: a quoted marker is dropped,
 #    \x1e is removed, and an answer without a final newline does not swallow the

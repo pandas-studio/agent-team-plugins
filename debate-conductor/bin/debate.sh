@@ -980,9 +980,11 @@ trap 'record_attempt_end "$?"; release_lock' EXIT
 # it is found, so none forks or exits, and gets reparented out of reach, while
 # the tree is collected. Best effort: a process that exited before it was found
 # can leave children behind, and one that ignores TERM keeps running. Waits up
-# to about 2 s for the stopped processes to go. Needs ps (see below).
+# to about 2 s for the collected processes to go — one budget, covering the
+# attempt itself — and never longer: the caller's cleanup runs after it (#66).
+# Needs ps (see below).
 stop_attempt() {
-  local roots table new tree="" i=0
+  local roots table new tree="" i=0 p pstat
   # shellcheck disable=SC2046,SC2005  # one line of PIDs
   roots="$(echo $(jobs -p))"
   [ -n "$roots" ] || return 0
@@ -1018,13 +1020,26 @@ stop_attempt() {
   kill -s TERM $tree 2>/dev/null || true
   # shellcheck disable=SC2086
   kill -s CONT $tree 2>/dev/null || true
-  # shellcheck disable=SC2086
-  wait $roots 2>/dev/null || true
+  # `wait $roots` stood here and was unbounded (#66). Every root has been sent
+  # TERM above, but one that ignores it held this call open for as long as it
+  # kept running, and on_signal's record_attempt_end and release_lock sit behind
+  # it — so a root that outlives the signal also cost the ledger entry and the
+  # lock. The loop below already covers the roots: `tree` is seeded from them, so
+  # a root that is still alive keeps that poll going. One budget, not two.
   i=0
   # shellcheck disable=SC2086
   while [ "$i" -lt 20 ] && ps -o stat= -p "$(echo $tree | tr ' ' ',')" 2>/dev/null | grep -qv '^Z'; do
     sleep 0.1
     i=$((i + 1))
+  done
+  # Then reap only what ps confirms has exited. A root that is still alive is
+  # left behind rather than waited on — that wait is the block being removed —
+  # and one that is already gone has nothing to reap, so `Z` is the whole set.
+  for p in $roots; do
+    pstat="$(ps -o stat= -p "$p" 2>/dev/null)" || pstat=""
+    case "$pstat" in
+      Z*) wait "$p" 2>/dev/null || true ;;
+    esac
   done
 }
 
