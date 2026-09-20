@@ -222,6 +222,26 @@ an abort, published from the wrapper's EXIT trap, so an interrupted run does not
 read as live forever. Unlike the RFC 0004 manifest, this file exists while the
 run is live and is written for nested dispatches too.
 
+Both wrappers append a final `=== END (rc=...) ===` log marker on a best-effort
+basis. If that append fails, they warn on stderr and preserve the resolved
+exit code and completion metadata; a published review keeps its verdict.
+Required result, receipt and manifest publication failures still fail the run.
+The dashboard uses `.run.json` for completion, so a missing END marker does not
+leave a completed run looking live. Legacy logs without run metadata continue
+to show completion as unavailable. This policy covers the final append;
+logging failures during model execution retain their existing behavior.
+
+[ralph-trio's `ralph-meta.sh`](../ralph-trio/bin/ralph-meta.sh) also uses END to
+bound its raw-log fallback when no usable `.final.md` exists. Without END, that
+fallback reads through EOF and can include
+late output from a descendant of the model CLI. It is raw diagnostic text;
+use the invocation's final/result artifacts for the authoritative review.
+
+This final-append policy is specific to dev-trio. The
+[debate-conductor role wrappers](../debate-conductor/README.md#logs) treat a
+failed END append as a logging failure: a successful model run becomes rc=6,
+while an already nonzero model exit code is preserved.
+
 **Reviewer transcript.** The reviewer CLI writes straight into
 `codex-<TS>-<PID>.log` on a descriptor, which `tail -F` follows as the review is
 produced. The dashboard does not read it — it renders from the run's `*.run.json`

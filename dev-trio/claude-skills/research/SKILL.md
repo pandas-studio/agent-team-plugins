@@ -62,4 +62,4 @@ But don't dispatch automatically — let the user confirm.
 
 - **Do not call `agy` directly.** `ask-researcher.sh` is the only entry point — it handles role-prompt loading, trust-boundary tag stripping, and RFC 0004 manifest emission.
 - **Do not paste the full Antigravity response back to chat.** The user has it in the pane and on disk; surface only the lead + cite count.
-- **Do not silently retry on a non-zero rc.** Surface the failure to the user (the wrapper logs `rc=N` in its `=== END ===` line); ask before re-running.
+- **Do not silently retry on a non-zero rc.** Capture the wrapper's actual exit code and surface the failure to the user; ask before re-running. The stderr artifact line also reports `rc=N`. When metadata is available, replace the `.log` suffix of that invocation's log path with `.run.json` and read `.completion.exit_code` there. The `=== END ===` log marker is best effort and may be absent.
