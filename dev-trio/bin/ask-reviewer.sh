@@ -221,9 +221,6 @@ cleanup_review() {
   # An interrupted run still owes the caller what the CLI produced. After the
   # completion above, so a failure here cannot cost the dashboard its record,
   # and before the out-of-band transcript is removed — that is the only copy.
-  # A signal outside the call's own window exits through here without having
-  # replayed. Best-effort: ordinary redirection applies on those paths.
-  [ "${TRANSCRIPT_EMITTED:-1}" -ne 0 ] || emit_transcript || true
   # Retention does not depend on the replay having worked. An out-of-band
   # transcript is the only copy of what the CLI produced — the log could not be
   # opened — so any run that ends without publishing a review keeps it and says
@@ -379,17 +376,13 @@ transcript_range() {
 }
 # This wrapper's stdout is the transcript — ralph-meta keeps it as the raw-output
 # artifact it falls back to when it cannot locate the log. It is replayed once,
-# at the end, and a replay that fails must not disturb a review that already
-# exists in $FINAL/$RESULT.
+# after the review is published, and a replay that fails must not disturb a
+# review that already exists in $FINAL/$RESULT. Both call sites run after the
+# range is frozen; a run that ends before that names its artifacts instead.
 TRANSCRIPT_EMITTED=0
 emit_transcript() {
   [ "$TRANSCRIPT_EMITTED" -eq 0 ] || return 0
   TRANSCRIPT_EMITTED=1
-  # An abort never reached the freeze below, so take the length now. What the
-  # CLI managed to produce before the signal is still owed to the caller — the
-  # pipeline this replaces had already streamed it.
-  [ -n "$TRANSCRIPT_END" ] || [ -z "$TRANSCRIPT_OFFSET" ] \
-    || TRANSCRIPT_END="$(wc -c < "$TRANSCRIPT_PATH" 2>/dev/null)" || TRANSCRIPT_END=""
   transcript_range 2>/dev/null || true
   return 0
 }
@@ -423,12 +416,19 @@ set -e
 trap 'exit 130' INT
 trap 'exit 143' TERM
 [ -z "$TRANSCRIPT_OFFSET" ] || TRANSCRIPT_END="$(wc -c < "$TRANSCRIPT_PATH")" || TRANSCRIPT_END=""
-# An interrupted run owes the caller what the CLI produced — the pipeline this
-# replaces had already streamed it — and owes it no review: a result parsed
-# from a partial transcript would be worse than none. The EXIT trap records the
-# abort.
+# An interrupted run owes the caller no review — a result parsed from a partial
+# transcript would be worse than none — and it does not put the partial
+# transcript on stdout either. It names its artifacts instead, in the same
+# `(log: ...)` shape the successful path ends with, because that is what a
+# caller actually reads: measured against ralph-meta.sh's own extraction
+# (`:248`, `:256`), the artifact line alone recovers the identical partial body
+# from the log, where a replayed stdout reaches only a caller that captured it
+# and left the pipe open. `result:` is absent because no review was published.
+# Printing it here rather than from the EXIT trap is deliberate: a trap firing
+# during the call runs with its `>&8 2>&8` still in effect, so the line would
+# land in the log instead of on stderr. The EXIT trap records the abort.
 if [ "$SIGNAL_RC" -ne 0 ]; then
-  emit_transcript
+  echo "(log: $LOG, final: $FINAL, rc=$SIGNAL_RC)" >&2 || true
   exit "$SIGNAL_RC"
 fi
 # Only adapters without native final capture synthesize a final. A missing

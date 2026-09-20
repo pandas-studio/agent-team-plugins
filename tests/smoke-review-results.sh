@@ -562,14 +562,20 @@ interrupt_review() {
   set +m
   interrupted_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-codex.log")"
 }
+# ralph-meta.sh's own extraction, verbatim from `:248` and `:256`: the log path
+# out of this wrapper's stderr, then the response body out of that log. An
+# interrupted run does not replay its transcript to stdout; it names its
+# artifacts, and this is the consumer that makes that enough.
+meta_log_path() {
+  awk -F'[(),]' '/^\(log: / { for (i=1; i<=NF; i++) { if ($i ~ /log: /) { sub(/^[[:space:]]*log:[[:space:]]*/, "", $i); print $i; exit } } }' "$1"
+}
+meta_response_body() {
+  awk '/^=== RESPONSE ===/{flag=1; next} /^=== END/{flag=0} flag' "$1" 2>/dev/null
+}
 fixture 'SHIP — interrupted'
 for interrupt_signal in TERM INT; do
   interrupt_review "$interrupt_signal"
   check "the stub was running when signalled ($interrupt_signal)" test "$interrupted_ready" -eq 1
-  check "an interrupted run replays the transcript ($interrupt_signal)" \
-    grep -q 'SHIP — interrupted' "$TMP/interrupted.out"
-  check "the replay does not land in the log instead ($interrupt_signal)" \
-    test "$(grep -c 'SHIP — interrupted' "$interrupted_log")" -eq 1
   expected_rc=143
   [ "$interrupt_signal" != INT ] || expected_rc=130
   check "an interrupted run keeps the signal's status ($interrupt_signal)" \
@@ -578,6 +584,16 @@ for interrupt_signal in TERM INT; do
     json_is "${interrupted_log%.log}.run.json" ".completion.reason==\"aborted\" and .completion.exit_code==$expected_rc"
   check "an interrupted run publishes no review ($interrupt_signal)" \
     test ! -f "${interrupted_log%.log}.review.json"
+  check "an interrupted run names its artifacts ($interrupt_signal)" \
+    grep -q "^(log: .*, rc=$expected_rc)$" "$TMP/interrupted.err"
+  check "an interrupted run's stdout carries no transcript ($interrupt_signal)" \
+    test ! -s "$TMP/interrupted.out"
+  META_LOG_PATH=$(meta_log_path "$TMP/interrupted.err")
+  check "a caller can extract the log path ($interrupt_signal)" \
+    test "$META_LOG_PATH" = "$interrupted_log"
+  meta_response_body "$META_LOG_PATH" > "$TMP/interrupted.body"
+  check "a caller recovers the partial transcript ($interrupt_signal)" \
+    grep -q 'SHIP — interrupted' "$TMP/interrupted.body"
 done
 # The three together: the log unopenable, the run interrupted, and a stdout that
 # cannot take the replay. Nothing else holds those bytes, so the wrapper keeps
@@ -605,6 +621,8 @@ oob2_rc=0
 wait "$oob2_pid" || oob2_rc=$?
 set +m
 check 'an interrupted out-of-band run keeps the signal status' test "$oob2_rc" -eq 143
+check 'an interrupted out-of-band run still names its artifacts' \
+  grep -q '^(log: .*, rc=143)$' "$TMP/oob2.err"
 check 'the retained transcript is reported' grep -q 'the transcript is at' "$TMP/oob2.err"
 OOB2_KEPT=$(sed -n 's/.*the transcript is at //p' "$TMP/oob2.err" | tail -1)
 check 'the retained transcript exists' test -s "$OOB2_KEPT"

@@ -238,6 +238,15 @@ parent no longer decides when the wrapper finishes, and what it writes past the
 sampled length reaches the log but neither artifact. The cost is that the
 wrapper's own stdout is no longer live.
 
+An **interrupted** run (`SIGINT`/`SIGTERM` while the CLI is running) publishes no
+review — a result parsed from a partial transcript would be worse than none —
+and puts nothing on stdout. It prints `(log: …, final: …, rc=…)` on stderr and
+exits on the signal's own status, with the run's `*.run.json` recording
+`reason: aborted`. That line is what a caller reads: `ralph-meta.sh` takes the
+log path out of it and recovers the partial transcript from the log itself, so
+naming the artifacts serves it better than replaying bytes onto a stdout it may
+not have captured. `result:` is absent because no review exists.
+
 **Researcher answer.** `agy-<TS>-<PID>.final.md` holds the answer on its own,
 captured by `registry_run_answer`: the model's own last message when it defines
 `final_args`, otherwise that function's existing copy of stdout — stdout alone,
