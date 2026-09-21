@@ -5,6 +5,13 @@
 #   ask-reviewer.sh                              # review uncommitted changes (default)
 #   ask-reviewer.sh "focus or scope instructions"
 #   ask-reviewer.sh "review HEAD~1..HEAD with focus on security"
+#   ask-reviewer.sh -- "-literal focus"          # focus that looks like an option
+#   ask-reviewer.sh -h | --help                  # usage; runs nothing, exit 0
+#
+# Arguments are parsed before anything is loaded, so --help and a mistyped
+# option (exit 2) never reach a model. Only a token shaped like an option —
+# -name or --name[=value], name = letter then [A-Za-z0-9_-] — is one; prose that
+# starts with a dash ("- item", "-What is X?") is still a focus.
 #
 # Optional context injection (any combination, in any order):
 #   ask-reviewer.sh --with-research path/to/research.md "original focus"
@@ -43,6 +50,95 @@
 # when the streamed stdout duplicates or drops the closing block.
 # Override log root via DEV_TRIO_LOG_DIR=/abs/path.
 set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: ask-reviewer.sh [options] ["focus or scope"]
+       ask-reviewer.sh [options] -- "focus"
+
+Runs the reviewer model against the current repo. Without a focus it reviews
+the full working-tree state (tracked diffs and untracked files).
+
+Options (any order relative to the focus):
+  --with-research FILE  research answer to include as untrusted context
+  --with-spec FILE      spec/contract the changes are expected to satisfy
+  --with-context FILE   repository facts fetched by the PM (PR, issue, CI)
+  --no-memories         run Codex without its memory summary (codex reviewer only)
+  --                    end of options: the one argument after it is the
+                        focus, even if it starts with a dash
+  -h, --help            show this help and exit
+
+A token like -name or --name[=value] is treated as an option; an unknown one
+exits 2. Prose that starts with a dash ("- item", "-What is X?") is a focus.
+A one-word focus shaped like an option (-foo) needs --. Known gap: a mistyped
+option with trailing whitespace ("--hlep ") is not option-shaped and becomes
+the focus.
+
+Environment:
+  DEV_TRIO_REVIEWER_MODEL   reviewer model (over config role binding and host default)
+  REVIEWER_ROLE_FILE        reviewer role prompt override
+  DEV_TRIO_LOG_DIR          log root (default: $PWD/.dev-trio/log)
+  DEV_TRIO_REVIEW_PROFILE   default | spec
+  DEV_TRIO_REVIEW_RECEIPT   absolute path of a fresh caller receipt file
+
+Exit: 0 parsed review (any verdict), 2 usage or setup error, 3 unparseable
+review; a failed reviewer CLI keeps its own nonzero code.
+EOF
+}
+
+usage_error() {
+  echo "error: $1" >&2
+  echo "Try 'ask-reviewer.sh --help'." >&2
+  exit 2
+}
+
+# -name or --name[=value], where name is a letter then [A-Za-z0-9_-]. Anything
+# else — including prose that merely starts with a dash — is a positional.
+is_option_shaped() {
+  _opt_name="${1%%=*}"
+  case "$_opt_name" in
+    --[A-Za-z]*) _opt_name="${_opt_name#--}" ;;
+    -[A-Za-z]*)  _opt_name="${_opt_name#-}" ;;
+    *) return 1 ;;
+  esac
+  case "$_opt_name" in *[!A-Za-z0-9_-]*) return 1 ;; esac
+  return 0
+}
+
+RESEARCH_FILE=""
+SPEC_FILE=""
+CONTEXT_FILE=""
+FOCUS=""
+NO_MEMORIES=0
+POSITIONAL_SEEN=0
+take_positional() {
+  [ "$POSITIONAL_SEEN" -eq 0 ] || usage_error "unexpected extra positional argument: $1"
+  POSITIONAL_SEEN=1
+  FOCUS="$1"
+}
+# Parsed before any library, role file, host or model is touched, so --help and
+# a usage error depend on nothing and start nothing. Scan all args so the
+# --with-* flags work in any position relative to the focus (the README
+# contract "any combination, in any order").
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --with-research|--with-spec|--with-context)
+      { [ $# -ge 2 ] && [ -n "$2" ]; } || usage_error "$1 requires a file path"
+      case "$1" in
+        --with-research) RESEARCH_FILE="$2" ;;
+        --with-spec)     SPEC_FILE="$2" ;;
+        *)               CONTEXT_FILE="$2" ;;
+      esac
+      shift 2 ;;
+    --no-memories) NO_MEMORIES=1; shift ;;
+    --) shift
+        while [ $# -gt 0 ]; do take_positional "$1"; shift; done ;;
+    *)
+      ! is_option_shaped "$1" || usage_error "unknown option: $1"
+      take_positional "$1"; shift ;;
+  esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -92,27 +188,6 @@ registry_model_exists "$REVIEWER_MODEL" || { echo "ask-reviewer: reviewer model 
 # Team namespace — isolates logs per tmux window/session.
 TEAM=$(agent_team_detect_team) || exit 2
 LOG_DIR="${DEV_TRIO_LOG_DIR:-$PWD/.dev-trio/log}/$TEAM"
-
-RESEARCH_FILE=""
-SPEC_FILE=""
-CONTEXT_FILE=""
-FOCUS=""
-NO_MEMORIES=0
-# Scan all args so --with-research / --with-spec work in any position relative
-# to the focus (matches the README contract "any combination, in any order").
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --with-research) RESEARCH_FILE="${2:?--with-research requires a file path}"; shift 2 ;;
-    --with-spec)     SPEC_FILE="${2:?--with-spec requires a file path}";         shift 2 ;;
-    --with-context)  CONTEXT_FILE="${2:?--with-context requires a file path}";   shift 2 ;;
-    --no-memories)   NO_MEMORIES=1; shift ;;
-    --) shift; [ "$#" -gt 0 ] && FOCUS="$1"; break ;;
-    *)
-      if [ -z "$FOCUS" ]; then FOCUS="$1"; shift
-      else echo "error: unexpected extra positional argument: $1" >&2; exit 2
-      fi ;;
-  esac
-done
 
 # --no-memories swaps codex for the built-in variant that disables Codex's
 # memories feature. Other models have no such switch, so refuse rather than
