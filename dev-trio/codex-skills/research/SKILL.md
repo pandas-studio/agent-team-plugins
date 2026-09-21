@@ -15,7 +15,8 @@ For the selected agy researcher, startup needs writes under
 `~/.gemini/antigravity-cli` (logs/crashes), a localhost listener, and external
 network access. These host resources are separate from agy's tool permissions.
 Use the current host's supplied sandbox/approval policy and restrictions already
-observed in this session; do not infer them from `rc=1` or a passing doctor check.
+observed in this session; do not infer them from `rc=1` alone or from a passing
+doctor check.
 
 - If those resources are already permitted, use the normal execution path;
   do not request escalation merely because the PM is Codex.

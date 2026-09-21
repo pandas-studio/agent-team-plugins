@@ -149,10 +149,11 @@ class ResearchDiagnosticsTests(unittest.TestCase):
                     env=self.env, text=True, capture_output=True, timeout=15, check=False,
                 )
                 status = "PASS" if expected_rc == 0 else "FAIL"
+                outcome = "passed" if expected_rc == 0 else "failed"
                 self.assertEqual(result.returncode, expected_rc, result.stderr)
                 self.assertEqual(result.stdout.splitlines()[-3:], [
-                    f"[{status}] Installation/config checks only (see warnings/skipped checks above).",
-                    "[NOT_CHECKED] Host execution: CLI startup writes, localhost binding and network access.",
+                    f"[{status}] Installation/config checks {outcome} (see warnings/skipped checks above).",
+                    "[NOT_CHECKED] Host execution: selected CLI startup under the current host policy.",
                     "[NOT_CHECKED] Research permissions: effective tool grants and actual research access.",
                 ])
                 self.assertNotIn("private.example", result.stdout)

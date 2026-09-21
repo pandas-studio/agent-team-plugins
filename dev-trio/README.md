@@ -217,7 +217,7 @@ An unexpected failure still needs its own diagnostic; `rc=1` alone is not proof
 of a host restriction. The skill follows the host permission policy and does
 not silently retry, switch models, or reuse a failed answer.
 
-### Read-only setup checks
+### After a failed call: read-only setup checks
 
 The [host acceptance scenarios](docs/research-host-acceptance.md) separate
 model-free regression coverage from actual host/model behavior verification.
@@ -243,14 +243,17 @@ Missing executables or invalid/unreadable configuration fail the check (exit
 The final summary separates three outcomes:
 
 ```text
-[PASS] Installation/config checks only (see warnings/skipped checks above).
-[NOT_CHECKED] Host execution: CLI startup writes, localhost binding and network access.
+[PASS] Installation/config checks passed (see warnings/skipped checks above).
+[NOT_CHECKED] Host execution: selected CLI startup under the current host policy.
 [NOT_CHECKED] Research permissions: effective tool grants and actual research access.
 ```
 
-The first row becomes `[FAIL]` when those checks fail. Existing exit semantics
-are preserved: `NOT_CHECKED` does not change the exit code, and exit 0 is not
-proof of execution readiness. Configured rule counts/modes above the summary
+The first row reports `[FAIL] Installation/config checks failed (...)` when
+those checks fail. The host row refers to the selected CLI's own requirements;
+agy's home writes and localhost listener are not assumed for custom adapters.
+Existing exit semantics are preserved: `NOT_CHECKED` does not change the exit
+code, and exit 0 is not proof of execution readiness. Configured rule counts/modes
+above the summary
 describe only the inspected file; neither presence nor absence proves effective
 grants. No startup write/bind/network probe is performed. The original doctor
 without arguments retains its broader checks.

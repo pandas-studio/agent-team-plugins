@@ -50,8 +50,9 @@ def check_settings(path: Path) -> bool:
 
 def report_checks(valid: bool) -> None:
     status = "PASS" if valid else "FAIL"
-    print(f"[{status}] Installation/config checks only (see warnings/skipped checks above).")
-    print("[NOT_CHECKED] Host execution: CLI startup writes, localhost binding and network access.")
+    outcome = "passed" if valid else "failed"
+    print(f"[{status}] Installation/config checks {outcome} (see warnings/skipped checks above).")
+    print("[NOT_CHECKED] Host execution: selected CLI startup under the current host policy.")
     print("[NOT_CHECKED] Research permissions: effective tool grants and actual research access.")
 
 
