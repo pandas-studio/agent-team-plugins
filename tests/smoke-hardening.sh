@@ -234,12 +234,31 @@ assert_eq "$(git -C "$CB" log --oneline feature | wc -l | tr -d ' ')" "1"
 # under bash 3.2's set -u (it used to report 0 commits every time).
 git -C "$DRV" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "ralph iter 1: smoke"
 git -C "$DRV" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "unrelated"
+mkdir -p "$TMP/meta-ws/log/smoke"
+printf "fixture stdout\n" > "$TMP/meta-ws/log/smoke/ralph-trio-fixture-plan.log"
+printf "fixture stdout\n" > "$TMP/meta-ws/log/smoke/ralph-trio-fixture-plan.stdout.log"
 mkdir -p "$TMP/meta-bin"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/meta-bin/ask-reviewer.sh"
 chmod +x "$TMP/meta-bin/ask-reviewer.sh"
-(cd "$DRV" && env PATH="$TMP/meta-bin:$PATH" AGENT_TEAM=smoke TMUX="" RALPH_TRIO_WORKSPACE="$TMP/rw" \
+(cd "$DRV" && env PATH="$TMP/meta-bin:$PATH" AGENT_TEAM=smoke TMUX="" RALPH_TRIO_WORKSPACE="$TMP/meta-ws" \
   "$ROOT/ralph-trio/bin/ralph-meta.sh" --since "1 hour ago" >/dev/null 2>"$TMP/meta.err" </dev/null) || true
 assert_eq "$(sed -n 's/.*ralph commits found: //p' "$TMP/meta.err")" "1"
+assert_eq "$(sed -n 's/.*ralph logs found: //p' "$TMP/meta.err")" "1"
+
+# A failed BSD-style probe may write stdout on GNU stat; it must not contaminate
+# the successful fallback's numeric mtime. Reproduce on every host.
+cat > "$TMP/meta-bin/stat" <<'STAT'
+#!/usr/bin/env bash
+if [ "$1" = -f ]; then
+  echo 'filesystem data from failed BSD probe'
+  exit 1
+fi
+python3 -c 'import os,sys; print(int(os.stat(sys.argv[1]).st_mtime))' "$3"
+STAT
+chmod +x "$TMP/meta-bin/stat"
+(cd "$DRV" && env PATH="$TMP/meta-bin:$PATH" AGENT_TEAM=smoke TMUX="" RALPH_TRIO_WORKSPACE="$TMP/meta-ws" \
+  "$ROOT/ralph-trio/bin/ralph-meta.sh" --since "1 hour ago" --variant trio >/dev/null 2>"$TMP/meta-fallback.err" </dev/null) || true
+assert_eq "$(sed -n 's/.*ralph logs found: //p' "$TMP/meta-fallback.err")" "1"
 
 # agent-team-models must not overwrite a config it could not parse: reads fall
 # back to an empty config, and a write built on that would drop every model.
@@ -513,9 +532,12 @@ run_debate() {
       "$ROOT/debate-conductor/bin/debate.sh" -n 2 "smoke: $team" > /dev/null 2>&1 </dev/null ) || rc=$?
   echo "$rc"
 }
-done_rounds() { ls -a "$TMP/debate-log/$1"/debate-*/ 2>/dev/null | grep -c '^\.round-.*\.done$' || true; }
+completed_rounds() {
+  jq -Rn '[inputs | (fromjson? // empty) | select(.t == "end" and .rc == 0) | .round] | unique | length' \
+    "$TMP/debate-log/$1"/debate-*/index.jsonl
+}
 assert_eq "$(run_debate gen-denied denied answer)" "5"
-assert_eq "$(done_rounds gen-denied)" "0"
+assert_eq "$(completed_rounds gen-denied)" "0"
 # /continue resumes a debate whose round 1 failed at round 1, in the same dir.
 continue_debate() {
   local team="$1" dir="$2" rc=0
@@ -530,7 +552,7 @@ continue_debate() {
 GEN_DENIED_DIR="$(cd "$TMP/debate-log/gen-denied/latest-debate" && pwd -P)"
 assert_eq "$(continue_debate gen-denied "$GEN_DENIED_DIR")" "0"
 assert_ok grep -q 'resuming from round 1' "$TMP/continue.err"
-assert_eq "$(done_rounds gen-denied)" "2"
+assert_eq "$(completed_rounds gen-denied)" "2"
 assert_eq "$(ls -d "$TMP/debate-log/gen-denied"/debate-* | wc -l | tr -d ' ')" "1"
 assert_eq "$(head -1 "$GEN_DENIED_DIR/round-1-gen.md")" "<!-- debate-round: 1 gen agy -->"
 assert_ok grep -qx 'Verdict: RECONSIDER' "$GEN_DENIED_DIR/round-1-gen.md"
@@ -543,20 +565,27 @@ assert_ok grep -qx 'Verdict: RECONSIDER' "$GEN_DENIED_DIR/round-1-gen.md"
     "$ROOT/debate-conductor/bin/debate.sh" -n 6 "smoke: long-denied" > /dev/null 2>&1 </dev/null ) || true
 LONG_DIR="$(cd "$TMP/debate-log/long-denied/latest-debate" && pwd -P)"
 assert_eq "$(ls "$LONG_DIR" | grep -c '^round-')" "6"
-# Kept: a later round with content, and files that are not round transcripts.
+# Later output with missing ledger history must block continuation, even
+# outside the requested range. Non-transcript files do not block it.
 printf 'kept\n' > "$LONG_DIR/round-5-gen.md"
 : > "$LONG_DIR/round-9-notes.md"
+assert_eq "$(continue_debate long-denied "$LONG_DIR")" "2"
+assert_ok grep -q 'contains output beyond retry round 1' "$TMP/continue.err"
+assert_eq "$(cat "$LONG_DIR/round-5-gen.md")" "kept"
+: > "$LONG_DIR/round-5-gen.md"
 assert_eq "$(continue_debate long-denied "$LONG_DIR")" "0"
-assert_eq "$(ls "$LONG_DIR" | grep '^round-' | tr '\n' ' ')" "round-1-gen.md round-2-crit.md round-5-gen.md round-9-notes.md "
-assert_eq "$(done_rounds long-denied)" "2"
+assert_eq "$(ls "$LONG_DIR" | grep '^round-' | tr '\n' ' ')" "round-1-gen.md round-2-crit.md round-9-notes.md "
+assert_eq "$(completed_rounds long-denied)" "2"
 # A debate dir that never started (no topic.txt) is still refused.
 mkdir -p "$TMP/debate-log/never-started/debate-20260101-000000"
+# A readable empty ledger passes compatibility, but without a topic nothing started.
+: > "$TMP/debate-log/never-started/debate-20260101-000000/index.jsonl"
 assert_eq "$(continue_debate never-started "$TMP/debate-log/never-started/debate-20260101-000000")" "2"
 assert_ok grep -q 'no completed round' "$TMP/continue.err"
 assert_eq "$(run_debate crit-denied answer denied)" "5"
-assert_eq "$(done_rounds crit-denied)" "1"
+assert_eq "$(completed_rounds crit-denied)" "1"
 assert_eq "$(run_debate both-answer answer answer)" "0"
-assert_eq "$(done_rounds both-answer)" "2"
+assert_eq "$(completed_rounds both-answer)" "2"
 
 # ralph-debate hands --prompt to debate.sh from inside the worktree, so a
 # relative path must be resolved (and checked) before any cd.
@@ -895,7 +924,7 @@ assert_eq "$(debate_in ctx-fail answer answer -n 2)" "0"
 CTX_DIR="$(debate_dir ctx-fail)"
 rm -f "$CTX_DIR/round-1-gen.md"
 assert_eq "$(debate_in ctx-fail answer answer --continue-from "$CTX_DIR" -n 1)" "1"
-assert_fail test -e "$CTX_DIR/.round-3-gen.done"
+assert_fail jq -e 'select(.t == "end" and .rc == 0 and .round == 3)' "$CTX_DIR/index.jsonl"
 assert_eq "$(LC_ALL=C grep -ac -E "^$(printf '\036')<!-- debate-round-end: 3 gen rc=1 $ID_RE -->$" "$CTX_DIR/stream-gen.log")" "1"
 
 # 3c. INT, TERM and HUP to the debate's process group, or to the debate.sh PID
@@ -924,7 +953,7 @@ for sig in INT TERM HUP parent-INT pid-INT pid-TERM pid-HUP KILL; do
     expected="rc=-$signum fast=1 model=gone grew=0 ends=1 <!-- debate-round-end: 1 gen rc=$status id=HEAD --> done=0 continued=0"
   fi
   assert_eq "$(python3 - "$ROOT" "$TMP" "$sig" <<'PYCASE'
-import glob, os, re, signal, subprocess, sys, time
+import glob, json, os, re, signal, subprocess, sys, time
 root, tmp, case = sys.argv[1:4]
 sig = case.split("-")[-1]
 team = f"cancel-{case}"
@@ -986,7 +1015,8 @@ size = os.path.getsize(stream)
 time.sleep(1.5)
 grew = int(os.path.getsize(stream) != size)
 ends = [l for l in open(stream, errors="replace") if l.startswith("\x1e<!-- debate-round-end: ")]
-done = int(os.path.exists(os.path.join(os.path.dirname(stream), ".round-1-gen.done")))
+rows = [json.loads(l) for l in open(os.path.join(os.path.dirname(stream), "index.jsonl")) if l.strip()]
+done = int(any(r["t"] == "end" and r["round"] == 1 and r["rc"] == 0 for r in rows))
 continued = int(os.path.exists(marker))
 end = ends[0].rstrip(chr(10))[1:] if ends else ""
 # The end record names the attempt its header started.
@@ -1003,7 +1033,7 @@ done
 #     attempt header in a stream has exactly one end record, an interrupted
 #     attempt records 143 and is not done, and no model keeps running.
 assert_eq "$(python3 - "$ROOT" "$TMP" <<'PYRACE'
-import glob, os, re, signal, subprocess, sys, time
+import glob, json, os, re, signal, subprocess, sys, time
 root, tmp = sys.argv[1:3]
 team = "cancel-after-done"
 env = {k: v for k, v in os.environ.items()
@@ -1015,7 +1045,7 @@ env.update(TMUX="", AGENT_TEAM=team, AGENT_TEAM_MODELS_CONFIG=f"{tmp}/no-models.
 p = subprocess.Popen([f"{root}/debate-conductor/bin/debate.sh", "-n", "2", f"smoke: {team}"], cwd=tmp, env=env,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      start_new_session=True)
-# The rc=0 end record is the last step of a completed attempt (after .done).
+# The stream end follows the authoritative ledger end.
 for _ in range(1000):
     streams = glob.glob(f"{tmp}/view-log/{team}/debate-*/stream-gen.log")
     if streams and re.search(r"^\x1e<!-- debate-round-end: 1 gen rc=0 id=\S+ -->$",
@@ -1060,99 +1090,35 @@ if os.path.exists(pid_file):
             os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
-print(f"rc={rc} gen={gen_ends} r1done={int(os.path.exists(f'{d}/.round-1-gen.done'))} "
-      f"crit-balanced={balanced} r2done={int(os.path.exists(f'{d}/.round-2-crit.done'))} model={model}")
+rows = [json.loads(l) for l in open(f"{d}/index.jsonl") if l.strip()]
+completed = {r["round"] for r in rows if r["t"] == "end" and r["rc"] == 0}
+print(f"rc={rc} gen={gen_ends} r1done={int(1 in completed)} "
+      f"crit-balanced={balanced} r2done={int(2 in completed)} model={model}")
 PYRACE
 )" "rc=-15 gen=['<!-- debate-round-end: 1 gen rc=0 id=ID -->'] r1done=1 crit-balanced=1 r2done=0 model=gone"
 
-# 3e. A signal while a completed attempt is being recorded (#50). `.done` is
-#     the completion boundary: once it exists, the attempt's end record says
-#     rc=0 (debate.sh still dies from the signal), and it is written once. PATH
-#     shims for touch and tail signal the debate.sh PID at a chosen command:
-#       done-touch   the touch that creates .round-1-gen.done
-#       done-tail    the first tail on stream-gen.log after that
-#       done-tail2   the second one (inside the write of the rc=0 record)
-#       done-fail    touch fails instead (no signal): rc=1, no .done
-#       header-tail  the tail before round 3's header: no header, no record
-mkdir -p "$TMP/done-shims"
-cat > "$TMP/done-shims/shim" <<STUB
-#!/bin/sh
-name="\${0##*/}"
-case "\$name" in touch) real="$(command -v touch)" ;; *) real="$(command -v tail)" ;; esac
-eval "last=\\\${\$#}"
-dir="\${last%/*}"
-fire=0
-case "\$SHIM_CASE:\$name" in
-  done-touch:touch) case "\$last" in *.round-1-gen.done) fire=1 ;; esac ;;
-  done-fail:touch) case "\$last" in *.round-1-gen.done) exit 1 ;; esac ;;
-  done-tail*:tail)
-    case "\$last" in *stream-gen.log)
-      if [ -e "\$dir/.round-1-gen.done" ]; then
-        n=\$((\$(cat "\$SHIM_STATE.count" 2>/dev/null || echo 0) + 1)); echo "\$n" > "\$SHIM_STATE.count"
-        [ "\$SHIM_CASE:\$n" = done-tail:1 ] || [ "\$SHIM_CASE:\$n" = done-tail2:2 ] && fire=1
-      fi ;;
-    esac ;;
-  header-tail:tail)
-    case "\$last" in *stream-gen.log)
-      [ -e "\$dir/.round-1-gen.done" ] && grep -aq 'debate-round-end: 1 gen' "\$last" && fire=1 ;;
-    esac ;;
-esac
-if [ "\$fire" = 1 ] && [ ! -e "\$SHIM_STATE.fired" ]; then
-  : > "\$SHIM_STATE.fired"
-  "\$real" "\$@"; rc=\$?
-  kill -s TERM "\$(cat "\$SHIM_STATE.pid")"
-  exit \$rc
-fi
-exec "\$real" "\$@"
-STUB
-chmod +x "$TMP/done-shims/shim"
-ln -s shim "$TMP/done-shims/touch"
-ln -s shim "$TMP/done-shims/tail"
-done_case() {
-  # The subshell's stderr is dropped too: it reports the TERM-killed debate.sh.
-  local case="$1" team="done-$1" rc=0 dir
-  ( cd "$TMP" && env -u DEBATE_GENERATOR_MODEL -u DEBATE_CRITIC_MODEL -u DEBATE_PRIMARY_GEN \
-      -u DEBATE_CONDUCTOR_PM_HOST TMUX='' AGENT_TEAM="$team" PATH="$TMP/done-shims:$PATH" \
-      SHIM_CASE="$case" SHIM_STATE="$TMP/$team" \
-      AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" DEBATE_LOG_DIR="$TMP/view-log" \
-      GENERATOR_CLI="$TMP/worker-cli/answer" CRITIC_CLI="$TMP/worker-cli/answer" \
-      bash -c 'echo $$ > "$SHIM_STATE.pid"; exec "$0" -n 3 "smoke: done"' \
-      "$ROOT/debate-conductor/bin/debate.sh" > /dev/null 2>&1 </dev/null ) 2>/dev/null || rc=$?
-  dir="$(debate_dir "$team")"
-  # `ledger=` carries round/role/rc of every end record: the stream's rc and the
-  # ledger's are normalised once, in record_attempt_end, and this is what proves
-  # a later change cannot make one of them disagree with the other (#44).
-  printf 'rc=%s fired=%s done=%s records=%s pairs=%s ledger=%s\n' "$rc" \
-    "$([ -e "$TMP/$team.fired" ] && echo 1 || echo 0)" \
-    "$(cd "$dir" && ls -a | grep '^\.round-.*\.done$' | tr '\n' ' ')" \
-    "$(LC_ALL=C grep -a "^$(printf '\036')<!-- debate-round" "$dir/stream-gen.log" | LC_ALL=C tr -d '\036' | sed -E 's/<!-- debate-round//; s/ id=[0-9.]+ -->//' | tr '\n' '|')" \
-    "$(attempt_pairs "$dir/stream-gen.log")" \
-    "$(jq -rRn 'inputs | (fromjson? // empty) | select(.t == "end")
-                | "\(.round)/\(.role)/rc=\(.rc)"' "$dir/index.jsonl" 2>/dev/null | tr '\n' '|')"
-}
-assert_eq "$(done_case done-touch)" "rc=143 fired=1 done=.round-1-gen.done  records=: 1 gen agy|-end: 1 gen rc=0| pairs=1/1 1/1/end  ledger=1/gen/rc=0|"
-assert_eq "$(done_case done-tail)" "rc=143 fired=1 done=.round-1-gen.done  records=: 1 gen agy|-end: 1 gen rc=0| pairs=1/1 1/1/end  ledger=1/gen/rc=0|"
-assert_eq "$(done_case done-tail2)" "rc=143 fired=1 done=.round-1-gen.done  records=: 1 gen agy|-end: 1 gen rc=0| pairs=1/1 1/1/end  ledger=1/gen/rc=0|"
-assert_eq "$(done_case done-fail)" "rc=1 fired=0 done= records=: 1 gen agy|-end: 1 gen rc=1| pairs=1/1 1/1/end  ledger=1/gen/rc=1|"
-assert_eq "$(done_case header-tail)" "rc=143 fired=1 done=.round-1-gen.done .round-2-crit.done  records=: 1 gen agy|-end: 1 gen rc=0| pairs=1/1 1/1/end  ledger=1/gen/rc=0|2/crit/rc=0|"
+# 3e. The completion-boundary fault matrix now lives in
+# tests/test_debate_conductor_hosts.py: it injects signals around status
+# selection and ledger/stream ends, and failed ledger starts/ends, without
+# relying on the retired sidecar touch syscall.
 
 # 3f. record_attempt_end on its own: an end record already last in the stream
 #     is not written again only when it is this attempt's (its id) and has one
-#     numeric rc; `.done` turns any status into rc=0; a stream that cannot be
+#     numeric rc; a selected status survives a signal; a stream that cannot be
 #     read is not written to.
 record_end_case() {
-  local last="$1" done="$2" rc="$3" path="${4:-$PATH}"
+  local last="$1" selected="$2" rc="$3" path="${4:-$PATH}"
   rm -rf "$TMP/rec" && mkdir -p "$TMP/rec"
   [ -z "$last" ] || printf '%s\n%s\n' "${REC_FIRST-$(printf '\036')<!-- debate-round: 1 gen agy id=7.1 -->}" "$last" > "$TMP/rec/stream-gen.log"
-  [ "$done" = 0 ] || : > "$TMP/rec/.round-1-gen.done"
-  PATH="$path" REC_PUBLISHED="${REC_PUBLISHED-1}" bash -c '
+  PATH="$path" REC_SELECTED="$selected" REC_PUBLISHED="${REC_PUBLISHED-1}" bash -c '
     set -euo pipefail
     eval "$(awk '"'"'$0 == "stream_record() {" || $0 == "stream_attempt_end() {" || $0 == "record_attempt_end() {" { f = 1 } f { print } f && $0 == "}" { f = 0 }'"'"' "$1")"
     RS_BYTE="$(printf "\036")"; DEBATE_DIR="$2"
-    CUR_ATTEMPT_ROUND=1; CUR_ATTEMPT_ROLE=gen; CUR_ATTEMPT_ID=7.1; CUR_ATTEMPT_DONE="$2/.round-1-gen.done"
+    CUR_ATTEMPT_ROUND=1; CUR_ATTEMPT_ROLE=gen; CUR_ATTEMPT_ID=7.1
     # No ledger here: this case drives the stream half only, and an attempt the
     # ledger never opened writes no end record to it (#44).
     CUR_ATTEMPT_FILE=round-1-gen.md; CUR_ATTEMPT_INDEXED=""; CUR_ATTEMPT_RC=""
+    [ "$REC_SELECTED" = 0 ] || CUR_ATTEMPT_RC=0
     CUR_ATTEMPT_HEADER="<!-- debate-round: 1 gen agy id=7.1 -->"; CUR_ATTEMPT_PUBLISHED="$REC_PUBLISHED"
     record_attempt_end "$3"
     printf "role=[%s] " "$CUR_ATTEMPT_ROLE"
@@ -1197,13 +1163,13 @@ assert_eq "$(REC_PUBLISHED='' record_end_case "" 0 143)" "role=[] no stream"
 #     header of the same round and model.
 cat > "$TMP/ordering.sh" <<'ORDER'
 set -euo pipefail
-eval "$(awk '$0 ~ /^(stream_record|stream_header|round_done_file|begin_attempt|stream_attempt_end|record_attempt_end|index_append|index_start|index_end)\(\) \{$/ { f = 1 } f { print } f && $0 == "}" { f = 0 }' "$1")"
+eval "$(awk '$0 ~ /^(stream_record|stream_header|begin_attempt|stream_attempt_end|record_attempt_end|index_append|index_start|index_end)\(\) \{$/ { f = 1 } f { print } f && $0 == "}" { f = 0 }' "$1")"
 # debate_index_file lives in lib/index.sh, which index_append calls.
 # $3 is the ordering case; the lib path comes in as $4.
 . "$4"
 eval "real_$(declare -f stream_header)"
 RS_BYTE="$(printf '\036')"; DEBATE_DIR="$2"; ATTEMPT_RUN=7; ATTEMPT_SEQ=0
-CUR_ATTEMPT_ROUND=""; CUR_ATTEMPT_ROLE=""; CUR_ATTEMPT_DONE=""; CUR_ATTEMPT_ID=""
+CUR_ATTEMPT_ROUND=""; CUR_ATTEMPT_ROLE=""; CUR_ATTEMPT_ID=""
 CUR_ATTEMPT_HEADER=""; CUR_ATTEMPT_PUBLISHED=""; CUR_ATTEMPT_FILE=""
 CUR_ATTEMPT_INDEXED=""; CUR_ATTEMPT_RC=""
 case "$3" in
@@ -1233,27 +1199,28 @@ assert_eq "$(ordering_case fail)" "rc=1 exit-trap=1 records=<!-- debate-round: 1
 #     same status (#44). The two writes are independent, so a signal can land
 #     between them: without a decision that outlives the first write, the
 #     re-entry normalises again and the records split (measured: stream rc=9,
-#     ledger rc=143). stream_attempt_end is wrapped to signal right after it
-#     writes, which is exactly that window.
+#     ledger rc=143). index_end is wrapped to signal right after it writes,
+#     before the stream end, which is exactly that window.
 cat > "$TMP/rcsplit.sh" <<'RCSPLIT'
 set -euo pipefail
-eval "$(awk '$0 ~ /^(stream_record|stream_header|round_done_file|stream_attempt_end|record_attempt_end|index_append|index_start|index_end)\(\) \{$/ { f = 1 } f { print } f && $0 == "}" { f = 0 }' "$1")"
+eval "$(awk '$0 ~ /^(stream_record|stream_header|stream_attempt_end|record_attempt_end|index_append|index_start|index_end)\(\) \{$/ { f = 1 } f { print } f && $0 == "}" { f = 0 }' "$1")"
 . "$3"
-eval "real_$(declare -f stream_attempt_end)"
+eval "real_$(declare -f index_end)"
 DEBATE_DIR="$2"; RS_BYTE="$(printf '\036')"
 CUR_ATTEMPT_ROUND=1; CUR_ATTEMPT_ROLE=gen; CUR_ATTEMPT_ID=7.1
-CUR_ATTEMPT_DONE="$2/.round-1-gen.done"; CUR_ATTEMPT_FILE=round-1-gen.md
+CUR_ATTEMPT_FILE=round-1-gen.md
 CUR_ATTEMPT_HEADER="<!-- debate-round: 1 gen agy id=7.1 -->"; CUR_ATTEMPT_PUBLISHED=1
 CUR_ATTEMPT_INDEXED=""; CUR_ATTEMPT_RC=""
 printf '%s%s\n' "$RS_BYTE" "$CUR_ATTEMPT_HEADER" > "$2/stream-gen.log"
 index_start agy && CUR_ATTEMPT_INDEXED=1
+[ "$5" = 0 ] || CUR_ATTEMPT_RC=0
 # Signal once, not on every call: the trap re-enters record_attempt_end, which
 # calls this again, and bash 5 runs the trap recursively where bash 3.2 blocks
 # the signal for the duration of its own handler — an unconditional kill here
 # looped until the shell died on Linux and passed on macOS.
 signalled=""
-stream_attempt_end() {
-  real_stream_attempt_end "$@"
+index_end() {
+  real_index_end "$@"
   [ -n "$signalled" ] || { signalled=1; kill -s TERM $$; }
 }
 trap 'record_attempt_end 143' TERM
@@ -1261,16 +1228,15 @@ record_attempt_end "$4"
 RCSPLIT
 rcsplit_case() {
   rm -rf "$TMP/rcsplit" && mkdir -p "$TMP/rcsplit"
-  [ "$2" = 0 ] || : > "$TMP/rcsplit/.round-1-gen.done"
   /bin/bash "$TMP/rcsplit.sh" "$ROOT/debate-conductor/bin/debate.sh" "$TMP/rcsplit" \
-    "$ROOT/debate-conductor/lib/index.sh" "$1" >/dev/null 2>&1 || true
+    "$ROOT/debate-conductor/lib/index.sh" "$1" "$2" >/dev/null 2>&1 || true
   printf 'stream=%s ledger=%s\n' \
     "$(LC_ALL=C grep -ao 'rc=[0-9]*' "$TMP/rcsplit/stream-gen.log" | tr '\n' ' ')" \
     "$(jq -r 'select(.t == "end") | "rc=\(.rc)"' "$TMP/rcsplit/index.jsonl" | tr '\n' ' ')"
 }
 assert_eq "$(rcsplit_case 9 0)" "stream=rc=9  ledger=rc=9 "
 assert_eq "$(rcsplit_case 143 0)" "stream=rc=143  ledger=rc=143 "
-# `.done` present: both records say 0, and the re-entry keeps saying 0.
+# Success selected: both records say 0, and the re-entry keeps saying 0.
 assert_eq "$(rcsplit_case 9 1)" "stream=rc=0  ledger=rc=0 "
 
 # 3h. wait_attempt waits for an attempt in short steps (#57). bash 3.2's `wait`
@@ -1624,6 +1590,9 @@ assert_eq "$(grep -ac 'LATE-LINE' "$TMP/view-log/held/latest-debate/stream-gen.l
 wait "$HELD_PID"
 assert_eq "$(cat "$TMP/held-open.rc")" "0"
 assert_eq "$(grep -ac 'LATE-LINE' "$TMP/view-log/held/latest-debate/stream-gen.log")" "1"
+
+cmp "$ROOT/ralph-trio/lib/stage-result.sh" "$ROOT/spec-trio/lib/stage-result.sh"
+PASS=$((PASS + 1))
 
 cmp "$ROOT/dev-trio/lib/registry.sh" "$ROOT/debate-conductor/lib/registry.sh"
 PASS=$((PASS + 1))

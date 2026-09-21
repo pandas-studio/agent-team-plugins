@@ -1,6 +1,6 @@
 {
   "name": "debate-conductor",
-  "version": "0.5.18",
+  "version": "0.5.20",
   "description": "Claude conducts a Generator-vs-Critic adversarial debate over N rounds (or until convergence), with a configurable model registry (swap roles to any CLI). Three-pane tmux view: left=Claude PM, middle=Generator transcript, right=Critic transcript. Skills: bootstrap, run, continue, install-pm.",
   "author": { "name": "pandas-studio" },
   "homepage": "https://github.com/pandas-studio/agent-team-plugins/tree/main/debate-conductor",

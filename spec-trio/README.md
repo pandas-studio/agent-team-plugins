@@ -27,6 +27,37 @@ CODER_CLI=...                    # override coder only
 
 `ask-reviewer.sh` also honors `CODEX_CLI` / `REVIEWER_CLI` (set inside dev-trio) for stubbing the reviewer.
 
+### Planner and coder success
+
+Planner and coder CLI overrides keep the same `-p PROMPT` interface. Each
+stage retains its diagnostic `.log` and adds a `.stdout.log` containing only
+stdout. Plans, allowed paths, and planner research requests are read only from
+stdout; stderr guidance is never a plan.
+
+A planner must exit 0 and produce non-whitespace stdout. A coder must exit 0
+and either produce non-whitespace stdout or change repository file content
+during that invocation. Silent edits are valid; an already-satisfied task must
+print a summary. Existing dirty files, empty commits, and harness bookkeeping
+(the configured workspace’s `log/` and `state/` subdirectories, `.claude/`,
+other trio state, backlog, and fix-plan files) are not new work. Setting the
+workspace root to the repository itself does not exclude implementation files.
+These evidence exclusions do not exempt CLI state such as `.claude/` from the
+planner allowlist or strict scope checks. Scope checks retain their existing
+Git visibility rules: ignored untracked files are not inspected, while tracked
+changes remain subject to the allowlist.
+New files ignored by repository or global Git ignore rules are also excluded;
+tracked files remain eligible. Outside Git, a
+coder must print a summary. This checks presence of evidence, not the truth of
+a summary; normal tests and review still apply.
+
+Both the initial coder and research retry must pass this gate before review
+or SHIP, including `--autoship`. Failed calls retain the existing retry/backlog
+and worktree handling. A CLI failure keeps its original status; an otherwise
+successful call without evidence has stage rc 5, and capture/inspection failure
+has stage rc 6. Manifests separately record `cli-rc`, `stage-rc`,
+`stage-evidence`, and `stdout-log`. Success snapshots are per invocation;
+cumulative review and scope baselines are unchanged.
+
 ### Model configuration
 
 The reviewer (`ask-reviewer.sh`) and researcher (`ask-researcher.sh`) come from the **dev-trio** plugin, which resolves each role through a shared, configurable model registry (`agent-team-models`). spec-trio inherits that resolution unchanged — point the reviewer or researcher at a different CLI globally with `agent-team-models set-role`, or per-run with dev-trio's `*_MODEL` env vars. See dev-trio's README for the registry reference.
@@ -196,6 +227,66 @@ bash $PLUGIN_ROOT/tests/smoke-pr5.sh
 ```
 
 The smoke auto-discovers a sibling `dev-trio` plugin checkout and prepends its `bin/` to PATH; you don't need dev-trio installed if you're in a sibling-checkout layout.
+
+## Verification tests
+
+From the repository root, run `python3 spec-trio/tests/test_verification.py` for
+model-free driver verification, or `bash scripts/check.sh` for the full sequential
+check suite. Verification replaces external model CLIs with local fixtures.
+
+The verification harness allows 120 seconds per driver invocation, 60 seconds
+for readiness waits, 30 seconds for interrupt shutdown, and 10 seconds for
+process teardown checks, including reaping and process-status polling. Slow or
+busy machines can multiply all four limits with a test-only environment variable:
+
+```bash
+SPEC_TRIO_TEST_TIMEOUT_SCALE=2 python3 spec-trio/tests/test_verification.py
+SPEC_TRIO_TEST_TIMEOUT_SCALE=2 bash scripts/check.sh
+```
+
+The default multiplier is `1`; the minimum is `0.1`. The accepted grammar is
+`[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?`, matching the entire value. Use ASCII
+digits with no leading sign and at least one digit on each side of a decimal
+point, if present. Scientific notation permits a sign on the exponent: `0.5`,
+`2e0`, `1e+1`, and `1e-1` are valid examples. Leading zeros are allowed.
+Whitespace, underscores, empty values, non-ASCII digits, leading signs (such as
+`+1`), `.5`, and `1.` are invalid. The value must be at least `0.1`, and all
+scaled timeouts must be finite.
+
+Direct execution, unittest import/discovery, and `check.sh` validate this setting
+before running test fixtures (discovery reports invalid settings as a module
+loading error). `python3 spec-trio/tests/test_verification.py --check-config`
+validates the setting alone. This setting applies only to the spec verification
+harness, not to the driver's `--max-runtime`, other suites, or the controlled
+clock used to test runtime caps. Tests still finish as soon as their work
+completes; the limits add no delay.
+
+Timeout and readiness failures report the test, phase, command, effective limit,
+and the first/last 4 KiB of each captured stream, with omitted byte counts.
+Successful results retain the full output. Supervisor internal failures are
+reported separately from driver exit codes, with their traceback in captured
+stderr and `returncode=None` when no driver result is available. A genuine driver
+exit code `125` remains `125`.
+
+Each invocation keeps a supervisor alive as its process-group leader until
+cleanup has signalled the group, then reaps it. This prevents a recycled PID
+from receiving a later cleanup signal, including when the driver exits before
+its children. A separate ownership pipe lets the supervisor terminate its
+group if the test runner is forcibly killed, both during driver execution and
+after driver completion.
+
+Cleanup always attempts to close both control descriptors. If the initial reap
+fails, the resulting owner EOF triggers supervisor termination before one final
+bounded collection attempt, without signalling the group again. An unconditional
+context-exit close also preserves owner EOF if cleanup is interrupted. Each
+attempt uses the scaled 10-second cleanup budget (at most 20 seconds times the
+scale across both waits). Both control descriptors are attempted even if a
+close fails. Cleanup errors fail an otherwise successful test; when a test
+already failed, they are reported without replacing its original exception.
+
+Child stdin is `/dev/null` (reads return EOF). Fixture Git and standalone
+coverage commands also use the scaled execution limit.
+Interrupt fixtures wait for a signal instead of expiring after a fixed sleep.
 
 ## Architecture
 

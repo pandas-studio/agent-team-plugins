@@ -22,6 +22,8 @@ If `$RALPH_WT_DIR` is set, you are inside a throwaway worktree on a per-iteratio
 
 ## Output expectations
 
+- Exit successfully only after completing this attempt. If no implementation content changes (for example, the task is already satisfied), print a non-empty summary to stdout. The driver requires exit 0 plus stdout or new repository content; stderr and bookkeeping alone are not success.
+
 - Use `git status` / `git diff` / file edits / test runs as your workflow. The harness streams your output to `log/<TEAM>/ralph-<variant>-<TS>-iter-<N>.log` for the dashboard.
 - End each iteration by ensuring `fix_plan.md` has a fresh entry. If you believe the mission is complete (every criterion in `PROMPT.md` is met), append `<promise>COMPLETE</promise>` on its own line in `fix_plan.md`.
 

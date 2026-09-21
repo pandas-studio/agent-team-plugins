@@ -107,7 +107,13 @@ The reviewer's final structured review is written to `<TS>.final.md` natively wh
 
 The result contains `schema_version: 1`, `profile`, `status`, `invocation_rc`, `exit_code`, `error`, `verdict`, `verdict_line`, and `findings` (`blocker`, `major`, `minor` arrays). Missing findings sections are `null` (unknown); empty sections are empty arrays. A successful review accepts one unfenced `## Verdict` immediately followed by `TOKEN — reason` or `TOKEN. reason`, with `TOKEN` in `SHIP`, `NEEDS-FIX`, `DISCUSS`. Duplicate headings, unclosed/unsupported code fences, missing/empty native finals, and unknown verdicts fail parsing. Raw logs and earlier runs never supply a fallback verdict.
 
-A parsed review exits **0**, including `NEEDS-FIX` or `DISCUSS`; inspect `verdict` to decide the next action. A parse failure after a successful invocation exits **3** (`status: "parse-failed"`). An invocation failure preserves its original nonzero exit code (`status: "invocation-failed"`). Both failure statuses leave `verdict: null`. `error` explains the failure. The reviewer requests `- None.` for empty sections in every language; the parser also accepts exact `- none` (case-insensitive, optional period) and Korean `- 없음` / `- 없음.`. Other short bullets remain findings.
+A parsed review exits **0**, including `NEEDS-FIX` or `DISCUSS`; inspect `verdict` to decide the next action. A parse failure after a successful invocation exits **3** (`status: "parse-failed"`). An invocation failure preserves its original nonzero exit code (`status: "invocation-failed"`). Both failure statuses leave `verdict: null`. `error` explains the failure. The reviewer requests `- None.` for empty sections in every language; the parser also accepts `- none` (case-insensitive, optional period) and Korean `- 없음` / `- 없음.`, allowing trailing whitespace on these markers. Other short bullets remain findings, with their text and whitespace preserved.
+
+An empty marker and finding bullets in the same severity are contradictory, in either order and even across repeated headings. This fails parsing with an error naming the severity; the verdict and all finding arrays become `null`, and the dashboard reports the failure without counts. Put resolved-finding explanations and positive evidence under `## What I checked`, outside the Findings sections. The final Markdown is preserved unchanged. A `SHIP` verdict alone never clears finding arrays.
+
+The structured findings format uses `- ` bullets at column 0. List items with text, including `None.` empty markers, fail parsing if indented 1–3 spaces or written with `*`, `+`, numbered markers (`1.` / `1)`), or a tab instead of the space after `-`. This avoids silently dropping findings or counting nested details as separate findings. List items containing only whitespace are ignored. Quoted, fenced, and four-space/tab-indented code examples remain excluded. Other prose is not parsed as findings; this is a structured review format, not a general Markdown parser.
+
+Bullets indented four or more spaces or a leading tab are treated as code and contribute no findings; an otherwise-empty, present severity section therefore reports **0**, not unknown. Numbered-list syntax also includes sentences such as `2024. The year was …` inside a findings section; put that contextual prose under `## What I checked` instead.
 
 **Loop callers.** ralph-trio and spec-trio reserve a fresh absolute receipt file for each review and re-review, and pass it as `DEV_TRIO_REVIEW_RECEIPT`. The wrapper atomically writes `{schema_version: 1, result_path, final_path}` after publishing its result. Callers load that result with the shared reader, bind its exit code to the actual wrapper exit code, and link it into their parent manifest. Receipts are retained beside the logs as per-dispatch audit artifacts. They use the exact final only for supporting text and research requests. Missing receipts or failed reviews never fall back to `latest` links or a second Markdown verdict parser.
 
@@ -302,6 +308,26 @@ run is live and is written for nested dispatches too.
 Research completion reasons are `ok` for exit 0, `failed` for a nonzero return,
 and `aborted` for the EXIT-trap backstop. `failed` records the outcome, not a
 diagnosis of permission denial.
+
+Both wrappers append a final `=== END (rc=...) ===` log marker on a best-effort
+basis. If that append fails, they warn on stderr and preserve the resolved
+exit code and completion metadata; a published review keeps its verdict.
+Required result, receipt and manifest publication failures still fail the run.
+The dashboard uses `.run.json` for completion, so a missing END marker does not
+leave a completed run looking live. Legacy logs without run metadata continue
+to show completion as unavailable. This policy covers the final append;
+logging failures during model execution retain their existing behavior.
+
+[ralph-trio's `ralph-meta.sh`](../ralph-trio/bin/ralph-meta.sh) also uses END to
+bound its raw-log fallback when no usable `.final.md` exists. Without END, that
+fallback reads through EOF and can include
+late output from a descendant of the model CLI. It is raw diagnostic text;
+use the invocation's final/result artifacts for the authoritative review.
+
+This final-append policy is specific to dev-trio. The
+[debate-conductor role wrappers](../debate-conductor/README.md#logs) treat a
+failed END append as a logging failure: a successful model run becomes rc=6,
+while an already nonzero model exit code is preserved.
 
 **Reviewer transcript.** The reviewer CLI writes straight into
 `codex-<TS>-<PID>.log` on a descriptor, which `tail -F` follows as the review is

@@ -23,10 +23,10 @@
 # headers into colored round banners. Round files stay clean markdown and are
 # not followed.
 #
-# Multi-debate handling: a new debate retargets the `latest-debate` symlink.
-# The controller resolves the symlink to the physical debate directory and tails
-# that directory's stream, so only the controller switches debates: it polls
-# the symlink, stops the pipeline, then starts one on the new directory.
+# Multi-debate handling: latest-debate.json pairs a physical directory with a
+# team-wide selection sequence. Polling that snapshot detects even A -> B -> A
+# between polls. Missing intermediate selections are reported, not replayed.
+# A return to the same directory keeps the existing follower and its offset.
 #
 # A debate created before streams existed has round files but no stream. The
 # pane says so once and shows new rounds after the debate is continued.
@@ -38,6 +38,8 @@ set -m  # job control: each backgrounded pipeline gets its own process group
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../lib/namespace.sh
 . "$SCRIPT_DIR/../lib/namespace.sh" || exit 2
+# shellcheck source=../lib/selection.sh
+. "$SCRIPT_DIR/../lib/selection.sh" || exit 2
 
 ROLE="${1:-}"
 case "$ROLE" in
@@ -48,7 +50,6 @@ esac
 TEAM=$(agent_team_detect_team) || exit 2
 LOG_BASE="${DEBATE_LOG_DIR:-$PWD/.debate-conductor/log}"
 LOG_DIR="$LOG_BASE/$TEAM"
-LATEST="$LOG_DIR/latest-debate"
 
 # ANSI color setup
 RESET=$'\033[0m'
@@ -132,13 +133,80 @@ stop_pipeline() {
   PIPE_PG=""
 }
 
-# current_debate: physical directory latest-debate resolves to, or empty.
-current_debate() {
-  (cd "$LATEST" 2>/dev/null && pwd -P) || true
+DIR=""
+SEQUENCE=""
+PAUSED=0
+JQ_NOTED=0
+MISSING_NOTED=""
+
+selection_fault() {
+  stop_pipeline
+  printf '\n%s── selection state invalid (%s) — repair latest-debate.json and restart this pane ──%s\n' "$YELLOW" "$1" "$RESET"
+  exit 0
+}
+
+# Called in this shell, not a command substitution: preserve the exact
+# observed sequence across both waiting-for-stream and active-follower loops.
+observe_selection() {
+  local rc=0 delta=0 missed=0 noun="selections" action="continuing current stream"
+  debate_selection_read "$LOG_DIR" || rc=$?
+  [ "$rc" != 2 ] || return 0
+  if [ "$rc" = 3 ]; then
+    if [ "$JQ_NOTED" = 0 ]; then
+      printf '\n%s── jq unavailable or failed — restore jq; selection polling will retry ──%s\n' "$YELLOW" "$RESET"
+      JQ_NOTED=1
+    fi
+    return 0
+  fi
+  JQ_NOTED=0
+  [ "$rc" = 0 ] || selection_fault 'unreadable or malformed snapshot'
+  if [ -n "$SEQUENCE" ]; then
+    [ -n "$SELECTION_SEQ" ] || selection_fault 'sequence disappeared'
+    [ "$SELECTION_SEQ" -ge "$SEQUENCE" ] || selection_fault 'sequence moved backwards'
+    delta=$((SELECTION_SEQ - SEQUENCE))
+    if { [ "$delta" = 0 ] && [ "$SELECTION_DIR" != "$DIR" ]; } \
+       || { [ "$delta" = 1 ] && [ "$SELECTION_DIR" = "$DIR" ]; }; then
+      selection_fault 'sequence and directory disagree'
+    fi
+    if [ "$delta" -gt 1 ]; then missed=$((delta - 1)); fi
+  fi
+  [ "$missed" != 1 ] || noun="selection"
+  [ -n "$SELECTION_DIR" ] || return 0
+  if [ -n "$DIR" ] && [ "$SELECTION_DIR" != "$DIR" ]; then
+    # Nothing from the old stream may print after the switch notice.
+    stop_pipeline
+    if [ "$missed" -gt 0 ]; then
+      printf '\n%s── missed %s intermediate debate %s — following latest ──%s\n\n' "$YELLOW" "$missed" "$noun" "$RESET"
+    else
+      printf '\n%s── new debate run detected — following it ──%s\n\n' "$DIM" "$RESET"
+    fi
+  elif [ "$missed" -gt 0 ]; then
+    # Keep the tail's offset on A -> B -> A; restarting with -n +1 would replay
+    # A. Suspend output for the notice and preserve a user's paused state.
+    if [ -n "$PIPE_PG" ]; then
+      kill -STOP -- "-$PIPE_PG" 2>/dev/null || true
+    fi
+    [ -n "$PIPE_PG" ] || action="waiting for current stream"
+    printf '\n%s── missed %s intermediate debate %s — %s ──%s\n\n' "$YELLOW" "$missed" "$noun" "$action" "$RESET"
+    if [ -n "$PIPE_PG" ] && [ "$PAUSED" = 0 ]; then
+      kill -CONT -- "-$PIPE_PG" 2>/dev/null || true
+    fi
+  fi
+  DIR="$SELECTION_DIR"
+  SEQUENCE="$SELECTION_SEQ"
+  if [ ! -d "$DIR" ]; then
+    stop_pipeline
+    if [ "$MISSING_NOTED" != "$DIR" ]; then
+      printf '\n%s── selected debate directory missing — waiting for it or another selection: %s ──%s\n' "$YELLOW" "$DIR" "$RESET"
+      MISSING_NOTED="$DIR"
+    fi
+  else
+    MISSING_NOTED=""
+  fi
 }
 
 while true; do
-  DIR="$(current_debate)"
+  observe_selection
   if [ -z "$DIR" ]; then sleep 1; continue; fi
   STREAM="$DIR/stream-$ROLE.log"
   if [ ! -f "$STREAM" ]; then
@@ -264,11 +332,9 @@ while true; do
 
     # A new debate: stop following this one before saying so, so nothing from
     # the old pipeline can print after the notice.
-    NOW="$(current_debate)"
-    if [ -n "$NOW" ] && [ "$NOW" != "$DIR" ]; then
-      stop_pipeline
+    observe_selection
+    if [ -z "$PIPE_PG" ]; then
       RETARGETED=1
-      printf '\n%s── new debate run detected — following it ──%s\n\n' "$DIM" "$RESET"
       break
     fi
   done

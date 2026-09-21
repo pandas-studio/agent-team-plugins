@@ -3,6 +3,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Reject invalid harness settings before spending time on unrelated suites.
+SPEC_VERIFICATION_TEST="$ROOT/spec-trio/tests/test_verification.py"
+if [ ! -f "$SPEC_VERIFICATION_TEST" ]; then
+  echo "spec-trio verification harness missing: $SPEC_VERIFICATION_TEST" >&2
+  exit 2
+fi
+python3 "$SPEC_VERIFICATION_TEST" --check-config
+
 find_sources() {
   find "$ROOT" -type f -name "$1" -not -path '*/.venv/*' -not -path '*/.git/*' | sort
 }
@@ -28,7 +36,7 @@ python3 -m unittest discover -s "$ROOT/tests" -p 'test_*.py'
 "$ROOT/tests/smoke-review-results.sh"
 "$ROOT/tests/smoke-review-callers.sh"
 "$ROOT/spec-trio/tests/smoke-pr5.sh"
-python3 "$ROOT/spec-trio/tests/test_verification.py"
+python3 "$SPEC_VERIFICATION_TEST"
 
 if [ -x "$ROOT/runtime/.venv/bin/pytest" ]; then
   "$ROOT/runtime/.venv/bin/ruff" check "$ROOT/runtime/src" "$ROOT/runtime/tests"

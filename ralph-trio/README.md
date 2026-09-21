@@ -29,6 +29,33 @@ WORKER_CLI=...                  # overrides for solo's single stage
 
 The trio reviewer and re-reviewer require dev-trio 0.4.3 or newer. Each dispatch returns a fresh receipt identifying its exact `.review.json` and `.final.md`. The parent manifest links the JSON and uses its verdict; `latest` artifacts and legacy `Verdict:` prose are not parsed. Malformed reviews (including blank lines before the token, bold tokens, or hyphen/colon separators) deliberately become UNKNOWN. Update both plugins together.
 
+### Planner and coder success
+
+Planner and coder CLI overrides keep the same `-p PROMPT` interface. Each
+stage retains its diagnostic `.log` and adds a `.stdout.log` containing only
+stdout. Plans, allowed paths, and planner research requests are read only from
+stdout; stderr guidance is never a plan.
+
+A planner must exit 0 and produce non-whitespace stdout. A coder must exit 0
+and either produce non-whitespace stdout or change repository file content
+during that invocation. Silent edits are valid; an already-satisfied task must
+print a summary. Existing dirty files, empty commits, and harness bookkeeping
+(the configured workspace’s `log/` and `state/` subdirectories, `.claude/`,
+other trio state, backlog, and fix-plan files) are not new work. Setting the
+workspace root to the repository itself does not exclude implementation files.
+New files ignored by repository or global Git ignore rules are also excluded;
+tracked files remain eligible. Outside Git, a
+coder must print a summary. This checks presence of evidence, not the truth of
+a summary; normal tests and review still apply.
+
+Both the initial coder and research retry must pass this gate before review
+or SHIP, including `--autoship`. Failed calls retain the existing retry/backlog
+and worktree handling. A CLI failure keeps its original status; an otherwise
+successful call without evidence has stage rc 5, and capture/inspection failure
+has stage rc 6. Manifests separately record `cli-rc`, `stage-rc`,
+`stage-evidence`, and `stdout-log`. Success snapshots are per invocation;
+cumulative review and scope baselines are unchanged.
+
 ## Install
 
 ```
