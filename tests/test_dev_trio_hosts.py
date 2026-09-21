@@ -15,6 +15,11 @@ import unittest
 
 PLUGIN = Path(__file__).resolve().parents[1] / "dev-trio"
 REVIEW = "## Verdict\nSHIP — inspected fixture\n\n## Findings\n### Blocker\n- none\n"
+DEFAULT_FOCUS = (
+    "Review the full working-tree state in this repo (see role instructions for the "
+    "inspection checklist — start with `git status --short`, then cover both tracked "
+    "diffs AND untracked files)."
+)
 
 
 class HostTests(unittest.TestCase):
@@ -74,6 +79,24 @@ class HostTests(unittest.TestCase):
         self.assertEqual(len(manifests), 1)
         self.assertEqual(json.loads(manifests[0].read_text())["roles"][0]["model"], model)
 
+    def fenced(self, prompt, tag):
+        """The exact text a wrapper placed between its own <tag> fences."""
+        opener, closer = f"\n<{tag}>\n", f"\n</{tag}>"
+        self.assertEqual(prompt.count(opener), 1, prompt)
+        start = prompt.index(opener) + len(opener)
+        return prompt[start:prompt.index(closer, start)]
+
+    def sent_prompt(self):
+        calls = [c for c in self.recorded() if c != ["auth", "status", "--json"]]
+        self.assertEqual(len(calls), 1, calls)
+        return calls[0][-1]
+
+    def assert_untouched(self, result, rc):
+        """Exited before any CLI (auth probe included) and before any artifact."""
+        self.assertEqual(result.returncode, rc, result.stderr)
+        self.assertEqual(self.recorded(), [])
+        self.assertFalse((self.workspace / ".dev-trio").exists())
+
     def assert_no_inference(self, result):
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertTrue(all(call == ["auth", "status", "--json"] for call in self.recorded()))
@@ -84,6 +107,7 @@ class HostTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.recorded()[0][0], "exec")
         self.assert_model("codex")
+        self.assertEqual(self.fenced(self.sent_prompt(), "review_target"), DEFAULT_FOCUS)
 
     def test_codex_pm_uses_claude_and_produces_final_artifact(self):
         evidence, spec = self.workspace / "research notes.md", self.workspace / "contract spec.md"
@@ -97,8 +121,9 @@ class HostTests(unittest.TestCase):
         self.assertEqual(auth, ["auth", "status", "--json"])
         self.assertEqual(review[0], "-p")
         self.assertEqual(len(review), 2)
-        for text in (focus, "source-backed finding", "retain §1"):
-            self.assertIn(text, review[1])
+        self.assertEqual(self.fenced(review[1], "review_target"), focus)
+        self.assertEqual(self.fenced(review[1], "research_context"), "source-backed finding")
+        self.assertEqual(self.fenced(review[1], "spec"), "retain §1")
         self.assertFalse((self.workspace / "BAD").exists())
         self.assertFalse((self.workspace / "BAD2").exists())
         self.assert_model("claude")
@@ -127,6 +152,165 @@ class HostTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("context file not found", result.stderr)
         self.assertEqual(self.recorded(), [])
+
+    # --- #93: arguments are parsed before anything runs --------------------
+
+    def test_reviewer_help_runs_nothing(self):
+        for flag in ("-h", "--help"):
+            with self.subTest(flag=flag):
+                self.reset_run_state()
+                result = self.run_cli("ask-reviewer.sh", flag)
+                self.assert_untouched(result, 0)
+                self.assertEqual(result.stdout.splitlines()[0],
+                                 'Usage: ask-reviewer.sh [options] ["focus or scope"]')
+                self.assertEqual(result.stderr, "")
+
+    def reset_run_state(self, config='{"models":{},"roles":{}}'):
+        self.config.write_text(config)
+        shutil.rmtree(self.workspace / ".dev-trio", ignore_errors=True)
+        self.calls.unlink(missing_ok=True)
+
+    def assert_help_without(self, script, config, env, breaks_a_run=True):
+        """--help succeeds with one dependency broken, and prints nothing on stderr."""
+        self.reset_run_state(config)
+        try:
+            result = self.run_cli(script, "--help", **env)
+            self.assert_untouched(result, 0)
+            self.assertEqual(result.stderr, "")
+            if breaks_a_run:
+                # The same setup does stop an ordinary run: the case is really broken.
+                self.assertEqual(self.run_cli(script, "q", **env).returncode, 2)
+        finally:
+            self.reset_run_state()
+
+    def test_reviewer_help_does_not_depend_on_setup(self):
+        # One broken dependency per case, so an earlier check cannot mask a later one.
+        ok = '{"models":{},"roles":{}}'
+        cases = {
+            "role file": (ok, dict(REVIEWER_ROLE_FILE="/nonexistent/reviewer.md"), True),
+            "model": (ok, dict(DEV_TRIO_REVIEWER_MODEL="bogus"), True),
+            "host": (ok, dict(DEV_TRIO_PM_HOST="invalid"), True),
+            "role binding": ('{"roles":{"dev-trio.reviewer":"ghost"}}', {}, True),
+            # Ignored with a warning by the registry; help must not even load it.
+            "invalid json": ("{not json", {}, False),
+        }
+        for name, (config, env, fails) in cases.items():
+            with self.subTest(broken=name):
+                self.assert_help_without("ask-reviewer.sh", config, env, breaks_a_run=fails)
+
+    def test_reviewer_unknown_option_is_a_usage_error(self):
+        for token in ("--hlep", "-x", "-help", "--no_memories", "--with_spec=x",
+                      "--with-spce=a b"):
+            with self.subTest(token=token):
+                self.reset_run_state()
+                result = self.run_cli("ask-reviewer.sh", token)
+                self.assert_untouched(result, 2)
+                self.assertEqual(result.stderr.splitlines(),
+                                 [f"error: unknown option: {token}",
+                                  "Try 'ask-reviewer.sh --help'."])
+
+    def test_reviewer_option_without_value_is_a_usage_error(self):
+        for flag in ("--with-research", "--with-spec", "--with-context"):
+            for args in ((flag,), (flag, ""), ("focus", flag)):
+                with self.subTest(args=args):
+                    self.reset_run_state()
+                    result = self.run_cli("ask-reviewer.sh", *args)
+                    self.assert_untouched(result, 2)
+                    self.assertEqual(result.stderr.splitlines()[0],
+                                     f"error: {flag} requires a file path")
+
+    def test_reviewer_rejects_a_second_positional(self):
+        for args in (("a", "--", "b"), ("--", "a", "b"), ("", "b"), ("a", "b")):
+            with self.subTest(args=args):
+                self.reset_run_state()
+                result = self.run_cli("ask-reviewer.sh", *args)
+                self.assert_untouched(result, 2)
+                self.assertEqual(result.stderr.splitlines()[0],
+                                 "error: unexpected extra positional argument: b")
+
+    def test_reviewer_focus_that_starts_with_a_dash(self):
+        cases = [(("--", "--help"), "--help"), (("--", "-x"), "-x"),
+                 (("- bullet",), "- bullet"), (("-What is X?",), "-What is X?"),
+                 (("--- x",), "--- x"), (("--hlep ",), "--hlep "),
+                 (("- a\n- b", "--no-memories"), "- a\n- b")]
+        for args, focus in cases:
+            with self.subTest(args=args):
+                self.reset_run_state()
+                result = self.run_cli("ask-reviewer.sh", *args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.fenced(self.sent_prompt(), "review_target"), focus)
+
+    def test_reviewer_empty_focus_is_the_default_scope(self):
+        for args in ((), ("--",), ("",), ("--", "")):
+            with self.subTest(args=args):
+                self.reset_run_state()
+                result = self.run_cli("ask-reviewer.sh", *args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.fenced(self.sent_prompt(), "review_target"), DEFAULT_FOCUS)
+
+    def test_researcher_help_runs_nothing(self):
+        for flag in ("-h", "--help"):
+            with self.subTest(flag=flag):
+                self.reset_run_state()
+                result = self.run_cli("ask-researcher.sh", flag)
+                self.assert_untouched(result, 0)
+                self.assertEqual(result.stdout.splitlines()[0],
+                                 'Usage: ask-researcher.sh "research question"')
+
+    def test_researcher_help_does_not_depend_on_setup(self):
+        ok = '{"models":{},"roles":{}}'
+        cases = {
+            "model": (ok, dict(DEV_TRIO_RESEARCHER_MODEL="bogus")),
+            "host": (ok, dict(DEV_TRIO_PM_HOST="invalid")),
+            "role binding": ('{"roles":{"dev-trio.researcher":"ghost"}}', {}),
+        }
+        for name, (config, env) in cases.items():
+            with self.subTest(broken=name):
+                self.assert_help_without("ask-researcher.sh", config, env)
+        with self.subTest(broken="invalid json"):
+            self.assert_help_without("ask-researcher.sh", "{not json", {}, breaks_a_run=False)
+        role = self.plugin / "lib/roles/researcher.md"
+        saved = role.read_bytes()
+        role.unlink()
+        with self.subTest(broken="role file"):
+            self.reset_run_state()
+            try:
+                result = self.run_cli("ask-researcher.sh", "--help")
+                self.assert_untouched(result, 0)
+                # Without the role file an ordinary run stops before any CLI.
+                ordinary = self.run_cli("ask-researcher.sh", "q")
+                self.assertNotEqual(ordinary.returncode, 0)
+                self.assertEqual(self.recorded(), [])
+            finally:
+                role.write_bytes(saved)
+                self.reset_run_state()
+
+    def test_researcher_usage_errors_run_nothing(self):
+        cases = [(("--bogus",), "error: unknown option: --bogus"),
+                 (("-help",), "error: unknown option: -help"),
+                 ((), "error: a research question is required"),
+                 (("--",), "error: a research question is required"),
+                 (("a", "b"), "error: unexpected extra positional argument: b"),
+                 (("", "b"), "error: unexpected extra positional argument: b"),
+                 (("--", "a", "b"), "error: unexpected extra positional argument: b")]
+        for args, error in cases:
+            with self.subTest(args=args):
+                self.reset_run_state()
+                result = self.run_cli("ask-researcher.sh", *args)
+                self.assert_untouched(result, 2)
+                self.assertEqual(result.stderr.splitlines(),
+                                 [error, "Try 'ask-researcher.sh --help'."])
+
+    def test_researcher_question_reaches_the_model_verbatim(self):
+        cases = [(("--", "--help"), "--help"), (("-What is X?",), "-What is X?"),
+                 (("- a\n- b",), "- a\n- b"), (("--hlep ",), "--hlep "),
+                 (("",), ""), (("--", ""), "")]
+        for args, question in cases:
+            with self.subTest(args=args):
+                self.reset_run_state()
+                result = self.run_cli("ask-researcher.sh", *args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.fenced(self.sent_prompt(), "user_question"), question)
 
     def test_config_overrides_codex_host_default(self):
         self.config.write_text('{"roles":{"dev-trio.reviewer":"codex"}}')

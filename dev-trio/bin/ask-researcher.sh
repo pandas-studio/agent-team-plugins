@@ -4,6 +4,13 @@
 # Usage:
 #   ask-researcher.sh "research question"
 #   echo "extra context" | ask-researcher.sh "research question"
+#   ask-researcher.sh -- "-literal question"     # question that looks like an option
+#   ask-researcher.sh -h | --help                # usage; runs nothing, exit 0
+#
+# Arguments are parsed before anything is loaded, so --help and a mistyped
+# option (exit 2) never reach a model. Only a token shaped like an option —
+# -name or --name[=value], name = letter then [A-Za-z0-9_-] — is one; a
+# NEED RESEARCH body that starts with "- " is still a question.
 #
 # Output goes to stdout AND $PWD/.dev-trio/log/<team>/agy-<TS>-<PID>.log.
 # The answer alone is also written to the sibling agy-<TS>-<PID>.final.md by
@@ -25,6 +32,75 @@
 # is not covered — the header write above still aborts the wrapper under
 # errexit, as it did before this change.
 set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: ask-researcher.sh "research question"
+       ask-researcher.sh -- "research question"
+       echo "extra context" | ask-researcher.sh "research question"
+
+Runs the researcher model on one question; stdin, when given, is extra context.
+
+Options:
+  --          end of options: the one argument after it is the question, even
+              if it starts with a dash
+  -h, --help  show this help and exit
+
+A token like -name or --name[=value] is treated as an option; an unknown one
+exits 2. Prose that starts with a dash ("- item", "-What is X?") is a question.
+A one-word question shaped like an option (-foo) needs --. Known gap: a mistyped
+option with trailing whitespace ("--hlep ") is not option-shaped and becomes
+the question.
+
+Environment:
+  DEV_TRIO_RESEARCHER_MODEL  researcher model (over config role binding and default)
+  DEV_TRIO_LOG_DIR           log root (default: $PWD/.dev-trio/log)
+
+Exit: the model's own code; 2 usage or setup error; 5 no answer; 6 answer not
+captured.
+EOF
+}
+
+usage_error() {
+  echo "error: $1" >&2
+  echo "Try 'ask-researcher.sh --help'." >&2
+  exit 2
+}
+
+# -name or --name[=value], where name is a letter then [A-Za-z0-9_-]. Anything
+# else — including prose that merely starts with a dash — is a positional.
+is_option_shaped() {
+  _opt_name="${1%%=*}"
+  case "$_opt_name" in
+    --[A-Za-z]*) _opt_name="${_opt_name#--}" ;;
+    -[A-Za-z]*)  _opt_name="${_opt_name#-}" ;;
+    *) return 1 ;;
+  esac
+  case "$_opt_name" in *[!A-Za-z0-9_-]*) return 1 ;; esac
+  return 0
+}
+
+QUERY=""
+POSITIONAL_SEEN=0
+take_positional() {
+  [ "$POSITIONAL_SEEN" -eq 0 ] || usage_error "unexpected extra positional argument: $1"
+  POSITIONAL_SEEN=1
+  QUERY="$1"
+}
+# Parsed before any library, host or model is touched, so --help and a usage
+# error depend on nothing and start nothing.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --) shift
+        while [ $# -gt 0 ]; do take_positional "$1"; shift; done ;;
+    *)
+      ! is_option_shaped "$1" || usage_error "unknown option: $1"
+      take_positional "$1"; shift ;;
+  esac
+done
+# An empty question is passed through, as it always has been; a missing one is not.
+[ "$POSITIONAL_SEEN" -eq 1 ] || usage_error "a research question is required"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -90,12 +166,6 @@ registry_model_exists "$RESEARCHER_MODEL" || { echo "ask-researcher: researcher 
 TEAM=$(agent_team_detect_team) || exit 2
 LOG_DIR="${DEV_TRIO_LOG_DIR:-$PWD/.dev-trio/log}/$TEAM"
 
-if [ "$#" -lt 1 ]; then
-  echo "usage: $0 \"research question\"  [stdin = optional context]" >&2
-  exit 2
-fi
-
-QUERY="$1"
 QUERY="${QUERY//<\/user_question>/[STRIPPED-CLOSING-TAG]}"
 ROLE="$(cat "$ROLE_FILE")"
 
