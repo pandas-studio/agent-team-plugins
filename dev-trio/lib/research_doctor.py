@@ -48,12 +48,21 @@ def check_settings(path: Path) -> bool:
     return True
 
 
+def report_checks(valid: bool) -> None:
+    status = "PASS" if valid else "FAIL"
+    outcome = "passed" if valid else "failed"
+    print(f"[{status}] Installation/config checks {outcome} (see warnings/skipped checks above).")
+    print("[NOT_CHECKED] Host execution: selected CLI startup under the current host policy.")
+    print("[NOT_CHECKED] Research permissions: effective tool grants and actual research access.")
+
+
 def check(model: str, binary: str, standard: bool, settings_path: Path) -> int:
     print(f"dev-trio research setup — model={model}")
     resolved = shutil.which(binary)
     if not resolved:
         print(f"[FAIL] Researcher executable not found: {binary}")
         print("Install/authenticate the selected CLI, or correct its existing model/CLI override.")
+        report_checks(False)
         return 1
     print(f"[ok] Researcher executable: {resolved}")
     valid = True
@@ -89,10 +98,7 @@ def check(model: str, binary: str, standard: bool, settings_path: Path) -> int:
     print("  Empty answer without a denial notice: cause unknown. rc=5 alone is not a permission diagnosis.")
     print("  After resolving the cause, explicitly rerun the original question and context through research.")
     print(f"Guide: {Path(__file__).resolve().parents[1] / 'README.md'}#research-troubleshooting")
-    if valid:
-        print("[ok] Setup checks passed; actual research permissions UNVERIFIED.")
-    else:
-        print("[FAIL] Setup checks failed; actual research permissions UNVERIFIED.")
+    report_checks(valid)
     return 0 if valid else 1
 
 

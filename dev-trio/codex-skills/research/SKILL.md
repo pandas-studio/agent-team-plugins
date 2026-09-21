@@ -9,7 +9,40 @@ Resolve the plugin root from this loaded file: two directories above this
 skill directory. The shared entry point is [ask-researcher.sh](../../bin/ask-researcher.sh).
 Do not assume the plugin added its bin directory to PATH.
 
-Run from the user's workspace, passing the question as one quoted argument:
+## Before dispatch: host execution permissions
+
+For the selected agy researcher, startup needs writes under
+`~/.gemini/antigravity-cli` (logs/crashes), a localhost listener, and external
+network access. These host resources are separate from agy's tool permissions.
+Use the current host's supplied sandbox/approval policy and restrictions already
+observed in this session; do not infer them from `rc=1` alone or from a passing
+doctor check.
+
+- If those resources are already permitted, use the normal execution path;
+  do not request escalation merely because the PM is Codex.
+- If a required resource is known to be blocked and the host supports approval,
+  request permission for this wrapper invocation before the first dispatch.
+  Explain the agy home writes, localhost listener and external network access.
+  Use the host's normal approval mechanism (for example, `require_escalated`
+  when offered), respecting existing grants; do not seek blanket/persistent
+  permission or change the host policy.
+- If a required resource is blocked and approval is unavailable or refused,
+  stop without invoking the researcher. Report the restriction. Do not switch
+  models, substitute another research tool, or bypass the restriction.
+- If the host restrictions are unknown, report that uncertainty and follow the
+  host's normal execution policy. Do not run a paid research call merely as a
+  probe or invent sandbox restrictions to justify escalation.
+
+Preserve explicit researcher/CLI overrides. For another researcher or a custom
+adapter, use its known requirements rather than assuming agy's startup needs.
+An unexpected startup failure follows the recovery section below and the host's
+permission policy; never silently retry. Approval to start agy does not grant
+`read_url`, shell-command or MCP access inside agy.
+
+## Run the research
+
+Run from the user's workspace under that host policy, passing the question as
+one quoted argument:
 
 ```bash
 DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/ask-researcher.sh" "<question>" </dev/null
