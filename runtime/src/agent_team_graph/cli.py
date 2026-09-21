@@ -7,6 +7,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shlex
 import sqlite3
 import stat
@@ -21,7 +22,15 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command, Overwrite
 
 from .artifacts import ArtifactStore, directory_fd
-from .graph import build_graph, initial_workspace_changes, resume_graph, validate_run_input
+from .graph import (
+    GATE_TIMEOUT_SECONDS,
+    ROLE_TIMEOUT_SECONDS,
+    build_graph,
+    initial_workspace_changes,
+    resume_graph,
+    validate_run_input,
+    validate_timeout,
+)
 from .process import Cancellation, signal_handlers
 from .registry import RegistryError, RoleRunner
 
@@ -31,6 +40,13 @@ def _common(parser: argparse.ArgumentParser) -> None:
         "--state-dir", type=Path, default=Path(".agent-team"),
         help="checkpoint directory relative to the invocation cwd (default: .agent-team)",
     )
+
+
+def _timeout(value: str) -> int:
+    try:
+        return validate_timeout(int(value), label="timeout")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -61,6 +77,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="fail the scope gate on .gitignore'd writes outside --allow-path too",
     )
+    run.add_argument("--role-timeout", type=_timeout, default=ROLE_TIMEOUT_SECONDS,
+                     metavar="SECONDS", help="per role call (default: %(default)s)")
+    run.add_argument("--gate-timeout", type=_timeout, default=GATE_TIMEOUT_SECONDS,
+                     metavar="SECONDS", help="per test command run (default: %(default)s)")
     run.add_argument("--thread-id")
     status = sub.add_parser("status", help="show checkpointed state")
     _common(status)
@@ -72,6 +92,10 @@ def build_parser() -> argparse.ArgumentParser:
     _common(approve)
     approve.add_argument("--thread-id", required=True)
     approve.add_argument("--decision", required=True, choices=("approve", "reject"))
+    approve.add_argument(
+        "--reviewed-digest", metavar="SHA256",
+        help="reviewed_change_sha256 from status; required with --decision approve",
+    )
     return parser
 
 
@@ -176,6 +200,7 @@ def _initial(args: argparse.Namespace, thread_id: str) -> dict[str, Any]:
         "test_command": shlex.split(args.test_command), "allowed_paths": args.allow_path,
         "operator_excluded_paths": args.exclude_path, "max_attempts": args.max_attempts,
         "strict_ignored": args.strict_ignored,
+        "role_timeout_seconds": args.role_timeout, "gate_timeout_seconds": args.gate_timeout,
         "repo_root": "", "spec_sha256": "", "base_sha": "", "excluded_paths": [],
         "execution_policy_version": 1, "attempt_start": "", "role_failed": False,
         "halted": False, "cancelled_signal": None,
@@ -183,6 +208,7 @@ def _initial(args: argparse.Namespace, thread_id: str) -> dict[str, Any]:
         "verdict": "", "approval": "", "status": "running",
         "gate_passed": False, "gate_feedback": "",
         "gated_change_sha256": None, "reviewed_change_sha256": None,
+        "approved_change_sha256": None,
         "artifacts": Overwrite([]), "usage": Overwrite([]), "errors": Overwrite([]),
     }
 
@@ -225,7 +251,22 @@ def _execute(args: argparse.Namespace, thread_id: str, state_dir: Path,
             if not view["awaiting_approval"]:
                 _print(view | {"error": "approve requires a ship-approval interrupt"})
                 return 2
-            payload = Command(resume=args.decision)
+            digest = args.reviewed_digest
+            if args.decision == "approve":
+                reviewed = view["reviewed_change_sha256"]
+                if not digest:
+                    _print(view | {"error": "approve requires --reviewed-digest; "
+                                   "pass reviewed_change_sha256 from status"})
+                    return 2
+                if not re.fullmatch(r"[a-f0-9]{64}", digest) or digest != reviewed:
+                    _print(view | {"error": f"--reviewed-digest {digest} is not the reviewed "
+                                   f"change set {reviewed}; re-read status before approving"})
+                    return 2
+            else:
+                # Rejecting is always safe; it must not depend on what the caller saw.
+                digest = None
+            payload = Command(resume={"decision": args.decision,
+                                      "reviewed_change_sha256": digest})
         elif view["awaiting_approval"]:
             _print(view | {"note": "use approve --decision approve or --decision reject"})
             return 3

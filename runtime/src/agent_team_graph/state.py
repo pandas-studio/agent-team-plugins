@@ -29,6 +29,8 @@ class GraphState(TypedDict, total=False):
     halted: bool
     cancelled_signal: int | None
     max_attempts: int
+    role_timeout_seconds: int
+    gate_timeout_seconds: int
     plan: str
     research: str
     code_report: str
@@ -38,6 +40,7 @@ class GraphState(TypedDict, total=False):
     gate_feedback: str
     gated_change_sha256: str | None
     reviewed_change_sha256: str | None
+    approved_change_sha256: str | None
     approval: str
     status: str
     artifacts: Annotated[list[dict[str, Any]], operator.add]

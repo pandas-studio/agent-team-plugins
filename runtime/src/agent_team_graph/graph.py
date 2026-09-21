@@ -28,6 +28,8 @@ from .registry import RegistryError, RoleResult, RoleRunner, usage_record
 from .state import GraphState
 
 GATE_TIMEOUT_SECONDS = 900
+ROLE_TIMEOUT_SECONDS = 900
+MAX_TIMEOUT_SECONDS = 86400
 SNAPSHOT_ERRORS = (OSError, ValueError)
 
 
@@ -459,6 +461,22 @@ def _gate_feedback(
     )
 
 
+def validate_timeout(value: Any, *, label: str) -> int:
+    # bool is an int subclass; True would silently mean one second.
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_TIMEOUT_SECONDS:
+        raise ValueError(f"{label} must be an integer between 1 and {MAX_TIMEOUT_SECONDS} seconds")
+    return value
+
+
+def run_timeouts(state: GraphState) -> dict[str, int]:
+    return {
+        "role_timeout_seconds": validate_timeout(
+            state.get("role_timeout_seconds", ROLE_TIMEOUT_SECONDS), label="role_timeout_seconds"),
+        "gate_timeout_seconds": validate_timeout(
+            state.get("gate_timeout_seconds", GATE_TIMEOUT_SECONDS), label="gate_timeout_seconds"),
+    }
+
+
 def validate_run_input(state: GraphState, runtime_root: Path) -> dict[str, Any]:
     """Validate before a CLI invocation updates an existing thread."""
     workspace = Path(state["workspace"]).expanduser().resolve()
@@ -493,6 +511,7 @@ def validate_run_input(state: GraphState, runtime_root: Path) -> dict[str, Any]:
         raise ValueError("test_command executable must not be blank")
     if not 1 <= int(state.get("max_attempts", 2)) <= 5:
         raise ValueError("max_attempts must be between 1 and 5")
+    run_timeouts(state)
     spec_text = spec.read_text(encoding="utf-8")
     return {
         "workspace": str(workspace), "repo_root": str(repo_root), "spec_path": str(spec),
@@ -524,6 +543,8 @@ def build_graph(
     Supply an operator-validated, canonical artifact_root (resolve trusted OS
     aliases such as macOS /tmp first). We reject symlinks instead of resolving
     an untrusted storage path. Use resume_graph for checkpoint-bound replay.
+    An injected runner, or a RoleRunner subclass overriding run, enforces its
+    own timeout; the run's role_timeout_seconds reaches only RoleRunner.run.
     """
 
     cancellation = cancellation or Cancellation()
@@ -536,8 +557,11 @@ def build_graph(
         context = validate_run_input(state, runtime_root)
         store.preflight()
         artifact = store.write_json(state["run_id"], "00-context.json", context)
+        # Timeouts stay out of 00-context.json: that artifact is immutable, and
+        # a 0.1.5 run that wrote it before crashing must replay byte-identical.
         update = {
             **context,
+            **run_timeouts(state),
             "schema_version": "graph-run-v1",
             "execution_policy_version": 1,
             "attempt": 0,
@@ -645,8 +669,16 @@ def build_graph(
 
         def invoke():
             try:
-                result = role_runner.run(f"langgraph-conductor.{role}", prompt,
-                                         Path(state["workspace"]))
+                # Only the built-in run takes the run's timeout; an override
+                # (injected or subclassed) keeps the 3-argument Runner protocol.
+                if type(role_runner).run is RoleRunner.run:
+                    result = role_runner.run(
+                        f"langgraph-conductor.{role}", prompt, Path(state["workspace"]),
+                        timeout=state.get("role_timeout_seconds", ROLE_TIMEOUT_SECONDS),
+                    )
+                else:
+                    result = role_runner.run(f"langgraph-conductor.{role}", prompt,
+                                             Path(state["workspace"]))
             except subprocess.TimeoutExpired as exc:
                 # Preserve compatibility with injected runners using subprocess.run.
                 output = exc.stdout or b""
@@ -665,7 +697,7 @@ def build_graph(
             result = RoleResult(**record.result)
         except TypeError as exc:
             raise RecoveryError(f"malformed call result for {role}: {exc}") from exc
-        usage = usage_record(result)
+        usage = usage_record(result, state["run_id"])
         if record.snapshot_error or result.cancelled_signal or result.cleanup_error:
             raise RoleFailure({
                 "halted": True, "status": "needs-human", "verdict": "DISCUSS",
@@ -714,7 +746,8 @@ def build_graph(
     def gate_node(state: GraphState, runtime: Runtime[CallReplay]) -> dict[str, Any]:
         command = state["test_command"]
         call = call_record(state, "gate", {"command": command}, lambda: asdict(run_process(
-            command, cwd=Path(state["workspace"]), timeout=GATE_TIMEOUT_SECONDS,
+            command, cwd=Path(state["workspace"]),
+            timeout=state.get("gate_timeout_seconds", GATE_TIMEOUT_SECONDS),
             cancellation=cancellation,
         )), runtime)
         try:
@@ -981,13 +1014,30 @@ def build_graph(
         normalized = decision.get("decision") if isinstance(decision, dict) else decision
         if normalized not in {"approve", "reject"}:
             normalized = "reject"
-        return {"approval": normalized}
+        # The digest the caller saw. The CLI requires it for approve; a plain
+        # "approve" from a direct graph caller or a legacy checkpoint has none.
+        approved = decision.get("reviewed_change_sha256") if isinstance(decision, dict) else None
+        return {"approval": normalized,
+                "approved_change_sha256": approved if normalized == "approve" else None}
 
     def publish_node(state: GraphState, runtime: Runtime[CallReplay]) -> dict[str, Any]:
         repo_root = Path(state["repo_root"])
         excluded = state.get("excluded_paths", [])
         expected = state.get("reviewed_change_sha256", "")
+        approved = state.get("approved_change_sha256")
         strict_ignored = bool(state.get("strict_ignored", False))
+        if approved is not None and approved != expected:
+            artifact = store.write_json(state["run_id"], "91-approval-change-drift.json", {
+                "approved": False,
+                "reviewed_change_sha256": expected,
+                "approved_change_sha256": approved,
+                "note": "approval blocked because the approved digest is not the reviewed digest",
+            })
+            return {
+                "status": "needs-human",
+                "artifacts": [artifact],
+                "errors": ["approval blocked: approved digest differs from reviewed digest"],
+            }
         try:
             current = _change_snapshot(
                 repo_root, state["base_sha"], excluded, strict_ignored
@@ -1065,6 +1115,10 @@ def build_graph(
             "covers": _attestation_covers(strict_ignored, excluded),
             "note": "approval receipt only; this runtime never pushes or force-merges",
         }
+        if approved is not None:
+            # Only when supplied: a legacy receipt written before a crash must
+            # replay byte-identical into the immutable artifact.
+            receipt["approved_change_sha256"] = approved
         artifact = store.write_json(state["run_id"], "90-approval-receipt.json", receipt)
         return {"status": "approved", "artifacts": [artifact]}
 

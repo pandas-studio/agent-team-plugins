@@ -202,7 +202,9 @@ class RoleRunner:
         prompt: str,
         workspace: Path,
         final_path: Path | None = None,
+        timeout: float | None = None,
     ) -> RoleResult:
+        timeout = self.timeout_seconds if timeout is None else timeout
         model_id, definition, command = self.resolve_adapter(role, workspace)
         with tempfile.TemporaryDirectory(prefix="agent-team-answer-") as temporary:
             native = bool(definition.get("final_args"))
@@ -215,7 +217,7 @@ class RoleRunner:
                 raise RegistryError(f"model {model_id!r} has an invalid {field} template")
             replacements = {"{prompt}": prompt, "{final}": str(capture or "")}
             argv = [command, *(replacements.get(item, item) for item in template)]
-            completed = run_process(argv, cwd=workspace, timeout=self.timeout_seconds,
+            completed = run_process(argv, cwd=workspace, timeout=timeout,
                                     cancellation=self.cancellation)
             returncode = completed.returncode
             output = completed.stdout if not native else ""
@@ -237,7 +239,7 @@ class RoleRunner:
                 returncode = NO_OUTPUT_RETURNCODE
                 diagnostic = f"model {model_id!r} exited 0 with no output\n{diagnostic}"
             if completed.timed_out:
-                diagnostic = f"role timed out after {self.timeout_seconds}s\n{diagnostic}"
+                diagnostic = f"role timed out after {timeout}s\n{diagnostic}"
             # Diagnostics are separate even for stdout-only adapters. They must
             # never become research, review or coder input.
             return RoleResult(
@@ -249,5 +251,6 @@ class RoleRunner:
             )
 
 
-def usage_record(result: RoleResult) -> dict[str, Any]:
-    return asdict(result) | {"output": None, "stderr": None}
+def usage_record(result: RoleResult, run_id: str) -> dict[str, Any]:
+    """One RFC 0004 harness receipt (schemas/rfc0004-manifest-v1.schema.json)."""
+    return asdict(result) | {"run_id": run_id, "output": None, "stderr": None}

@@ -297,3 +297,73 @@ def test_clean_workspace_model_error_preserves_checkpoint_history(cli_run, monke
     assert rc == 2 and "RegistryError" in view["error"] and runner.roles == []
     with _open_runtime(state) as graph:
         assert list(graph.get_state_history({"configurable": {"thread_id": "same-thread"}})) == []
+
+
+def test_approve_is_bound_to_the_reviewed_digest(cli_run):
+    import json
+    from pathlib import Path
+
+    invoke, _, _, _ = cli_run
+    rc, parked = invoke("run")
+    reviewed = parked["reviewed_change_sha256"]
+    assert rc == 3 and len(reviewed) == 64
+    missing = invoke("approve", "--decision", "approve")
+    assert missing[0] == 2 and "--reviewed-digest" in missing[1]["error"]
+    for wrong in ("0" * 64, reviewed.upper(), reviewed[:-1]):
+        rc, view = invoke("approve", "--decision", "approve", "--reviewed-digest", wrong)
+        assert rc == 2 and wrong in view["error"] and reviewed in view["error"]
+    rc, still = invoke("status")
+    assert rc == 3 and still == parked
+    rc, view = invoke("approve", "--decision", "approve", "--reviewed-digest", reviewed)
+    assert rc == 0 and view["status"] == "approved"
+    receipt = json.loads(Path(view["artifacts"][-1]["path"]).read_text())
+    assert receipt["approved_change_sha256"] == reviewed == receipt["reviewed_change_sha256"]
+
+
+def test_reject_needs_no_digest_and_ignores_a_wrong_one(cli_run):
+    invoke, _, _, _ = cli_run
+    assert invoke("run")[0] == 3
+    rc, view = invoke("approve", "--decision", "reject", "--reviewed-digest", "not-a-digest")
+    assert rc == 4 and view["status"] == "rejected"
+
+
+@pytest.mark.parametrize("value", ["0", "86401", "-5", "1.5", "abc"])
+@pytest.mark.parametrize("flag", ["--role-timeout", "--gate-timeout"])
+def test_timeout_flags_are_bounded_integers(flag, value, capsys):
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["run", "--project-id", "p", "--spec", "s", "--task", "t",
+                                   "--test-command", "true", "--allow-path", "a", flag, value])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert f"argument {flag}" in err
+    if value.lstrip("-").isdigit():
+        assert "between 1 and 86400" in err
+
+
+def test_timeouts_are_checkpointed_and_reach_role_and_gate(cli_run, monkeypatch):
+    from agent_team_graph import graph as module
+    from agent_team_graph.registry import RoleRunner
+
+    invoke, runner, _, _ = cli_run
+    role_timeouts, gate_timeouts = [], []
+
+    def run(self, role, prompt, workspace, **kw):
+        role_timeouts.append(kw.get("timeout"))
+        return runner.run(role, prompt, workspace)
+
+    real_process = module.run_process
+
+    def run_process(command, **kw):
+        gate_timeouts.append(kw["timeout"])
+        return real_process(command, **kw)
+
+    monkeypatch.setattr(RoleRunner, "run", run)
+    monkeypatch.setattr(module, "run_process", run_process)
+    rc, _ = invoke("run", "--role-timeout", "7", "--gate-timeout", "11")
+    assert rc == 3
+    assert role_timeouts == [7, 7, 7, 7] and gate_timeouts == [11]
+    # Read back from SQLite, not from this process's memory.
+    from agent_team_graph.cli import _open_runtime
+    with _open_runtime(cli_run[3]) as graph:
+        values = graph.get_state({"configurable": {"thread_id": "same-thread"}}).values
+    assert (values["role_timeout_seconds"], values["gate_timeout_seconds"]) == (7, 11)

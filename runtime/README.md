@@ -35,8 +35,16 @@ digest에서 완전히 제외합니다(tracked·untracked 모두). 이는 신뢰
 
 ```bash
 uv run --project "$RUNTIME" agent-team-graph status --thread-id demo-abc123
-uv run --project "$RUNTIME" agent-team-graph approve --thread-id demo-abc123 --decision approve
+uv run --project "$RUNTIME" agent-team-graph approve --thread-id demo-abc123 --decision approve \
+  --reviewed-digest <status의 reviewed_change_sha256>
 ```
+
+승인은 `--reviewed-digest`로 `status`에서 본 `reviewed_change_sha256`을 넘겨야 합니다.
+없거나 현재 값과 다르면 체크포인트를 바꾸지 않고 코드 2로 끝나며, 영수증에는
+`approved_change_sha256`으로 기록됩니다. 거절(`--decision reject`)에는 digest가 필요 없습니다.
+이 바인딩은 CLI가 강제합니다. 그래프를 직접 호출해 `"approve"` 문자열로 재개하거나 0.1.5
+이전에 이미 승인 결정이 기록된 체크포인트는 digest 없이 끝나며, 영수증에 이 필드가 없습니다.
+승인 직전 작업 트리 digest 재검사는 모든 경우에 적용됩니다.
 
 ## 종료 코드
 
@@ -124,6 +132,9 @@ CLI 시작 시 이미 무시된 signal(예: `nohup` 아래의 SIGHUP)은 계속 
   답변도 실패한 시도로 셉니다. 성공한 plan/research는 다음 시도에서 재사용합니다.
   모델 CLI 내부 재시도나 실제 청구 횟수의 상한을 뜻하지 않습니다. snapshot 오류나
   결과를 알 수 없는 호출, 사용자 취소는 자동 재시도하지 않습니다.
+- timeout은 역할 호출당 `--role-timeout`, 테스트 명령당 `--gate-timeout`(초, 기본 900,
+  1–86400)입니다. run 시작 시 체크포인트에 기록되므로 `resume`도 같은 값을 씁니다.
+  `runner`를 직접 주입한 그래프 호출자는 자신의 timeout을 직접 관리합니다.
 - 역할과 테스트는 별도 process group으로 실행합니다. timeout/취소 시 TERM 후 2초 유예를
   두고 남은 그룹을 KILL합니다. stdout/stderr는 바이트로 수집한 뒤 UTF-8의 잘못된 바이트를
   대체 문자로 표시합니다. native final-answer가 있는 모델은 그 파일만 답변으로 사용하며,
