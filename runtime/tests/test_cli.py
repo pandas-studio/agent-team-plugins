@@ -298,3 +298,58 @@ def test_a_second_run_is_refused_while_the_first_is_inside_a_role(
         release.touch()
         assert first.wait(timeout=60) == 3
     assert started.read_text() == "x"
+
+
+def test_ctrl_c_during_a_role_stops_the_role_and_leaves_the_run_resumable(
+    tmp_path: Path, monkeypatch
+):
+    """Roles run in their own session, so the CLI must end them when it is interrupted."""
+    import os
+    import signal
+
+    pidfile = tmp_path / "coder.pid"
+    coder = [
+        "-c",
+        (
+            "import os, sys, time\n"
+            f"open({str(pidfile)!r} + '.tmp', 'w').write(str(os.getpid()))\n"
+            f"os.rename({str(pidfile)!r} + '.tmp', {str(pidfile)!r})\n"
+            "time.sleep(120)"
+        ),
+        "{prompt}",
+    ]
+    _models(tmp_path, monkeypatch, coder=coder)
+    workspace, spec = make_repo(tmp_path)
+    args = [
+        "run", "--project-id", "demo", "--workspace", str(workspace), "--spec", str(spec),
+        "--task", "t", "--test-command", "true", "--allow-path", "README.md",
+        "--thread-id", "interrupted", "--state-dir", str(tmp_path / "state"),
+    ]
+    cli = subprocess.Popen([sys.executable, "-c", _MAIN, *args], stderr=subprocess.DEVNULL)
+    child = None
+    try:
+        deadline = time.monotonic() + 60
+        while not pidfile.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert pidfile.exists(), "the coder never started"
+        child = int(pidfile.read_text())
+        cli.send_signal(signal.SIGINT)
+        assert cli.wait(timeout=30) != 0
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("the coder outlived the interrupted CLI")
+    finally:
+        cli.kill()
+        cli.wait()
+        if child is not None:
+            try:
+                os.kill(child, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    assert _cli(tmp_path, "status", "--thread-id", "interrupted") == 6

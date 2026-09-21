@@ -112,3 +112,34 @@ def test_invalid_utf8_output_is_replaced_not_raised(tmp_path: Path):
     assert result.returncode == 0
     assert result.stdout == "\ufffd ok"
     assert result.stderr == "\ufffd"
+
+
+_DRIVER = """
+import sys
+from agent_team_graph.proc import run_bounded
+code = (
+    "import os, sys, time\\n"
+    "open(sys.argv[1] + '.tmp', 'w').write(str(os.getpid()))\\n"
+    "os.rename(sys.argv[1] + '.tmp', sys.argv[1])\\n"
+    "time.sleep(120)\\n"
+)
+run_bounded([sys.executable, "-c", code, sys.argv[1]], ".", 60)
+"""
+
+
+def test_an_interrupted_caller_takes_the_child_with_it(tmp_path: Path, pidfile: Path):
+    """The new session keeps Ctrl-C from the child; the caller must kill the group."""
+    import subprocess
+
+    driver = subprocess.Popen([sys.executable, "-c", _DRIVER, str(pidfile)], cwd=tmp_path)
+    try:
+        deadline = time.monotonic() + 30
+        while not pidfile.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        child = _descendant(pidfile)
+        driver.send_signal(signal.SIGINT)
+        assert driver.wait(timeout=30) == -signal.SIGINT
+        assert _gone_within(child, 5)
+    finally:
+        driver.kill()
+        driver.wait()

@@ -118,6 +118,11 @@ attempt (retried while attempts remain), a planner or researcher timeout stops a
   Exclude only trusted scratch paths; do not exempt coder output.
 - `--test-command` is split as argv. Shell operators (`&&`, `|`, `>`) are not
   interpreted — wrap them in a script if you need them.
+- Roles and the test command run non-interactively: stdin is `/dev/null` (0.1.3
+  passed the CLI's own stdin through), and each runs in its own process group,
+  which a timeout or an interrupted CLI (Ctrl-C) kills as a whole. A command
+  that prompts or reads stdin sees EOF; feed it input from a file in a wrapper
+  script instead.
 - Artifacts under `.agent-team/artifacts/<run_id>/` are immutable and published
   whole (never partially written). If a write conflicts, start a new run instead
   of deleting them.

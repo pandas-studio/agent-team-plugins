@@ -46,18 +46,33 @@ def run_bounded(argv: list[str], cwd: Path | str, timeout: float) -> Bounded:
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        _kill_group(process)
         try:
             stdout, stderr = process.communicate(timeout=DRAIN_SECONDS)
         except subprocess.TimeoutExpired as exc:
             # The exception carries everything read so far.
             stdout, stderr = exc.stdout, exc.stderr
-            for stream in (process.stdout, process.stderr):
-                if stream:
-                    stream.close()
-            process.wait()
+            _close_and_reap(process)
         return Bounded(process.returncode, _text(stdout), _text(stderr), True)
+    except BaseException:
+        # The new session also keeps a terminal's Ctrl-C from reaching the child,
+        # so an interrupted caller must end the group itself: otherwise the child
+        # keeps writing the workspace after the thread lock is released.
+        _kill_group(process)
+        _close_and_reap(process)
+        raise
     return Bounded(process.returncode, _text(stdout), _text(stderr), False)
+
+
+def _kill_group(process: subprocess.Popen) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def _close_and_reap(process: subprocess.Popen) -> None:
+    for stream in (process.stdout, process.stderr):
+        if stream:
+            stream.close()
+    process.wait()
