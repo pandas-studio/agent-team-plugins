@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
-import time
+import shutil
+import stat
+import tempfile
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+from .process import Cancellation, run_process
 
 BUILTIN_MODELS: dict[str, dict[str, Any]] = {
     "agy": {"command": "agy", "env_command": "AGY_CLI", "args": ["-p", "{prompt}"]},
@@ -98,9 +101,14 @@ class ModelRegistry:
         for name, section in (("models", models), ("roles", roles)):
             if not isinstance(section, dict):
                 raise RegistryError(f"registry config {name!r} must be an object")
+        if not all(isinstance(value, str) for value in roles.values()):
+            raise RegistryError("registry role bindings must be model ID strings")
         for model_id, definition in models.items():
             if not isinstance(definition, dict):
                 raise RegistryError(f"model {model_id!r} must be an object")
+            for field in ("command", "env_command"):
+                if field in definition and not isinstance(definition[field], str):
+                    raise RegistryError(f"model {model_id!r} {field} must be a string")
         return {"version": value.get("version", 1), "models": models, "roles": roles}
 
     @property
@@ -134,14 +142,59 @@ class RoleResult:
     usage_source: str = "unavailable"
     input_tokens: int | None = None
     output_tokens: int | None = None
+    stderr: str = ""
+    timed_out: bool = False
+    cancelled_signal: int | None = None
+    cleanup_error: str = ""
 
 
 class RoleRunner:
     """Run a configured CLI adapter without a shell or eval boundary."""
 
-    def __init__(self, registry: ModelRegistry | None = None, timeout_seconds: int = 900):
-        self.registry = registry or ModelRegistry()
+    def __init__(self, registry: ModelRegistry | None = None, timeout_seconds: float = 900,
+                 cancellation: Cancellation | None = None):
+        self._registry = registry
         self.timeout_seconds = timeout_seconds
+        self.cancellation = cancellation
+
+    @property
+    def registry(self) -> ModelRegistry:
+        if self._registry is None:
+            self._registry = ModelRegistry()
+        return self._registry
+
+    def preflight(self, workspace: Path) -> None:
+        for role in BUILTIN_ROLES:
+            _, definition, _ = self.resolve_adapter(role, workspace)
+            for field in ("args", "final_args"):
+                if field == "final_args" and field not in definition:
+                    continue
+                template = definition.get(field)
+                if not isinstance(template, list) or not all(isinstance(x, str) and "\0" not in x for x in template):
+                    raise RegistryError(f"role {role!r} has an invalid {field} template")
+
+    def resolve_adapter(self, role: str, workspace: Path) -> tuple[str, dict[str, Any], str]:
+        """Resolve the model, definition and executable used for execution and call identity."""
+        model_id, definition = self.registry.resolve_model(role)
+        command = (
+            os.environ.get("REGISTRY_CMD_OVERRIDE")
+            or os.environ.get(definition.get("env_command", ""))
+            or definition.get("command")
+        )
+        if not isinstance(command, str) or not command or "\0" in command:
+            raise RegistryError(f"model {model_id!r} has no valid command")
+        if os.sep in command:
+            executable = (workspace / command).absolute()
+            resolved = str(executable) if executable.is_file() and os.access(executable, os.X_OK) else None
+        else:
+            search_path = os.pathsep.join(
+                str(workspace / entry) if not Path(entry).is_absolute() else entry
+                for entry in os.environ.get("PATH", os.defpath).split(os.pathsep)
+            )
+            resolved = shutil.which(command, path=search_path)
+        if not resolved:
+            raise RegistryError(f"model {model_id!r} executable not found: {command}")
+        return model_id, definition, resolved
 
     def run(
         self,
@@ -150,57 +203,51 @@ class RoleRunner:
         workspace: Path,
         final_path: Path | None = None,
     ) -> RoleResult:
-        model_id, definition = self.registry.resolve_model(role)
-        # Binary precedence mirrors registry.sh: caller override, then the
-        # model's env_command, then its literal command.
-        command = (
-            os.environ.get("REGISTRY_CMD_OVERRIDE")
-            or os.environ.get(definition.get("env_command", ""))
-            or definition.get("command")
-        )
-        if not command:
-            raise RegistryError(f"model {model_id!r} has no command")
-        field = "final_args" if final_path and definition.get("final_args") else "args"
-        template = definition.get(field)
-        if not isinstance(template, list) or not all(isinstance(item, str) for item in template):
-            raise RegistryError(f"model {model_id!r} has an invalid {field} template")
-        # Whole-argument placeholders, as in registry.sh: substring replacement
-        # would also rewrite a literal "{final}" inside the inserted prompt.
-        replacements = {"{prompt}": prompt, "{final}": str(final_path or "")}
-        argv = [command, *(replacements.get(item, item) for item in template)]
-        started = time.monotonic()
-        completed = subprocess.run(
-            argv,
-            cwd=workspace,
-            text=True,
-            capture_output=True,
-            timeout=self.timeout_seconds,
-            check=False,
-        )
-        elapsed_ms = round((time.monotonic() - started) * 1000)
-        returncode = completed.returncode
-        output = completed.stdout
-        from_final = bool(final_path and final_path.exists())
-        if from_final:
-            output = final_path.read_text(encoding="utf-8")
-        # Decide on the answer before stderr is appended: agy's print mode can
-        # soft-deny a tool, print its guidance on stderr only and still exit 0.
-        if returncode == 0 and not output.strip():
-            returncode = NO_OUTPUT_RETURNCODE
-            output = f"model {model_id!r} exited 0 with no output" + (
-                f"\n{completed.stderr}" if completed.stderr else ""
+        model_id, definition, command = self.resolve_adapter(role, workspace)
+        with tempfile.TemporaryDirectory(prefix="agent-team-answer-") as temporary:
+            native = bool(definition.get("final_args"))
+            capture = (final_path or Path(temporary) / "answer.md") if native else None
+            if capture is not None and os.path.lexists(capture):
+                raise RegistryError(f"final-answer path already exists: {capture}")
+            field = "final_args" if native else "args"
+            template = definition.get(field)
+            if not isinstance(template, list) or not all(isinstance(item, str) for item in template):
+                raise RegistryError(f"model {model_id!r} has an invalid {field} template")
+            replacements = {"{prompt}": prompt, "{final}": str(capture or "")}
+            argv = [command, *(replacements.get(item, item) for item in template)]
+            completed = run_process(argv, cwd=workspace, timeout=self.timeout_seconds,
+                                    cancellation=self.cancellation)
+            returncode = completed.returncode
+            output = completed.stdout if not native else ""
+            diagnostic = completed.stderr
+            if native:
+                try:
+                    fd = os.open(capture, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                    with os.fdopen(fd, "rb") as answer:
+                        if not stat.S_ISREG(os.fstat(answer.fileno()).st_mode):
+                            raise ValueError("final-answer capture is not a regular file")
+                        output = answer.read().decode("utf-8", errors="replace")
+                except FileNotFoundError:
+                    pass
+                except (OSError, ValueError) as exc:
+                    if returncode == 0:
+                        returncode = 6
+                    diagnostic += f"\ninvalid final-answer capture: {exc}"
+            if returncode == 0 and not output.strip():
+                returncode = NO_OUTPUT_RETURNCODE
+                diagnostic = f"model {model_id!r} exited 0 with no output\n{diagnostic}"
+            if completed.timed_out:
+                diagnostic = f"role timed out after {self.timeout_seconds}s\n{diagnostic}"
+            # Diagnostics are separate even for stdout-only adapters. They must
+            # never become research, review or coder input.
+            return RoleResult(
+                invocation_id=str(uuid.uuid4()), role=role, model=model_id,
+                output=output, returncode=returncode, elapsed_ms=completed.elapsed_ms,
+                stderr=diagnostic, timed_out=completed.timed_out,
+                cancelled_signal=completed.cancelled_signal,
+                cleanup_error=completed.cleanup_error,
             )
-        elif not from_final and completed.stderr:
-            output += ("\n" if output else "") + completed.stderr
-        return RoleResult(
-            invocation_id=str(uuid.uuid4()),
-            role=role,
-            model=model_id,
-            output=output,
-            returncode=returncode,
-            elapsed_ms=elapsed_ms,
-        )
 
 
 def usage_record(result: RoleResult) -> dict[str, Any]:
-    return asdict(result) | {"output": None}
+    return asdict(result) | {"output": None, "stderr": None}

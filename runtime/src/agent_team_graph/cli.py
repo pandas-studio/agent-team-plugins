@@ -3,24 +3,34 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
+import hashlib
 import json
+import os
 import shlex
 import sqlite3
+import stat
 import sys
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
 from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.types import Command
+from langgraph.types import Command, Overwrite
 
-from .graph import build_graph
+from .artifacts import ArtifactStore, directory_fd
+from .graph import build_graph, resume_graph, validate_run_input
+from .process import Cancellation, signal_handlers
+from .registry import RegistryError, RoleRunner
 
 
 def _common(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--state-dir", type=Path, default=Path(".agent-team"))
+    parser.add_argument(
+        "--state-dir", type=Path, default=Path(".agent-team"),
+        help="checkpoint directory relative to the invocation cwd (default: .agent-team)",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -66,7 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 @contextmanager
-def _open_runtime(state_dir: Path) -> Iterator[Any]:
+def _open_runtime(state_dir: Path, cancellation: Cancellation | None = None) -> Iterator[Any]:
     state_dir = state_dir.expanduser().resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(state_dir / "runs.sqlite3", check_same_thread=False)
@@ -76,14 +86,21 @@ def _open_runtime(state_dir: Path) -> Iterator[Any]:
             checkpointer=saver,
             artifact_root=state_dir / "artifacts",
             state_root=state_dir,
+            cancellation=cancellation,
         )
     finally:
         connection.close()
 
 
-def _view(graph: Any, thread_id: str) -> dict[str, Any]:
-    snapshot = graph.get_state({"configurable": {"thread_id": thread_id}})
-    values = dict(snapshot.values or {})
+def _snapshot_view(snapshot: Any, thread_id: str) -> dict[str, Any]:
+    values = dict(getattr(snapshot, "values", None) or {})
+    next_nodes = tuple(getattr(snapshot, "next", ()))
+    interrupts = getattr(snapshot, "interrupts", ())
+    if not interrupts:
+        interrupts = tuple(i for task in getattr(snapshot, "tasks", ()) for i in task.interrupts)
+    awaiting = next_nodes == ("approval",) and any(
+        isinstance(i.value, dict) and i.value.get("kind") == "ship-approval" for i in interrupts
+    )
     approval = values.get("approval")
     status = values.get("status", "not-found")
     approval_note = None
@@ -91,6 +108,7 @@ def _view(graph: Any, thread_id: str) -> dict[str, Any]:
         approval_note = "approve decision recorded; receipt blocked, see errors and artifacts"
     return {
         "thread_id": thread_id,
+        "run_id": values.get("run_id"),
         "status": status,
         "verdict": values.get("verdict"),
         "attempt": values.get("attempt"),
@@ -99,27 +117,26 @@ def _view(graph: Any, thread_id: str) -> dict[str, Any]:
         "excluded_paths_not_attested": values.get("excluded_paths", []),
         "approval": approval,
         "approval_note": approval_note,
-        "next": list(snapshot.next),
+        "awaiting_approval": awaiting,
+        "next": list(next_nodes),
         "errors": values.get("errors", []),
         "artifacts": values.get("artifacts", []),
         "usage": values.get("usage", []),
     }
 
 
-# Exit codes let a wrapper branch on the outcome without parsing the JSON body:
-# 0 approved, 3 still open (parked at the ship-approval interrupt), 4 stopped
-# without approval, 5 unknown thread.
-EXIT_BY_STATUS = {
-    "approved": 0,
-    "running": 3,
-    "rejected": 4,
-    "needs-human": 4,
-    "not-found": 5,
-}
+def _view(graph: Any, thread_id: str) -> dict[str, Any]:
+    return _snapshot_view(graph.get_state({"configurable": {"thread_id": thread_id}}), thread_id)
 
 
 def _exit_code(view: dict[str, Any]) -> int:
-    return EXIT_BY_STATUS.get(view["status"], 4)
+    if view["status"] == "not-found":
+        return 5
+    if view.get("awaiting_approval"):
+        return 3
+    if view["status"] == "approved" and not view.get("next"):
+        return 0
+    return 4
 
 
 def _print(value: Any) -> None:
@@ -132,40 +149,120 @@ def _report(graph: Any, thread_id: str) -> int:
     return _exit_code(view)
 
 
+@contextmanager
+def _thread_lock(state_dir: Path, thread_id: str) -> Iterator[None]:
+    name = hashlib.sha256(thread_id.encode("utf-8")).hexdigest() + ".lock"
+    with directory_fd(state_dir / "locks") as parent:
+        fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                     0o600, dir_fd=parent)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError("thread lock must be a regular file")
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise ValueError("thread is busy; retry after its active command finishes") from exc
+            yield
+        finally:
+            # Never unlink: another process may already have this inode open.
+            os.close(fd)
+
+
+def _initial(args: argparse.Namespace, thread_id: str) -> dict[str, Any]:
+    return {
+        "schema_version": "graph-run-v1",
+        "thread_id": thread_id, "run_id": uuid.uuid4().hex, "project_id": args.project_id,
+        "workspace": str(args.workspace), "spec_path": str(args.spec), "task": args.task,
+        "test_command": shlex.split(args.test_command), "allowed_paths": args.allow_path,
+        "operator_excluded_paths": args.exclude_path, "max_attempts": args.max_attempts,
+        "strict_ignored": args.strict_ignored,
+        "repo_root": "", "spec_sha256": "", "base_sha": "", "excluded_paths": [],
+        "execution_policy_version": 1, "attempt_start": "", "role_failed": False,
+        "halted": False, "cancelled_signal": None,
+        "attempt": 0, "plan": "", "research": "", "code_report": "", "review": "",
+        "verdict": "", "approval": "", "status": "running",
+        "gate_passed": False, "gate_feedback": "",
+        "gated_change_sha256": None, "reviewed_change_sha256": None,
+        "artifacts": Overwrite([]), "usage": Overwrite([]), "errors": Overwrite([]),
+    }
+
+
+def _execute(args: argparse.Namespace, thread_id: str, state_dir: Path,
+             cancellation: Cancellation) -> int:
+    config = {"configurable": {"thread_id": thread_id}}
+    if args.command != "run" and not (state_dir / "runs.sqlite3").exists():
+        _print(_snapshot_view(None, thread_id))
+        return 5
+    initial = None
+    if args.command == "run":
+        initial = _initial(args, thread_id)
+        validate_run_input(initial, state_dir)
+    lock = nullcontext() if args.command == "status" else _thread_lock(state_dir, thread_id)
+    with lock, _open_runtime(state_dir, cancellation) as graph:
+        snapshot = graph.get_state(config)
+        view = _snapshot_view(snapshot, thread_id)
+        if args.command == "run":
+            if view["status"] != "not-found" and (
+                view["status"] not in {"approved", "rejected", "needs-human"}
+                or snapshot.next or getattr(snapshot, "interrupts", ())
+            ):
+                _print(view | {"error": "thread is unfinished; use approve/reject or resume"})
+                return 2
+            ArtifactStore(state_dir / "artifacts").preflight()
+            RoleRunner().preflight(Path(initial["workspace"]).expanduser().resolve())
+            payload = initial
+        elif args.command == "status" or view["status"] == "not-found":
+            _print(view)
+            return _exit_code(view)
+        elif args.command == "approve":
+            if not view["awaiting_approval"]:
+                _print(view | {"error": "approve requires a ship-approval interrupt"})
+                return 2
+            payload = Command(resume=args.decision)
+        elif view["awaiting_approval"]:
+            _print(view | {"note": "use approve --decision approve or --decision reject"})
+            return 3
+        elif not snapshot.next:
+            _print(view)
+            return _exit_code(view)
+        else:
+            if snapshot.values.get("execution_policy_version") != 1 and any(
+                node in {"planner", "researcher", "coder", "gate", "reviewer"} for node in snapshot.next
+            ):
+                _print(view | {"error": "legacy interrupted call has no outcome records; inspect "
+                               "the workspace and start a new run; checkpoint preserved"})
+                return 4
+            payload = None
+        if cancellation.signal:
+            _print(view | {"error": "execution cancelled before checkpoint update"})
+            return 128 + cancellation.signal
+        try:
+            if args.command == "resume":
+                resume_graph(graph, config)
+            else:
+                graph.invoke(payload, config=config, durability="sync")
+        except Exception as exc:  # noqa: BLE001 - CLI boundary reports failed checkpoints without a traceback
+            view = _view(graph, thread_id)
+            _print(view | {"errors": [*view["errors"], f"{type(exc).__name__}: {exc}"]})
+            return 128 + cancellation.signal if cancellation.signal else 4
+        rc = _report(graph, thread_id)
+        return 128 + cancellation.signal if cancellation.signal else rc
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    with _open_runtime(args.state_dir) as graph:
-        config = {"configurable": {"thread_id": args.thread_id}}
-        if args.command == "run":
-            thread_id = args.thread_id or f"{args.project_id}-{uuid.uuid4().hex[:12]}"
-            config = {"configurable": {"thread_id": thread_id}}
-            initial = {
-                "thread_id": thread_id,
-                "run_id": uuid.uuid4().hex,
-                "project_id": args.project_id,
-                "workspace": str(args.workspace),
-                "spec_path": str(args.spec),
-                "task": args.task,
-                "test_command": shlex.split(args.test_command),
-                "allowed_paths": args.allow_path,
-                "operator_excluded_paths": args.exclude_path,
-                "max_attempts": args.max_attempts,
-                "strict_ignored": args.strict_ignored,
-                "artifacts": [],
-                "usage": [],
-                "errors": [],
-            }
-            graph.invoke(initial, config=config)
-            return _report(graph, thread_id)
-        if args.command == "status":
-            return _report(graph, args.thread_id)
-        if args.command == "resume":
-            graph.invoke(None, config=config)
-            return _report(graph, args.thread_id)
-        if args.command == "approve":
-            graph.invoke(Command(resume=args.decision), config=config)
-            return _report(graph, args.thread_id)
-    return 2
+    thread_id = args.thread_id
+    if thread_id is None and args.command == "run":
+        thread_id = f"{args.project_id}-{uuid.uuid4().hex[:12]}"
+    try:
+        if not thread_id or "\0" in thread_id:
+            raise ValueError("thread_id must be nonempty and contain no NUL bytes")
+        cancellation = Cancellation()
+        with signal_handlers(cancellation):
+            return _execute(args, thread_id, args.state_dir.expanduser().resolve(), cancellation)
+    except (ValueError, OSError, RegistryError) as exc:
+        _print({"thread_id": thread_id, "error": f"{type(exc).__name__}: {exc}"})
+        return 2
 
 
 if __name__ == "__main__":

@@ -117,9 +117,10 @@ def test_gitignored_writes_are_reported_and_enforced_only_under_strict(tmp_path:
     assert _ignored_paths(workspace, []) == ["build/out.bin"]
     assert _ignored_paths(workspace, ["build"]) == []
 
+    (workspace / "build/out.bin").unlink()
     strict = initial(workspace, spec, "strict")
     strict["strict_ignored"] = True
-    snapshot = _run(tmp_path, FakeRunner(), strict, "strict")
+    snapshot = _run(tmp_path, FakeRunner(writes={"build/out.bin": "artifact\n"}), strict, "strict")
     assert snapshot.values["gate_passed"] is False
     assert _gate_record(snapshot)["outside_scope"] == ["build/out.bin"]
 
@@ -283,7 +284,9 @@ def test_snapshot_race_is_a_recorded_gate_failure(tmp_path: Path, monkeypatch):
 
     def disappear_once(repo_root: Path, relative: str):
         nonlocal failed
-        if relative == "NEW.md" and not failed:
+        if relative == "NEW.md" and not failed and any(
+            frame.function == "gate_node" for frame in inspect.stack()
+        ):
             failed = True
             raise FileNotFoundError("simulated list/lstat race")
         return real_digest(repo_root, relative)
@@ -304,6 +307,8 @@ def test_snapshot_race_is_a_recorded_gate_failure(tmp_path: Path, monkeypatch):
     assert "FileNotFoundError" in record["snapshot_error"]
     assert snapshot.values["gated_change_sha256"] is None
     assert snapshot.values["status"] == "needs-human"
+    assert not any("pre-review-drift" in a["name"] for a in snapshot.values["artifacts"])
+    assert not any(u["role"].endswith(".reviewer") for u in snapshot.values["usage"])
 
 
 def test_publish_snapshot_race_blocks_receipt(tmp_path: Path, monkeypatch):
@@ -464,7 +469,10 @@ def test_paths_are_listed_verbatim(tmp_path: Path):
 
     state = initial(workspace, spec, "verbatim")
     state["allowed_paths"] = ["docs"]
-    snapshot = _run(tmp_path, FakeRunner(), state, "verbatim")
+    (workspace / "docs/한글.md").unlink()
+    (workspace / " README.md").unlink()
+    snapshot = _run(tmp_path, FakeRunner(writes={"docs/한글.md": "k\n", " README.md": "new\n"}),
+                    state, "verbatim")
     # The non-ASCII name matches its allowed directory; the edge-space name is
     # reported as itself, not as the tracked README.md.
     assert _gate_record(snapshot)["outside_scope"] == [" README.md"]
@@ -738,7 +746,8 @@ def test_clean_filter_on_a_tracked_path_fails_closed(tmp_path: Path):
     state = initial(workspace, spec, "clean-filter")
     state["max_attempts"] = 1
     snapshot = _run(tmp_path, FakeRunner(), state, "clean-filter")
-    assert "clean/process filter" in _gate_record(snapshot)["snapshot_error"]
+    assert "clean/process filter" in snapshot.values["errors"][0]
+    assert snapshot.values["usage"] == []
     assert snapshot.values["status"] == "needs-human"
 
 
