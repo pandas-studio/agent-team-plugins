@@ -245,6 +245,21 @@ chmod +x "$TMP/meta-bin/ask-reviewer.sh"
 assert_eq "$(sed -n 's/.*ralph commits found: //p' "$TMP/meta.err")" "1"
 assert_eq "$(sed -n 's/.*ralph logs found: //p' "$TMP/meta.err")" "1"
 
+# A failed BSD-style probe may write stdout on GNU stat; it must not contaminate
+# the successful fallback's numeric mtime. Reproduce on every host.
+cat > "$TMP/meta-bin/stat" <<'STAT'
+#!/usr/bin/env bash
+if [ "$1" = -f ]; then
+  echo 'filesystem data from failed BSD probe'
+  exit 1
+fi
+python3 -c 'import os,sys; print(int(os.stat(sys.argv[1]).st_mtime))' "$3"
+STAT
+chmod +x "$TMP/meta-bin/stat"
+(cd "$DRV" && env PATH="$TMP/meta-bin:$PATH" AGENT_TEAM=smoke TMUX="" RALPH_TRIO_WORKSPACE="$TMP/meta-ws" \
+  "$ROOT/ralph-trio/bin/ralph-meta.sh" --since "1 hour ago" --variant trio >/dev/null 2>"$TMP/meta-fallback.err" </dev/null) || true
+assert_eq "$(sed -n 's/.*ralph logs found: //p' "$TMP/meta-fallback.err")" "1"
+
 # agent-team-models must not overwrite a config it could not parse: reads fall
 # back to an empty config, and a write built on that would drop every model.
 for plugin in dev-trio debate-conductor; do
