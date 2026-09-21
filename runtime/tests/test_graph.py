@@ -152,7 +152,7 @@ def test_publish_replays_its_receipt_after_a_crash(tmp_path: Path, monkeypatch, 
     assert ("approved_change_sha256" in json.loads(before)) is bound
 
 
-def test_role_timeout_from_state_reaches_the_builtin_runner(tmp_path: Path):
+def _slow_models(tmp_path: Path) -> Path:
     config = tmp_path / "models.json"
     config.write_text(json.dumps({
         "models": {"slow": {"command": sys.executable,
@@ -161,12 +161,22 @@ def test_role_timeout_from_state_reaches_the_builtin_runner(tmp_path: Path):
             "langgraph-conductor.planner", "langgraph-conductor.researcher",
             "langgraph-conductor.coder", "langgraph-conductor.reviewer")},
     }))
+    return config
+
+
+@pytest.mark.parametrize("configured_by", ["state", "injected-runner"])
+def test_role_timeout_reaches_the_builtin_runner(tmp_path: Path, configured_by):
+    """State wins when given; otherwise an injected RoleRunner keeps its own timeout."""
+    by_state = configured_by == "state"
+    runner = RoleRunner(ModelRegistry(_slow_models(tmp_path)),
+                        **({} if by_state else {"timeout_seconds": 1}))
     workspace, spec = make_repo(tmp_path)
     graph = build_graph(checkpointer=SqliteSaver(sqlite3.connect(":memory:",
                                                                  check_same_thread=False)),
-                        artifact_root=tmp_path / "artifacts",
-                        runner=RoleRunner(ModelRegistry(config)))
-    state = initial(workspace, spec) | {"max_attempts": 1, "role_timeout_seconds": 1}
+                        artifact_root=tmp_path / "artifacts", runner=runner)
+    state = initial(workspace, spec) | {"max_attempts": 1}
+    if by_state:
+        state["role_timeout_seconds"] = 1
     thread = {"configurable": {"thread_id": "demo-thread"}}
     started = time.monotonic()
     graph.invoke(state, config=thread)
@@ -176,6 +186,7 @@ def test_role_timeout_from_state_reaches_the_builtin_runner(tmp_path: Path):
     assert values["errors"] == ["planner attempt 1 failed with exit code 124 (timeout)"]
     failure = next((tmp_path / "artifacts").rglob("failure-1-planner.json"))
     assert "role timed out after 1s" in json.loads(failure.read_text())["stderr"]
+    assert ("role_timeout_seconds" in values) is by_state
 
 
 @pytest.mark.parametrize("field", ["role_timeout_seconds", "gate_timeout_seconds"])

@@ -469,12 +469,14 @@ def validate_timeout(value: Any, *, label: str) -> int:
 
 
 def run_timeouts(state: GraphState) -> dict[str, int]:
-    return {
-        "role_timeout_seconds": validate_timeout(
-            state.get("role_timeout_seconds", ROLE_TIMEOUT_SECONDS), label="role_timeout_seconds"),
-        "gate_timeout_seconds": validate_timeout(
-            state.get("gate_timeout_seconds", GATE_TIMEOUT_SECONDS), label="gate_timeout_seconds"),
-    }
+    timeouts = {"gate_timeout_seconds": validate_timeout(
+        state.get("gate_timeout_seconds", GATE_TIMEOUT_SECONDS), label="gate_timeout_seconds")}
+    # No default for roles: without an explicit value the runner's own
+    # configured timeout applies (RoleRunner(timeout_seconds=...)).
+    if "role_timeout_seconds" in state:
+        timeouts["role_timeout_seconds"] = validate_timeout(
+            state["role_timeout_seconds"], label="role_timeout_seconds")
+    return timeouts
 
 
 def validate_run_input(state: GraphState, runtime_root: Path) -> dict[str, Any]:
@@ -544,7 +546,8 @@ def build_graph(
     aliases such as macOS /tmp first). We reject symlinks instead of resolving
     an untrusted storage path. Use resume_graph for checkpoint-bound replay.
     An injected runner, or a RoleRunner subclass overriding run, enforces its
-    own timeout; the run's role_timeout_seconds reaches only RoleRunner.run.
+    own timeout; the run's role_timeout_seconds reaches only RoleRunner.run,
+    and without one RoleRunner keeps its configured timeout_seconds.
     """
 
     cancellation = cancellation or Cancellation()
@@ -674,7 +677,7 @@ def build_graph(
                 if type(role_runner).run is RoleRunner.run:
                     result = role_runner.run(
                         f"langgraph-conductor.{role}", prompt, Path(state["workspace"]),
-                        timeout=state.get("role_timeout_seconds", ROLE_TIMEOUT_SECONDS),
+                        timeout=state.get("role_timeout_seconds"),
                     )
                 else:
                     result = role_runner.run(f"langgraph-conductor.{role}", prompt,

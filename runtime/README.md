@@ -134,7 +134,8 @@ CLI 시작 시 이미 무시된 signal(예: `nohup` 아래의 SIGHUP)은 계속 
   결과를 알 수 없는 호출, 사용자 취소는 자동 재시도하지 않습니다.
 - timeout은 역할 호출당 `--role-timeout`, 테스트 명령당 `--gate-timeout`(초, 기본 900,
   1–86400)입니다. run 시작 시 체크포인트에 기록되므로 `resume`도 같은 값을 씁니다.
-  `runner`를 직접 주입한 그래프 호출자는 자신의 timeout을 직접 관리합니다.
+  그래프를 직접 호출할 때 `role_timeout_seconds`를 주지 않으면 주입한 `RoleRunner`의
+  `timeout_seconds`가 그대로 적용되고, 직접 만든 runner는 자신의 timeout을 관리합니다.
 - 역할과 테스트는 별도 process group으로 실행합니다. timeout/취소 시 TERM 후 2초 유예를
   두고 남은 그룹을 KILL합니다. stdout/stderr는 바이트로 수집한 뒤 UTF-8의 잘못된 바이트를
   대체 문자로 표시합니다. native final-answer가 있는 모델은 그 파일만 답변으로 사용하며,

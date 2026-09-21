@@ -67,8 +67,9 @@ def test_rejected_run_conforms(tmp_path: Path):
     values = graph.get_state(config).values
     _conforms(values)
     assert values["status"] == "rejected" and values["approved_change_sha256"] is None
-    # Defaults are written into the checkpoint, not left implicit.
-    assert (values["role_timeout_seconds"], values["gate_timeout_seconds"]) == (900, 900)
+    # The gate default is written into the checkpoint. A direct caller without a
+    # role timeout leaves it to the runner's own configuration.
+    assert values["gate_timeout_seconds"] == 900 and "role_timeout_seconds" not in values
 
 
 class FailingCoder(FakeRunner):
