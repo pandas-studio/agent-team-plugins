@@ -162,13 +162,11 @@ def test_completed_call_with_workspace_drift_cannot_be_reused(tmp_path, monkeypa
     assert runner.roles.count("langgraph-conductor.coder") == 1
 
 
-def test_gate_timeout_is_a_decoded_failure_and_not_a_crash(tmp_path, monkeypatch):
-    from agent_team_graph import graph as module
-
+def test_gate_timeout_is_a_decoded_failure_and_not_a_crash(tmp_path):
     workspace, spec = make_repo(tmp_path)
-    monkeypatch.setattr(module, "GATE_TIMEOUT_SECONDS", .15)
     state = initial(workspace, spec, "test-timeout")
     state["max_attempts"] = 1
+    state["gate_timeout_seconds"] = 1
     state["test_command"] = [sys.executable, "-c", "import os,time; os.write(1,b'OUT\\xff\\n'); time.sleep(10)"]
     config = {"configurable": {"thread_id": "test-timeout"}}
     with persisted(tmp_path, FakeRunner()) as graph:
@@ -178,6 +176,8 @@ def test_gate_timeout_is_a_decoded_failure_and_not_a_crash(tmp_path, monkeypatch
     gate = json.loads(Path(record["path"]).read_text())
     assert gate["output"] == "OUT\ufffd\n" and gate["returncode"] == 124
     assert values["status"] == "needs-human"
+    assert values["gate_timeout_seconds"] == 1
+    assert "gate attempt 1: test command timed out" in values["errors"]
 
 
 def test_legacy_interrupted_external_checkpoint_is_preserved_by_cli(tmp_path, capsys):
@@ -258,10 +258,13 @@ def test_legacy_approval_checkpoint_remains_actionable(tmp_path, capsys, decisio
         old = b.compile(checkpointer=SqliteSaver(connection))
         old.invoke(state, config, durability="sync")
     rc = main(["approve", "--state-dir", str(state_dir), "--thread-id", "old-approval",
-               "--decision", decision])
+               "--decision", decision, "--reviewed-digest", digest])
     view = json.loads(capsys.readouterr().out)
     assert rc == (0 if decision == "approve" else 4)
     assert view["status"] == ("approved" if decision == "approve" else "rejected")
+    if decision == "approve":
+        receipt = json.loads(Path(view["artifacts"][-1]["path"]).read_text())
+        assert receipt["approved_change_sha256"] == digest
 
 
 def _kill_checkpoint_writer(root, phase, ready):
@@ -669,3 +672,81 @@ def test_programming_type_error_is_not_misclassified_as_a_receipt_failure(tmp_pa
         with pytest.raises(TypeError, match="programming error in runner"):
             graph.invoke(initial(workspace, spec, "type-error"), config, durability="sync")
         assert graph.get_state(config).next == ("coder",)
+
+
+def test_context_artifact_keeps_its_0_1_5_shape_for_crash_replay(tmp_path, monkeypatch):
+    """00-context.json is immutable: a 0.1.5 run that wrote it and crashed resumes here."""
+    workspace, spec = make_repo(tmp_path)
+    config = {"configurable": {"thread_id": "ctx"}}
+    original = ArtifactStore.write_json
+
+    def crash_after_context(store, run_id, name, value):
+        record = original(store, run_id, name, value)
+        if name == "00-context.json":
+            raise RuntimeError("simulated crash after the context write")
+        return record
+
+    monkeypatch.setattr(ArtifactStore, "write_json", crash_after_context)
+    state = initial(workspace, spec, "ctx") | {"role_timeout_seconds": 7}
+    with (persisted(tmp_path, FakeRunner()) as graph,
+          pytest.raises(RuntimeError, match="simulated crash")):
+        graph.invoke(state, config, durability="sync")
+    monkeypatch.setattr(ArtifactStore, "write_json", original)
+    written = next(tmp_path.rglob("00-context.json"))
+    before = written.read_bytes()
+    # The exact 0.1.5 key set; run policy lives in the checkpoint, not here.
+    assert sorted(json.loads(before)) == sorted([
+        "workspace", "repo_root", "spec_path", "base_sha", "spec_sha256", "allowed_paths",
+        "operator_excluded_paths", "excluded_paths", "strict_ignored"])
+    with persisted(tmp_path, FakeRunner()) as graph:
+        resume_graph(graph, config)
+        values = graph.get_state(config).values
+    assert graph.get_state(config).next == ("approval",) and written.read_bytes() == before
+    assert values["role_timeout_seconds"] == 7 and values["gate_timeout_seconds"] == 900
+
+
+def test_resumed_run_keeps_its_timeouts_after_reopen(tmp_path, monkeypatch):
+    from agent_team_graph import graph as module
+    from agent_team_graph.registry import RoleRunner
+
+    workspace, spec = make_repo(tmp_path)
+    fake = FakeRunner(writes={"README.md": "implemented\n"})
+    seen = []
+
+    def run(self, role, prompt, workspace, **kw):
+        seen.append((role.rsplit(".", 1)[1], kw.get("timeout")))
+        return fake.run(role, prompt, workspace)
+
+    real_process = module.run_process
+
+    def run_process(command, **kw):
+        seen.append(("gate", kw["timeout"]))
+        return real_process(command, **kw)
+
+    monkeypatch.setattr(RoleRunner, "preflight", lambda self, workspace: None)
+    monkeypatch.setattr(RoleRunner, "resolve_adapter",
+                        lambda self, role, workspace: ("fake", {"args": []}, "fake-model"))
+    monkeypatch.setattr(RoleRunner, "run", run)
+    monkeypatch.setattr(module, "run_process", run_process)
+    original = ArtifactStore.write
+    crashed = False
+
+    def crash_after_coder(store, run_id, name, content):
+        nonlocal crashed
+        if name == "30-code-attempt-1.md" and not crashed:
+            crashed = True
+            raise RuntimeError("simulated crash after durable completion")
+        return original(store, run_id, name, content)
+
+    monkeypatch.setattr(ArtifactStore, "write", crash_after_coder)
+    config = {"configurable": {"thread_id": "keep"}}
+    state = initial(workspace, spec, "keep") | {"role_timeout_seconds": 7,
+                                                "gate_timeout_seconds": 11}
+    with (persisted(tmp_path, RoleRunner()) as graph,
+          pytest.raises(RuntimeError, match="simulated crash")):
+        graph.invoke(state, config, durability="sync")
+    assert seen == [("planner", 7), ("researcher", 7), ("coder", 7)]
+    with persisted(tmp_path, RoleRunner()) as graph:
+        resume_graph(graph, config)
+        assert graph.get_state(config).next == ("approval",)
+    assert seen[3:] == [("gate", 11), ("reviewer", 7)]

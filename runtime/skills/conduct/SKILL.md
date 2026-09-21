@@ -30,7 +30,7 @@ uv sync --project "${CLAUDE_PLUGIN_ROOT}" --frozen --python 3.12
 ## Start a run
 
 Every argument below is required except `--max-attempts`, `--strict-ignored`,
-and `--exclude-path`.
+`--exclude-path`, `--role-timeout` and `--gate-timeout`.
 `--allow-path` is **repository-root-relative** and repeatable; anything the
 coder changes outside it fails the gate.
 
@@ -49,6 +49,8 @@ mode also checks ignored files. Do not automatically exempt existing user files.
 The default is **2 total attempts (1 retry)**, with at most **5 total attempts**.
 Role timeouts, nonzero exits and empty answers consume an attempt. Successful plan/research
 outputs are reused. This does not bound retries or billing inside a model CLI.
+`--role-timeout` (per role call) and `--gate-timeout` (per test run) take seconds, default
+900, range 1–86400. They are stored with the run, so `resume` keeps them.
 
 The command prints a JSON view containing the `thread_id`. Keep it — every
 other subcommand takes it.
@@ -58,9 +60,15 @@ other subcommand takes it.
 ```bash
 uv run --project "${CLAUDE_PLUGIN_ROOT}" agent-team-graph status  --thread-id <id>
 uv run --project "${CLAUDE_PLUGIN_ROOT}" agent-team-graph resume  --thread-id <id>   # continue after a crash
-uv run --project "${CLAUDE_PLUGIN_ROOT}" agent-team-graph approve --thread-id <id> --decision approve
+uv run --project "${CLAUDE_PLUGIN_ROOT}" agent-team-graph approve --thread-id <id> --decision approve \
+  --reviewed-digest <reviewed_change_sha256 from status>
 uv run --project "${CLAUDE_PLUGIN_ROOT}" agent-team-graph approve --thread-id <id> --decision reject
 ```
+
+Approving requires the `reviewed_change_sha256` you showed the user, from `status`. A
+missing or different digest returns code 2 and leaves the checkpoint unchanged; re-read
+`status` and ask again. The receipt records it as `approved_change_sha256`. Rejecting
+needs no digest.
 
 ## Exit codes
 

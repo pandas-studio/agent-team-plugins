@@ -18,6 +18,9 @@
     "strict_ignored": {"type": "boolean"},
     "gated_change_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
     "reviewed_change_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+    "approved_change_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+    "role_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+    "gate_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
     "errors": {"type": "array", "items": {"type": "string"}},
     "artifacts": {"type": "array"},
     "usage": {"type": "array"}
