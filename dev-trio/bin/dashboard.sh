@@ -360,7 +360,7 @@ while true; do
             BUF+="  ${BOLD}Status:${RESET} ${GREEN}✓ done${RESET}"$'\n\n'
           else
             BUF+="  ${BOLD}Status:${RESET} ${RED}✗ failed (rc=$RC)${RESET}"
-            [ "$REASON" = "ok" ] || BUF+=" ${DIM}(${REASON})${RESET}"
+            [ "$REASON" = "ok" ] || [ "$REASON" = "failed" ] || BUF+=" ${DIM}(${REASON})${RESET}"
             BUF+=$'\n\n'
           fi
         fi

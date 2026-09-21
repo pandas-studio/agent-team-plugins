@@ -37,6 +37,7 @@ The scripts can also be called directly **from the workspace being reviewed**:
 
 ```bash
 DEV_TRIO_PM_HOST=codex /absolute/path/to/dev-trio/bin/dev-trio-doctor.sh
+DEV_TRIO_PM_HOST=codex /absolute/path/to/dev-trio/bin/dev-trio-doctor.sh --research
 DEV_TRIO_PM_HOST=codex /absolute/path/to/dev-trio/bin/ask-researcher.sh "research question" </dev/null
 DEV_TRIO_PM_HOST=codex /absolute/path/to/dev-trio/bin/ask-reviewer.sh "review focus" </dev/null
 python3 /absolute/path/to/dev-trio/bin/install-pm.py --host codex
@@ -78,9 +79,16 @@ detached tmux layout outside tmux and prints an attach command for a terminal.
 
 Models and CLI binaries are configurable — see [Model configuration](#model-configuration). Quick binary overrides still work: `AGY_CLI` / `RESEARCHER_CLI` (researcher), `CODEX_CLI` / `REVIEWER_CLI` (reviewer).
 
+Before the first research call, run `dev-trio-doctor.sh --research` from the
+workspace (Codex users: use the absolute plugin path and host variable shown
+above). This checks setup without authentication or model calls. Headless
+research also requires permission for the tools used by the particular
+question; installation and authentication alone do not prove that access.
+See [Research troubleshooting](#research-troubleshooting).
+
 ## Model configuration
 
-The Researcher and Reviewer roles resolve through the shared model registry (the [marketplace README](../README.md#shared-model-configuration) covers it in full). Defaults are `agy` (researcher) and `codex` (reviewer) — no setup needed.
+The Researcher and Reviewer roles resolve through the shared model registry (the [marketplace README](../README.md#shared-model-configuration) covers it in full). Defaults are `agy` (researcher) and `codex` (reviewer); Codex PM defaults the reviewer to Claude. No model binding configuration is needed for these defaults. Each CLI still needs its own installation, authentication and applicable headless tool permissions.
 
 | Role | Default | Pick a different model | Override its binary |
 | :--- | :--- | :--- | :--- |
@@ -180,6 +188,76 @@ claude --plugin-dir ./agent-team-plugins/dev-trio
 
    **Reviewers may run without network access** (Codex's sandbox disables it by default), so the PM supplies repository facts. For a PR, resolve the base/head commits with `gh pr view` first and pass them as `--with-context <file>` with a `<merge-base>..<head>` range focus; a bare `"pr 55"` focus leaves a sandboxed reviewer unable to identify the commits. When a reviewer still needs a remote fact it returns a `## NEED CONTEXT` block of read-only commands; the PM runs them, appends the output to the context file, and re-reviews once with every original flag.
 
+## Research troubleshooting
+
+If research fails, the wrapper prints the selected model, exit code, exact run
+log and a read-only doctor command. Both research skills run that check and
+explain recovery. Preserve any per-call model, registry and CLI overrides when
+running the printed command yourself. The plugin does not change vendor
+settings or retry the question automatically.
+
+```bash
+DEV_TRIO_PM_HOST=codex "/absolute/path/to/dev-trio/bin/dev-trio-doctor.sh" --research
+```
+
+Use `DEV_TRIO_PM_HOST=claude` for Claude Code. `--research` checks only the
+selected researcher: it does not require the reviewer, start tmux, call a model,
+run an authentication subprocess, create run artifacts, or write settings.
+It reports an available CLI version for unmodified built-ins. Custom adapters
+and binary overrides are not executed for probing because they may interpret
+`--version` as a prompt; their settings and authentication remain unverified.
+Missing executables or invalid/unreadable configuration fail the check (exit
+1). Missing agy settings and unavailable version information produce warnings.
+A pass (exit 0) means **setup checks passed; actual research permissions are
+unverified**. The original doctor without arguments retains its broader checks.
+
+Read the `.run.json` and `.log` belonging to the failed invocation, not a
+`latest` link. Question/context sections can quote errors; use only actual CLI
+diagnostics to identify the cause. If startup failed before creating a log,
+read the wrapper's stderr.
+
+| Evidence from this invocation | Recovery |
+| --- | --- |
+| Authentication required or login failure | Open the selected CLI in a terminal and complete its normal authentication flow. |
+| Host sandbox blocks CLI startup, networking or Keychain | Use the PM host's normal permission flow. This is separate from the child CLI's tool permissions. |
+| agy explicitly reports a headless tool permission denial | Inspect the requested action and target, then review the corresponding rule in agy's `/permissions`. |
+| CLI exited 0 without an answer; wrapper returns 5 | Inspect the diagnostic. Headless denial is one possible cause, not a conclusion from the code alone. |
+| Answer could not be captured/inspected; wrapper returns 6 | Check the reported file, temporary-directory or write error. Do not grant tool permissions to fix a capture failure. |
+| Other failure, or no explanatory diagnostic | Keep the cause unknown and inspect the selected CLI's own diagnostics. Nonzero CLI codes, including 5 and 6, are preserved. |
+
+### Resolve a confirmed agy permission denial
+
+Headless agy cannot display an approval prompt. It can soft-deny a tool, emit
+a notice on stderr and still exit 0. dev-trio rejects an empty answer from that
+run. See the [official headless guide](https://www.antigravity.google/docs/cli/headless/).
+
+1. Identify the action and target in the CLI diagnostic. If only the permission
+   type is present, the target is **unknown**: open interactive agy from the same
+   workspace and reproduce the original question/context to see the permission
+   request. This is another model call and may repeat external actions; inspect
+   the request before deciding whether to grant it. Do not infer a broad permission
+   from code 5 or from the last command mentioned in the question.
+2. Use agy's `/permissions` or edit `~/.gemini/antigravity-cli/settings.json`
+   yourself. Under `permissions.allow`, review only the required
+   `command(<target>)`, `read_url(<domain>)`, or `mcp(<server/tool>)` rule.
+   These are placeholders, not a permission bundle to copy wholesale. A Python
+   query does not require allowing every Python command, and a documentation
+   page does not require allowing all websites. Existing `ask`/`deny` rules may
+   take precedence. See [official permission rules](https://www.antigravity.google/docs/permissions?tab=cli).
+3. If agy warns that `unsandboxed(...)` rules are ignored, follow the guidance
+   for that installed CLI. The doctor only flags their presence: support varies
+   by version/platform, so neither it nor plugin installation migrates them.
+4. Re-run `dev-trio-doctor.sh --research`, then explicitly request research again
+   with the original question and stdin context. This is a new run and may
+   repeat external calls; it is not automatic resumption. A different needed
+   tool may require another permission decision.
+
+Do not enable blanket permission bypass as the default fix. Successful recovery
+requires exit 0 **and** a nonempty final answer that addresses the question with
+appropriate sources. Pass that new `.final.md` to follow-up work; a failed run,
+its diagnostics, or an older successful answer cannot replace it. Static and
+stub checks are not evidence of a successful live research call.
+
 ## Skills
 
 | Skill | What it does |
@@ -221,6 +299,9 @@ A second atomic rewrite of the same file adds `completion`
 an abort, published from the wrapper's EXIT trap, so an interrupted run does not
 read as live forever. Unlike the RFC 0004 manifest, this file exists while the
 run is live and is written for nested dispatches too.
+Research completion reasons are `ok` for exit 0, `failed` for a nonzero return,
+and `aborted` for the EXIT-trap backstop. `failed` records the outcome, not a
+diagnosis of permission denial.
 
 **Reviewer transcript.** The reviewer CLI writes straight into
 `codex-<TS>-<PID>.log` on a descriptor, which `tail -F` follows as the review is

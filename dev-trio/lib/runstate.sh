@@ -33,7 +33,7 @@
 #     result_path,      # absolute *.review.json, or null (research has none)
 #     inputs: [ { kind, value? , path? } ],
 #     completion: null | { ended_at, exit_code, verdict, reason }
-#                       # reason: ok | aborted | result-write-failed
+#                       # reason: ok | failed | aborted | result-write-failed
 #                       #       | final-write-failed
 #   }
 #
