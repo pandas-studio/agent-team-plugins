@@ -242,8 +242,19 @@ cleanup has signalled the group, then reaps it. This prevents a recycled PID
 from receiving a later cleanup signal, including when the driver exits before
 its children. A separate ownership pipe lets the supervisor terminate its
 group if the test runner is forcibly killed, both during driver execution and
-after driver completion. Child stdin is `/dev/null` (reads return EOF). Fixture
-Git and standalone coverage commands also use the scaled execution limit.
+after driver completion.
+
+Cleanup always attempts to close both control descriptors. If the initial reap
+fails, the resulting owner EOF triggers supervisor termination before one final
+bounded collection attempt, without signalling the group again. An unconditional
+context-exit close also preserves owner EOF if cleanup is interrupted. Each
+attempt uses the scaled 10-second cleanup budget (at most 20 seconds times the
+scale across both waits). Both control descriptors are attempted even if a
+close fails. Cleanup errors fail an otherwise successful test; when a test
+already failed, they are reported without replacing its original exception.
+
+Child stdin is `/dev/null` (reads return EOF). Fixture Git and standalone
+coverage commands also use the scaled execution limit.
 Interrupt fixtures wait for a signal instead of expiring after a fixed sleep.
 
 ## Architecture
