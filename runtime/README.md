@@ -43,7 +43,7 @@ uv run --project "$RUNTIME" agent-team-graph approve --thread-id demo-abc123 --d
 없거나 현재 값과 다르면 체크포인트를 바꾸지 않고 코드 2로 끝나며, 영수증에는
 `approved_change_sha256`으로 기록됩니다. 거절(`--decision reject`)에는 digest가 필요 없습니다.
 이 바인딩은 CLI가 강제합니다. 그래프를 직접 호출해 `"approve"` 문자열로 재개하거나 0.1.5
-이전에 이미 승인 결정이 기록된 체크포인트는 digest 없이 끝나며, 영수증에 이 필드가 없습니다.
+이하 버전이 이미 승인 결정을 기록한 체크포인트는 digest 없이 끝나며, 영수증에 이 필드가 없습니다.
 승인 직전 작업 트리 digest 재검사는 모든 경우에 적용됩니다.
 
 ## 종료 코드

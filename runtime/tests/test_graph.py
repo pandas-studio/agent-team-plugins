@@ -197,3 +197,19 @@ def test_direct_callers_get_the_same_timeout_bounds(tmp_path: Path, field, value
     workspace, spec = make_repo(tmp_path)
     with pytest.raises(ValueError, match=field):
         validate_run_input(initial(workspace, spec) | {field: value}, tmp_path / "state")
+
+
+def test_instance_level_run_override_keeps_the_three_argument_protocol(tmp_path: Path):
+    runner = RoleRunner()
+    fake = FakeRunner()
+    runner.run = fake.run  # three arguments; must not receive timeout=
+    runner.preflight = lambda workspace: None
+    runner.resolve_adapter = lambda role, workspace: ("fake", {"args": []}, "fake-model")
+    workspace, spec = make_repo(tmp_path)
+    graph = build_graph(checkpointer=SqliteSaver(sqlite3.connect(":memory:",
+                                                                 check_same_thread=False)),
+                        artifact_root=tmp_path / "artifacts", runner=runner)
+    thread = {"configurable": {"thread_id": "demo-thread"}}
+    graph.invoke(initial(workspace, spec) | {"role_timeout_seconds": 5}, config=thread)
+    assert graph.get_state(thread).next == ("approval",)
+    assert len(fake.roles) == 4

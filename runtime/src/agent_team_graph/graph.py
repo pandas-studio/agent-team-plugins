@@ -673,8 +673,9 @@ def build_graph(
         def invoke():
             try:
                 # Only the built-in run takes the run's timeout; an override
-                # (injected or subclassed) keeps the 3-argument Runner protocol.
-                if type(role_runner).run is RoleRunner.run:
+                # (injected, subclassed or set on the instance) keeps the
+                # 3-argument Runner protocol.
+                if getattr(role_runner.run, "__func__", None) is RoleRunner.run:
                     result = role_runner.run(
                         f"langgraph-conductor.{role}", prompt, Path(state["workspace"]),
                         timeout=state.get("role_timeout_seconds"),

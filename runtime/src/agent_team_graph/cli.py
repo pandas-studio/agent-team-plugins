@@ -268,7 +268,8 @@ def _execute(args: argparse.Namespace, thread_id: str, state_dir: Path,
             payload = Command(resume={"decision": args.decision,
                                       "reviewed_change_sha256": digest})
         elif view["awaiting_approval"]:
-            _print(view | {"note": "use approve --decision approve or --decision reject"})
+            _print(view | {"note": "use approve --decision approve --reviewed-digest "
+                           "<reviewed_change_sha256>, or approve --decision reject"})
             return 3
         elif not snapshot.next:
             _print(view)
