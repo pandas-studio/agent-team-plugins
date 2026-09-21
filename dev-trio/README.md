@@ -196,6 +196,32 @@ claude --plugin-dir ./agent-team-plugins/dev-trio
 
 ## Research troubleshooting
 
+### Before the first Codex research call
+
+agy startup needs writes under `~/.gemini/antigravity-cli` (logs/crashes),
+a localhost listener, and external network access. The Codex research skill
+uses the host's supplied execution policy and known session restrictions:
+
+| Host state | Action before dispatch |
+| --- | --- |
+| Required resources already permitted | Use normal execution, honoring existing grants. |
+| A required resource is known blocked; approval available | Request normal host approval for that wrapper invocation before starting it. |
+| A required resource is blocked; approval unavailable or refused | Stop without starting research. |
+| Restrictions unknown | State the uncertainty and follow host policy; do not use research as a probe. |
+
+Approval describes home writes, localhost binding and external network access;
+the plugin does not change host policy or request blanket persistent grants.
+Other researchers/custom adapters retain their own execution requirements.
+Host approval does not grant agy's internal `read_url`, command or MCP permissions.
+An unexpected failure still needs its own diagnostic; `rc=1` alone is not proof
+of a host restriction. The skill follows the host permission policy and does
+not silently retry, switch models, or reuse a failed answer.
+
+### Read-only setup checks
+
+The [host acceptance scenarios](docs/research-host-acceptance.md) separate
+model-free regression coverage from actual host/model behavior verification.
+
 If research fails, the wrapper prints the selected model, exit code, exact run
 log and a read-only doctor command. Both research skills run that check and
 explain recovery. Preserve any per-call model, registry and CLI overrides when
@@ -214,8 +240,20 @@ and binary overrides are not executed for probing because they may interpret
 `--version` as a prompt; their settings and authentication remain unverified.
 Missing executables or invalid/unreadable configuration fail the check (exit
 1). Missing agy settings and unavailable version information produce warnings.
-A pass (exit 0) means **setup checks passed; actual research permissions are
-unverified**. The original doctor without arguments retains its broader checks.
+The final summary separates three outcomes:
+
+```text
+[PASS] Installation/config checks only (see warnings/skipped checks above).
+[NOT_CHECKED] Host execution: CLI startup writes, localhost binding and network access.
+[NOT_CHECKED] Research permissions: effective tool grants and actual research access.
+```
+
+The first row becomes `[FAIL]` when those checks fail. Existing exit semantics
+are preserved: `NOT_CHECKED` does not change the exit code, and exit 0 is not
+proof of execution readiness. Configured rule counts/modes above the summary
+describe only the inspected file; neither presence nor absence proves effective
+grants. No startup write/bind/network probe is performed. The original doctor
+without arguments retains its broader checks.
 
 Read the `.run.json` and `.log` belonging to the failed invocation, not a
 `latest` link. Question/context sections can quote errors; use only actual CLI

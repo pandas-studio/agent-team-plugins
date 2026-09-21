@@ -112,7 +112,7 @@ class ResearchDiagnosticsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.calls.read_text(), "--version\n")
         self.assertIn("fixture CLI 1.2.7", result.stdout)
-        self.assertIn("actual research permissions UNVERIFIED", result.stdout)
+        self.assertIn("[NOT_CHECKED] Research permissions:", result.stdout)
         self.assertIn(f"Guide: {self.plugin.resolve() / 'README.md'}#research-troubleshooting", result.stdout)
         self.assertEqual(self.settings.read_text(), content)
         self.assertFalse((self.workspace / ".dev-trio").exists())
@@ -127,6 +127,40 @@ class ResearchDiagnosticsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertNotIn(str(self.settings), result.stdout)
         self.assertEqual(self.calls.read_text(), "--version\n")
+
+    def test_summary_separates_setup_from_unchecked_execution_and_permissions(self):
+        cases = (
+            (None, 0),  # No settings file is allowed; defaults remain unverified.
+            ('{}', 0),
+            ('{"permissions":{"allow":[]}}', 0),
+            ('{"permissions":{"allow":["read_url(private.example)"]}}', 0),
+            ('{"permissions":{"deny":["read_url(*)"]}}', 0),
+            ('{"toolPermission":"request-review"}', 0),
+            ('{', 1),
+            ('{"permissions":{"allow":"read_url(*)"}}', 1),
+        )
+        for content, expected_rc in cases:
+            with self.subTest(content=content):
+                if content is not None:
+                    self.settings.write_text(content)
+                result = subprocess.run(
+                    ["python3", str(self.plugin / "lib/research_doctor.py"), "agy",
+                     str(self.stub), "true", str(self.settings)],
+                    env=self.env, text=True, capture_output=True, timeout=15, check=False,
+                )
+                status = "PASS" if expected_rc == 0 else "FAIL"
+                self.assertEqual(result.returncode, expected_rc, result.stderr)
+                self.assertEqual(result.stdout.splitlines()[-3:], [
+                    f"[{status}] Installation/config checks only (see warnings/skipped checks above).",
+                    "[NOT_CHECKED] Host execution: CLI startup writes, localhost binding and network access.",
+                    "[NOT_CHECKED] Research permissions: effective tool grants and actual research access.",
+                ])
+                self.assertNotIn("private.example", result.stdout)
+                if content is None:
+                    self.assertFalse(self.settings.exists())
+                else:
+                    self.assertEqual(self.settings.read_text(), content)
+        self.assertEqual(self.calls.read_text().splitlines(), ["--version"] * len(cases))
 
     def test_custom_binary_is_never_probed_or_assumed_to_use_agy_settings(self):
         result = self.run_script("dev-trio-doctor.sh", "--research", AGY_CLI=str(self.stub))
@@ -195,7 +229,10 @@ class ResearchDiagnosticsTests(unittest.TestCase):
 
     def test_failed_research_codes_do_not_become_permission_diagnoses(self):
         for cli_rc, answer, diagnostic, expected in (
+            (1, "", "CLI failed to start - listen tcp 127.0.0.1:0: bind: operation not permitted", 1),
             (0, "", "", 5),
+            (0, "", ('jetski: no output produced — a tool required the "read_url" permission '
+                     'that headless mode cannot prompt for, so it was auto-denied.'), 5),
             (0, "", 'jetski: headless command permission auto-denied', 5),
             (5, "partial answer", "unrelated failure", 5),
             (6, "partial answer", "vendor failure", 6),
@@ -227,7 +264,9 @@ class ResearchDiagnosticsTests(unittest.TestCase):
                 self.assertIn("AGENT_TEAM_MODELS_CONFIG=" + str(self.config), argv)
 
     def test_success_keeps_diagnostics_out_of_answer_and_reason_ok(self):
-        result = self.run_script("ask-researcher.sh", "question", DIAG_ANSWER="An answer.",
+        result = self.run_script("ask-researcher.sh",
+                                 'Explain "bind: operation not permitted" and "read_url auto-denied"',
+                                 DIAG_ANSWER="An answer.",
                                  DIAG_STDERR="a CLI diagnostic")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "An answer.")
