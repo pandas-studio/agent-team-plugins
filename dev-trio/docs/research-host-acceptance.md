@@ -1,7 +1,8 @@
 # Research host approval acceptance (#90)
 
-Automated fixtures in `test_research_diagnostics.py` verify setup summary states,
-exit-code/answer-channel preservation, and captured host vs headless diagnostics.
+Automated fixtures in `tests/test_research_diagnostics.py` verify setup summary
+states, exit codes, and answer-channel isolation for captured host/headless
+diagnostics. They do not verify classification of those diagnostics by cause.
 They do not prove that a model follows the Codex research skill or that a host
 can start agy. A skill frontmatter/loader check is not a behavioral test.
 
