@@ -609,7 +609,8 @@ def test_failed_call_snapshot_is_not_reported_as_workspace_drift(tmp_path):
                     lambda: pytest.fail("must not relabel missing snapshot as drift"), allow_replay=True)
 
 
-def test_unavailable_replay_adapter_names_the_saved_receipt(tmp_path, monkeypatch):
+@pytest.mark.parametrize("phase", ["started", "completed"])
+def test_unavailable_replay_adapter_explains_terminal_recovery(tmp_path, monkeypatch, phase):
     from agent_team_graph.registry import RegistryError, RoleRunner
 
     class Runner(RoleRunner):
@@ -631,22 +632,28 @@ def test_unavailable_replay_adapter_names_the_saved_receipt(tmp_path, monkeypatc
     original = ArtifactStore.write
 
     def crash(store, run_id, name, content):
-        if name == "30-code-attempt-1.md":
-            raise RuntimeError("crash after completion")
+        target = ("call-1-coder-completed.json" if phase == "started"
+                  else "30-code-attempt-1.md")
+        if name == target:
+            raise RuntimeError("crash after call receipt")
         return original(store, run_id, name, content)
 
     monkeypatch.setattr(ArtifactStore, "write", crash)
     config = {"configurable": {"thread_id": "missing-adapter"}}
-    with persisted(tmp_path, runner) as graph, pytest.raises(RuntimeError, match="after completion"):
+    with persisted(tmp_path, runner) as graph, pytest.raises(RuntimeError, match="after call receipt"):
         graph.invoke(initial(workspace, spec, "missing-adapter"), config, durability="sync")
+    receipt_dir = tmp_path / "artifacts/run-missing-adapter"
+    assert (receipt_dir / "call-1-coder-started.json").is_file()
+    assert (receipt_dir / "call-1-coder-completed.json").is_file() == (phase == "completed")
     runner.missing = True
     with persisted(tmp_path, runner) as graph:
         resume_graph(graph, config)
         snapshot = graph.get_state(config)
     assert snapshot.next == () and snapshot.values["status"] == "needs-human"
     error = "\n".join(snapshot.values["errors"])
-    assert "RecoveryError" in error and "registry/PATH" in error
-    assert "call-1-coder-completed.json" in error
+    assert "RecoveryError" in error and "registry/PATH" in error and "start a new run" in error
+    assert f"call-1-coder records under {receipt_dir}" in error
+    assert "call-1-coder-completed.json" not in error
 
 
 def test_programming_type_error_is_not_misclassified_as_a_receipt_failure(tmp_path):

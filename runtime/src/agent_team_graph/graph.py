@@ -634,11 +634,11 @@ def build_graph(
                 )
             except RegistryError as exc:
                 if runtime.context is not None and runtime.context.matches(state, role):
-                    receipt = (store.root / state["run_id"] /
-                               f"call-{state['attempt']}-{role}-completed.json")
+                    receipt_dir = store.root / state["run_id"]
                     raise RecoveryError(
-                        f"cannot resolve model for resumed call; inspect {receipt} and "
-                        f"restore the model registry/PATH before recovery: {exc}"
+                        f"cannot resolve model for resumed call; inspect saved "
+                        f"call-{state['attempt']}-{role} records under {receipt_dir}; "
+                        f"restore the model registry/PATH, then start a new run: {exc}"
                     ) from exc
                 raise
             identity.update(model=model, definition=definition, command=command)

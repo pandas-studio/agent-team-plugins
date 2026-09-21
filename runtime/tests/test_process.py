@@ -147,3 +147,53 @@ def test_cleanup_error_keeps_timeout_and_reaps_direct_child(tmp_path, monkeypatc
                          timeout=.1, terminate_grace=.1)
     assert result.returncode == 124 and result.timed_out
     assert "cleanup denial" in result.cleanup_error
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS reports EPERM for zombie-only groups")
+@pytest.mark.parametrize("signum", [0, signal.SIGTERM, signal.SIGKILL])
+def test_unreaped_zombie_group_is_not_a_cleanup_denial(signum):
+    from agent_team_graph.process import _signal_group
+
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                               start_new_session=True)
+    try:
+        process.send_signal(signal.SIGTERM)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            state = subprocess.run(["ps", "-p", str(process.pid), "-o", "stat="],
+                                   capture_output=True, text=True, check=False)
+            if state.stdout.strip().startswith("Z"):
+                break
+            time.sleep(.01)
+        else:
+            pytest.fail("child did not become an unreaped zombie")
+        # Do not poll/wait: reaping the leader would hide the cleanup race.
+        assert _signal_group(process.pid, signum) is False
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+
+
+@pytest.mark.parametrize("members,gone", [
+    ("", True),
+    ("123 Z\n", True),
+    ("123 Z+\n123 Z\n", True),
+    ("123 Z\n123 S\n", False),
+    ("123 S\n", False),
+    ("123\n", False),
+])
+def test_group_permission_denial_distinguishes_zombies_from_live_members(monkeypatch, members, gone):
+    from agent_team_graph import process as module
+
+    def denied(*args):
+        raise PermissionError("group signal denied")
+
+    monkeypatch.setattr(os, "killpg", denied)
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs:
+                        subprocess.CompletedProcess(args[0], 0, members, ""))
+    if gone:
+        assert module._signal_group(123, 0) is False
+    else:
+        with pytest.raises(PermissionError, match="group signal denied"):
+            module._signal_group(123, 0)

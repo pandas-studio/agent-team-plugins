@@ -56,19 +56,20 @@ def _signal_group(pgid: int, signum: int) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        # Some restricted POSIX hosts report EPERM even after the last owned
-        # group member has exited. Do not mistake that for a live unkillable
-        # child, or silently ignore a real denial. Confirm absence explicitly.
+        # macOS can report EPERM for a group containing only unreaped zombies.
+        # Confirm that no live member remains, without hiding a real denial.
         try:
             listed = subprocess.run(
-                ["ps", "-g", str(pgid), "-o", "pgid="], capture_output=True,
+                ["ps", "-g", str(pgid), "-o", "pgid=,stat="], capture_output=True,
                 text=True, check=False, timeout=1,
             )
         except (OSError, subprocess.TimeoutExpired):
             raise PermissionError(f"cannot establish whether process group {pgid} exited") from None
         if listed.returncode in (0, 1) and not listed.stderr.strip():
-            groups = listed.stdout.split()
-            if all(group.isdecimal() for group in groups) and str(pgid) not in groups:
+            members = [line.split() for line in listed.stdout.splitlines() if line.strip()]
+            if (all(len(member) == 2 and member[0].isdecimal() for member in members)
+                    and all(group != str(pgid) or state.startswith("Z")
+                            for group, state in members)):
                 return False
         raise
 
