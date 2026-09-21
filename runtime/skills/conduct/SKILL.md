@@ -22,6 +22,8 @@ Requires `uv`. The environment lives in the plugin install directory, so re-run
 this after a plugin update. Finish (approve or reject) any run parked at
 approval before updating: a newer version may compute the change digest
 differently, and the parked run then stops as `needs-human` — start a new run.
+Runs started before 0.1.7 have no filesystem baseline: resuming, approving or
+rejecting one records `needs-human` without calling a role.
 
 ```bash
 uv sync --project "${CLAUDE_PLUGIN_ROOT}" --frozen --python 3.12
@@ -129,13 +131,29 @@ invocation context and is never checkpointed.
   every gate and blocks approval: filters run before git compares files, so an
   edit could be invisible to the scope check and the digest. Use a workspace
   without such filters.
-- **Trust boundary: the coder must not be able to write `.git`.** The gate and
-  the digest ask git what changed, and git answers from its own config, index
-  and refs. The runtime refuses the known ways that state hides content
-  (clean/process filters, assume-unchanged/skip-worktree entries, replacement
-  refs, a moved `core.worktree`), but a role with write access to `.git` is
-  outside what an approval receipt can prove. Run the coder sandboxed without
-  write access to `.git`.
+- **What `.git` can and cannot change.** The scope gate and the approval digest
+  are computed from the filesystem against a base manifest recorded when the run
+  starts (every tracked file's mode and content digest, plus the ignore rules
+  that live outside the tree: `core.excludesFile` and `.git/info/exclude`,
+  frozen). Editing the index, config, refs or ignore rules mid-run cannot change
+  what is attested. Git is still asked which paths changed and must agree with
+  the filesystem; any disagreement fails closed. That covers a file hidden by
+  `info/exclude`, index surgery and a `core.fileMode=false` chmod, and it
+  surfaces a CRLF rewrite or a case-only rename, so treat those as unsupported
+  during a run.
+- **Remaining `.git` trust:**
+  - The base manifest trusts the repository as it stands at run start, so start
+    each run from a `.git` you vouch for.
+  - The reviewer reads git's rendered diff, which `.git` can still distort. The
+    runtime refuses the known ways (clean/process filters,
+    assume-unchanged/skip-worktree entries, replacement refs, a moved
+    `core.worktree`), but a role with write access to `.git` can make the
+    reviewer see something other than the attested bytes. Keep the coder
+    sandboxed without write access to `.git`.
+- Submodule and nested-repository content is never attested. Their set is frozen
+  at run start, and a new nested repository (including a `git init` by a tool),
+  a moved submodule or a removed gitlink fails closed. Files named `.git` are
+  never listed and never attested.
 - **Trust boundary: the coder must not be able to write the state-dir either.** Checkpoints
   and call receipts control recovery and approval and are excluded from scope checks/digests.
   Put state outside the coder's writable workspace and deny sandbox write access to it.

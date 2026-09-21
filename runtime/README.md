@@ -100,8 +100,9 @@ CLI 시작 시 이미 무시된 signal(예: `nohup` 아래의 SIGHUP)은 계속 
 - 테스트 명령은 argv로 실행하며 셸 연산자나 `eval`을 지원하지 않습니다.
 - base SHA 이후 변경은 반복 지정한 `--allow-path` 안에 있어야 합니다. 경로는
   **저장소 루트 기준**이며, `--workspace`가 하위 디렉터리여도 동일합니다. 변경
-  탐지(`git diff` + `git ls-files --others`)는 항상 저장소 루트에서 실행되므로
-  workspace 밖에 생성된 파일도 게이트를 빠져나가지 못합니다.
+  탐지는 run 시작 시 기록한 base manifest(모든 tracked 파일의 mode와 내용 해시)와
+  저장소 루트 전체의 실제 파일을 비교하므로 workspace 밖에 생성된 파일도 게이트를
+  빠져나가지 못합니다.
 - `.gitignore` 대상 파일은 기본적으로 게이트를 실패시키지 않지만(테스트 명령이
   만드는 빌드 산출물과 구분할 수 없기 때문) 게이트 산출물의 `ignored_paths`에
   항상 기록됩니다. `--strict-ignored`를 주면 범위 검사와 내용 증명에 포함됩니다.
@@ -116,11 +117,22 @@ CLI 시작 시 이미 무시된 signal(예: `nohup` 아래의 SIGHUP)은 계속 
 - tracked 경로에 git clean/process 필터(예: git-lfs)가 걸려 있으면 게이트와 승인이 항상
   실패합니다. 필터는 git이 파일을 비교하기 전에 실행되므로 수정 내용이 범위 검사와 digest에서
   사라질 수 있기 때문입니다. 이런 필터가 없는 workspace에서 실행하세요.
-- **신뢰 경계: coder가 `.git`에 쓸 수 있으면 안 됩니다.** 게이트와 digest는 git에게 변경 내용을
-  묻고, git은 자신의 config·index·ref를 근거로 답합니다. 알려진 은닉 경로(clean/process 필터,
-  assume-unchanged/skip-worktree 항목, replace ref, `core.worktree` 전환)는 거부하지만,
-  `.git` 쓰기 권한이 있는 역할의 변경은 승인 영수증이 증명할 수 있는 범위 밖입니다. coder는
-  `.git` 쓰기 권한이 없는 sandbox에서 실행하세요.
+- **`.git`이 바꿀 수 있는 것과 없는 것.** 게이트와 digest는 git이 아니라 파일시스템에서
+  계산합니다. 기준은 run 시작 시 기록한 base manifest입니다. 작업 트리 밖에 있는 무시
+  규칙(`core.excludesFile`, `.git/info/exclude`)도 이때 고정합니다. 따라서 실행 중에
+  index·config·ref·무시 규칙을 고쳐도 증명 대상은 바뀌지 않습니다. git에게도 변경 경로를
+  묻고, 파일시스템과 다르면 fail-closed로 멈춥니다. `info/exclude`로 숨긴 파일, index 조작,
+  `core.fileMode=false` 상태의 chmod가 여기에 걸립니다. CRLF 재작성과 대소문자만 바꾼
+  이름 변경도 걸리므로 run 중에는 지원하지 않는 변경으로 보세요.
+- **남은 `.git` 신뢰:** base manifest는 run 시작 시점의 저장소를 신뢰하므로, 각 run은 확인된
+  `.git`에서 시작하세요. reviewer는 git이 그린 diff를 읽는데, 이 표시는 `.git`으로 여전히
+  왜곡할 수 있습니다. 알려진 경로(clean/process 필터, assume-unchanged/skip-worktree 항목,
+  replace ref, `core.worktree` 전환)는 거부합니다. 그래도 `.git`에 쓸 수 있는 역할은 reviewer가
+  증명 대상과 다른 내용을 보게 만들 수 있습니다. coder는 `.git` 쓰기 권한이 없는 sandbox에서
+  실행하세요.
+- submodule과 중첩 저장소의 내용은 증명하지 않습니다. 그 목록은 run 시작 시 고정되며, 새
+  중첩 저장소(도구의 `git init` 포함)·submodule 이동·gitlink 제거는 fail-closed로 처리합니다.
+  `.git`이라는 이름의 파일은 나열되지 않으므로 증명되지 않습니다.
 - **신뢰 경계: coder가 state-dir에도 쓸 수 있으면 안 됩니다.** checkpoint와 호출 기록은
   실행 여부와 승인 판단의 근거이며 범위 검사·digest에서 제외됩니다. coder에게 쓰기가 허용된
   workspace 밖에 state-dir을 두고 sandbox에서 쓰기 접근을 막으세요. 경로를 옮기기만 해서는
@@ -128,6 +140,8 @@ CLI 시작 시 이미 무시된 signal(예: `nohup` 아래의 SIGHUP)은 계속 
   별도로 보호해야 하며, 이 런타임은 sandbox를 자동으로 구성하지 않습니다.
 - 플러그인을 업데이트하기 전에 승인 대기 중인 run을 끝내세요. 버전에 따라 digest 계산이
   달라질 수 있어, 대기 중이던 run은 `needs-human`으로 종료되고 새 run이 필요합니다.
+  0.1.6 이하에서 시작한 run에는 파일시스템 기준이 없으므로 resume·approve·reject 모두
+  역할을 호출하지 않고 `needs-human`으로 기록됩니다.
 - 총 시도는 기본 2회(최대 재시도 1회), 상한은 총 5회입니다. 각 역할의 timeout·nonzero·빈
   답변도 실패한 시도로 셉니다. 성공한 plan/research는 다음 시도에서 재사용합니다.
   모델 CLI 내부 재시도나 실제 청구 횟수의 상한을 뜻하지 않습니다. snapshot 오류나
@@ -141,8 +155,9 @@ CLI 시작 시 이미 무시된 signal(예: `nohup` 아래의 SIGHUP)은 계속 
   대체 문자로 표시합니다. native final-answer가 있는 모델은 그 파일만 답변으로 사용하며,
   stderr 진단을 다음 역할의 답변 입력에 섞지 않습니다.
 - 승인은 push/merge 권한이 아니라 로컬 승인 영수증만 생성합니다. 영수증의
-  `change_sha256`은 tracked diff와 **untracked 신규 파일의 내용 해시**를 함께
-  덮습니다 — `git diff`만으로는 신규 파일이 빠지기 때문입니다.
+  `change_sha256`은 base manifest 대비 **바뀐 모든 경로의 mode와 내용 해시**(`changes`,
+  삭제는 `null`)를 덮으며, 신규 파일도 포함합니다. `attestation`은 형식
+  (`fs-manifest-v1`), `submodule_paths_not_attested`는 증명하지 않은 submodule 경로입니다.
 - gate와 reviewer가 확정한 `reviewed_change_sha256`을 승인 질문에 표시하고 승인 직전
   다시 계산합니다. 승인 대기 중 파일이 바뀌면 영수증 생성을 차단하고 `needs-human`으로
   종료합니다. reviewer 실행 전 drift와 reviewer 자체 mutation은 별도 산출물로

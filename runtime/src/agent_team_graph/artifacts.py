@@ -110,6 +110,10 @@ class ArtifactStore:
     def _path(self, run_id: str, name: str) -> Path:
         return self.root.expanduser().absolute() / _component(run_id) / _component(name)
 
+    def path(self, run_id: str, name: str) -> Path:
+        """Where an artifact lives, for a reader that must open it by path (git)."""
+        return self._path(run_id, name)
+
     def preflight(self) -> None:
         """Exercise publication on the selected filesystem before external calls."""
         name = f".capability-{uuid.uuid4().hex}"

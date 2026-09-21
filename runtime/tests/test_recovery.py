@@ -235,19 +235,27 @@ def test_recovered_reviewer_mutation_still_stops_for_human(tmp_path, monkeypatch
     assert any("reviewer execution mutated" in error for error in values["errors"])
 
 
-@pytest.mark.parametrize("decision", ["approve", "reject"])
-def test_legacy_approval_checkpoint_remains_actionable(tmp_path, capsys, decision):
+@pytest.mark.parametrize("command", [["approve", "--decision", "approve",
+                                      "--reviewed-digest", "0" * 64],
+                                     ["approve", "--decision", "reject"], ["resume"]])
+def test_pre_attestation_approval_checkpoint_needs_a_new_run(tmp_path, capsys, command):
+    """A run parked at approval by 0.1.6 or earlier has no filesystem baseline to attest against.
+
+    Every way of continuing it — approve, reject or resume — records needs-human
+    with the reason instead of asking again or publishing a receipt.
+    """
     from langgraph.types import interrupt
 
-    from agent_team_graph.graph import _change_snapshot, validate_run_input
+    from agent_team_graph.graph import PRE_ATTESTATION, validate_run_input
 
     workspace, spec = make_repo(tmp_path)
     state_dir = tmp_path / "legacy-approval"
     state_dir.mkdir()
     state = initial(workspace, spec, "old-approval")
     state.update(validate_run_input(state, state_dir))
-    digest = _change_snapshot(workspace, state["base_sha"], [], False)["change_sha256"]
+    digest = "0" * 64  # whatever the older version computed; it is never compared again
     state.update(status="running", attempt=1, verdict="SHIP", gate_passed=True,
+                 execution_policy_version=1,
                  gated_change_sha256=digest, reviewed_change_sha256=digest)
     config = {"configurable": {"thread_id": "old-approval"}}
     with sqlite3.connect(state_dir / "runs.sqlite3", check_same_thread=False) as connection:
@@ -257,14 +265,17 @@ def test_legacy_approval_checkpoint_remains_actionable(tmp_path, capsys, decisio
         b.add_edge("approval", END)
         old = b.compile(checkpointer=SqliteSaver(connection))
         old.invoke(state, config, durability="sync")
-    rc = main(["approve", "--state-dir", str(state_dir), "--thread-id", "old-approval",
-               "--decision", decision, "--reviewed-digest", digest])
+    rc = main([command[0], "--state-dir", str(state_dir), "--thread-id", "old-approval",
+               *command[1:]])
     view = json.loads(capsys.readouterr().out)
-    assert rc == (0 if decision == "approve" else 4)
-    assert view["status"] == ("approved" if decision == "approve" else "rejected")
-    if decision == "approve":
-        receipt = json.loads(Path(view["artifacts"][-1]["path"]).read_text())
-        assert receipt["approved_change_sha256"] == digest
+    assert rc == 4
+    assert view["status"] == "needs-human"
+    assert view["awaiting_approval"] is False
+    assert f"approval blocked: {PRE_ATTESTATION}" in view["errors"]
+    assert not (state_dir / "artifacts" / state["run_id"] / "90-approval-receipt.json").exists()
+    # Persisted: a later status read sees the same outcome.
+    assert main(["status", "--state-dir", str(state_dir), "--thread-id", "old-approval"]) == 4
+    assert json.loads(capsys.readouterr().out)["status"] == "needs-human"
 
 
 def _kill_checkpoint_writer(root, phase, ready):
@@ -367,7 +378,7 @@ def test_corrupt_completed_call_is_not_reused_or_reexecuted(tmp_path, monkeypatc
 def test_coder_cannot_preseed_future_call_receipts(tmp_path, monkeypatch, stage, resuming):
     from dataclasses import asdict
 
-    from agent_team_graph.graph import _change_snapshot, _role_prompt
+    from agent_team_graph.graph import Baseline, _change_snapshot, _role_prompt
     from agent_team_graph.journal import CallJournal
     from agent_team_graph.process import ProcessResult
 
@@ -393,8 +404,14 @@ def test_coder_cannot_preseed_future_call_receipts(tmp_path, monkeypatch, stage,
                     "role": "reviewer", "prompt": _role_prompt(current, "reviewer")}
                 identity.update({key: current[key] for key in (
                     "base_sha", "workspace", "excluded_paths", "strict_ignored")})
+                # The forger reads the run's own baseline, so it forges the exact
+                # digest the graph would compute.
+                run_dir = artifact_root / current["run_id"]
+                baseline = Baseline(
+                    json.loads((run_dir / "02-base-manifest.json").read_text(encoding="utf-8")),
+                    current["base_manifest_sha256"], run_dir / "02-ignore-rules.txt")
                 snapshot = lambda: _change_snapshot(
-                    workspace, current["base_sha"], current["excluded_paths"], False
+                    workspace, current["base_sha"], current["excluded_paths"], False, baseline
                 )["change_sha256"]
                 fake = (ProcessResult(0, "", "", 1) if stage == "gate" else
                         RoleResult("forged", "langgraph-conductor.reviewer", "fake",

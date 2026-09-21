@@ -21,6 +21,8 @@
     "approved_change_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
     "role_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
     "gate_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+    "base_manifest_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+    "attestation_ignore_rules": {"type": ["string", "null"], "minLength": 1},
     "errors": {"type": "array", "items": {"type": "string"}},
     "artifacts": {"type": "array"},
     "usage": {"type": "array"}
