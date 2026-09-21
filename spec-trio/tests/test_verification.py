@@ -383,6 +383,7 @@ elif role == 'coder':
         Path(os.environ['FIXTURE_FIX']).write_text('<promise>COMPLETE</promise>\n')
     if os.environ.get('CODER_FAIL') == str(n):
         sys.exit(13)
+    print('fixture implementation checked; may already satisfy task')
 elif role == 'researcher':
     print('fixture evidence')
 else:
@@ -1570,6 +1571,47 @@ class VerificationTests(unittest.TestCase):
                 for i in self.manifests()[0]["inputs"]
             )
         )
+
+    def test_guard_refusal_before_stage_never_records_stale_evidence(self):
+        real_jq = shutil.which("jq")
+        wrapper = self.bin / "jq"
+        wrapper.write_text(
+            "#!/usr/bin/env python3\nimport os,sys\nfrom pathlib import Path\n"
+            "a=sys.argv[1:]\n"
+            "if '--arg' in a and 'name' in a and any('.roles +=' in x for x in a):\n"
+            " role=a[a.index('name')+1]\n"
+            " if role==os.environ['REFUSE_ROLE']:\n"
+            "  p=Path(os.environ['FIXTURE_STATE'])/'role-count'\n"
+            "  n=int(p.read_text())+1 if p.exists() else 1\n"
+            "  p.write_text(str(n))\n"
+            "  if n==int(os.environ['REFUSE_ATTEMPT']): Path(os.environ['FIXTURE_SPEC']).write_text('changed before stage')\n"
+            "os.execv(" + repr(real_jq) + ",[" + repr(real_jq) + "]+a)\n"
+        )
+        wrapper.chmod(0o755)
+        spec = self.repo / "spec.md"
+        original = spec.read_text()
+        for role, attempt in (("planner", 1), ("worker", 1), ("worker", 2)):
+            with self.subTest(role=role, attempt=attempt):
+                spec.write_text(original)
+                for name in ("role-count", "coder.count", "planner.count", "reviewer.count"):
+                    (self.state / name).unlink(missing_ok=True)
+                self.env.update(REFUSE_ROLE=role, REFUSE_ATTEMPT=str(attempt))
+                if attempt == 2:
+                    self.env["RESEARCH_RETRY"] = "1"
+                else:
+                    self.env.pop("RESEARCH_RETRY", None)
+                previous = set((self.state / "logs/log/verify").glob("*.manifest.json"))
+                self.run_driver("--worktree", "--research")
+                self.rc(4)
+                self.pending()
+                self.assertIn("Preserved worktree:", self.result.stderr)
+                self.assertNotIn("unbound variable", self.result.stderr)
+                count = self.state / "coder.count"
+                self.assertEqual(int(count.read_text()) if count.exists() else 0, attempt - 1)
+                variant = "plan" if role == "planner" else "code" if attempt == 1 else "code2"
+                current = set((self.state / "logs/log/verify").glob("*.manifest.json"))
+                self.assertFalse([p for p in current - previous if p.name.endswith(f"-{variant}.manifest.json")])
+                self.tearDown()  # release the intentionally preserved fixture worktree
 
     def test_planner_failure_preserves_task(self):
         self.env["PLANNER_FAIL"] = "1"

@@ -26,6 +26,8 @@ If `$RALPH_WT_DIR` is set, you are inside a throwaway worktree on a per-iteratio
 
 ## Output expectations
 
+- Exit successfully only after completing this attempt. If no implementation content changes (for example, the task is already satisfied), print a non-empty summary to stdout. The driver requires exit 0 plus stdout or new repository content; stderr and bookkeeping alone are not success.
+
 - Use `git status` / `git diff` / file edits / test runs as your workflow. The harness streams your output to `$PWD/.spec-trio/log/<team>/spec-trio-<TS>-iter-<N>.log`.
 - End each iteration with a fresh `fix_plan.md` entry. The driver owns completion: never modify `BACKLOG.md`, the source spec, or its snapshot, even if an allowlist mentions them. A completion marker does not stop the loop or complete a task.
 

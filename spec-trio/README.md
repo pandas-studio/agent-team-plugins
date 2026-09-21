@@ -27,6 +27,37 @@ CODER_CLI=...                    # override coder only
 
 `ask-reviewer.sh` also honors `CODEX_CLI` / `REVIEWER_CLI` (set inside dev-trio) for stubbing the reviewer.
 
+### Planner and coder success
+
+Planner and coder CLI overrides keep the same `-p PROMPT` interface. Each
+stage retains its diagnostic `.log` and adds a `.stdout.log` containing only
+stdout. Plans, allowed paths, and planner research requests are read only from
+stdout; stderr guidance is never a plan.
+
+A planner must exit 0 and produce non-whitespace stdout. A coder must exit 0
+and either produce non-whitespace stdout or change repository file content
+during that invocation. Silent edits are valid; an already-satisfied task must
+print a summary. Existing dirty files, empty commits, and harness bookkeeping
+(the configured workspace’s `log/` and `state/` subdirectories, `.claude/`,
+other trio state, backlog, and fix-plan files) are not new work. Setting the
+workspace root to the repository itself does not exclude implementation files.
+These evidence exclusions do not exempt CLI state such as `.claude/` from the
+planner allowlist or strict scope checks. Scope checks retain their existing
+Git visibility rules: ignored untracked files are not inspected, while tracked
+changes remain subject to the allowlist.
+New files ignored by repository or global Git ignore rules are also excluded;
+tracked files remain eligible. Outside Git, a
+coder must print a summary. This checks presence of evidence, not the truth of
+a summary; normal tests and review still apply.
+
+Both the initial coder and research retry must pass this gate before review
+or SHIP, including `--autoship`. Failed calls retain the existing retry/backlog
+and worktree handling. A CLI failure keeps its original status; an otherwise
+successful call without evidence has stage rc 5, and capture/inspection failure
+has stage rc 6. Manifests separately record `cli-rc`, `stage-rc`,
+`stage-evidence`, and `stdout-log`. Success snapshots are per invocation;
+cumulative review and scope baselines are unchanged.
+
 ### Model configuration
 
 The reviewer (`ask-reviewer.sh`) and researcher (`ask-researcher.sh`) come from the **dev-trio** plugin, which resolves each role through a shared, configurable model registry (`agent-team-models`). spec-trio inherits that resolution unchanged — point the reviewer or researcher at a different CLI globally with `agent-team-models set-role`, or per-run with dev-trio's `*_MODEL` env vars. See dev-trio's README for the registry reference.
