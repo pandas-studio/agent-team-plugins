@@ -350,12 +350,29 @@ def test_a_signalled_cli_stops_the_role_and_leaves_the_run_resumable(
         else:
             raise AssertionError("the coder outlived the signalled CLI")
     finally:
-        cli.kill()
-        cli.wait(timeout=30)
-        # The coder is in its own session: find it by the path in its argv, which
-        # works even if it never got as far as publishing its pid.
-        subprocess.run(["pkill", "-KILL", "-f", str(pidfile)], check=False)
+        try:
+            cli.kill()
+            cli.wait(timeout=30)
+        finally:
+            _kill_by_argv(str(pidfile))
     assert _cli(tmp_path, "status", "--thread-id", "signalled") == 6
+
+
+def _kill_by_argv(marker: str) -> None:
+    """Kill a role in its own session by a path in its argv, then confirm it is gone.
+
+    Works even if it never got as far as publishing its pid.
+    """
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        subprocess.run(["pkill", "-KILL", "-f", marker], check=False, timeout=10)
+        found = subprocess.run(
+            ["pgrep", "-f", marker], capture_output=True, check=False, timeout=10
+        )
+        if found.returncode == 1:
+            return
+        time.sleep(0.1)
+    raise AssertionError(f"a process matching {marker} survived teardown")
 
 
 def test_an_ignored_hangup_stays_ignored(monkeypatch):

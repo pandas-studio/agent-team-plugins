@@ -120,8 +120,9 @@ attempt (retried while attempts remain), a planner or researcher timeout stops a
   interpreted — wrap them in a script if you need them.
 - Roles and the test command run non-interactively: stdin is `/dev/null` (0.1.3
   passed the CLI's own stdin through), and each runs in its own process group,
-  which a timeout or a signalled CLI (Ctrl-C, SIGTERM, SIGHUP) kills as a whole
-  before the CLI exits (a `resume` then continues, exit 6). A command
+  which a timeout or a signalled CLI (Ctrl-C, SIGTERM, SIGHUP) kills as a whole.
+  A signalled CLI then dies of that signal; `status` afterwards reports
+  `incomplete` (exit 6) and `resume` continues the run. A command
   that prompts or reads stdin sees EOF; feed it input from a file in a wrapper
   script instead.
 - Artifacts under `.agent-team/artifacts/<run_id>/` are immutable and published

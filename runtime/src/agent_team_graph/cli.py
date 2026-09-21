@@ -239,6 +239,11 @@ def _terminate_as_exception() -> Iterator[None]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """The CLI entry point; it owns the process.
+
+    On SIGTERM/SIGHUP it cleans up and then dies of the same signal, so a caller
+    that needs to survive those must run it in a subprocess.
+    """
     args = build_parser().parse_args(argv)
     try:
         with _terminate_as_exception():
