@@ -52,7 +52,8 @@ JSON을 파싱하지 말고 종료 코드로 분기하세요.
 
 `awaiting_approval`은 실제 체크포인트의 승인 인터럽트를 확인한 값입니다. `running`만으로
 승인 대기를 뜻하지 않습니다. `next`와 `errors`로 중단 위치를 확인하세요.
-SIGINT/SIGTERM으로 취소하면 자식 프로세스를 정리한 뒤 각각 130/143을 반환합니다.
+SIGINT/SIGTERM/SIGHUP으로 취소하면 자식 프로세스를 정리한 뒤 각각 130/143/129를 반환합니다.
+CLI 시작 시 이미 무시된 signal(예: `nohup` 아래의 SIGHUP)은 계속 무시합니다.
 
 ## thread 재사용과 복구
 

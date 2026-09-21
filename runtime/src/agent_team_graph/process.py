@@ -30,7 +30,13 @@ def signal_handlers(cancellation: Cancellation) -> Iterator[None]:
         if cancellation.signal is None:
             cancellation.signal = signum
 
-    previous = {s: signal.signal(s, cancel) for s in (signal.SIGINT, signal.SIGTERM)}
+    # SIGHUP too: a closed terminal would otherwise kill the CLI without cleanup,
+    # and the role, in its own session, never sees the hangup. A signal already
+    # ignored (nohup, a background job's SIGINT) stays ignored.
+    previous = {}
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        if signal.getsignal(signum) is not signal.SIG_IGN:
+            previous[signum] = signal.signal(signum, cancel)
     try:
         yield
     finally:

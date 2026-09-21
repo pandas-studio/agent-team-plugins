@@ -75,7 +75,8 @@ Branch on these rather than parsing the JSON:
 | 5 | unknown `--thread-id` |
 
 The JSON `awaiting_approval` reflects the saved interrupt, not just `status=running`.
-Inspect `next` and `errors` for a stopped execution. SIGINT/SIGTERM return 130/143 after cleanup.
+Inspect `next` and `errors` for a stopped execution. SIGINT/SIGTERM/SIGHUP return 130/143/129 after cleanup; a signal
+already ignored when the CLI starts (for example SIGHUP under `nohup`) stays ignored.
 
 ## Reuse and recovery
 

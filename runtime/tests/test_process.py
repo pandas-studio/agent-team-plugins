@@ -85,7 +85,31 @@ def test_launch_failure_is_a_result(tmp_path):
     assert result.returncode == 127 and "FileNotFoundError" in result.stderr
 
 
-@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
+def test_already_ignored_signal_stays_ignored(signum):
+    """nohup (SIGHUP) or a background job (SIGINT) must not start cancelling runs."""
+    handled = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    original = {s: signal.getsignal(s) for s in handled}
+    try:
+        # Known starting point, even if pytest itself runs under nohup.
+        for s in handled:
+            signal.signal(s, signal.SIG_DFL)
+        signal.signal(signum, signal.SIG_IGN)
+        with signal_handlers(Cancellation()):
+            assert signal.getsignal(signum) is signal.SIG_IGN
+            for other in handled:
+                if other != signum:
+                    assert signal.getsignal(other) not in (signal.SIG_IGN, signal.SIG_DFL)
+        assert signal.getsignal(signum) is signal.SIG_IGN
+        for other in handled:
+            if other != signum:
+                assert signal.getsignal(other) is signal.SIG_DFL
+    finally:
+        for s, handler in original.items():
+            signal.signal(s, handler)
+
+
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
 def test_cli_signal_cleans_child_and_preserves_nonapproval_status(tmp_path, signum):
     import json
 
@@ -94,8 +118,10 @@ def test_cli_signal_cleans_child_and_preserves_nonapproval_status(tmp_path, sign
     workspace, spec = make_repo(tmp_path)
     marker = tmp_path / "model-pid"
     config = tmp_path / "models.json"
+    # Written under a temporary name and renamed, so the test never reads it half-written.
     code = ("import os,time,pathlib; "
-            f"pathlib.Path({str(marker)!r}).write_text(str(os.getpid())); time.sleep(30)")
+            f"tmp = pathlib.Path({str(marker)!r} + '.tmp'); tmp.write_text(str(os.getpid())); "
+            f"os.replace(tmp, {str(marker)!r}); time.sleep(30)")
     config.write_text(json.dumps({
         "models": {"fake": {"command": sys.executable, "args": ["-c", code]}},
         "roles": {f"langgraph-conductor.{role}": "fake"
