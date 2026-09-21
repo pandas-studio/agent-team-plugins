@@ -76,17 +76,26 @@ def _signal_group(pgid: int, signum: int) -> bool:
 
 def _cleanup(process: subprocess.Popen, grace: float) -> str:
     # The session/group ID is the child's PID, never the caller's group.
+    def signal_group(signum: int) -> bool:
+        try:
+            return _signal_group(process.pid, signum)
+        except PermissionError:
+            # Exit state can change between poll(), killpg() and ps. Reap the
+            # leader and confirm once more; persistent denials still propagate.
+            process.poll()
+            return _signal_group(process.pid, signum)
+
     errors = []
     try:
-        if _signal_group(process.pid, signal.SIGTERM):
+        if signal_group(signal.SIGTERM):
             deadline = time.monotonic() + grace
             while time.monotonic() < deadline:
                 process.poll()
-                if not _signal_group(process.pid, 0):
+                if not signal_group(0):
                     break
                 time.sleep(min(0.025, max(0, deadline - time.monotonic())))
-            if _signal_group(process.pid, 0):
-                _signal_group(process.pid, signal.SIGKILL)
+            if signal_group(0):
+                signal_group(signal.SIGKILL)
     except OSError as exc:
         errors.append(f"process group cleanup failed: {exc}")
     try:

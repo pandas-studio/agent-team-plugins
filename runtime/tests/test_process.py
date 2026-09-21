@@ -197,3 +197,23 @@ def test_group_permission_denial_distinguishes_zombies_from_live_members(monkeyp
     else:
         with pytest.raises(PermissionError, match="group signal denied"):
             module._signal_group(123, 0)
+
+
+@pytest.mark.parametrize("denials", [1, 2])
+def test_cleanup_rechecks_a_denial_once_but_preserves_persistent_denials(tmp_path, monkeypatch, denials):
+    original = os.killpg
+    term_calls = []
+
+    def deny_term(pgid, signum):
+        if signum == signal.SIGTERM:
+            term_calls.append(pgid)
+            if len(term_calls) <= denials:
+                raise PermissionError("simulated transient group denial")
+        return original(pgid, signum)
+
+    monkeypatch.setattr(os, "killpg", deny_term)
+    result = run_process([sys.executable, "-c", "import time; time.sleep(30)"], cwd=tmp_path,
+                         timeout=.1, terminate_grace=.1)
+    assert result.returncode == 124 and result.timed_out
+    assert len(term_calls) == 2
+    assert bool(result.cleanup_error) == (denials == 2)

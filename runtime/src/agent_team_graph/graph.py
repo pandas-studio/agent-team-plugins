@@ -636,7 +636,7 @@ def build_graph(
                 if runtime.context is not None and runtime.context.matches(state, role):
                     receipt_dir = store.root / state["run_id"]
                     raise RecoveryError(
-                        f"cannot resolve model for resumed call; inspect saved "
+                        f"cannot resolve model for resumed call; inspect any "
                         f"call-{state['attempt']}-{role} records under {receipt_dir}; "
                         f"restore the model registry/PATH, then start a new run: {exc}"
                     ) from exc
