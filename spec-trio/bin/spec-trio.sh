@@ -39,6 +39,8 @@ REVIEWER_ROLE_FILE="$ROLES_DIR/reviewer.md"
 export REVIEWER_ROLE_FILE
 # shellcheck disable=SC1091
 . "$PLUGIN_ROOT/lib/common.sh"
+# shellcheck source=/dev/null
+. "$PLUGIN_ROOT/lib/stage-result.sh" || exit 2
 # shellcheck disable=SC1091
 . "$PLUGIN_ROOT/lib/spec-helpers.sh"
 # shellcheck disable=SC1091
@@ -172,10 +174,13 @@ LOG_DIR=$(cd -P "$LOG_DIR" && pwd -P) || exit 1
 # main repo), so this absolute path is unaffected by the later cd. ask-reviewer.sh
 # appends /$TEAM and returns exact artifact paths through a fresh receipt.
 CODEX_FINAL_ROOT="$LOG_DIR/codex"
+STAGE_IGNORE_PATHS=("$BACKLOG_FILE" "$FIX_PLAN_FILE" "$(spec_workspace_root)/log" "$(spec_workspace_root)/state"
+  "$ORIGINAL_DIR/.claude" "$ORIGINAL_DIR/.dev-trio" "$ORIGINAL_DIR/.debate-conductor" "$ORIGINAL_DIR/.agent-team")
 # Keep the exact bytes of one contract for every stage and the coverage report.
 SOURCE_STAMP=$(spec_stamp "$SPEC_SOURCE") || exit 1
 CONTRACT_DIR=$(mktemp -d "$LOG_DIR/contract-XXXXXXXX") || exit 1
 SPEC_FILE="$CONTRACT_DIR/spec.md"
+STAGE_IGNORE_PATHS+=("$SPEC_SOURCE" "$SPEC_TARGET" "$SPEC_FILE" "$BACKLOG_TARGET")
 cp "$SPEC_SOURCE" "$SPEC_FILE" || exit 1
 chmod 444 "$SPEC_FILE" || exit 1
 SNAPSHOT_STAMP=$(spec_stamp "$SPEC_FILE") || exit 1
@@ -309,14 +314,11 @@ extract_need_research() {
   ' "$f" 2>/dev/null
 }
 
-# build_harness_ignore — echo the newline-separated set of paths (relative to
-# WORK_DIR) the scope gate must ignore because the harness writes them itself,
-# not the coder: the driver-owned BACKLOG, the templated fix_plan, the spec contract,
-# AND the spec-trio workspace/log tree. The workspace defaults to $PWD/.spec-trio
-# and (without --worktree) lives inside WORK_DIR, so its per-iter logs+manifests
-# would otherwise read as untracked out-of-allowlist changes and trip
-# strict-scope in any repo that hasn't yet gitignored `.spec-trio/`. Emitted with
-# a trailing slash so check_scope treats it as a directory prefix.
+# Scope exemptions cover driver-owned contract/backlog files and only the
+# configured workspace's log/ and state/ subdirectories, even when the workspace
+# root is WORK_DIR. Directory exemptions end in / for check_scope prefix matching.
+# CLI state such as .claude/ is excluded from success evidence, but remains
+# subject to the planner allowlist here.
 build_harness_ignore() {
   local out="" p rel ws
   for p in "$BACKLOG_FILE" "$BACKLOG_TARGET" "$FIX_PLAN_FILE" "$SPEC_SOURCE" "$SPEC_TARGET"; do
@@ -325,9 +327,11 @@ build_harness_ignore() {
     esac
   done
   ws="$(cd -P "$(spec_workspace_root)" && pwd -P)"
-  case "$ws" in
-    "$WORK_DIR"/*) out="${out:+$out$'\n'}${ws#"$WORK_DIR"/}/" ;;
-  esac
+  for p in "$ws/log/" "$ws/state/"; do
+    case "$p" in
+      "$WORK_DIR"/*) out="${out:+$out$'\n'}${p#"$WORK_DIR"/}" ;;
+    esac
+  done
   printf '%s' "$out"
 }
 
@@ -484,6 +488,7 @@ while :; do
   ITER_BASE_SHA="$TASK_BASE_SHA"
 
   PLAN_LOG="$LOG_DIR/spec-trio-$TS-iter-$ITER-plan.log"
+  PLAN_STDOUT="${PLAN_LOG%.log}.stdout.log"
   CODE_LOG="$LOG_DIR/spec-trio-$TS-iter-$ITER-code.log"
   REVIEW_LOG="$LOG_DIR/spec-trio-$TS-iter-$ITER-review.log"
   RESEARCH_LOG="$LOG_DIR/spec-trio-$TS-iter-$ITER-research.log"
@@ -524,6 +529,7 @@ while :; do
     manifest_add_input kind=skip-reason value=dry-run || exit 1
     echo "[dry-run plan] task: $TASK" | tee "$PLAN_LOG" >/dev/null
     PLAN="(dry-run plan for $TASK)"
+    PLAN_STDOUT="$PLAN_LOG"
   else
     manifest_add_role planner claude "$ROLES_DIR/planner.md" || exit 1
     [ -n "$PROMPT_FILE" ] && manifest_add_input kind=prompt-md path="$PROMPT_FILE"
@@ -532,19 +538,18 @@ while :; do
       manifest_add_input kind=fix-plan-tail value="$FIX_PLAN_TAIL" || exit 1
     fi
     PLAN_PROMPT=$(build_planner_prompt "$TASK" "$SPEC_BODY" "$PROMPT_CONTEXT" "$FP_EXCERPT")
-    ( cd "$WORK_DIR" && spec_run_stage "${PLANNER_CLI:-${CLAUDE_CLI:-claude}}" -p "$PLAN_PROMPT" 2>&1 ) | tee "$PLAN_LOG" >/dev/null
-    PLAN_RC="${PIPESTATUS[0]}"
+    PLAN_RC=0
+    spec_capture_stage planner "$PLAN_LOG" "${PLANNER_CLI:-${CLAUDE_CLI:-claude}}" -p "$PLAN_PROMPT" || PLAN_RC=$?
     spec_check_or_stop
-    PLAN="$(cat "$PLAN_LOG")"
+    PLAN="$(cat "$PLAN_STDOUT" 2>/dev/null)"
     if [ "$PLAN_RC" != "0" ]; then
-      # Planner CLI exited non-zero. Without this check the loop would treat
-      # the planner's stderr as the plan and feed it to a coder that has no
-      # way to know the plan is bogus — without marking the BACKLOG entry complete. Set PLAN_FAILED=1; Stage 2 + 3 below treat it as
-      # a hard skip and the verdict dispatch retains the task for retry via NEEDS-FIX.
+      # Execution failure or absent stdout is retryable. Keep the backlog
+      # row pending and skip coding/review. A nonempty plan missing its scope
+      # declaration is handled separately by the scope gate below.
       PLAN_FAILED=1
       manifest_add_input kind=skip-reason value=plan-failed || exit 1
       manifest_add_input kind=plan-rc value="$PLAN_RC" || exit 1
-      ralph_log "  [stage 1/3] planner exited rc=$PLAN_RC — marking iter PLAN-FAILED (keep task pending, skip Stage 2+3)"
+      ralph_log "  [stage 1/3] planner failed stage rc=$PLAN_RC — marking iter PLAN-FAILED (keep task pending, skip Stage 2+3)"
     fi
   fi
   manifest_finalize || exit 1
@@ -552,13 +557,13 @@ while :; do
 
   # ---- Scope gate 1: plan-invalid check (after Stage 1, before Stage 2) ----
   # Only meaningful when there's a real plan log; --dry-run skips. Also skip
-  # when the planner CLI itself exited non-zero — that's a transient infra
+  # when the planner invocation failed — that's an execution/evidence
   # failure (auth/rate-limit/missing binary), not a contract violation.
   # Routing it through plan-invalid OUT-OF-SCOPE would send the task to
   # human-attention without re-queue; we want the dispatch's NEEDS-FIX path
   # to re-queue for another planner attempt next iter.
   if [ "$DRY_RUN" != "1" ] && [ "$PLAN_FAILED" != "1" ]; then
-    ALLOWED_PATHS_LIST="$(parse_allowed_paths "$PLAN_LOG")"
+    ALLOWED_PATHS_LIST="$(parse_allowed_paths "$PLAN_STDOUT")"
     if [ -z "$ALLOWED_PATHS_LIST" ]; then
       if [ "$STRICT_SCOPE" = "1" ]; then
         ralph_log "  [scope-gate] plan-invalid: <allowed-paths> missing/empty (strict-scope ON) — skipping coder + reviewer"
@@ -604,7 +609,7 @@ while :; do
   # --dry-run / --no-research. PRE_RESEARCH was reset above and threads into
   # Stage 2's build_coder_prompt.
   if [ "$PLAN_FAILED" = "0" ] && [ "$SCOPE_FAIL" = "0" ] && [ "$DRY_RUN" != "1" ] && [ "$NO_RESEARCH" = "0" ]; then
-    PLAN_RESEARCH_QS=$(extract_need_research "$PLAN_LOG")
+    PLAN_RESEARCH_QS=$(extract_need_research "$PLAN_STDOUT")
     if [ -n "$PLAN_RESEARCH_QS" ]; then
       ralph_log "  [stage 1.5] planner requested research → $PLAN_RESEARCH_LOG"
       manifest_init spec-research "$PLAN_RESEARCH_LOG" || exit 1
@@ -647,13 +652,13 @@ while :; do
     # Emit a minimal coder manifest so manifest-consumers see the skip,
     # then let the verdict dispatch route NEEDS-FIX via Stage 3.
     ralph_log "  [stage 2/3] coder SKIPPED (planner failed rc=$PLAN_RC)"
-    echo "PLAN_FAILED=1 — skipping coder (planner exited rc=$PLAN_RC, see $PLAN_LOG)" > "$CODE_LOG"
+    echo "PLAN_FAILED=1 — skipping coder (planner failed stage rc=$PLAN_RC, see $PLAN_LOG)" > "$CODE_LOG"
     manifest_init spec-code "$CODE_LOG" || exit 1
     CODE_RUN_ID="$MANIFEST_RUN_ID"
     manifest_set_parent "$PARENT_RUN_ID" || exit 1
     manifest_add_input kind=task value="$TASK" || exit 1
     manifest_add_input kind=spec path="$SPEC_FILE" || exit 1
-    manifest_add_input kind=plan path="$PLAN_LOG" || exit 1
+    manifest_add_input kind=plan path="$PLAN_STDOUT" || exit 1
     manifest_add_input kind=skip-reason value=plan-failed || exit 1
     manifest_add_input kind=plan-rc value="$PLAN_RC" || exit 1
     manifest_finalize || exit 1
@@ -671,7 +676,7 @@ while :; do
     manifest_set_parent "$PARENT_RUN_ID" || exit 1
     manifest_add_input kind=task value="$TASK" || exit 1
     manifest_add_input kind=spec path="$SPEC_FILE" || exit 1
-    manifest_add_input kind=plan path="$PLAN_LOG" || exit 1
+    manifest_add_input kind=plan path="$PLAN_STDOUT" || exit 1
     [ -n "$ALLOWED_JOINED" ] && manifest_add_input kind=allowed-paths value="$ALLOWED_JOINED"
     if [ "$DRY_RUN" = "1" ]; then
       manifest_add_input kind=skip-reason value=dry-run || exit 1
@@ -685,7 +690,7 @@ while :; do
         manifest_add_input kind=fix-plan-tail value="$FIX_PLAN_TAIL" || exit 1
       fi
       CODE_PROMPT=$(build_coder_prompt "$TASK" "$SPEC_BODY" "$PLAN" "$PROMPT_CONTEXT" "$PRE_RESEARCH" "$FP_EXCERPT")
-      ( cd "$WORK_DIR" && spec_run_stage "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p "$CODE_PROMPT" 2>&1 ) | tee "$CODE_LOG" >/dev/null || CODE_RC=$?
+      spec_capture_stage coder "$CODE_LOG" "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p "$CODE_PROMPT" || CODE_RC=$?
       spec_test_code "$CODE_RC" "$CODE_LOG"
     fi
     manifest_finalize || exit 1
@@ -864,7 +869,7 @@ $RESEARCH"
         manifest_set_parent "$RESEARCH_RUN_ID" || exit 1
         manifest_add_input kind=task value="$TASK" || exit 1
         manifest_add_input kind=spec path="$SPEC_FILE" || exit 1
-        manifest_add_input kind=plan path="$PLAN_LOG" || exit 1
+        manifest_add_input kind=plan path="$PLAN_STDOUT" || exit 1
         [ -n "${PRE_RESEARCH:-}" ] && manifest_add_input kind=research path="${PLAN_RESEARCH_LOG:-}"
         manifest_add_input kind=research path="$RESEARCH_LOG" || exit 1
         [ -n "$ALLOWED_JOINED" ] && manifest_add_input kind=allowed-paths value="$ALLOWED_JOINED"
@@ -872,7 +877,7 @@ $RESEARCH"
         CODE_RC=0
         if [ "$RESEARCH_RC" -eq 0 ]; then
           manifest_add_role worker claude "$ROLES_DIR/worker.md" || exit 1
-          ( cd "$WORK_DIR" && spec_run_stage "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p "$CODE_PROMPT2" 2>&1 ) | tee "$CODE2_LOG" >/dev/null || CODE_RC=$?
+          spec_capture_stage coder "$CODE2_LOG" "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p "$CODE_PROMPT2" || CODE_RC=$?
           spec_test_code "$CODE_RC" "$CODE2_LOG"
         else
           TEST_RC=0

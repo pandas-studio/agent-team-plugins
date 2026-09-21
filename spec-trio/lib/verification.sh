@@ -38,14 +38,27 @@ spec_check_or_stop() {
   fi
 }
 
-# Runs in the stage subshell. The persistent marker retains even a transient
-# guard failure, so a later restored file cannot turn this attempt into SHIP.
+# Runs around an external stage, in the caller shell or its stage subshell.
+# The persistent marker retains even a transient guard failure, so a later
+# restored file cannot turn this attempt into SHIP.
 spec_run_stage() {
   local rc=0
   spec_guard || return 4
   "$@" || rc=$?
   spec_guard || return 4
   return "$rc"
+}
+
+# Planner/coder state is initialized even when the pre-call guard refuses to
+# invoke it. Stop on protected-input failure before publishing stage evidence.
+spec_capture_stage() {
+  local role="$1" log="$2" stage_rc=0
+  shift 2
+  stage_reset_result "$log"
+  spec_run_stage stage_run "$role" "$WORK_DIR" "$log" "$@" || stage_rc=$?
+  spec_check_or_stop
+  stage_record_result "$stage_rc" || exit 1
+  return "$stage_rc"
 }
 
 spec_protect() {

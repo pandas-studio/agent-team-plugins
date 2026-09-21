@@ -122,6 +122,8 @@ while IFS= read -r f; do
   [ -n "$f" ] && RALPH_LOGS+=("$f")
 done < <(
   for f in "$LOG_DIR"/$PATTERN_GLOB; do
+    # stdout sidecars duplicate content already present in the stage log.
+    [[ "$f" == *.stdout.log ]] && continue
     [ -f "$f" ] || continue
     # mtime in epoch seconds, portable across BSD (-f) and GNU (-c).
     mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo "")

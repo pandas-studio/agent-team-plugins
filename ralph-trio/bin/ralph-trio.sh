@@ -33,6 +33,8 @@ PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROLES_DIR="$PLUGIN_ROOT/lib/roles"
 # shellcheck disable=SC1091
 . "$PLUGIN_ROOT/lib/common.sh"
+# shellcheck source=/dev/null
+. "$PLUGIN_ROOT/lib/stage-result.sh" || exit 2
 # shellcheck disable=SC1091
 . "$PLUGIN_ROOT/lib/manifest.sh" || { echo "ralph-trio: failed to load lib/manifest.sh (jq missing?)" >&2; exit 2; }
 
@@ -123,6 +125,8 @@ LOG_DIR=$(init_log_dir)
 # this absolute path is unaffected by the later cd. ask-reviewer.sh appends /$TEAM
 # and returns exact artifact paths through the fresh per-invocation receipt.
 CODEX_FINAL_ROOT="$LOG_DIR/codex"
+STAGE_IGNORE_PATHS=("$BACKLOG_FILE" "$FIX_PLAN_FILE" "$(ralph_workspace_root)/log" "$(ralph_workspace_root)/state"
+  "$ORIGINAL_DIR/.claude" "$ORIGINAL_DIR/.dev-trio" "$ORIGINAL_DIR/.debate-conductor" "$ORIGINAL_DIR/.agent-team")
 TS=$(date +%Y%m%d-%H%M%S)
 SUMMARY_LOG="$LOG_DIR/ralph-trio-$TS.log"
 ln -sfn "ralph-trio-$TS.log" "$LOG_DIR/latest-ralph-trio.log"
@@ -332,6 +336,7 @@ while :; do
   fi
 
   PLAN_LOG="$LOG_DIR/ralph-trio-$TS-iter-$ITER-plan.log"
+  PLAN_STDOUT="${PLAN_LOG%.log}.stdout.log"
   CODE_LOG="$LOG_DIR/ralph-trio-$TS-iter-$ITER-code.log"
   REVIEW_LOG="$LOG_DIR/ralph-trio-$TS-iter-$ITER-review.log"
   RESEARCH_LOG="$LOG_DIR/ralph-trio-$TS-iter-$ITER-research.log"
@@ -356,6 +361,7 @@ while :; do
     manifest_add_input kind=skip-reason value=dry-run
     echo "[dry-run plan] task: $TASK" | tee "$PLAN_LOG" >/dev/null
     PLAN="(dry-run plan for $TASK)"
+    PLAN_STDOUT="$PLAN_LOG"
   else
     manifest_add_role planner claude "$ROLES_DIR/planner.md"
     [ -n "$PROMPT_FILE" ] && manifest_add_input kind=prompt-md path="$PROMPT_FILE"
@@ -364,21 +370,18 @@ while :; do
       manifest_add_input kind=fix-plan-tail value="$FIX_PLAN_TAIL"
     fi
     PLAN_PROMPT=$(build_planner_prompt "$TASK" "$PROMPT_CONTEXT" "$FP_EXCERPT")
-    ( cd "$WORK_DIR" && "${PLANNER_CLI:-${CLAUDE_CLI:-claude}}" -p "$PLAN_PROMPT" 2>&1 ) | tee "$PLAN_LOG" >/dev/null
-    PLAN_RC="${PIPESTATUS[0]}"
-    PLAN="$(cat "$PLAN_LOG")"
+    PLAN_RC=0
+    stage_run planner "$WORK_DIR" "$PLAN_LOG" "${PLANNER_CLI:-${CLAUDE_CLI:-claude}}" -p "$PLAN_PROMPT" || PLAN_RC=$?
+    stage_record_result "$PLAN_RC" || exit 1
+    PLAN="$(cat "$PLAN_STDOUT" 2>/dev/null)"
     if [ "$PLAN_RC" != "0" ]; then
-      # Planner CLI exited non-zero (auth, rate-limit, missing binary, …).
-      # Without this check the loop would treat the planner's stderr as the
-      # plan and feed it to a coder that has no way to know the plan is bogus.
-      # Worse: pop_top_task already consumed the BACKLOG entry, so the task
-      # would silently disappear. Mark the iter as plan-failed; Stage 2 + 3
-      # below treat the flag as a hard skip and the verdict dispatch
-      # re-queues via the NEEDS-FIX path.
+      # Execution failure or absent stdout is retryable, not a usable plan.
+      # pop_top_task already consumed the row; skip coding/review and route
+      # through NEEDS-FIX so the task is re-queued.
       PLAN_FAILED=1
       manifest_add_input kind=skip-reason value=plan-failed
       manifest_add_input kind=plan-rc value="$PLAN_RC"
-      ralph_log "  [stage 1/3] planner exited rc=$PLAN_RC — marking iter PLAN-FAILED (re-queue task, skip Stage 2+3)"
+      ralph_log "  [stage 1/3] planner failed stage rc=$PLAN_RC — marking iter PLAN-FAILED (re-queue task, skip Stage 2+3)"
     fi
   fi
   manifest_finalize
@@ -394,7 +397,7 @@ while :; do
   # is reset every iter and threads into Stage 2's build_coder_prompt.
   PRE_RESEARCH=""
   if [ "$PLAN_FAILED" = "0" ] && [ "$DRY_RUN" != "1" ] && [ "$NO_RESEARCH" = "0" ]; then
-    PLAN_RESEARCH_QS=$(extract_need_research "$PLAN_LOG")
+    PLAN_RESEARCH_QS=$(extract_need_research "$PLAN_STDOUT")
     if [ -n "$PLAN_RESEARCH_QS" ]; then
       ralph_log "  [stage 1.5] planner requested research → $PLAN_RESEARCH_LOG"
       manifest_init ralph-research "$PLAN_RESEARCH_LOG"
@@ -441,12 +444,12 @@ while :; do
   CODE_RC=0
   if [ "$PLAN_FAILED" = "1" ]; then
     ralph_log "  [stage 2/3] coder SKIPPED (planner failed rc=$PLAN_RC)"
-    echo "PLAN_FAILED=1 — skipping coder (planner exited rc=$PLAN_RC)" > "$CODE_LOG"
+    echo "PLAN_FAILED=1 — skipping coder (planner failed stage rc=$PLAN_RC)" > "$CODE_LOG"
     manifest_init ralph-code "$CODE_LOG"
     CODE_RUN_ID="$MANIFEST_RUN_ID"
     manifest_set_parent "$PARENT_RUN_ID"
     manifest_add_input kind=task value="$TASK"
-    manifest_add_input kind=plan path="$PLAN_LOG"
+    manifest_add_input kind=plan path="$PLAN_STDOUT"
     manifest_add_input kind=skip-reason value=plan-failed
     manifest_finalize
     PARENT_RUN_ID="$CODE_RUN_ID"
@@ -456,7 +459,7 @@ while :; do
     CODE_RUN_ID="$MANIFEST_RUN_ID"
     manifest_set_parent "$PARENT_RUN_ID"
     manifest_add_input kind=task value="$TASK"
-    manifest_add_input kind=plan path="$PLAN_LOG"
+    manifest_add_input kind=plan path="$PLAN_STDOUT"
     [ -n "$PRE_RESEARCH" ] && manifest_add_input kind=research path="$PLAN_RESEARCH_LOG"
     if [ "$DRY_RUN" = "1" ]; then
       manifest_add_input kind=skip-reason value=dry-run
@@ -469,7 +472,8 @@ while :; do
         manifest_add_input kind=fix-plan-tail value="$FIX_PLAN_TAIL"
       fi
       CODE_PROMPT=$(build_coder_prompt "$TASK" "$PLAN" "$PROMPT_CONTEXT" "$PRE_RESEARCH" "$FP_EXCERPT")
-      ( cd "$WORK_DIR" && "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p "$CODE_PROMPT" 2>&1 ) | tee "$CODE_LOG" >/dev/null || CODE_RC=$?
+      stage_run coder "$WORK_DIR" "$CODE_LOG" "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p "$CODE_PROMPT" || CODE_RC=$?
+      stage_record_result "$CODE_RC" || exit 1
     fi
     manifest_finalize
     PARENT_RUN_ID="$CODE_RUN_ID"
@@ -483,7 +487,7 @@ while :; do
   manifest_add_input kind=task value="$TASK"
   manifest_add_input kind=code-log path="$CODE_LOG"
   if [ "$PLAN_FAILED" = "1" ]; then
-    # Planner exited non-zero; we never ran Stage 2. Don't fabricate a SHIP.
+    # Planner invocation failed; we never ran Stage 2. Don't fabricate a SHIP.
     # NEEDS-FIX routes to the dispatch's re-queue path so the task gets
     # another shot (next iter, fresh planner attempt).
     VERDICT="NEEDS-FIX"
@@ -493,15 +497,15 @@ while :; do
     manifest_add_input kind=plan-rc value="$PLAN_RC"
     manifest_set_verdict NEEDS-FIX
     manifest_finalize
-  elif [ "$AUTOSHIP" = "1" ] && [ "$CODE_RC" != "0" ]; then
-    # --autoship skips review, NOT coder failure. Without this check, a
-    # broken coder run (rate-limit, partial diff, missing CLI) would be
-    # marked SHIP and — in worktree mode — get fast-forward-merged. Route
-    # to NEEDS-FIX (re-queue) so the task survives a transient coder error.
+  elif [ "$CODE_RC" != "0" ]; then
+    # A reviewer cannot override a failed coder invocation, even if an older
+    # diff looks shippable. Keep the task pending through the retry path.
     VERDICT="NEEDS-FIX"
-    ralph_log "  [stage 3/3] reviewer SKIPPED (--autoship), but coder rc=$CODE_RC — NEEDS-FIX (re-queue, refusing to ship a failed coder run)"
-    echo "AUTOSHIP=1 + coder rc=$CODE_RC — refusing to ship a failed coder run" > "$REVIEW_LOG"
-    manifest_add_input kind=skip-reason value=autoship-coder-failed
+    ralph_log "  [stage 3/3] reviewer SKIPPED (coder failed rc=$CODE_RC) — NEEDS-FIX"
+    echo "coder rc=$CODE_RC — refusing to ship a failed coder run" > "$REVIEW_LOG"
+    FAIL_REASON=coder-failed
+    [ "$AUTOSHIP" != "1" ] || FAIL_REASON=autoship-coder-failed
+    manifest_add_input kind=skip-reason value="$FAIL_REASON"
     manifest_add_input kind=coder-rc value="$CODE_RC"
     manifest_set_verdict NEEDS-FIX
     manifest_finalize
@@ -628,11 +632,13 @@ $RESEARCH"
         manifest_set_parent "$RESEARCH_RUN_ID"
         manifest_add_role worker claude "$ROLES_DIR/worker.md"
         manifest_add_input kind=task value="$TASK"
-        manifest_add_input kind=plan path="$PLAN_LOG"
+        manifest_add_input kind=plan path="$PLAN_STDOUT"
         [ -n "$PRE_RESEARCH" ] && manifest_add_input kind=research path="$PLAN_RESEARCH_LOG"
         [ "$RESEARCH_RC" -eq 0 ] && manifest_add_input kind=research path="$RESEARCH_LOG"
         CODE_PROMPT2=$(build_coder_prompt "$TASK" "$PLAN" "$PROMPT_CONTEXT" "$RETRY_RESEARCH" "$FP_EXCERPT")
-        ( cd "$WORK_DIR" && "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p "$CODE_PROMPT2" 2>&1 ) | tee "$CODE2_LOG" >/dev/null || true
+        CODE_RC=0
+        stage_run coder "$WORK_DIR" "$CODE2_LOG" "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p "$CODE_PROMPT2" || CODE_RC=$?
+        stage_record_result "$CODE_RC" || exit 1
         manifest_finalize
         # Stage 6: Review2 (parent = code2)
         REVIEW2_LOG="$LOG_DIR/ralph-trio-$TS-iter-$ITER-review2.log"
@@ -642,39 +648,48 @@ $RESEARCH"
         # Reviewer role recorded by ask-reviewer.sh via the PR 9 carve-out.
         manifest_add_input kind=task value="$TASK"
         manifest_add_input kind=code-log path="$CODE2_LOG"
-        RANGE_HINT2=$(build_range_hint "$PRE_CODE2_REF" "$WORK_DIR")
-        # No verdict-format instruction — see the Stage-3 review note above.
-        REVIEW2_FOCUS="Re-review the same task after research-informed retry: '$TASK'.${RANGE_HINT2}"
-        REVIEW_RECEIPT=$(review_receipt_create "$REVIEW2_LOG") || exit 2
-        ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$CODEX_FINAL_ROOT" \
-            DEV_TRIO_REVIEW_RECEIPT="$REVIEW_RECEIPT" MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-reviewer.sh "$REVIEW2_FOCUS" 2>&1 ) | tee "$REVIEW2_LOG" >/dev/null
-        CODEX2_RC=${PIPESTATUS[0]}
-        REVIEW_DATA=$(review_result_from_receipt "$REVIEW_RECEIPT" "$CODEX2_RC") || REVIEW_DATA=""
-        VERDICT="UNKNOWN"
-        REVIEW2_SRC=""
-        if [ -n "$REVIEW_DATA" ]; then
-          REVIEW_RESULT_PATH=$(printf '%s\n' "$REVIEW_DATA" | jq -r '.result_path')
-          manifest_add_input kind=review-result path="$REVIEW_RESULT_PATH"
-          if [ "$CODEX2_RC" -eq 0 ]; then
-            VERDICT=$(printf '%s\n' "$REVIEW_DATA" | jq -r '.verdict')
-            REVIEW2_SRC=$(printf '%s\n' "$REVIEW_DATA" | jq -r '.final_path')
-            { printf '\n=== AUTHORITATIVE FINAL ===\n'; cat "$REVIEW2_SRC"; } >> "$REVIEW2_LOG"
-            manifest_add_input kind=codex-final path="$REVIEW2_SRC"
-          fi
+        if [ "$CODE_RC" -ne 0 ]; then
+          VERDICT=NEEDS-FIX
+          echo "coder retry rc=$CODE_RC — skipping re-review" > "$REVIEW2_LOG"
+          manifest_add_input kind=skip-reason value=coder-failed
+          manifest_add_input kind=coder-rc value="$CODE_RC"
+          manifest_set_verdict NEEDS-FIX
+          manifest_finalize
         else
-          ralph_log "  review result unavailable — forcing UNKNOWN verdict (receipt: $REVIEW_RECEIPT)"
+          RANGE_HINT2=$(build_range_hint "$PRE_CODE2_REF" "$WORK_DIR")
+          # No verdict-format instruction — see the Stage-3 review note above.
+          REVIEW2_FOCUS="Re-review the same task after research-informed retry: '$TASK'.${RANGE_HINT2}"
+          REVIEW_RECEIPT=$(review_receipt_create "$REVIEW2_LOG") || exit 2
+          ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$CODEX_FINAL_ROOT" \
+              DEV_TRIO_REVIEW_RECEIPT="$REVIEW_RECEIPT" MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-reviewer.sh "$REVIEW2_FOCUS" 2>&1 ) | tee "$REVIEW2_LOG" >/dev/null
+          CODEX2_RC=${PIPESTATUS[0]}
+          REVIEW_DATA=$(review_result_from_receipt "$REVIEW_RECEIPT" "$CODEX2_RC") || REVIEW_DATA=""
+          VERDICT="UNKNOWN"
+          REVIEW2_SRC=""
+          if [ -n "$REVIEW_DATA" ]; then
+            REVIEW_RESULT_PATH=$(printf '%s\n' "$REVIEW_DATA" | jq -r '.result_path')
+            manifest_add_input kind=review-result path="$REVIEW_RESULT_PATH"
+            if [ "$CODEX2_RC" -eq 0 ]; then
+              VERDICT=$(printf '%s\n' "$REVIEW_DATA" | jq -r '.verdict')
+              REVIEW2_SRC=$(printf '%s\n' "$REVIEW_DATA" | jq -r '.final_path')
+              { printf '\n=== AUTHORITATIVE FINAL ===\n'; cat "$REVIEW2_SRC"; } >> "$REVIEW2_LOG"
+              manifest_add_input kind=codex-final path="$REVIEW2_SRC"
+            fi
+          else
+            ralph_log "  review result unavailable — forcing UNKNOWN verdict (receipt: $REVIEW_RECEIPT)"
+          fi
+          if [ "$CODEX2_RC" -ne 0 ]; then
+            ralph_log "  ask-reviewer.sh exited rc=$CODEX2_RC — forcing UNKNOWN verdict (review log: $REVIEW2_LOG)"
+            manifest_add_input kind=codex-rc value="$CODEX2_RC"
+          fi
+          [ -z "$VERDICT" ] && VERDICT="UNKNOWN"
+          MV=$(to_manifest_verdict "$VERDICT")
+          if [ "$MV" = "null" ] && [ -n "$VERDICT" ]; then
+            manifest_add_input kind=raw-verdict value="$VERDICT"
+          fi
+          manifest_set_verdict "$MV"
+          manifest_finalize
         fi
-        if [ "$CODEX2_RC" -ne 0 ]; then
-          ralph_log "  ask-reviewer.sh exited rc=$CODEX2_RC — forcing UNKNOWN verdict (review log: $REVIEW2_LOG)"
-          manifest_add_input kind=codex-rc value="$CODEX2_RC"
-        fi
-        [ -z "$VERDICT" ] && VERDICT="UNKNOWN"
-        MV=$(to_manifest_verdict "$VERDICT")
-        if [ "$MV" = "null" ] && [ -n "$VERDICT" ]; then
-          manifest_add_input kind=raw-verdict value="$VERDICT"
-        fi
-        manifest_set_verdict "$MV"
-        manifest_finalize
         REVIEW_LOG="$REVIEW2_LOG"
       fi
     fi

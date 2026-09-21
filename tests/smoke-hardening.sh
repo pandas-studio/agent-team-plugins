@@ -234,12 +234,16 @@ assert_eq "$(git -C "$CB" log --oneline feature | wc -l | tr -d ' ')" "1"
 # under bash 3.2's set -u (it used to report 0 commits every time).
 git -C "$DRV" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "ralph iter 1: smoke"
 git -C "$DRV" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "unrelated"
+mkdir -p "$TMP/meta-ws/log/smoke"
+printf "fixture stdout\n" > "$TMP/meta-ws/log/smoke/ralph-trio-fixture-plan.log"
+printf "fixture stdout\n" > "$TMP/meta-ws/log/smoke/ralph-trio-fixture-plan.stdout.log"
 mkdir -p "$TMP/meta-bin"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/meta-bin/ask-reviewer.sh"
 chmod +x "$TMP/meta-bin/ask-reviewer.sh"
-(cd "$DRV" && env PATH="$TMP/meta-bin:$PATH" AGENT_TEAM=smoke TMUX="" RALPH_TRIO_WORKSPACE="$TMP/rw" \
+(cd "$DRV" && env PATH="$TMP/meta-bin:$PATH" AGENT_TEAM=smoke TMUX="" RALPH_TRIO_WORKSPACE="$TMP/meta-ws" \
   "$ROOT/ralph-trio/bin/ralph-meta.sh" --since "1 hour ago" >/dev/null 2>"$TMP/meta.err" </dev/null) || true
 assert_eq "$(sed -n 's/.*ralph commits found: //p' "$TMP/meta.err")" "1"
+assert_eq "$(sed -n 's/.*ralph logs found: //p' "$TMP/meta.err")" "1"
 
 # agent-team-models must not overwrite a config it could not parse: reads fall
 # back to an empty config, and a write built on that would drop every model.
@@ -1571,6 +1575,9 @@ assert_eq "$(grep -ac 'LATE-LINE' "$TMP/view-log/held/latest-debate/stream-gen.l
 wait "$HELD_PID"
 assert_eq "$(cat "$TMP/held-open.rc")" "0"
 assert_eq "$(grep -ac 'LATE-LINE' "$TMP/view-log/held/latest-debate/stream-gen.log")" "1"
+
+cmp "$ROOT/ralph-trio/lib/stage-result.sh" "$ROOT/spec-trio/lib/stage-result.sh"
+PASS=$((PASS + 1))
 
 cmp "$ROOT/dev-trio/lib/registry.sh" "$ROOT/debate-conductor/lib/registry.sh"
 PASS=$((PASS + 1))

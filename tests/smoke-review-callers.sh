@@ -83,6 +83,8 @@ for plugin in ralph-trio spec-trio; do
     git init -q "$repo"
     git -C "$repo" config user.email fixture@example.com
     git -C "$repo" config user.name Fixture
+    # XDG Git ignore files still apply when GIT_CONFIG_GLOBAL is disabled.
+    git -C "$repo" config core.excludesFile /dev/null
     printf 'baseline\n' > "$repo/file.txt"
     printf '# Spec\n## §5 Test criteria\n### §5.1 implement file\n' > "$repo/spec.md"
     printf -- '- [ ] §5.1 implement file\n' > "$repo/BACKLOG.md"
@@ -120,7 +122,7 @@ for plugin in ralph-trio spec-trio; do
       check "$plugin denied research request runs once" test "$(wc -l < "$case_root/research" | tr -d ' ')" -eq 1
       check "$plugin denied research rc recorded" \
         jq -se '[.[].inputs[]?|select(.kind=="research-rc" and (.value|tostring)=="5")]|length==1' \
-        "$state/log/caller"/"$plugin"-*-research*.manifest.json
+        "$state/log/caller"/"$plugin"-*-research*.manifest.json >/dev/null
       check "$plugin denied research not given to a coder" \
         sh -c '! grep -q "auto-denied" "$1" 2>/dev/null' _ "$case_root/coder-prompts"
       if [ "$plugin" = ralph-trio ]; then
@@ -222,4 +224,173 @@ for variant in commit no-commit; do
       grep -qF 'The repository has no commits yet' "$case_root/review-prompts"
   fi
 done
+# Issue #34: use real drivers, replace only model CLIs. Harness logs live inside
+# the fixture repository so their growth cannot accidentally qualify as code.
+cat > "$TMP/stage-worker" <<'STUB'
+#!/usr/bin/env bash
+set -eu
+case "$2" in
+  '# Role: Ralph Planner'*|'# Role: Spec-driven Planner'*)
+    case "$STAGE_CASE" in
+      planner-stderr) printf '<allowed-paths>file.txt</allowed-paths>\n## NEED RESEARCH\n- stderr-decoy\n' >&2 ;;
+      planner-blank) printf ' \n\t'; echo guidance >&2 ;;
+      planner-missing-paths) echo 'real plan without paths'; echo '<allowed-paths>file.txt</allowed-paths>' >&2 ;;
+      *)
+        echo '<allowed-paths>file.txt,new.txt</allowed-paths>'
+        if [ "$STAGE_CASE" = planner-mixed ]; then
+          printf 'STDERR-ONLY-DECOY\n<allowed-paths>secret.txt</allowed-paths>\n## NEED RESEARCH\n- stderr-decoy\n' >&2
+        fi ;;
+    esac
+    exit 0 ;;
+esac
+n=0
+[ ! -f "$STAGE_CODER_COUNT" ] || n=$(cat "$STAGE_CODER_COUNT")
+n=$((n + 1))
+echo "$n" > "$STAGE_CODER_COUNT"
+printf '%s\n' "$2" >> "$STAGE_CODER_PROMPTS"
+if [ "$STAGE_MODE" = retry ] && [ "$n" -eq 1 ]; then
+  echo first-attempt > file.txt
+  echo first-attempt-summary
+  exit 0
+fi
+case "$STAGE_CASE" in
+  noop|dirty-noop) echo 'tool soft-denied' >&2 ;;
+  whitespace) printf ' \t\n'; echo 'tool soft-denied' >&2 ;;
+  silent-change) echo "changed-$n" > file.txt ;;
+  silent-new) echo new > new.txt ;;
+  silent-commit)
+    echo changed > file.txt
+    git add file.txt
+    git -c core.hooksPath=/dev/null -c commit.gpgsign=false commit -qm implement ;;
+  empty-commit) git -c core.hooksPath=/dev/null -c commit.gpgsign=false commit -qm empty --allow-empty ;;
+  failed) echo partial > file.txt; echo summary; exit 17 ;;
+  cli-config|cli-config-commit)
+    echo changed > file.txt
+    mkdir -p .claude; echo changed > .claude/settings.json
+    if [ "$STAGE_CASE" = cli-config-commit ]; then
+      git add file.txt .claude/settings.json
+      git -c core.hooksPath=/dev/null -c commit.gpgsign=false commit -qm config
+    fi
+    echo summary ;;
+  cli-state) mkdir -p .claude; echo local-state > .claude/settings.local.json ;;
+  harness-only) echo bookkeeping >> "$STAGE_FIX"; mkdir -p "$STAGE_WORKSPACE/state"; echo artifact > "$STAGE_WORKSPACE/state/extra"; echo guidance >&2 ;;
+  *) echo 'already satisfied, checked implementation' ;;
+esac
+STUB
+chmod +x "$TMP/stage-worker"
+for plugin in ralph-trio spec-trio; do
+  for entry in \
+    planner-stderr:reviewed planner-stderr:autoship planner-blank:reviewed \
+    planner-mixed:reviewed planner-missing-paths:reviewed \
+    noop:reviewed noop:autoship noop:retry noop:worktree \
+    whitespace:reviewed whitespace:retry dirty-noop:reviewed \
+    silent-change:reviewed silent-change:retry silent-change:worktree \
+    silent-new:autoship silent-commit:autoship summary:reviewed summary:retry \
+    empty-commit:reviewed failed:reviewed failed:autoship failed:retry harness-only:autoship \
+    cli-config:autoship cli-config-commit:reviewed cli-config-commit:retry \
+    cli-state:autoship cli-state:retry silent-change:workspace-root harness-only:workspace-root; do
+    scenario=${entry%:*}; mode=${entry#*:}
+    case_root="$TMP/stage-$plugin-$scenario-$mode"
+    repo="$case_root/repo"
+    mkdir -p "$repo"
+    git init -q "$repo"
+    git -C "$repo" config user.email fixture@example.com
+    git -C "$repo" config user.name Fixture
+    # XDG Git ignore files still apply when GIT_CONFIG_GLOBAL is disabled.
+    git -C "$repo" config core.excludesFile /dev/null
+    printf baseline > "$repo/file.txt"
+    printf '# Spec\n## §5 Test criteria\n### §5.1 implement file\n' > "$repo/spec.md"
+    printf -- '- [ ] §5.1 implement file\n' > "$repo/BACKLOG.md"
+    if [ "$scenario" = cli-config-commit ]; then
+      mkdir -p "$repo/.claude"; echo baseline > "$repo/.claude/settings.json"
+    fi
+    git -C "$repo" add .
+    git -C "$repo" -c core.hooksPath=/dev/null -c commit.gpgsign=false commit -qm baseline
+    baseline=$(git -C "$repo" rev-parse HEAD)
+    [ "$scenario" != dirty-noop ] || echo preexisting-dirty > "$repo/file.txt"
+    state="$repo/.driver-state"
+    [ "$mode" != workspace-root ] || state="$repo"
+    args=(--backlog "$repo/BACKLOG.md" --max-iter 1)
+    [ "$plugin" != spec-trio ] || args+=(--spec "$repo/spec.md" --test-cmd 'echo tested >> "$STAGE_TEST_TESTS"')
+    [ "$mode" != autoship ] || args+=(--autoship)
+    [ "$mode" != worktree ] || args+=(--worktree)
+    review_case=stage
+    [ "$mode" != retry ] || review_case=retry
+    driver_rc=0
+    (
+      cd "$repo"
+      env -u REVIEWER_CLI -u REVIEWER_ROLE_FILE -u MANIFEST_PARENT_TMP \
+        -u DEV_TRIO_REVIEW_PROFILE -u DEV_TRIO_REVIEW_RECEIPT -u RESEARCHER_CLI \
+        PATH="$ROOT/dev-trio/bin:$PATH" AGENT_TEAM=stage TMUX='' \
+        AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" \
+        DEV_TRIO_REVIEWER_MODEL=codex DEV_TRIO_RESEARCHER_MODEL=agy \
+        PLANNER_CLI="$TMP/stage-worker" CODER_CLI="$TMP/stage-worker" \
+        CODEX_CLI="$TMP/reviewer" AGY_CLI="$TMP/researcher" \
+        RALPH_TRIO_WORKSPACE="$state" SPEC_TRIO_WORKSPACE="$state" \
+        STAGE_CASE="$scenario" STAGE_MODE="$mode" STAGE_WORKSPACE="$state" \
+        STAGE_FIX="$repo/fix_plan.md" STAGE_CODER_COUNT="$case_root/coder.count" \
+        STAGE_CODER_PROMPTS="$case_root/coder.prompts" STAGE_TEST_TESTS="$case_root/tests" \
+        REVIEW_TEST_CASE="$review_case" REVIEW_TEST_COUNTER="$case_root/reviewer.count" \
+        REVIEW_TEST_RESEARCH="$case_root/research" REVIEW_TEST_DECOY="$case_root/decoy.md" \
+        "$ROOT/$plugin/bin/$plugin.sh" "${args[@]}"
+    ) < /dev/null > "$TMP/driver.out" 2>&1 || driver_rc=$?
+    failed=0; plan_failed=0; scope_failed=0
+    case "$scenario" in
+      planner-stderr|planner-blank) failed=1; plan_failed=1 ;;
+      noop|whitespace|dirty-noop|empty-commit|failed|harness-only|cli-state) failed=1 ;;
+      planner-missing-paths) if [ "$plugin" = spec-trio ]; then failed=1; scope_failed=1; fi ;;
+    esac
+    if [ "$plugin" = spec-trio ]; then
+      case "$scenario" in cli-state|cli-config|cli-config-commit) failed=1; scope_failed=1 ;; esac
+    fi
+    expected_rc=0
+    if [ "$plugin" = spec-trio ] && [ "$failed" = 1 ]; then expected_rc=3; fi
+    if [ "$scope_failed" = 1 ]; then expected_rc=4; fi
+    check "$plugin $entry driver status" test "$driver_rc" -eq "$expected_rc"
+    coder_calls=1; reviewer_calls=1
+    if [ "$failed" = 1 ] || [ "$mode" = autoship ]; then reviewer_calls=0; fi
+    if [ "$plan_failed" = 1 ] || { [ "$scope_failed" = 1 ] && [ "$scenario" = planner-missing-paths ]; }; then coder_calls=0; fi
+    if [ "$mode" = retry ]; then coder_calls=2; reviewer_calls=$((reviewer_calls + 1)); fi
+    actual_coder=0; actual_reviewer=0
+    [ ! -f "$case_root/coder.count" ] || actual_coder=$(cat "$case_root/coder.count")
+    [ ! -f "$case_root/reviewer.count" ] || actual_reviewer=$(cat "$case_root/reviewer.count")
+    check "$plugin $entry coder calls" test "$actual_coder" -eq "$coder_calls"
+    check "$plugin $entry reviewer calls" test "$actual_reviewer" -eq "$reviewer_calls"
+    if [ "$failed" = 1 ]; then
+      check "$plugin $entry pending task" grep -q -- '- \[ \]' "$repo/BACKLOG.md"
+    else
+      check "$plugin $entry completed task" sh -c '! grep -q -- "- \[ \]" "$1"' _ "$repo/BACKLOG.md"
+    fi
+    if [ "$mode" = worktree ] && [ "$failed" = 1 ]; then
+      check "$plugin failed coder did not merge" test "$(git -C "$repo" rev-parse HEAD)" = "$baseline"
+    fi
+    if [ "$mode" = worktree ] && [ "$failed" = 0 ]; then
+      check "$plugin silent coder change merged" grep -q changed "$repo/file.txt"
+    fi
+    if [ "$scenario" = planner-mixed ]; then
+      check "$plugin stderr not injected into coder prompt" sh -c '! grep -q STDERR-ONLY-DECOY "$1"' _ "$case_root/coder.prompts"
+      check "$plugin stderr does not request research" test ! -e "$case_root/research"
+    fi
+    if [ "$failed" = 1 ] && [ "$scope_failed" = 0 ]; then
+      stage=code
+      [ "$mode" != retry ] || stage=code2
+      [ "$plan_failed" != 1 ] || stage=plan
+      result=("$state/log/stage/"*-"$stage.manifest.json")
+      stage_rc=5; cli_rc=0
+      if [ "$scenario" = failed ]; then stage_rc=17; cli_rc=17; fi
+      check "$plugin $entry manifest stage rc" json_is "${result[0]}" \
+        "any(.inputs[]; .kind==\"stage-rc\" and .value==\"$stage_rc\")"
+      check "$plugin $entry manifest actual CLI rc" json_is "${result[0]}" \
+        "any(.inputs[]; .kind==\"cli-rc\" and .value==\"$cli_rc\")"
+    fi
+    if [ "$plugin" = spec-trio ]; then
+      test_calls=0
+      [ ! -f "$case_root/tests" ] || test_calls=$(wc -l < "$case_root/tests" | tr -d ' ')
+      expected_tests=$coder_calls
+      [ "$failed" != 1 ] || expected_tests=$((coder_calls > 0 ? coder_calls - 1 : 0))
+      check "$plugin $entry tests require coder success and valid scope" test "$test_calls" -eq "$expected_tests"
+    fi
+  done
+done
+
 printf 'review-caller smoke: %s assertions passed\n' "$PASS"
