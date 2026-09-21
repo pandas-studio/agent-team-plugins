@@ -255,3 +255,45 @@ def test_cli_resume_reuses_only_its_interrupted_completed_call(cli_run, monkeypa
     assert rc == 3 and view["next"] == ["approval"]
     assert runner.roles.count("langgraph-conductor.coder") == 1
     assert len(view["usage"]) == 4
+
+
+@pytest.mark.parametrize("kind", ["tracked", "untracked", "ignored"])
+def test_workspace_dirt_wins_over_broken_model_configuration(cli_run, monkeypatch, kind):
+    from agent_team_graph.registry import RegistryError, RoleRunner
+
+    invoke, runner, workspace, _ = cli_run
+    model_checks = []
+
+    def broken_models(self, workspace):
+        model_checks.append("checked")
+        raise RegistryError("broken model configuration")
+
+    monkeypatch.setattr(RoleRunner, "preflight", broken_models)
+    if kind == "tracked":
+        (workspace / "README.md").write_text("existing change")
+    elif kind == "untracked":
+        (workspace / "existing.txt").write_text("existing change")
+    else:
+        (workspace / ".git/info/exclude").write_text("cache/\n")
+        (workspace / "cache").mkdir()
+        (workspace / "cache/existing.pyc").write_bytes(b"existing cache")
+    rc, view = invoke("run", *(["--strict-ignored"] if kind == "ignored" else []))
+    assert rc == 4 and view["status"] == "needs-human"
+    assert "pre-existing changes" in view["errors"][0]
+    assert runner.roles == [] and model_checks == []
+
+
+def test_clean_workspace_model_error_preserves_checkpoint_history(cli_run, monkeypatch):
+    from agent_team_graph.cli import _open_runtime
+    from agent_team_graph.registry import RegistryError, RoleRunner
+
+    invoke, runner, _, state = cli_run
+
+    def broken_models(self, workspace):
+        raise RegistryError("broken model configuration")
+
+    monkeypatch.setattr(RoleRunner, "preflight", broken_models)
+    rc, view = invoke("run")
+    assert rc == 2 and "RegistryError" in view["error"] and runner.roles == []
+    with _open_runtime(state) as graph:
+        assert list(graph.get_state_history({"configurable": {"thread_id": "same-thread"}})) == []

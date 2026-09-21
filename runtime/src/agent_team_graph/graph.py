@@ -502,6 +502,15 @@ def validate_run_input(state: GraphState, runtime_root: Path) -> dict[str, Any]:
     }
 
 
+def initial_workspace_changes(context: dict[str, Any]) -> dict[str, list[str]]:
+    """Read the initial dirt without loading model configuration or calling a model."""
+    root = Path(context["repo_root"])
+    excluded = context["excluded_paths"]
+    tracked, untracked = _changed_paths(root, context["base_sha"], excluded)
+    ignored = _ignored_paths(root, excluded) if context["strict_ignored"] else []
+    return {"tracked_paths": tracked, "untracked_paths": untracked, "ignored_paths": ignored}
+
+
 def build_graph(
     *,
     checkpointer: Any,
@@ -539,8 +548,7 @@ def build_graph(
         repo_root = Path(context["repo_root"])
         excluded = context["excluded_paths"]
         try:
-            tracked, untracked = _changed_paths(repo_root, context["base_sha"], excluded)
-            ignored = _ignored_paths(repo_root, excluded) if context["strict_ignored"] else []
+            changes = initial_workspace_changes(context)
             _change_snapshot(repo_root, context["base_sha"], excluded, context["strict_ignored"])
         except SNAPSHOT_ERRORS as exc:
             diagnostic = store.write_json(state["run_id"], "01-preflight-error.json",
@@ -548,17 +556,23 @@ def build_graph(
             update.update(status="needs-human", artifacts=[artifact, diagnostic],
                           errors=[f"workspace preflight failed: {exc}"])
             return update
-        dirty = sorted(set(tracked + untracked + ignored))
+        dirty = sorted({path for paths in changes.values() for path in paths})
         if dirty:
             record = store.write_json(state["run_id"], "01-dirty-workspace.json", {
-                "tracked_paths": tracked, "untracked_paths": untracked, "ignored_paths": ignored,
+                **changes,
                 "note": "commit or move pre-existing changes before starting a new run",
             })
             update.update(status="needs-human", artifacts=[artifact, record], errors=[
                 "workspace has pre-existing changes: " + json.dumps(dirty, ensure_ascii=False)
             ])
         elif isinstance(role_runner, RoleRunner):
-            role_runner.preflight(Path(context["workspace"]))
+            # Direct graph callers need this check too; the CLI's earlier check
+            # also cannot rule out a registry/executable changing in the interim.
+            try:
+                role_runner.preflight(Path(context["workspace"]))
+            except RegistryError as exc:
+                update.update(status="needs-human", halted=True,
+                              errors=[f"model preflight failed: {exc}"])
         return update
 
     class RoleFailure(Exception):
@@ -572,7 +586,7 @@ def build_graph(
                 return node(state, runtime)
             except RoleFailure as exc:
                 return exc.update
-            except (OSError, ValueError, TypeError, RecoveryError, RegistryError) as exc:
+            except (OSError, ValueError, RecoveryError, RegistryError) as exc:
                 return {
                     "status": "needs-human", "halted": True, "verdict": "DISCUSS",
                     "gate_passed": False, "reviewed_change_sha256": None,
@@ -614,9 +628,19 @@ def build_graph(
         prompt = _role_prompt(state, role)
         identity = {"role": role, "prompt": prompt}
         if isinstance(role_runner, RoleRunner):
-            model, definition, command = role_runner.resolve_adapter(
-                f"langgraph-conductor.{role}", Path(state["workspace"])
-            )
+            try:
+                model, definition, command = role_runner.resolve_adapter(
+                    f"langgraph-conductor.{role}", Path(state["workspace"])
+                )
+            except RegistryError as exc:
+                if runtime.context is not None and runtime.context.matches(state, role):
+                    receipt = (store.root / state["run_id"] /
+                               f"call-{state['attempt']}-{role}-completed.json")
+                    raise RecoveryError(
+                        f"cannot resolve model for resumed call; inspect {receipt} and "
+                        f"restore the model registry/PATH before recovery: {exc}"
+                    ) from exc
+                raise
             identity.update(model=model, definition=definition, command=command)
 
         def invoke():
@@ -637,7 +661,10 @@ def build_graph(
             return asdict(result)
 
         record = call_record(state, role, identity, invoke, runtime)
-        result = RoleResult(**record.result)
+        try:
+            result = RoleResult(**record.result)
+        except TypeError as exc:
+            raise RecoveryError(f"malformed call result for {role}: {exc}") from exc
         usage = usage_record(result)
         if record.snapshot_error or result.cancelled_signal or result.cleanup_error:
             raise RoleFailure({
@@ -686,13 +713,16 @@ def build_graph(
 
     def gate_node(state: GraphState, runtime: Runtime[CallReplay]) -> dict[str, Any]:
         command = state["test_command"]
-        record = call_record(state, "gate", {"command": command}, lambda: asdict(run_process(
+        call = call_record(state, "gate", {"command": command}, lambda: asdict(run_process(
             command, cwd=Path(state["workspace"]), timeout=GATE_TIMEOUT_SECONDS,
             cancellation=cancellation,
         )), runtime)
-        completed = ProcessResult(**record.result)
-        call_artifacts = record.artifacts
-        snapshot_error = record.snapshot_error
+        try:
+            completed = ProcessResult(**call.result)
+        except TypeError as exc:
+            raise RecoveryError(f"malformed call result for gate: {exc}") from exc
+        call_artifacts = call.artifacts
+        snapshot_error = call.snapshot_error
         if completed.cancelled_signal or completed.cleanup_error:
             return {"halted": True, "status": "needs-human", "gate_passed": False,
                     "gated_change_sha256": None, "cancelled_signal": completed.cancelled_signal,
@@ -761,6 +791,22 @@ def build_graph(
             "attestation_covers": _attestation_covers(strict_ignored, excluded),
             "output": output,
         }
+        if (not strict_ignored and runtime.context is not None
+                and runtime.context.matches(state, "gate")):
+            try:
+                previous = store.read_json(state["run_id"],
+                                           f"40-gate-attempt-{state['attempt']}.json")
+            except FileNotFoundError:
+                pass
+            else:
+                # The ignored listing is informational in this mode. Preserve
+                # its original observation while recomputing every attested
+                # field; immutable publication still rejects any other change.
+                if (not isinstance(previous, dict)
+                        or not isinstance(previous.get("ignored_paths"), list)
+                        or not all(isinstance(path, str) for path in previous["ignored_paths"])):
+                    raise RecoveryError("malformed saved gate ignored-path listing")
+                record["ignored_paths"] = previous["ignored_paths"]
         artifact = store.write_json(
             state["run_id"], f"40-gate-attempt-{state['attempt']}.json", record
         )

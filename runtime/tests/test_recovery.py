@@ -325,7 +325,7 @@ def test_sigkill_between_external_call_and_checkpoint(tmp_path, phase):
             process.join(5)
 
 
-@pytest.mark.parametrize("corruption", ["missing-field", "output-bytes"])
+@pytest.mark.parametrize("corruption", ["missing-field", "output-bytes", "result-field"])
 def test_corrupt_completed_call_is_not_reused_or_reexecuted(tmp_path, monkeypatch, corruption):
     workspace, spec = make_repo(tmp_path)
     runner = FakeRunner()
@@ -341,11 +341,14 @@ def test_corrupt_completed_call_is_not_reused_or_reexecuted(tmp_path, monkeypatc
     with persisted(tmp_path, runner) as graph, pytest.raises(RuntimeError):
         graph.invoke(initial(workspace, spec, "corrupt"), config, durability="sync")
     root = tmp_path / "artifacts" / "run-corrupt"
-    if corruption == "missing-field":
+    if corruption in {"missing-field", "result-field"}:
         path = root / "call-1-coder-completed.json"
         record = json.loads(path.read_text())
-        record.pop("result")
-        path.write_text(json.dumps(record))
+        if corruption == "missing-field":
+            record.pop("result")
+        else:
+            record["result"].pop("model")
+        path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
     else:
         (root / "call-1-coder-output.txt").write_text("corrupted answer")
     with persisted(tmp_path, runner) as graph:
@@ -481,13 +484,14 @@ def test_reviewer_failure_replaces_stale_feedback_for_next_coder(tmp_path):
         "VERDICT: NEEDS-FIX", "UNTRUSTED FAILED REVIEW", "PRIVATE DIAGNOSTIC"))
 
 
-@pytest.mark.parametrize("phase", ["before-claim", "after-claim"])
+@pytest.mark.parametrize("phase", ["preflight", "before-claim", "after-claim"])
 def test_registry_failure_during_run_is_checkpointed_for_human_recovery(tmp_path, phase):
     from agent_team_graph.registry import RegistryError, RoleRunner
 
     class Runner(RoleRunner):
         def preflight(self, workspace):
-            pass
+            if phase == "preflight":
+                raise RegistryError("model executable disappeared")
 
         def resolve_adapter(self, role, workspace):
             if role.endswith(".coder") and phase == "before-claim":
@@ -505,10 +509,11 @@ def test_registry_failure_during_run_is_checkpointed_for_human_recovery(tmp_path
         graph.invoke(initial(workspace, spec, "registry-failure"), config, durability="sync")
         snapshot = graph.get_state(config)
     assert snapshot.next == () and snapshot.values["status"] == "needs-human"
-    assert snapshot.values["attempt"] == 1 and snapshot.values["halted"]
-    assert any("RegistryError: model executable disappeared" in error
+    assert snapshot.values["attempt"] == (0 if phase == "preflight" else 1)
+    assert snapshot.values["halted"]
+    assert any("model executable disappeared" in error
                for error in snapshot.values["errors"])
-    assert len(snapshot.values["usage"]) == 2
+    assert len(snapshot.values["usage"]) == (0 if phase == "preflight" else 2)
 
 
 @pytest.mark.parametrize("signum", [2, 15])
@@ -538,3 +543,122 @@ def test_cancellation_during_context_does_not_claim_first_role(tmp_path, monkeyp
     assert snapshot.values["attempt"] == 0 and snapshot.values["cancelled_signal"] == signum
     assert snapshot.values["usage"] == [] and runner.roles == []
     assert list(artifacts.rglob("call-*")) == []
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_gate_recovery_preserves_original_ignored_observation(tmp_path, monkeypatch, strict):
+    from agent_team_graph import graph as module
+
+    workspace, spec = make_repo(tmp_path)
+    (workspace / ".gitignore").write_text("cache/\n")
+    subprocess.run(["git", "-C", workspace, "add", ".gitignore"], check=True)
+    subprocess.run(["git", "-C", workspace, "commit", "-qm", "ignore cache"], check=True)
+    runner = FakeRunner(writes={"README.md": "implemented", "cache/before.pyc": "old cache"})
+    state = initial(workspace, spec, "gate-cache")
+    state.update(strict_ignored=strict, allowed_paths=["README.md", "cache"])
+    config = {"configurable": {"thread_id": "gate-cache"}}
+    original_write = ArtifactStore.write_json
+    original_run = module.run_process
+    calls = []
+    crashed = False
+
+    def count_test(*args, **kwargs):
+        calls.append("test")
+        return original_run(*args, **kwargs)
+
+    def crash_after_gate(store, run_id, name, content):
+        nonlocal crashed
+        artifact = original_write(store, run_id, name, content)
+        if name == "40-gate-attempt-1.json" and not crashed:
+            crashed = True
+            raise RuntimeError("crash after gate artifact before checkpoint")
+        return artifact
+
+    monkeypatch.setattr(module, "run_process", count_test)
+    monkeypatch.setattr(ArtifactStore, "write_json", crash_after_gate)
+    with persisted(tmp_path, runner) as graph, pytest.raises(RuntimeError, match="after gate artifact"):
+        graph.invoke(state, config, durability="sync")
+    path = tmp_path / "artifacts/run-gate-cache/40-gate-attempt-1.json"
+    before = path.read_bytes()
+    assert json.loads(before)["ignored_paths"] == ["cache/before.pyc"]
+    (workspace / "cache/before.pyc").unlink()
+    (workspace / "cache/after.pyc").write_text("new cache")
+    with persisted(tmp_path, runner) as graph:
+        assert graph.get_state(config).next == ("gate",)
+        resume_graph(graph, config)
+        snapshot = graph.get_state(config)
+    assert calls == ["test"] and path.read_bytes() == before
+    if strict:
+        assert snapshot.values["status"] == "needs-human" and snapshot.next == ()
+        assert any("no longer matches" in error for error in snapshot.values["errors"])
+    else:
+        assert snapshot.next == ("approval",) and snapshot.values["gate_passed"]
+
+
+def test_failed_call_snapshot_is_not_reported_as_workspace_drift(tmp_path):
+    from agent_team_graph.journal import CallJournal, RecoveryError
+
+    journal = CallJournal(ArtifactStore(tmp_path), "run", 1, "gate")
+
+    def failed_snapshot():
+        raise OSError("snapshot unavailable")
+
+    journal.run({"command": ["true"]}, lambda: {"stdout": "", "stderr": ""}, failed_snapshot)
+    with pytest.raises(RecoveryError, match="snapshot could not be attested.*snapshot unavailable"):
+        journal.run({"command": ["true"]}, lambda: pytest.fail("must not invoke"),
+                    lambda: pytest.fail("must not relabel missing snapshot as drift"), allow_replay=True)
+
+
+def test_unavailable_replay_adapter_names_the_saved_receipt(tmp_path, monkeypatch):
+    from agent_team_graph.registry import RegistryError, RoleRunner
+
+    class Runner(RoleRunner):
+        missing = False
+
+        def preflight(self, workspace):
+            pass
+
+        def resolve_adapter(self, role, workspace):
+            if self.missing:
+                raise RegistryError("executable not found")
+            return "fake", {"args": []}, "fake-model"
+
+        def run(self, role, prompt, workspace):
+            return RoleResult("fake", role, "fake", "answer", 0, 1)
+
+    workspace, spec = make_repo(tmp_path)
+    runner = Runner()
+    original = ArtifactStore.write
+
+    def crash(store, run_id, name, content):
+        if name == "30-code-attempt-1.md":
+            raise RuntimeError("crash after completion")
+        return original(store, run_id, name, content)
+
+    monkeypatch.setattr(ArtifactStore, "write", crash)
+    config = {"configurable": {"thread_id": "missing-adapter"}}
+    with persisted(tmp_path, runner) as graph, pytest.raises(RuntimeError, match="after completion"):
+        graph.invoke(initial(workspace, spec, "missing-adapter"), config, durability="sync")
+    runner.missing = True
+    with persisted(tmp_path, runner) as graph:
+        resume_graph(graph, config)
+        snapshot = graph.get_state(config)
+    assert snapshot.next == () and snapshot.values["status"] == "needs-human"
+    error = "\n".join(snapshot.values["errors"])
+    assert "RecoveryError" in error and "registry/PATH" in error
+    assert "call-1-coder-completed.json" in error
+
+
+def test_programming_type_error_is_not_misclassified_as_a_receipt_failure(tmp_path):
+    class Runner(FakeRunner):
+        def run(self, role, prompt, workspace):
+            if role.endswith(".coder"):
+                raise TypeError("programming error in runner")
+            return super().run(role, prompt, workspace)
+
+    workspace, spec = make_repo(tmp_path)
+    config = {"configurable": {"thread_id": "type-error"}}
+    with persisted(tmp_path, Runner()) as graph:
+        with pytest.raises(TypeError, match="programming error in runner"):
+            graph.invoke(initial(workspace, spec, "type-error"), config, durability="sync")
+        assert graph.get_state(config).next == ("coder",)

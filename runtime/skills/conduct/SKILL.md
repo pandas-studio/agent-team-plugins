@@ -84,6 +84,8 @@ artifact/usage/error lists while retaining old checkpoints and files. Pending ap
 requires `approve`; `resume` returns code 3 without discarding that interrupt.
 Mutating commands lock one thread at a time; `status` and rejecting an approval work even
 with a broken model registry.
+Pre-existing workspace changes take precedence over model-configuration errors and return 4.
+On a clean workspace, model-configuration errors return 2 before checkpoint updates.
 
 The runtime reserves each attempt before its external calls. Call start/completion records
 prevent silent repetition after a crash. Explicit resume grants replay only to the run, attempt
@@ -91,6 +93,8 @@ and role pending in its starting checkpoint, with matching output hashes and wor
 Existing receipts for a fresh run or any later call are rejected. An incomplete call or changed workspace stops for human
 recovery; inspect the files and any surviving processes, then start a new run. SIGKILL and
 processes escaping into a separate session cannot be cleaned up reliably.
+On non-strict gate replay, a previously published gate artifact keeps its original informational
+ignored-path listing while all attested fields are revalidated. Strict mode rejects ignored-file drift.
 Legacy approval/terminal checkpoints remain supported. A legacy checkpoint interrupted in
 an external-call node has no receipt: resume returns 4 with recovery guidance and preserves it.
 Never infer that adding a new graph node will run it before an already saved pending node.

@@ -73,6 +73,11 @@ class CallJournal:
                 raise RecoveryError(f"malformed call completion record: {prefix}")
             if record.get("input_sha256") != digest or record.get("version") != 1:
                 raise RecoveryError(mismatch)
+            if record.get("snapshot_error"):
+                raise RecoveryError(
+                    f"completed call snapshot could not be attested: {prefix}: "
+                    f"{record['snapshot_error']}"
+                )
             if not record.get("change_sha256") or snapshot() != record["change_sha256"]:
                 raise RecoveryError(f"workspace no longer matches completed call: {prefix}")
             result = dict(record["result"])

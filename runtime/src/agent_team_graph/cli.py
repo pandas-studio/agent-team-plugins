@@ -21,7 +21,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command, Overwrite
 
 from .artifacts import ArtifactStore, directory_fd
-from .graph import build_graph, resume_graph, validate_run_input
+from .graph import build_graph, initial_workspace_changes, resume_graph, validate_run_input
 from .process import Cancellation, signal_handlers
 from .registry import RegistryError, RoleRunner
 
@@ -196,7 +196,7 @@ def _execute(args: argparse.Namespace, thread_id: str, state_dir: Path,
     initial = None
     if args.command == "run":
         initial = _initial(args, thread_id)
-        validate_run_input(initial, state_dir)
+        context = validate_run_input(initial, state_dir)
     lock = nullcontext() if args.command == "status" else _thread_lock(state_dir, thread_id)
     with lock, _open_runtime(state_dir, cancellation) as graph:
         snapshot = graph.get_state(config)
@@ -209,7 +209,14 @@ def _execute(args: argparse.Namespace, thread_id: str, state_dir: Path,
                 _print(view | {"error": "thread is unfinished; use approve/reject or resume"})
                 return 2
             ArtifactStore(state_dir / "artifacts").preflight()
-            RoleRunner().preflight(Path(initial["workspace"]).expanduser().resolve())
+            try:
+                dirty = any(initial_workspace_changes(context).values())
+            except (OSError, ValueError):
+                # Let context_node record the workspace failure before trying
+                # any model configuration. It rechecks the live tree on invoke.
+                dirty = True
+            if not dirty:
+                RoleRunner().preflight(Path(initial["workspace"]).expanduser().resolve())
             payload = initial
         elif args.command == "status" or view["status"] == "not-found":
             _print(view)
