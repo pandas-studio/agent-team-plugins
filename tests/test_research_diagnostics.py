@@ -201,6 +201,12 @@ class ResearchDiagnosticsTests(unittest.TestCase):
                 result = self.run_script("dev-trio-doctor.sh", "--research", **overrides)
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertIn("[FAIL]" if "RESEARCHER_CLI" in overrides else "unregistered", result.stdout)
+                if "RESEARCHER_CLI" in overrides:
+                    self.assertEqual(result.stdout.splitlines()[-3:], [
+                        "[FAIL] Installation/config checks failed (see warnings/skipped checks above).",
+                        "[NOT_CHECKED] Host execution: selected CLI startup under the current host policy.",
+                        "[NOT_CHECKED] Research permissions: effective tool grants and actual research access.",
+                    ])
                 self.assertFalse(self.calls.exists())
 
     def test_invalid_registry_is_not_silently_ignored(self):

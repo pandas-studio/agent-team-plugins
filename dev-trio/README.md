@@ -253,10 +253,9 @@ those checks fail. The host row refers to the selected CLI's own requirements;
 agy's home writes and localhost listener are not assumed for custom adapters.
 Existing exit semantics are preserved: `NOT_CHECKED` does not change the exit
 code, and exit 0 is not proof of execution readiness. Configured rule counts/modes
-above the summary
-describe only the inspected file; neither presence nor absence proves effective
-grants. No startup write/bind/network probe is performed. The original doctor
-without arguments retains its broader checks.
+above the summary describe only the inspected file; neither presence nor absence
+proves effective grants. No startup write/bind/network probe is performed. The
+original doctor without arguments retains its broader checks.
 
 Read the `.run.json` and `.log` belonging to the failed invocation, not a
 `latest` link. Question/context sections can quote errors; use only actual CLI
