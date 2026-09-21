@@ -6,9 +6,12 @@ import argparse
 import fcntl
 import hashlib
 import json
+import os
 import shlex
+import signal
 import sqlite3
 import sys
+import threading
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -194,8 +197,60 @@ def _invoke(graph: Any, value: Any, config: dict[str, Any]) -> None:
         print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
 
 
+class _Terminated(BaseException):
+    """SIGTERM/SIGHUP as an exception, so `run_bounded` ends the role's group."""
+
+    def __init__(self, signum: int):
+        super().__init__(signum)
+        self.signum = signum
+
+
+_TERMINATING_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+
+
+@contextmanager
+def _terminate_as_exception() -> Iterator[None]:
+    """Turn SIGTERM/SIGHUP into `_Terminated` for the block.
+
+    Roles run in their own session (so a timeout can kill the whole group), which
+    also keeps a signal sent to this CLI or its job from reaching them. Raising
+    lets the cleanup in `run_bounded` kill the group before the thread lock is
+    released. A signal already ignored (`nohup`) stays ignored; signal handlers
+    can only be set from the main thread, so other threads are left as they are.
+    """
+
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def handler(signum: int, frame: Any) -> None:
+        raise _Terminated(signum)
+
+    previous = {}
+    for signum in _TERMINATING_SIGNALS:
+        if signal.getsignal(signum) is signal.SIG_IGN:
+            continue
+        previous[signum] = signal.signal(signum, handler)
+    try:
+        yield
+    finally:
+        for signum, old in previous.items():
+            signal.signal(signum, old)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    try:
+        with _terminate_as_exception():
+            return _main(args)
+    except _Terminated as exc:
+        # Cleaned up and unlocked; now die of the signal, as the caller expects.
+        signal.signal(exc.signum, signal.SIG_DFL)
+        os.kill(os.getpid(), exc.signum)
+        return 128 + exc.signum
+
+
+def _main(args: argparse.Namespace) -> int:
     state_dir = args.state_dir.expanduser().resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
     if args.command == "run":

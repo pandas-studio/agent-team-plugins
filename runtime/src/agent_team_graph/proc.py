@@ -55,9 +55,13 @@ def run_bounded(argv: list[str], cwd: Path | str, timeout: float) -> Bounded:
             _close_and_reap(process)
         return Bounded(process.returncode, _text(stdout), _text(stderr), True)
     except BaseException:
-        # The new session also keeps a terminal's Ctrl-C from reaching the child,
-        # so an interrupted caller must end the group itself: otherwise the child
-        # keeps writing the workspace after the thread lock is released.
+        # The new session also keeps a terminal's Ctrl-C (and a signal sent to
+        # the caller's job) from reaching the child, so an interrupted caller must
+        # end the group itself: otherwise the child keeps writing the workspace
+        # after the thread lock is released. The CLI turns SIGTERM/SIGHUP into an
+        # exception so they take this path too. Not covered: an interrupt that
+        # lands inside Popen() before it returns a handle, and a second interrupt
+        # during the drain after a timeout (the group is already SIGKILLed then).
         _kill_group(process)
         _close_and_reap(process)
         raise

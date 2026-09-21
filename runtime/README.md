@@ -60,7 +60,8 @@ timeout은 판정 없이 `needs-human`으로 종료합니다. timeout은 자식 
 - 테스트 명령은 argv로 실행하며 셸 연산자나 `eval`을 지원하지 않습니다.
 - 역할과 테스트 명령은 비대화형으로 실행합니다. stdin은 `/dev/null`이며(0.1.3은 CLI의 stdin을
   그대로 넘겼습니다) 각자 별도 프로세스 그룹에서 실행되고, timeout이나 CLI 중단(Ctrl-C) 시 그룹
-  전체를 종료합니다. 입력을 묻거나 stdin을 읽는 명령은 EOF를 받으므로 wrapper 스크립트에서
+  전체를 종료합니다. SIGTERM·SIGHUP으로 CLI가 종료될 때도 먼저 그룹을 종료하며, 이후 `resume`으로
+  이어갈 수 있습니다(종료 코드 6). 입력을 묻거나 stdin을 읽는 명령은 EOF를 받으므로 wrapper 스크립트에서
   파일로 입력을 넘기세요.
 - base SHA 이후 변경은 반복 지정한 `--allow-path` 안에 있어야 합니다. 경로는
   **저장소 루트 기준**이며, `--workspace`가 하위 디렉터리여도 동일합니다. 변경

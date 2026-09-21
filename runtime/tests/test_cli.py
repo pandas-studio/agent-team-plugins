@@ -300,13 +300,19 @@ def test_a_second_run_is_refused_while_the_first_is_inside_a_role(
     assert started.read_text() == "x"
 
 
-def test_ctrl_c_during_a_role_stops_the_role_and_leaves_the_run_resumable(
-    tmp_path: Path, monkeypatch
+@pytest.mark.parametrize("signame", ["SIGINT", "SIGTERM", "SIGHUP"])
+def test_a_signalled_cli_stops_the_role_and_leaves_the_run_resumable(
+    tmp_path: Path, monkeypatch, signame: str
 ):
-    """Roles run in their own session, so the CLI must end them when it is interrupted."""
+    """Roles run in their own session, so the CLI must end them when it is signalled.
+
+    Sent to the CLI's pid alone, the case no terminal or shell helps with: before,
+    the coder kept writing the workspace after the thread lock was released.
+    """
     import os
     import signal
 
+    signum = getattr(signal, signame)
     pidfile = tmp_path / "coder.pid"
     coder = [
         "-c",
@@ -323,18 +329,17 @@ def test_ctrl_c_during_a_role_stops_the_role_and_leaves_the_run_resumable(
     args = [
         "run", "--project-id", "demo", "--workspace", str(workspace), "--spec", str(spec),
         "--task", "t", "--test-command", "true", "--allow-path", "README.md",
-        "--thread-id", "interrupted", "--state-dir", str(tmp_path / "state"),
+        "--thread-id", "signalled", "--state-dir", str(tmp_path / "state"),
     ]
     cli = subprocess.Popen([sys.executable, "-c", _MAIN, *args], stderr=subprocess.DEVNULL)
-    child = None
     try:
         deadline = time.monotonic() + 60
         while not pidfile.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
         assert pidfile.exists(), "the coder never started"
         child = int(pidfile.read_text())
-        cli.send_signal(signal.SIGINT)
-        assert cli.wait(timeout=30) != 0
+        cli.send_signal(signum)
+        assert cli.wait(timeout=30) == -signum
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             try:
@@ -343,13 +348,27 @@ def test_ctrl_c_during_a_role_stops_the_role_and_leaves_the_run_resumable(
                 break
             time.sleep(0.05)
         else:
-            raise AssertionError("the coder outlived the interrupted CLI")
+            raise AssertionError("the coder outlived the signalled CLI")
     finally:
         cli.kill()
-        cli.wait()
-        if child is not None:
-            try:
-                os.kill(child, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-    assert _cli(tmp_path, "status", "--thread-id", "interrupted") == 6
+        cli.wait(timeout=30)
+        # The coder is in its own session: find it by the path in its argv, which
+        # works even if it never got as far as publishing its pid.
+        subprocess.run(["pkill", "-KILL", "-f", str(pidfile)], check=False)
+    assert _cli(tmp_path, "status", "--thread-id", "signalled") == 6
+
+
+def test_an_ignored_hangup_stays_ignored(monkeypatch):
+    """Under nohup SIGHUP is ignored; the CLI must not start dying of it."""
+    import signal
+
+    from agent_team_graph.cli import _terminate_as_exception
+
+    previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    try:
+        with _terminate_as_exception():
+            assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
+            assert signal.getsignal(signal.SIGTERM) is not signal.SIG_DFL
+        assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
+    finally:
+        signal.signal(signal.SIGHUP, previous)
