@@ -54,12 +54,37 @@ unset _REGISTRY_LIB
 # shellcheck source=../lib/host.sh
 . "$PLUGIN_ROOT/lib/host.sh"
 PM_HOST="$(dev_trio_host)" || exit $?
+LOG=""
+
+research_failure_hint() {
+  local env_name
+  printf '[ask-researcher] research failed (model=%s, rc=%s); do not use this run as evidence.\n' \
+    "$RESEARCHER_MODEL" "$1" >&2
+  if [ -n "${LOG:-}" ]; then
+    printf '[ask-researcher] inspect this invocation: %s\n' "$LOG" >&2
+  else
+    echo '[ask-researcher] no run log created; inspect the startup diagnostic above.' >&2
+  fi
+  echo '[ask-researcher] read-only setup check (keep the same CLI overrides):' >&2
+  printf '  DEV_TRIO_PM_HOST=%q DEV_TRIO_RESEARCHER_MODEL=%q AGENT_TEAM_MODELS_CONFIG=%q' \
+    "$PM_HOST" "$RESEARCHER_MODEL" "$(registry_config_file)" >&2
+  for env_name in RESEARCHER_CLI "$(_registry_model_def "$RESEARCHER_MODEL" | jq -r '.env_command // ""' 2>/dev/null)"; do
+    if [[ "$env_name" =~ ^[a-zA-Z_][a-zA-Z_0-9]*$ ]] && [ -n "${!env_name:-}" ]; then
+      printf ' %s=%q' "$env_name" "${!env_name}" >&2
+    fi
+  done
+  printf ' %q --research\n' "$SCRIPT_DIR/dev-trio-doctor.sh" >&2
+  if [ "$RESEARCHER_MODEL" = agy ] && [ "$1" -eq 5 ]; then
+    echo '[ask-researcher] rc=5 alone does not establish permission denial. Check the CLI diagnostic for a headless denial before changing permissions.' >&2
+  fi
+  printf '[ask-researcher] recovery guide: %s/README.md#research-troubleshooting\n' "$PLUGIN_ROOT" >&2
+}
 
 # Researcher model — DEV_TRIO_RESEARCHER_MODEL env > config role binding >
 # built-in default (agy). ask-researcher has no CLI model flag, so the flag tier is
 # empty. The legacy RESEARCHER_CLI/AGY_CLI still override the *binary* below.
 RESEARCHER_MODEL="$(dev_trio_resolve_role researcher)"
-registry_model_exists "$RESEARCHER_MODEL" || { echo "ask-researcher: researcher model '$RESEARCHER_MODEL' is not registered (run: agent-team-models list)" >&2; exit 2; }
+registry_model_exists "$RESEARCHER_MODEL" || { echo "ask-researcher: researcher model '$RESEARCHER_MODEL' is not registered (run: agent-team-models list)" >&2; research_failure_hint 2; exit 2; }
 
 # Team namespace — isolates logs per tmux window/session.
 TEAM=$(agent_team_detect_team) || exit 2
@@ -99,7 +124,12 @@ $STDIN_CONTEXT
 </user_context>"
 fi
 
-REGISTRY_CMD_OVERRIDE="${RESEARCHER_CLI:-}" dev_trio_check_cli "$RESEARCHER_MODEL" || exit $?
+CHECK_RC=0
+REGISTRY_CMD_OVERRIDE="${RESEARCHER_CLI:-}" dev_trio_check_cli "$RESEARCHER_MODEL" || CHECK_RC=$?
+if [ "$CHECK_RC" -ne 0 ]; then
+  research_failure_hint "$CHECK_RC" || true
+  exit "$CHECK_RC"
+fi
 
 mkdir -p "$LOG_DIR"
 case "$LOG_DIR" in /*) ;; *) LOG_DIR="$PWD/$LOG_DIR" ;; esac
@@ -263,5 +293,10 @@ fi
 exec 8>&-
 echo || true
 echo "(log: $LOG, final: $FINAL, rc=$RC)" >&2 || true
-[ -z "$RUNSTATE_LOG" ] || runstate_complete "$RUNSTATE_LOG" exit_code="$RC" reason=ok || true
+REASON=ok
+if [ "$RC" -ne 0 ]; then
+  REASON=failed
+  research_failure_hint "$RC" || true
+fi
+[ -z "$RUNSTATE_LOG" ] || runstate_complete "$RUNSTATE_LOG" exit_code="$RC" reason="$REASON" || true
 exit "$RC"

@@ -1062,8 +1062,10 @@ for outcome in success empty-answer invocation-failed; do
   check 'research END failure leaves the marker absent' no_match '^=== END (rc=' "$AGY_LOG"
   check 'research END failure is reported' grep -q 'final log append failed' "$TMP/research.err"
   check 'research END warning stays off stdout' no_match 'final log append failed' "$TMP/research.out"
+  expected_reason=ok
+  [ "$expected_rc" -eq 0 ] || expected_reason=failed
   check 'research END failure preserves completion' json_is "$AGY_RUN" \
-    ".completion.exit_code==$expected_rc and .completion.reason==\"ok\""
+    ".completion.exit_code==$expected_rc and .completion.reason==\"$expected_reason\""
   research_dashboard
   check 'research without END does not remain running' no_match 'no completion recorded' "$TMP/dashboard.out"
   if [ "$expected_rc" -eq 0 ]; then

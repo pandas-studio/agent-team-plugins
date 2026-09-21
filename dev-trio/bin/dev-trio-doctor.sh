@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # dev-trio-doctor.sh — environment probe + stub-CLI smoke for dev-trio.
 #
-# Usage: dev-trio-doctor.sh
+# Usage: dev-trio-doctor.sh [--research]
+# --research is a read-only researcher check: no inference, auth subprocess,
+# stub runs, or configuration writes. A pass does not verify research access.
 #
-# Checks:
+# Default-mode checks (without --research):
 #   1. Helpers and resolved role CLIs; Claude login for Codex PM; optional tmux.
 #   2. Plugin layout intact (ask-reviewer.sh / ask-researcher.sh / agent-team-models.sh /
 #      dashboard.sh / team-layout.sh / lib/manifest.sh / lib/registry.sh /
@@ -20,6 +22,18 @@
 # Stub smokes are *necessary but not sufficient* — verdict / dashboard /
 # parse-affecting changes need a real-CLI dry-run on top.
 set -uo pipefail
+
+RESEARCH_ONLY=false
+case "${1:-}" in
+  '') ;;
+  --research) RESEARCH_ONLY=true; shift ;;
+  --help|-h)
+    echo 'usage: dev-trio-doctor.sh [--research]'
+    echo '  --research  Read-only researcher setup checks; no inference or settings changes.'
+    exit 0 ;;
+  *) echo 'usage: dev-trio-doctor.sh [--research]' >&2; exit 2 ;;
+esac
+[ "$#" -eq 0 ] || { echo 'usage: dev-trio-doctor.sh [--research]' >&2; exit 2; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -41,6 +55,40 @@ fail()  { printf '  %s✗%s %s\n'  "$RED"    "$RESET" "$1"; FAILED=1; }
 note()  { printf '    %s%s%s\n'  "$DIM"    "$1"     "$RESET"; }
 
 FAILED=0
+
+if [ "$RESEARCH_ONLY" = true ]; then
+  command -v python3 >/dev/null 2>&1 || { fail 'python3 is required'; exit 1; }
+  config="$(registry_config_file)"
+  if [ -e "$config" ] && ! jq -e '
+    type == "object" and
+    ((.models // {}) | type == "object") and
+    ((.roles // {}) | type == "object")
+  ' "$config" >/dev/null 2>&1; then
+    fail "model registry is unreadable or malformed: $config"
+    note 'Fix the registry JSON before checking research. No invocation started.'
+    exit 1
+  fi
+  model="$(dev_trio_resolve_role researcher)" || { fail 'researcher model resolution failed'; exit 1; }
+  registry_model_exists "$model" || { fail "unregistered researcher: $model"; exit 1; }
+  binary="$(REGISTRY_CMD_OVERRIDE="${RESEARCHER_CLI:-}" registry_resolve_command "$model")" || {
+    fail "researcher binary resolution failed for model: $model"
+    note 'Check the selected model definition and CLI overrides. No invocation started.'
+    exit 1
+  }
+  # Only known, unmodified built-ins promise a non-inference --version flag.
+  # A custom wrapper may interpret any argument as a prompt, so never probe it.
+  standard=false
+  definition="$(_registry_model_def "$model")"
+  builtin="$(_registry_builtin_models | jq -c --arg id "$model" '.[$id] // null')"
+  env_command="$(printf '%s' "$definition" | jq -r '.env_command // ""')"
+  if [ "$builtin" != null ] && [ "$definition" = "$builtin" ] &&
+     [ -z "${RESEARCHER_CLI:-}" ] && [ "$binary" = "$(printf '%s' "$definition" | jq -r '.command')" ]; then
+    # Even an override with the same spelling has an explicitly custom contract.
+    if [ -z "$env_command" ] || [ -z "${!env_command:-}" ]; then standard=true; fi
+  fi
+  exec python3 "$PLUGIN_ROOT/lib/research_doctor.py" "$model" "$binary" "$standard" \
+    "$HOME/.gemini/antigravity-cli/settings.json"
+fi
 
 echo "dev-trio doctor — plugin root: $PLUGIN_ROOT"
 echo
@@ -78,7 +126,7 @@ echo
 echo "2. Plugin layout"
 for rel in bin/ask-reviewer.sh bin/ask-researcher.sh bin/agent-team-models.sh \
            bin/dashboard.sh bin/team-layout.sh \
-           lib/manifest.sh lib/registry.sh lib/runstate.sh lib/host.sh \
+           lib/manifest.sh lib/registry.sh lib/runstate.sh lib/host.sh lib/research_doctor.py \
            lib/pm.md lib/pm-codex.md \
            lib/roles/researcher.md lib/roles/reviewer.md; do
   p="$PLUGIN_ROOT/$rel"
