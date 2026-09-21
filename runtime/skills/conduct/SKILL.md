@@ -22,6 +22,9 @@ Requires `uv`. The environment lives in the plugin install directory, so re-run
 this after a plugin update. Finish (approve or reject) any run parked at
 approval before updating: a newer version may compute the change digest
 differently, and the parked run then stops as `needs-human` — start a new run.
+Also let every running invocation from an older version exit first: the
+one-process-per-thread lock (exit 7) only holds between versions that take it,
+and 0.1.3 and earlier do not.
 
 ```bash
 uv sync --project "${CLAUDE_PLUGIN_ROOT}" --frozen --python 3.12
@@ -34,6 +37,13 @@ and `--exclude-path`.
 `--allow-path` is **repository-root-relative** and repeatable; anything the
 coder changes outside it fails the gate.
 
+Start from a clean tree. A change that is already present outside `--allow-path`
+(including an uncommitted `SPEC.md`) would fail every attempt, so the run is
+refused before any role runs (`needs-human`, see `05-preexisting-changes.json`):
+commit the spec or keep it outside the repository. Changes already present inside
+`--allow-path` are kept, listed as `preexisting_changes` in `00-context.json`, and
+attested together with the coder's.
+
 ```bash
 uv run --project "${CLAUDE_PLUGIN_ROOT}" agent-team-graph run \
   --project-id demo --workspace . --spec SPEC.md \
@@ -44,7 +54,8 @@ uv run --project "${CLAUDE_PLUGIN_ROOT}" agent-team-graph run \
 ```
 
 The command prints a JSON view containing the `thread_id`. Keep it — every
-other subcommand takes it.
+other subcommand takes it. `run --thread-id` with an id that already exists is
+refused (exit 2); continue that thread with `resume` or `approve` instead.
 
 ## Inspect, resume, approve
 
@@ -65,6 +76,12 @@ Branch on these rather than parsing the JSON:
 | 3 | still open — parked at the ship-approval interrupt, needs `approve` |
 | 4 | stopped without approval (`rejected` or `needs-human`) |
 | 5 | unknown `--thread-id` |
+| 6 | incomplete — stopped before reaching approval (a crash or an interrupted process); `resume` continues from the last checkpoint |
+| 7 | busy — another process is running this thread; try again when it exits |
+
+Role and test-command timeouts do not crash a run: a coder timeout is a failed
+attempt (retried while attempts remain), a planner or researcher timeout stops as
+`needs-human`, and a reviewer timeout stops as `needs-human` without a verdict.
 
 ## Boundaries to preserve
 
@@ -94,9 +111,18 @@ Branch on these rather than parsing the JSON:
   for tool scratch. Excluded content (tracked or untracked) is neither
   scope-checked nor attested; use
   the narrowest path and verify `excluded_paths_not_attested` before approval.
-- `--strict-ignored` may take up to four full snapshots on a successful attempt.
+- `--strict-ignored` may take up to five full snapshots on a successful attempt
+  (start, gate, pre-review, post-review, publish). It also refuses to start when
+  ignored files already exist outside `--allow-path`, so a `.venv` or
+  `node_modules` in the repository needs `--exclude-path` or a clean workspace.
   Exclude only trusted scratch paths; do not exempt coder output.
 - `--test-command` is split as argv. Shell operators (`&&`, `|`, `>`) are not
   interpreted — wrap them in a script if you need them.
-- Artifacts under `.agent-team/artifacts/<run_id>/` are immutable. If a write
-  conflicts, start a new run instead of deleting them.
+- Artifacts under `.agent-team/artifacts/<run_id>/` are immutable and published
+  whole (never partially written). If a write conflicts, start a new run instead
+  of deleting them.
+- **Trust boundary: roles must not write the state directory** (`--state-dir`,
+  default `.agent-team`, excluded from attestation). A role that can write it can
+  rewrite the checkpoint database, so it is trusted like `.git`. The store refuses a
+  symlink at an artifact's own name, but not one planted higher up. When the coder
+  is not sandboxed, put `--state-dir` outside the repository.

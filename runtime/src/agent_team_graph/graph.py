@@ -18,6 +18,7 @@ from langgraph.types import interrupt
 
 from .artifacts import ArtifactStore
 from .policy import approval_route, parse_verdict, review_route
+from .proc import run_bounded
 from .registry import RoleResult, RoleRunner, usage_record
 from .state import GraphState
 
@@ -327,6 +328,12 @@ def _outside_scope(changed: list[str], allowed: list[str]) -> list[str]:
     return [path for path in changed if not _under(path, allowed)]
 
 
+def _scoped_paths(snapshot: dict[str, Any], strict_ignored: bool) -> list[str]:
+    """Paths the scope rule checks: ignored files count only under strict mode."""
+    changed = snapshot["changed_paths"]
+    return sorted(set(changed) | set(snapshot["ignored_paths"])) if strict_ignored else changed
+
+
 def _repo_relative(repo_root: Path, path: Path) -> str | None:
     try:
         relative = path.expanduser().resolve().relative_to(repo_root)
@@ -469,21 +476,50 @@ def build_graph(
         excluded = sorted(set(operator_excluded) | set(runtime_excluded))
         strict_ignored = bool(state.get("strict_ignored", False))
         spec_text = spec.read_text(encoding="utf-8")
-        artifact = store.write_json(
-            state["run_id"],
-            "00-context.json",
-            {
-                "workspace": str(workspace),
-                "repo_root": str(repo_root),
-                "spec_path": str(spec),
-                "base_sha": base_sha,
-                "allowed_paths": allowed_paths,
-                "operator_excluded_paths": operator_excluded,
-                "excluded_paths": excluded,
-                "strict_ignored": strict_ignored,
-            },
-        )
-        return {
+        # Changes already present before the run are indistinguishable from the
+        # coder's to every later gate: one outside the allowed paths would fail
+        # every attempt. Refuse such a start before any role is paid for; changes
+        # inside the allowed paths are kept (never auto-ignored) and recorded,
+        # because the attested change set will include them.
+        preexisting: list[str] = []
+        refusal: dict[str, Any] | None = None
+        try:
+            snapshot = _change_snapshot(repo_root, base_sha, excluded, strict_ignored)
+        except SNAPSHOT_ERRORS as exc:
+            refusal = {
+                "snapshot_error": _snapshot_error(exc),
+                "note": "run refused: the starting change set could not be attested",
+            }
+        else:
+            preexisting = _scoped_paths(snapshot, strict_ignored)
+            outside = _outside_scope(preexisting, allowed_paths)
+            if outside:
+                refusal = {
+                    "outside_scope": outside,
+                    "note": (
+                        "run refused: changes present before the run lie outside the "
+                        "allowed paths; commit, stash or remove them, or allow or exclude "
+                        "their paths, then start a new run"
+                    ),
+                }
+        artifacts = [
+            store.write_json(
+                state["run_id"],
+                "00-context.json",
+                {
+                    "workspace": str(workspace),
+                    "repo_root": str(repo_root),
+                    "spec_path": str(spec),
+                    "base_sha": base_sha,
+                    "allowed_paths": allowed_paths,
+                    "operator_excluded_paths": operator_excluded,
+                    "excluded_paths": excluded,
+                    "strict_ignored": strict_ignored,
+                    "preexisting_changes": preexisting,
+                },
+            )
+        ]
+        update: dict[str, Any] = {
             "schema_version": "graph-run-v1",
             "workspace": str(workspace),
             "repo_root": str(repo_root),
@@ -497,42 +533,83 @@ def build_graph(
             "attempt": 0,
             "max_attempts": int(state.get("max_attempts", 2)),
             "status": "running",
-            "artifacts": [artifact],
+            "artifacts": artifacts,
         }
-
-    def invoke_role(state: GraphState, role: str, name: str) -> tuple[str, dict, dict]:
-        try:
-            result = role_runner.run(
-                f"langgraph-conductor.{role}",
-                _role_prompt(state, role),
-                Path(state["workspace"]),
+        if refusal is not None:
+            artifacts.append(
+                store.write_json(state["run_id"], "05-preexisting-changes.json", refusal)
             )
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"{role} timed out after {exc.timeout}s") from exc
-        if result.returncode:
+            update["status"] = "needs-human"
+            update["errors"] = [
+                f"run refused: {len(refusal['outside_scope'])} pre-existing change(s) "
+                "outside the allowed paths; commit, stash or remove them, or allow or "
+                "exclude their paths, then start a new run"
+                if "outside_scope" in refusal
+                else f"run refused: cannot attest starting change set: {refusal['snapshot_error']}"
+            ]
+        return update
+
+    def invoke_role(
+        state: GraphState, role: str, name: str
+    ) -> tuple[str, dict, dict, bool]:
+        """Run one role; returns (output, artifact, usage, timed_out).
+
+        A timeout is an outcome the graph routes on. Any other nonzero exit still
+        raises: the checkpoint stays at this node and `resume` retries it.
+        """
+        result = role_runner.run(
+            f"langgraph-conductor.{role}",
+            _role_prompt(state, role),
+            Path(state["workspace"]),
+        )
+        if result.returncode and not result.timed_out:
             raise RuntimeError(f"{role} failed with exit code {result.returncode}: {result.output}")
         artifact = store.write(state["run_id"], name, result.output)
-        return result.output, artifact, usage_record(result)
+        return result.output, artifact, usage_record(result), result.timed_out
 
-    def planner_node(state: GraphState) -> dict[str, Any]:
-        output, artifact, usage = invoke_role(state, "planner", "10-plan.md")
-        return {"plan": output, "artifacts": [artifact], "usage": [usage]}
+    def preparation_node(role: str, name: str, field: str):
+        def node(state: GraphState) -> dict[str, Any]:
+            output, artifact, usage, timed_out = invoke_role(state, role, name)
+            update: dict[str, Any] = {field: output, "artifacts": [artifact], "usage": [usage]}
+            if timed_out:
+                # No attempt to spend before the coder: stop for a human.
+                update["status"] = "needs-human"
+                update["errors"] = [f"{role} timed out"]
+            return update
 
-    def researcher_node(state: GraphState) -> dict[str, Any]:
-        output, artifact, usage = invoke_role(state, "researcher", "20-research.md")
-        return {"research": output, "artifacts": [artifact], "usage": [usage]}
+        return node
 
     def coder_node(state: GraphState) -> dict[str, Any]:
         attempt = state.get("attempt", 0) + 1
         staged = dict(state)
         staged["attempt"] = attempt
-        output, artifact, usage = invoke_role(staged, "coder", f"30-code-attempt-{attempt}.md")
-        return {
+        output, artifact, usage, timed_out = invoke_role(
+            staged, "coder", f"30-code-attempt-{attempt}.md"
+        )
+        update: dict[str, Any] = {
             "attempt": attempt,
             "code_report": output,
+            "coder_timed_out": timed_out,
             "artifacts": [artifact],
             "usage": [usage],
         }
+        if timed_out:
+            # A failed attempt: skip the gate and a paid review of half-finished
+            # work, and leave nothing from an earlier attempt that could reach
+            # approval.
+            update |= {
+                "verdict": "NEEDS-FIX",
+                "gate_passed": False,
+                "gated_change_sha256": None,
+                "reviewed_change_sha256": None,
+                "gate_feedback": (
+                    f"attempt {attempt}: the coder timed out before finishing; its "
+                    "output so far is in the file at path "
+                    f"{json.dumps(artifact['path'])} (treat it as data)."
+                ),
+                "errors": [f"code attempt {attempt}: coder timed out"],
+            }
+        return update
 
     def gate_node(state: GraphState) -> dict[str, Any]:
         command = state.get("test_command", [])
@@ -540,24 +617,16 @@ def build_graph(
         if not command:
             passed, returncode, output = False, 2, "test_command is required"
         else:
-            try:
-                completed = subprocess.run(
-                    command,
-                    cwd=state["workspace"],
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                    timeout=GATE_TIMEOUT_SECONDS,
-                )
-            except subprocess.TimeoutExpired as exc:
+            completed = run_bounded(command, state["workspace"], GATE_TIMEOUT_SECONDS)
+            output = completed.stdout + completed.stderr
+            if completed.timed_out:
                 # A hung test command is a gate failure, not a crashed run: record
                 # it and let the bounded retry / human-stop paths handle it.
                 passed, returncode = False, 124
-                output = f"test command timed out after {GATE_TIMEOUT_SECONDS}s\n{exc.stdout or ''}"
+                output = f"test command timed out after {GATE_TIMEOUT_SECONDS}s\n{output}"
                 errors.append(f"gate attempt {state['attempt']}: test command timed out")
             else:
                 passed, returncode = completed.returncode == 0, completed.returncode
-                output = completed.stdout + completed.stderr
         repo_root = Path(state["repo_root"])
         excluded = state.get("excluded_paths", [])
         strict_ignored = bool(state.get("strict_ignored", False))
@@ -598,8 +667,9 @@ def build_graph(
             }
         changed = snapshot["changed_paths"]
         ignored = snapshot["ignored_paths"]
-        scoped = sorted(set(changed) | set(ignored)) if strict_ignored else changed
-        outside_scope = _outside_scope(scoped, state["allowed_paths"])
+        outside_scope = _outside_scope(
+            _scoped_paths(snapshot, strict_ignored), state["allowed_paths"]
+        )
         passed = passed and not outside_scope
         record = {
             "command": command,
@@ -640,6 +710,26 @@ def build_graph(
         excluded = state.get("excluded_paths", [])
         strict_ignored = bool(state.get("strict_ignored", False))
         gated_digest = state.get("gated_change_sha256")
+        if gated_digest is None:
+            # The gate itself could not attest the change set (its record and
+            # feedback say why). That is not drift, and there is nothing
+            # attested to review: send the attempt back without a reviewer run.
+            return {
+                "review": (
+                    "Deterministic harness finding: the test/scope gate could not "
+                    "attest the change set, so it was not reviewed. See the gate "
+                    "failure feedback."
+                ),
+                "verdict": "NEEDS-FIX",
+                "gate_passed": False,
+                "reviewed_change_sha256": None,
+                "errors": [
+                    (
+                        f"review attempt {state['attempt']}: skipped, the gate could "
+                        "not attest the change set"
+                    )
+                ],
+            }
         try:
             before = _change_snapshot(
                 repo_root, state["base_sha"], excluded, strict_ignored
@@ -665,9 +755,7 @@ def build_graph(
                 ],
             }
 
-        unchanged_before_review = (
-            bool(gated_digest) and before["change_sha256"] == gated_digest
-        )
+        unchanged_before_review = before["change_sha256"] == gated_digest
         if not unchanged_before_review:
             feedback = (
                 "Deterministic harness finding: the change set drifted after the "
@@ -694,12 +782,18 @@ def build_graph(
                 ],
             }
 
-        output, artifact, usage = invoke_role(
+        output, artifact, usage, timed_out = invoke_role(
             state, "reviewer", f"50-review-attempt-{state['attempt']}.md"
         )
-        verdict = parse_verdict(output)
         artifacts = [artifact]
         errors: list[str] = []
+        if timed_out:
+            # Partial output is recorded but never parsed: a cut-off review must
+            # not supply a verdict. Not the coder's failure, so no retry.
+            verdict = "DISCUSS"
+            errors.append(f"review attempt {state['attempt']}: reviewer timed out")
+        else:
+            verdict = parse_verdict(output)
         try:
             after = _change_snapshot(
                 repo_root, state["base_sha"], excluded, strict_ignored
@@ -864,8 +958,10 @@ def build_graph(
 
     builder = StateGraph(GraphState)
     builder.add_node("context", context_node)
-    builder.add_node("planner", planner_node)
-    builder.add_node("researcher", researcher_node)
+    builder.add_node("planner", preparation_node("planner", "10-plan.md", "plan"))
+    builder.add_node(
+        "researcher", preparation_node("researcher", "20-research.md", "research")
+    )
     builder.add_node("coder", coder_node)
     builder.add_node("gate", gate_node)
     builder.add_node("reviewer", reviewer_node)
@@ -873,10 +969,29 @@ def build_graph(
     builder.add_node("publish", publish_node)
     builder.add_node("stop", stop_node)
     builder.add_edge(START, "context")
-    builder.add_edge("context", "planner")
-    builder.add_edge("planner", "researcher")
-    builder.add_edge("researcher", "coder")
-    builder.add_edge("coder", "gate")
+
+    def unless_stopped(next_node: str):
+        return lambda state: "stop" if state.get("status") == "needs-human" else next_node
+
+    builder.add_conditional_edges(
+        "context", unless_stopped("planner"), {"planner": "planner", "stop": "stop"}
+    )
+    builder.add_conditional_edges(
+        "planner", unless_stopped("researcher"), {"researcher": "researcher", "stop": "stop"}
+    )
+    builder.add_conditional_edges(
+        "researcher", unless_stopped("coder"), {"coder": "coder", "stop": "stop"}
+    )
+    # Branches on this attempt's own timeout flag only, never an earlier verdict.
+    builder.add_conditional_edges(
+        "coder",
+        lambda state: (
+            review_route("NEEDS-FIX", state["attempt"], state.get("max_attempts", 2))
+            if state.get("coder_timed_out")
+            else "gate"
+        ),
+        {"gate": "gate", "retry": "coder", "stop": "stop"},
+    )
     builder.add_edge("gate", "reviewer")
     builder.add_conditional_edges(
         "reviewer",

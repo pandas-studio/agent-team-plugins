@@ -33,6 +33,11 @@ def _run(tmp_path: Path, runner: FakeRunner, state: dict, thread: str):
     return graph.get_state(config)
 
 
+def _fresh(directory: Path) -> Path:
+    directory.mkdir()
+    return directory
+
+
 def _gate_record(snapshot) -> dict:
     artifact = next(a for a in snapshot.values["artifacts"] if "40-gate" in a["name"])
     return json.loads(Path(artifact["path"]).read_text(encoding="utf-8"))
@@ -117,9 +122,17 @@ def test_gitignored_writes_are_reported_and_enforced_only_under_strict(tmp_path:
     assert _ignored_paths(workspace, []) == ["build/out.bin"]
     assert _ignored_paths(workspace, ["build"]) == []
 
+    # A fresh repository: build/out.bin left by the lenient run would now be
+    # refused before the strict run starts (a pre-existing change).
+    workspace, spec = make_repo(_fresh(tmp_path / "strict-repo"))
+    (workspace / ".gitignore").write_text("build/\n", encoding="utf-8")
+    subprocess.run(["git", "-C", workspace, "add", ".gitignore"], check=True)
+    subprocess.run(["git", "-C", workspace, "commit", "-qm", "ignore"], check=True)
     strict = initial(workspace, spec, "strict")
     strict["strict_ignored"] = True
-    snapshot = _run(tmp_path, FakeRunner(), strict, "strict")
+    snapshot = _run(
+        tmp_path, FakeRunner(writes={"build/out.bin": "artifact\n"}), strict, "strict"
+    )
     assert snapshot.values["gate_passed"] is False
     assert _gate_record(snapshot)["outside_scope"] == ["build/out.bin"]
 
@@ -462,9 +475,13 @@ def test_paths_are_listed_verbatim(tmp_path: Path):
     assert untracked == [" README.md", "docs/한글.md"]
     assert _file_digest(workspace, " README.md") != _file_digest(workspace, "README.md")
 
+    # The graph run starts clean and lets the coder create the same names: files
+    # present before a run are refused up front, not gated.
+    workspace, spec = make_repo(_fresh(tmp_path / "graph-repo"))
     state = initial(workspace, spec, "verbatim")
     state["allowed_paths"] = ["docs"]
-    snapshot = _run(tmp_path, FakeRunner(), state, "verbatim")
+    runner = FakeRunner(writes={"docs/한글.md": "k\n", " README.md": "not the tracked README\n"})
+    snapshot = _run(tmp_path, runner, state, "verbatim")
     # The non-ASCII name matches its allowed directory; the edge-space name is
     # reported as itself, not as the tracked README.md.
     assert _gate_record(snapshot)["outside_scope"] == [" README.md"]
@@ -735,11 +752,19 @@ def test_clean_filter_on_a_tracked_path_fails_closed(tmp_path: Path):
     else:
         raise AssertionError("a filtered tracked path was attested")
 
+    # The filter is already configured when the run starts, so the starting
+    # snapshot fails closed and no role is paid for.
     state = initial(workspace, spec, "clean-filter")
     state["max_attempts"] = 1
-    snapshot = _run(tmp_path, FakeRunner(), state, "clean-filter")
-    assert "clean/process filter" in _gate_record(snapshot)["snapshot_error"]
+    runner = FakeRunner()
+    snapshot = _run(tmp_path, runner, state, "clean-filter")
+    refusal = next(
+        a for a in snapshot.values["artifacts"] if a["name"] == "05-preexisting-changes.json"
+    )
+    record = json.loads(Path(refusal["path"]).read_text(encoding="utf-8"))
+    assert "clean/process filter" in record["snapshot_error"]
     assert snapshot.values["status"] == "needs-human"
+    assert runner.roles == []
 
 
 def test_configured_filter_without_tracked_matches_is_allowed(tmp_path: Path):

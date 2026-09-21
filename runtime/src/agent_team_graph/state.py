@@ -27,6 +27,8 @@ class GraphState(TypedDict, total=False):
     plan: str
     research: str
     code_report: str
+    # Set on every coder run: routes that attempt past the gate and reviewer.
+    coder_timed_out: bool
     review: str
     verdict: str
     gate_passed: bool

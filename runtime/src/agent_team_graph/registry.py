@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+from .proc import run_bounded
 
 BUILTIN_MODELS: dict[str, dict[str, Any]] = {
     "agy": {"command": "agy", "env_command": "AGY_CLI", "args": ["-p", "{prompt}"]},
@@ -121,6 +122,9 @@ class ModelRegistry:
 
 # Matches registry_run_answer in registry.sh: a zero exit with no answer.
 NO_OUTPUT_RETURNCODE = 5
+# Reported for a harness timeout; `RoleResult.timed_out` is what callers branch
+# on, since a CLI may exit 124 by itself.
+TIMEOUT_RETURNCODE = 124
 
 
 @dataclass(frozen=True)
@@ -134,14 +138,23 @@ class RoleResult:
     usage_source: str = "unavailable"
     input_tokens: int | None = None
     output_tokens: int | None = None
+    timed_out: bool = False
 
 
 class RoleRunner:
     """Run a configured CLI adapter without a shell or eval boundary."""
 
     def __init__(self, registry: ModelRegistry | None = None, timeout_seconds: int = 900):
-        self.registry = registry or ModelRegistry()
+        self._registry = registry
         self.timeout_seconds = timeout_seconds
+
+    @property
+    def registry(self) -> ModelRegistry:
+        # Loaded on first use: `status` and `approve --decision reject` build the
+        # graph but never run a role, so a malformed models.json must not stop them.
+        if self._registry is None:
+            self._registry = ModelRegistry()
+        return self._registry
 
     def run(
         self,
@@ -169,15 +182,20 @@ class RoleRunner:
         replacements = {"{prompt}": prompt, "{final}": str(final_path or "")}
         argv = [command, *(replacements.get(item, item) for item in template)]
         started = time.monotonic()
-        completed = subprocess.run(
-            argv,
-            cwd=workspace,
-            text=True,
-            capture_output=True,
-            timeout=self.timeout_seconds,
-            check=False,
-        )
+        completed = run_bounded(argv, workspace, self.timeout_seconds)
         elapsed_ms = round((time.monotonic() - started) * 1000)
+        if completed.timed_out:
+            partial = completed.stdout + completed.stderr
+            return RoleResult(
+                invocation_id=str(uuid.uuid4()),
+                role=role,
+                model=model_id,
+                output=f"model {model_id!r} timed out after {self.timeout_seconds}s"
+                + (f"\n{partial}" if partial else ""),
+                returncode=TIMEOUT_RETURNCODE,
+                elapsed_ms=elapsed_ms,
+                timed_out=True,
+            )
         returncode = completed.returncode
         output = completed.stdout
         from_final = bool(final_path and final_path.exists())

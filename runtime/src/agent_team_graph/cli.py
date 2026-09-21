@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
+import hashlib
 import json
 import shlex
 import sqlite3
@@ -45,7 +47,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="trusted repository-relative path omitted from scope checks and attestation; repeat as needed",
     )
-    run.add_argument("--max-attempts", type=int, default=2, choices=tuple(range(1, 6)))
+    run.add_argument(
+        "--max-attempts",
+        type=int,
+        default=2,
+        choices=tuple(range(1, 6)),
+        help="coder attempts, not retries (2 = one retry)",
+    )
     run.add_argument(
         "--strict-ignored",
         action="store_true",
@@ -67,8 +75,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 @contextmanager
 def _open_runtime(state_dir: Path) -> Iterator[Any]:
-    state_dir = state_dir.expanduser().resolve()
-    state_dir.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(state_dir / "runs.sqlite3", check_same_thread=False)
     try:
         saver = SqliteSaver(connection)
@@ -81,11 +87,55 @@ def _open_runtime(state_dir: Path) -> Iterator[Any]:
         connection.close()
 
 
+@contextmanager
+def _thread_lock(state_dir: Path, thread_id: str) -> Iterator[bool]:
+    """Hold this thread's lock for the block; yields False if another process has it.
+
+    One process per thread: without it two `run`s could both find a thread id
+    unused, and `status` could not tell an active run from a crashed one. The
+    lock file is never deleted (that would reopen the race); only a held lock
+    means busy. flock is advisory: processes older than this lock never take it.
+    """
+    locks = state_dir / "locks"
+    locks.mkdir(exist_ok=True)
+    name = hashlib.sha256(thread_id.encode()).hexdigest()[:32]
+    with open(locks / f"{name}.lock", "a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+TERMINAL_STATUSES = ("approved", "rejected", "needs-human")
+
+
+def _thread_exists(snapshot: Any) -> bool:
+    # A checkpoint, not a status: a run that crashed inside `context` has one but
+    # never set `status`.
+    return snapshot.created_at is not None
+
+
+def _status(snapshot: Any) -> str:
+    if not _thread_exists(snapshot):
+        return "not-found"
+    status = (snapshot.values or {}).get("status")
+    if status in TERMINAL_STATUSES:
+        return status
+    # Called under the thread lock, so nothing is executing: a non-terminal
+    # checkpoint is either parked at the approval interrupt or stopped early.
+    return "running" if snapshot.interrupts else "incomplete"
+
+
 def _view(graph: Any, thread_id: str) -> dict[str, Any]:
     snapshot = graph.get_state({"configurable": {"thread_id": thread_id}})
     values = dict(snapshot.values or {})
     approval = values.get("approval")
-    status = values.get("status", "not-found")
+    status = _status(snapshot)
     approval_note = None
     if approval == "approve" and status != "approved":
         approval_note = "approve decision recorded; receipt blocked, see errors and artifacts"
@@ -108,13 +158,17 @@ def _view(graph: Any, thread_id: str) -> dict[str, Any]:
 
 # Exit codes let a wrapper branch on the outcome without parsing the JSON body:
 # 0 approved, 3 still open (parked at the ship-approval interrupt), 4 stopped
-# without approval, 5 unknown thread.
+# without approval, 5 unknown thread, 6 stopped before reaching approval (crash
+# or interruption; `resume` continues), 7 busy in another process. 2 is a usage
+# error (argparse, or `run` on an existing thread).
 EXIT_BY_STATUS = {
     "approved": 0,
     "running": 3,
     "rejected": 4,
     "needs-human": 4,
     "not-found": 5,
+    "incomplete": 6,
+    "busy": 7,
 }
 
 
@@ -132,13 +186,40 @@ def _report(graph: Any, thread_id: str) -> int:
     return _exit_code(view)
 
 
+def _invoke(graph: Any, value: Any, config: dict[str, Any]) -> None:
+    """Run the graph; a failure is reported, and the view then says `incomplete`."""
+    try:
+        graph.invoke(value, config=config)
+    except Exception as exc:  # noqa: BLE001 - the CLI boundary reports every failure
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    with _open_runtime(args.state_dir) as graph:
-        config = {"configurable": {"thread_id": args.thread_id}}
+    state_dir = args.state_dir.expanduser().resolve()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    if args.command == "run":
+        thread_id = args.thread_id or f"{args.project_id}-{uuid.uuid4().hex[:12]}"
+    else:
+        thread_id = args.thread_id
+    config = {"configurable": {"thread_id": thread_id}}
+    with _thread_lock(state_dir, thread_id) as held, _open_runtime(state_dir) as graph:
+        if not held:
+            if args.command != "status":
+                print(f"error: thread {thread_id} is busy in another process", file=sys.stderr)
+            _print({"thread_id": thread_id, "status": "busy"})
+            return EXIT_BY_STATUS["busy"]
+        exists = _thread_exists(graph.get_state(config))
         if args.command == "run":
-            thread_id = args.thread_id or f"{args.project_id}-{uuid.uuid4().hex[:12]}"
-            config = {"configurable": {"thread_id": thread_id}}
+            if exists:
+                # Re-running would inherit the old run's review, approval and
+                # verdict, and silently drop a pending approval interrupt.
+                print(
+                    f"error: thread {thread_id} already exists; use status, resume or "
+                    "approve, or omit --thread-id to start a new run",
+                    file=sys.stderr,
+                )
+                return 2
             initial = {
                 "thread_id": thread_id,
                 "run_id": uuid.uuid4().hex,
@@ -155,16 +236,17 @@ def main(argv: list[str] | None = None) -> int:
                 "usage": [],
                 "errors": [],
             }
-            graph.invoke(initial, config=config)
+            _invoke(graph, initial, config)
             return _report(graph, thread_id)
-        if args.command == "status":
-            return _report(graph, args.thread_id)
+        if args.command == "status" or not exists:
+            # resume/approve on an unknown thread would start a new, empty run.
+            return _report(graph, thread_id)
         if args.command == "resume":
-            graph.invoke(None, config=config)
-            return _report(graph, args.thread_id)
+            _invoke(graph, None, config)
+            return _report(graph, thread_id)
         if args.command == "approve":
-            graph.invoke(Command(resume=args.decision), config=config)
-            return _report(graph, args.thread_id)
+            _invoke(graph, Command(resume=args.decision), config)
+            return _report(graph, thread_id)
     return 2
 
 
