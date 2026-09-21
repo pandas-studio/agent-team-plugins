@@ -10,19 +10,50 @@ import re
 import shlex
 import stat
 import subprocess
+import uuid
+from dataclasses import asdict, dataclass
+from functools import wraps
 from pathlib import Path
 from typing import Any, Protocol
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 
 from .artifacts import ArtifactStore
+from .journal import CallJournal, RecoveryError
 from .policy import approval_route, parse_verdict, review_route
-from .registry import RoleResult, RoleRunner, usage_record
+from .process import Cancellation, ProcessResult, run_process
+from .registry import RegistryError, RoleResult, RoleRunner, usage_record
 from .state import GraphState
 
 GATE_TIMEOUT_SECONDS = 900
 SNAPSHOT_ERRORS = (OSError, ValueError)
+
+
+@dataclass(frozen=True)
+class CallReplay:
+    """Invocation-only authority for one checkpointed call; never stored in state."""
+
+    run_id: str
+    attempt: int
+    stage: str
+
+    def matches(self, state: GraphState, stage: str) -> bool:
+        return (self.run_id, self.attempt, self.stage) == (
+            state.get("run_id"), state.get("attempt"), stage
+        )
+
+
+def resume_graph(graph: Any, config: dict[str, Any]) -> Any:
+    """Resume with replay limited to the pending call. Caller must own the thread lock."""
+    snapshot = graph.get_state(config)
+    replay = None
+    if (len(snapshot.next) == 1
+            and snapshot.next[0] in {"planner", "researcher", "coder", "gate", "reviewer"}
+            and snapshot.values.get("execution_policy_version") == 1):
+        replay = CallReplay(snapshot.values["run_id"], snapshot.values["attempt"], snapshot.next[0])
+    return graph.invoke(None, config=config, context=replay, durability="sync")
 
 
 class Runner(Protocol):
@@ -354,7 +385,7 @@ def _role_prompt(state: GraphState, role: str) -> str:
         return (
             shared
             + f"Plan:\n{state['plan']}\nResearch:\n{state['research']}\n"
-            + f"Previous review:\n{state.get('review', '(none)')}\n"
+            + f"Previous review:\n{state.get('review') or '(none)'}\n"
             + (f"Previous gate failure: {gate_feedback}\n" if gate_feedback else "")
             + "Implement the task in the workspace. Stay within the specification."
         )
@@ -428,140 +459,286 @@ def _gate_feedback(
     )
 
 
+def validate_run_input(state: GraphState, runtime_root: Path) -> dict[str, Any]:
+    """Validate before a CLI invocation updates an existing thread."""
+    workspace = Path(state["workspace"]).expanduser().resolve()
+    spec = Path(state["spec_path"]).expanduser().resolve()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,47}", state["project_id"]):
+        raise ValueError("project_id must be a safe 1-48 character identifier")
+    if not workspace.is_dir() or not spec.is_file():
+        raise ValueError("workspace must be a directory and spec_path must be a file")
+    allowed_paths = _normalize_allowed(state.get("allowed_paths", []))
+    if not allowed_paths:
+        raise ValueError("at least one allowed path is required")
+    repo_root = Path(_git(workspace, "rev-parse", "--show-toplevel")).resolve()
+    if repo_root != workspace and repo_root not in workspace.parents:
+        raise ValueError(f"git work tree {repo_root} does not contain workspace {workspace}")
+    base_sha = _git(repo_root, "rev-parse", "HEAD")
+    operator_excluded = _normalize_paths(
+        state.get("operator_excluded_paths", []), label="excluded"
+    )
+    # Checkpoints and artifacts must be protected from coder writes by the
+    # operator's sandbox. Their machine writes are excluded from the scope gate.
+    runtime_relative = _repo_relative(repo_root, runtime_root)
+    if runtime_relative == ".":
+        # Excluding it would exempt the whole repository from the digest.
+        raise ValueError("state directory must not be the repository root")
+    runtime_excluded = [runtime_relative] if runtime_relative is not None else []
+    excluded = sorted(set(operator_excluded) | set(runtime_excluded))
+    strict_ignored = bool(state.get("strict_ignored", False))
+    command = state.get("test_command", [])
+    if not command or not all(isinstance(arg, str) and "\0" not in arg for arg in command):
+        raise ValueError("test_command must be a nonempty argv without NUL bytes")
+    if not command[0].strip():
+        raise ValueError("test_command executable must not be blank")
+    if not 1 <= int(state.get("max_attempts", 2)) <= 5:
+        raise ValueError("max_attempts must be between 1 and 5")
+    spec_text = spec.read_text(encoding="utf-8")
+    return {
+        "workspace": str(workspace), "repo_root": str(repo_root), "spec_path": str(spec),
+        "base_sha": base_sha, "spec_sha256": hashlib.sha256(spec_text.encode()).hexdigest(),
+        "allowed_paths": allowed_paths, "operator_excluded_paths": operator_excluded,
+        "excluded_paths": excluded, "strict_ignored": strict_ignored,
+    }
+
+
+def initial_workspace_changes(context: dict[str, Any]) -> dict[str, list[str]]:
+    """Read the initial dirt without loading model configuration or calling a model."""
+    root = Path(context["repo_root"])
+    excluded = context["excluded_paths"]
+    tracked, untracked = _changed_paths(root, context["base_sha"], excluded)
+    ignored = _ignored_paths(root, excluded) if context["strict_ignored"] else []
+    return {"tracked_paths": tracked, "untracked_paths": untracked, "ignored_paths": ignored}
+
+
 def build_graph(
     *,
     checkpointer: Any,
     artifact_root: Path,
     runner: Runner | None = None,
     state_root: Path | None = None,
+    cancellation: Cancellation | None = None,
 ):
-    """Compile the graph with injected persistence and role execution boundaries."""
+    """Compile with injected persistence and execution boundaries.
 
-    role_runner = runner or RoleRunner()
-    # Absolute: roles run with cwd=workspace and are pointed at artifact paths.
-    store = ArtifactStore(Path(artifact_root).expanduser().resolve())
+    Supply an operator-validated, canonical artifact_root (resolve trusted OS
+    aliases such as macOS /tmp first). We reject symlinks instead of resolving
+    an untrusted storage path. Use resume_graph for checkpoint-bound replay.
+    """
+
+    cancellation = cancellation or Cancellation()
+    role_runner = runner or RoleRunner(cancellation=cancellation)
+    # Do not resolve the artifact path through an attacker-planted symlink.
+    store = ArtifactStore(Path(artifact_root).expanduser().absolute())
     runtime_root = Path(state_root or artifact_root)
 
     def context_node(state: GraphState) -> dict[str, Any]:
-        workspace = Path(state["workspace"]).expanduser().resolve()
-        spec = Path(state["spec_path"]).expanduser().resolve()
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,47}", state["project_id"]):
-            raise ValueError("project_id must be a safe 1-48 character identifier")
-        if not workspace.is_dir() or not spec.is_file():
-            raise ValueError("workspace must be a directory and spec_path must be a file")
-        allowed_paths = _normalize_allowed(state.get("allowed_paths", []))
-        if not allowed_paths:
-            raise ValueError("at least one allowed path is required")
-        repo_root = Path(_git(workspace, "rev-parse", "--show-toplevel")).resolve()
-        if repo_root != workspace and repo_root not in workspace.parents:
-            raise ValueError(f"git work tree {repo_root} does not contain workspace {workspace}")
-        base_sha = _git(repo_root, "rev-parse", "HEAD")
-        operator_excluded = _normalize_paths(
-            state.get("operator_excluded_paths", []), label="excluded"
-        )
-        # The runtime's own state (checkpoint db + artifacts) is machine-written,
-        # never coder-written, so it must not count against the scope gate.
-        runtime_relative = _repo_relative(repo_root, runtime_root)
-        if runtime_relative == ".":
-            # Excluding it would exempt the whole repository from the digest.
-            raise ValueError("state directory must not be the repository root")
-        runtime_excluded = [runtime_relative] if runtime_relative is not None else []
-        excluded = sorted(set(operator_excluded) | set(runtime_excluded))
-        strict_ignored = bool(state.get("strict_ignored", False))
-        spec_text = spec.read_text(encoding="utf-8")
-        artifact = store.write_json(
-            state["run_id"],
-            "00-context.json",
-            {
-                "workspace": str(workspace),
-                "repo_root": str(repo_root),
-                "spec_path": str(spec),
-                "base_sha": base_sha,
-                "allowed_paths": allowed_paths,
-                "operator_excluded_paths": operator_excluded,
-                "excluded_paths": excluded,
-                "strict_ignored": strict_ignored,
-            },
-        )
-        return {
+        context = validate_run_input(state, runtime_root)
+        store.preflight()
+        artifact = store.write_json(state["run_id"], "00-context.json", context)
+        update = {
+            **context,
             "schema_version": "graph-run-v1",
-            "workspace": str(workspace),
-            "repo_root": str(repo_root),
-            "spec_path": str(spec),
-            "spec_sha256": hashlib.sha256(spec_text.encode()).hexdigest(),
-            "base_sha": base_sha,
-            "allowed_paths": allowed_paths,
-            "operator_excluded_paths": operator_excluded,
-            "excluded_paths": excluded,
-            "strict_ignored": strict_ignored,
+            "execution_policy_version": 1,
             "attempt": 0,
             "max_attempts": int(state.get("max_attempts", 2)),
             "status": "running",
             "artifacts": [artifact],
         }
-
-    def invoke_role(state: GraphState, role: str, name: str) -> tuple[str, dict, dict]:
+        repo_root = Path(context["repo_root"])
+        excluded = context["excluded_paths"]
         try:
-            result = role_runner.run(
-                f"langgraph-conductor.{role}",
-                _role_prompt(state, role),
-                Path(state["workspace"]),
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"{role} timed out after {exc.timeout}s") from exc
-        if result.returncode:
-            raise RuntimeError(f"{role} failed with exit code {result.returncode}: {result.output}")
-        artifact = store.write(state["run_id"], name, result.output)
-        return result.output, artifact, usage_record(result)
+            changes = initial_workspace_changes(context)
+            _change_snapshot(repo_root, context["base_sha"], excluded, context["strict_ignored"])
+        except SNAPSHOT_ERRORS as exc:
+            diagnostic = store.write_json(state["run_id"], "01-preflight-error.json",
+                                          {"snapshot_error": _snapshot_error(exc)})
+            update.update(status="needs-human", artifacts=[artifact, diagnostic],
+                          errors=[f"workspace preflight failed: {exc}"])
+            return update
+        dirty = sorted({path for paths in changes.values() for path in paths})
+        if dirty:
+            record = store.write_json(state["run_id"], "01-dirty-workspace.json", {
+                **changes,
+                "note": "commit or move pre-existing changes before starting a new run",
+            })
+            update.update(status="needs-human", artifacts=[artifact, record], errors=[
+                "workspace has pre-existing changes: " + json.dumps(dirty, ensure_ascii=False)
+            ])
+        elif isinstance(role_runner, RoleRunner):
+            # Direct graph callers need this check too; the CLI's earlier check
+            # also cannot rule out a registry/executable changing in the interim.
+            try:
+                role_runner.preflight(Path(context["workspace"]))
+            except RegistryError as exc:
+                update.update(status="needs-human", halted=True,
+                              errors=[f"model preflight failed: {exc}"])
+        return update
 
-    def planner_node(state: GraphState) -> dict[str, Any]:
-        output, artifact, usage = invoke_role(state, "planner", "10-plan.md")
-        return {"plan": output, "artifacts": [artifact], "usage": [usage]}
+    class RoleFailure(Exception):
+        def __init__(self, update):
+            self.update = update
 
-    def researcher_node(state: GraphState) -> dict[str, Any]:
-        output, artifact, usage = invoke_role(state, "researcher", "20-research.md")
-        return {"research": output, "artifacts": [artifact], "usage": [usage]}
+    def guarded(node):
+        @wraps(node)
+        def run(state, runtime: Runtime[CallReplay]):
+            try:
+                return node(state, runtime)
+            except RoleFailure as exc:
+                return exc.update
+            except (OSError, ValueError, RecoveryError, RegistryError) as exc:
+                return {
+                    "status": "needs-human", "halted": True, "verdict": "DISCUSS",
+                    "gate_passed": False, "reviewed_change_sha256": None,
+                    "errors": [f"{node.__name__}: {type(exc).__name__}: {exc}"],
+                }
+        return run
 
-    def coder_node(state: GraphState) -> dict[str, Any]:
-        attempt = state.get("attempt", 0) + 1
-        staged = dict(state)
-        staged["attempt"] = attempt
-        output, artifact, usage = invoke_role(staged, "coder", f"30-code-attempt-{attempt}.md")
+    def capture(state: GraphState) -> str:
+        return _change_snapshot(Path(state["repo_root"]), state["base_sha"],
+                                state.get("excluded_paths", []),
+                                bool(state.get("strict_ignored", False)))["change_sha256"]
+
+    def call_record(state: GraphState, stage: str, identity: dict, invoke,
+                    runtime: Runtime[CallReplay]):
+        if state.get("execution_policy_version") != 1:
+            raise RecoveryError("legacy external-call checkpoint has no call records; inspect "
+                                "the workspace and start a new run")
+        journal = CallJournal(store, state["run_id"], state["attempt"], stage)
+        identity = {**identity, "base_sha": state["base_sha"],
+                    "workspace": state["workspace"], "excluded_paths": state.get("excluded_paths", []),
+                    "strict_ignored": bool(state.get("strict_ignored", False))}
+        allow_replay = runtime.context is not None and runtime.context.matches(state, stage)
+        return journal.run(identity, invoke, lambda: capture(state), allow_replay=allow_replay)
+
+    def prepare_attempt_node(state: GraphState, runtime: Runtime[CallReplay]) -> dict[str, Any]:
+        if state.get("attempt", 0) >= state.get("max_attempts", 2):
+            return {"halted": True, "errors": ["attempt budget exhausted"]}
+        stage = "planner" if not state.get("plan") else (
+            "researcher" if not state.get("research") else "coder"
+        )
         return {
-            "attempt": attempt,
-            "code_report": output,
-            "artifacts": [artifact],
-            "usage": [usage],
+            "attempt": state.get("attempt", 0) + 1, "attempt_start": stage,
+            "role_failed": False, "halted": False, "cancelled_signal": None,
+            "gate_passed": False, "gated_change_sha256": None, "reviewed_change_sha256": None,
         }
 
-    def gate_node(state: GraphState) -> dict[str, Any]:
-        command = state.get("test_command", [])
-        errors: list[str] = []
-        if not command:
-            passed, returncode, output = False, 2, "test_command is required"
-        else:
+    def invoke_role(state: GraphState, role: str, name: str,
+                    runtime: Runtime[CallReplay]) -> tuple[str, list[dict], dict]:
+        prompt = _role_prompt(state, role)
+        identity = {"role": role, "prompt": prompt}
+        if isinstance(role_runner, RoleRunner):
             try:
-                completed = subprocess.run(
-                    command,
-                    cwd=state["workspace"],
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                    timeout=GATE_TIMEOUT_SECONDS,
+                model, definition, command = role_runner.resolve_adapter(
+                    f"langgraph-conductor.{role}", Path(state["workspace"])
                 )
+            except RegistryError as exc:
+                if runtime.context is not None and runtime.context.matches(state, role):
+                    receipt_dir = store.root / state["run_id"]
+                    raise RecoveryError(
+                        f"cannot resolve model for resumed call; inspect any "
+                        f"call-{state['attempt']}-{role} records under {receipt_dir}; "
+                        f"restore the model registry/PATH, then start a new run: {exc}"
+                    ) from exc
+                raise
+            identity.update(model=model, definition=definition, command=command)
+
+        def invoke():
+            try:
+                result = role_runner.run(f"langgraph-conductor.{role}", prompt,
+                                         Path(state["workspace"]))
             except subprocess.TimeoutExpired as exc:
-                # A hung test command is a gate failure, not a crashed run: record
-                # it and let the bounded retry / human-stop paths handle it.
-                passed, returncode = False, 124
-                output = f"test command timed out after {GATE_TIMEOUT_SECONDS}s\n{exc.stdout or ''}"
-                errors.append(f"gate attempt {state['attempt']}: test command timed out")
-            else:
-                passed, returncode = completed.returncode == 0, completed.returncode
-                output = completed.stdout + completed.stderr
+                # Preserve compatibility with injected runners using subprocess.run.
+                output = exc.stdout or b""
+                diagnostic = exc.stderr or b""
+                result = RoleResult(
+                    str(uuid.uuid4()), f"langgraph-conductor.{role}", "unknown",
+                    output.decode("utf-8", errors="replace") if isinstance(output, bytes) else output,
+                    124, round(exc.timeout * 1000),
+                    stderr=(diagnostic.decode("utf-8", errors="replace")
+                            if isinstance(diagnostic, bytes) else diagnostic), timed_out=True,
+                )
+            return asdict(result)
+
+        record = call_record(state, role, identity, invoke, runtime)
+        try:
+            result = RoleResult(**record.result)
+        except TypeError as exc:
+            raise RecoveryError(f"malformed call result for {role}: {exc}") from exc
+        usage = usage_record(result)
+        if record.snapshot_error or result.cancelled_signal or result.cleanup_error:
+            raise RoleFailure({
+                "halted": True, "status": "needs-human", "verdict": "DISCUSS",
+                "cancelled_signal": result.cancelled_signal,
+                "gate_passed": False, "reviewed_change_sha256": None,
+                "artifacts": record.artifacts, "usage": [usage],
+                "errors": [(f"{role} interrupted or unattestable: "
+                            f"{record.snapshot_error or result.cleanup_error or result.cancelled_signal}")],
+            })
+        if result.returncode or not result.output.strip():
+            failure = store.write_json(state["run_id"],
+                                       f"failure-{state['attempt']}-{role}.json", asdict(result))
+            update = {
+                "role_failed": True, "verdict": "NEEDS-FIX",
+                "gate_passed": False, "reviewed_change_sha256": None,
+                "artifacts": [*record.artifacts, failure], "usage": [usage],
+                "errors": [f"{role} attempt {state['attempt']} failed with exit code "
+                           f"{result.returncode or 5}" + (" (timeout)" if result.timed_out else "")],
+            }
+            if role == "reviewer":
+                update["review"] = (
+                    f"Deterministic harness finding: previous reviewer attempt {state['attempt']} "
+                    f"failed with exit code {result.returncode or 5}"
+                    + (" (timeout)" if result.timed_out else "")
+                    + "; no usable review was produced. Preserve changes that passed the gate "
+                    "unless the specification or a fresh check requires a correction."
+                )
+            raise RoleFailure(update)
+        artifact = store.write(state["run_id"], name, result.output)
+        return result.output, [*record.artifacts, artifact], usage
+
+    def planner_node(state: GraphState, runtime: Runtime[CallReplay]) -> dict[str, Any]:
+        output, artifacts, usage = invoke_role(state, "planner", "10-plan.md", runtime)
+        return {"plan": output, "artifacts": artifacts, "usage": [usage]}
+
+    def researcher_node(state: GraphState, runtime: Runtime[CallReplay]) -> dict[str, Any]:
+        output, artifacts, usage = invoke_role(state, "researcher", "20-research.md", runtime)
+        return {"research": output, "artifacts": artifacts, "usage": [usage]}
+
+    def coder_node(state: GraphState, runtime: Runtime[CallReplay]) -> dict[str, Any]:
+        output, artifacts, usage = invoke_role(
+            state, "coder", f"30-code-attempt-{state['attempt']}.md", runtime
+        )
+        return {"code_report": output, "artifacts": artifacts, "usage": [usage]}
+
+    def gate_node(state: GraphState, runtime: Runtime[CallReplay]) -> dict[str, Any]:
+        command = state["test_command"]
+        call = call_record(state, "gate", {"command": command}, lambda: asdict(run_process(
+            command, cwd=Path(state["workspace"]), timeout=GATE_TIMEOUT_SECONDS,
+            cancellation=cancellation,
+        )), runtime)
+        try:
+            completed = ProcessResult(**call.result)
+        except TypeError as exc:
+            raise RecoveryError(f"malformed call result for gate: {exc}") from exc
+        call_artifacts = call.artifacts
+        snapshot_error = call.snapshot_error
+        if completed.cancelled_signal or completed.cleanup_error:
+            return {"halted": True, "status": "needs-human", "gate_passed": False,
+                    "gated_change_sha256": None, "cancelled_signal": completed.cancelled_signal,
+                    "artifacts": call_artifacts,
+                    "errors": [completed.cleanup_error or "test command interrupted"]}
+        passed, returncode = completed.returncode == 0, completed.returncode
+        output = completed.stdout + completed.stderr
+        errors = []
+        if completed.timed_out:
+            errors.append(f"gate attempt {state['attempt']}: test command timed out")
         repo_root = Path(state["repo_root"])
         excluded = state.get("excluded_paths", [])
         strict_ignored = bool(state.get("strict_ignored", False))
         try:
+            if snapshot_error:
+                raise ValueError(snapshot_error)
             snapshot = _change_snapshot(
                 repo_root, state["base_sha"], excluded, strict_ignored
             )
@@ -590,7 +767,7 @@ def build_graph(
                 "gate_feedback": _gate_feedback(
                     state["attempt"], returncode, 0, True, artifact["path"]
                 ),
-                "artifacts": [artifact],
+                "artifacts": [*call_artifacts, artifact],
                 "errors": [
                     *errors,
                     f"gate attempt {state['attempt']}: cannot attest change set: {message}",
@@ -614,6 +791,22 @@ def build_graph(
             "attestation_covers": _attestation_covers(strict_ignored, excluded),
             "output": output,
         }
+        if (not strict_ignored and runtime.context is not None
+                and runtime.context.matches(state, "gate")):
+            try:
+                previous = store.read_json(state["run_id"],
+                                           f"40-gate-attempt-{state['attempt']}.json")
+            except FileNotFoundError:
+                pass
+            else:
+                # The ignored listing is informational in this mode. Preserve
+                # its original observation while recomputing every attested
+                # field; immutable publication still rejects any other change.
+                if (not isinstance(previous, dict)
+                        or not isinstance(previous.get("ignored_paths"), list)
+                        or not all(isinstance(path, str) for path in previous["ignored_paths"])):
+                    raise RecoveryError("malformed saved gate ignored-path listing")
+                record["ignored_paths"] = previous["ignored_paths"]
         artifact = store.write_json(
             state["run_id"], f"40-gate-attempt-{state['attempt']}.json", record
         )
@@ -629,17 +822,24 @@ def build_graph(
                     state["attempt"], returncode, len(outside_scope), False, artifact["path"]
                 )
             ),
-            "artifacts": [artifact],
+            "artifacts": [*call_artifacts, artifact],
         }
         if errors:
             update["errors"] = errors
         return update
 
-    def reviewer_node(state: GraphState) -> dict[str, Any]:
+    def reviewer_node(state: GraphState, runtime: Runtime[CallReplay]) -> dict[str, Any]:
         repo_root = Path(state["repo_root"])
         excluded = state.get("excluded_paths", [])
         strict_ignored = bool(state.get("strict_ignored", False))
         gated_digest = state.get("gated_change_sha256")
+        if not gated_digest:
+            # Fresh edges enforce this too; a saved checkpoint can already be
+            # positioned at reviewer without traversing those edges again.
+            return {
+                "verdict": "DISCUSS", "gate_passed": False, "reviewed_change_sha256": None,
+                "errors": ["review skipped: no attested gate snapshot; inspect gate artifacts"],
+            }
         try:
             before = _change_snapshot(
                 repo_root, state["base_sha"], excluded, strict_ignored
@@ -668,7 +868,13 @@ def build_graph(
         unchanged_before_review = (
             bool(gated_digest) and before["change_sha256"] == gated_digest
         )
-        if not unchanged_before_review:
+        try:
+            store.read(state["run_id"], f"call-{state['attempt']}-reviewer-started.json")
+            replaying_review = (runtime.context is not None
+                                and runtime.context.matches(state, "reviewer"))
+        except FileNotFoundError:
+            replaying_review = False
+        if not unchanged_before_review and not replaying_review:
             feedback = (
                 "Deterministic harness finding: the change set drifted after the "
                 "test/scope gate and before reviewer execution. Reconcile the workspace "
@@ -694,11 +900,15 @@ def build_graph(
                 ],
             }
 
-        output, artifact, usage = invoke_role(
-            state, "reviewer", f"50-review-attempt-{state['attempt']}.md"
+        if replaying_review:
+            # A completed reviewer may itself have mutated the tree before a
+            # crash. Keep the original gated digest for attribution; the call
+            # journal validates its saved result against the current tree.
+            before = {"change_sha256": gated_digest}
+        output, artifacts, usage = invoke_role(
+            state, "reviewer", f"50-review-attempt-{state['attempt']}.md", runtime
         )
         verdict = parse_verdict(output)
-        artifacts = [artifact]
         errors: list[str] = []
         try:
             after = _change_snapshot(
@@ -773,7 +983,7 @@ def build_graph(
             normalized = "reject"
         return {"approval": normalized}
 
-    def publish_node(state: GraphState) -> dict[str, Any]:
+    def publish_node(state: GraphState, runtime: Runtime[CallReplay]) -> dict[str, Any]:
         repo_root = Path(state["repo_root"])
         excluded = state.get("excluded_paths", [])
         expected = state.get("reviewed_change_sha256", "")
@@ -860,34 +1070,61 @@ def build_graph(
 
     def stop_node(state: GraphState) -> dict[str, Any]:
         status = "rejected" if state.get("approval") == "reject" else "needs-human"
-        return {"status": status}
+        return {"status": status, **({"cancelled_signal": cancellation.signal}
+                                    if cancellation.signal else {})}
 
-    builder = StateGraph(GraphState)
+    def after_role(state: GraphState, next_node: str) -> str:
+        if state.get("halted") or cancellation.signal:
+            return "stop"
+        if state.get("role_failed"):
+            return "prepare_attempt" if state["attempt"] < state["max_attempts"] else "stop"
+        return next_node
+
+    def after_review(state: GraphState) -> str:
+        route = after_role(state, "review")
+        if route != "review":
+            return route
+        decision = review_route(state["verdict"], state["attempt"], state.get("max_attempts", 2))
+        return "prepare_attempt" if decision == "retry" else decision
+
+    builder = StateGraph(GraphState, context_schema=CallReplay)
     builder.add_node("context", context_node)
-    builder.add_node("planner", planner_node)
-    builder.add_node("researcher", researcher_node)
-    builder.add_node("coder", coder_node)
-    builder.add_node("gate", gate_node)
-    builder.add_node("reviewer", reviewer_node)
+    builder.add_node("prepare_attempt", guarded(prepare_attempt_node))
+    builder.add_node("planner", guarded(planner_node))
+    builder.add_node("researcher", guarded(researcher_node))
+    builder.add_node("coder", guarded(coder_node))
+    builder.add_node("gate", guarded(gate_node))
+    builder.add_node("reviewer", guarded(reviewer_node))
     builder.add_node("approval", approval_node)
-    builder.add_node("publish", publish_node)
+    builder.add_node("publish", guarded(publish_node))
     builder.add_node("stop", stop_node)
     builder.add_edge(START, "context")
-    builder.add_edge("context", "planner")
-    builder.add_edge("planner", "researcher")
-    builder.add_edge("researcher", "coder")
-    builder.add_edge("coder", "gate")
-    builder.add_edge("gate", "reviewer")
     builder.add_conditional_edges(
-        "reviewer",
-        lambda state: review_route(
-            state["verdict"], state["attempt"], state.get("max_attempts", 2)
-        ),
-        {"approval": "approval", "retry": "coder", "stop": "stop"},
+        "context", lambda state: "stop" if state["status"] == "needs-human" or
+        cancellation.signal else "prepare_attempt",
+        {"stop": "stop", "prepare_attempt": "prepare_attempt"},
     )
     builder.add_conditional_edges(
-        "approval",
-        lambda state: approval_route(state["approval"]),
+        "prepare_attempt", lambda state: "stop" if state.get("halted") or
+        cancellation.signal else state["attempt_start"],
+        {name: name for name in ("stop", "planner", "researcher", "coder")},
+    )
+    for stage, following in (("planner", "researcher"), ("researcher", "coder"), ("coder", "gate")):
+        builder.add_conditional_edges(
+            stage, lambda state, next_node=following: after_role(state, next_node),
+            {name: name for name in (following, "prepare_attempt", "stop")},
+        )
+    builder.add_conditional_edges(
+        "gate", lambda state: "reviewer" if state.get("gated_change_sha256") and
+        not state.get("halted") and not cancellation.signal else "stop",
+        {"reviewer": "reviewer", "stop": "stop"},
+    )
+    builder.add_conditional_edges(
+        "reviewer", after_review,
+        {name: name for name in ("approval", "prepare_attempt", "stop")},
+    )
+    builder.add_conditional_edges(
+        "approval", lambda state: approval_route(state["approval"]),
         {"publish": "publish", "stop": "stop"},
     )
     builder.add_edge("publish", END)

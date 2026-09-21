@@ -43,6 +43,13 @@ uv run --project "${CLAUDE_PLUGIN_ROOT}" agent-team-graph run \
   --exclude-path .reviewer-cache
 ```
 
+Start with a clean worktree. Commit SPEC.md first or keep it outside the repository.
+Tracked/untracked pre-existing changes are reported before any model call; strict ignored
+mode also checks ignored files. Do not automatically exempt existing user files.
+The default is **2 total attempts (1 retry)**, with at most **5 total attempts**.
+Role timeouts, nonzero exits and empty answers consume an attempt. Successful plan/research
+outputs are reused. This does not bound retries or billing inside a model CLI.
+
 The command prints a JSON view containing the `thread_id`. Keep it — every
 other subcommand takes it.
 
@@ -62,9 +69,39 @@ Branch on these rather than parsing the JSON:
 | code | meaning |
 | ---- | ------- |
 | 0 | approved — the run reached `publish` and wrote an approval receipt |
-| 3 | still open — parked at the ship-approval interrupt, needs `approve` |
-| 4 | stopped without approval (`rejected` or `needs-human`) |
+| 2 | invalid input, invalid transition, or a busy thread |
+| 3 | an actual ship-approval interrupt exists, needs `approve` |
+| 4 | neither approved nor awaiting approval, including crashed `running` checkpoints |
 | 5 | unknown `--thread-id` |
+
+The JSON `awaiting_approval` reflects the saved interrupt, not just `status=running`.
+Inspect `next` and `errors` for a stopped execution. SIGINT/SIGTERM return 130/143 after cleanup.
+
+## Reuse and recovery
+
+Only terminal threads can start another run. A new run resets intermediate fields and
+artifact/usage/error lists while retaining old checkpoints and files. Pending approval
+requires `approve`; `resume` returns code 3 without discarding that interrupt.
+Mutating commands lock one thread at a time; `status` and rejecting an approval work even
+with a broken model registry.
+Pre-existing workspace changes take precedence over model-configuration errors and return 4.
+On a clean workspace, model-configuration errors return 2 before checkpoint updates.
+
+The runtime reserves each attempt before its external calls. Call start/completion records
+prevent silent repetition after a crash. Explicit resume grants replay only to the run, attempt
+and role pending in its starting checkpoint, with matching output hashes and workspace digest.
+Existing receipts for a fresh run or any later call are rejected. An incomplete call or changed workspace stops for human
+recovery; inspect the files and any surviving processes, then start a new run. SIGKILL and
+processes escaping into a separate session cannot be cleaned up reliably.
+On non-strict gate replay, a previously published gate artifact keeps its original informational
+ignored-path listing while all attested fields are revalidated. Strict mode rejects ignored-file drift.
+Legacy approval/terminal checkpoints remain supported. A legacy checkpoint interrupted in
+an external-call node has no receipt: resume returns 4 with recovery guidance and preserves it.
+Never infer that adding a new graph node will run it before an already saved pending node.
+Python callers must supply an operator-validated canonical `artifact_root` (resolve trusted
+OS aliases such as macOS `/tmp` first), own the thread lock and use `resume_graph(graph, config)`
+for recovery. Ordinary `graph.invoke` does not authorize receipt replay; replay authority is
+invocation context and is never checkpointed.
 
 ## Boundaries to preserve
 
@@ -90,12 +127,17 @@ Branch on these rather than parsing the JSON:
   refs, a moved `core.worktree`), but a role with write access to `.git` is
   outside what an approval receipt can prove. Run the coder sandboxed without
   write access to `.git`.
+- **Trust boundary: the coder must not be able to write the state-dir either.** Checkpoints
+  and call receipts control recovery and approval and are excluded from scope checks/digests.
+  Put state outside the coder's writable workspace and deny sandbox write access to it.
+  Moving the path alone does not restrict an unsandboxed CLI running as the same user.
+  The default `.agent-team` also requires protection; the runtime does not create a sandbox.
 - `--exclude-path` is a trusted, repeatable repository-root-relative exemption
   for tool scratch. Excluded content (tracked or untracked) is neither
   scope-checked nor attested; use
   the narrowest path and verify `excluded_paths_not_attested` before approval.
-- `--strict-ignored` may take up to four full snapshots on a successful attempt.
-  Exclude only trusted scratch paths; do not exempt coder output.
+- `--strict-ignored` reads ignored files during preflight, call completion and gate/review/approval
+  snapshots, including recovery validation. Exclude only trusted scratch paths; do not exempt coder output.
 - `--test-command` is split as argv. Shell operators (`&&`, `|`, `>`) are not
   interpreted — wrap them in a script if you need them.
 - Artifacts under `.agent-team/artifacts/<run_id>/` are immutable. If a write

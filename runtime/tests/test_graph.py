@@ -54,8 +54,6 @@ def test_researcher_exit_zero_without_answer_stops_before_coding(tmp_path: Path)
     import json
     import sys
 
-    import pytest
-
     from agent_team_graph.registry import ModelRegistry, RoleRunner
 
     answer = ["-c", "print('an answer')", "{prompt}"]
@@ -86,7 +84,11 @@ def test_researcher_exit_zero_without_answer_stops_before_coding(tmp_path: Path)
         runner=RoleRunner(ModelRegistry(config)),
     )
     config_ = {"configurable": {"thread_id": "denied-thread"}}
-    with pytest.raises(RuntimeError, match="researcher failed with exit code 5"):
-        graph.invoke(initial(workspace, spec, "denied-thread"), config=config_)
+    graph.invoke(initial(workspace, spec, "denied-thread"), config=config_)
+    values = graph.get_state(config_).values
+    assert values["status"] == "needs-human"
+    assert values["attempt"] == 2
+    assert len(values["usage"]) == 3  # one planner, two failed research calls
+    assert all("researcher" in error and "exit code 5" in error for error in values["errors"])
     assert not list((tmp_path / "artifacts").rglob("20-research.md"))
     assert not list((tmp_path / "artifacts").rglob("30-code-attempt-*.md"))

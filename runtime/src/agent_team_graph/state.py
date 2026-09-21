@@ -23,6 +23,11 @@ class GraphState(TypedDict, total=False):
     strict_ignored: bool
     base_sha: str
     attempt: int
+    execution_policy_version: int
+    attempt_start: str
+    role_failed: bool
+    halted: bool
+    cancelled_signal: int | None
     max_attempts: int
     plan: str
     research: str
