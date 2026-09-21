@@ -240,7 +240,9 @@ and binary overrides are not executed for probing because they may interpret
 `--version` as a prompt; their settings and authentication remain unverified.
 Missing executables or invalid/unreadable configuration fail the check (exit
 1). Missing agy settings and unavailable version information produce warnings.
-The final summary separates three outcomes:
+Once the shell checks reach the Python diagnostic, the final summary separates
+three outcomes. Earlier failures, such as a missing Python interpreter or failed
+model/command resolution, exit without this summary:
 
 ```text
 [PASS] Installation/config checks passed (see warnings/skipped checks above).
