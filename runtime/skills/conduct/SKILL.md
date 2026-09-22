@@ -106,7 +106,9 @@ recovery; inspect the files and any surviving processes, then start a new run. S
 processes escaping into a separate session cannot be cleaned up reliably.
 On non-strict gate replay, a previously published gate artifact keeps its original informational
 ignored-path listing while all attested fields are revalidated. Strict mode rejects ignored-file drift.
-Legacy approval/terminal checkpoints remain supported. A legacy checkpoint interrupted in
+Terminal checkpoints from any version remain readable. A run started on 0.1.6 or earlier cannot be
+continued: at approval or publish it records `needs-human`, even if it already recorded a decision
+or wrote a receipt before crashing (that receipt is not valid). A legacy checkpoint interrupted in
 an external-call node has no receipt: resume returns 4 with recovery guidance and preserves it.
 Never infer that adding a new graph node will run it before an already saved pending node.
 Python callers must supply an operator-validated canonical `artifact_root` (resolve trusted

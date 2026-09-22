@@ -42,9 +42,10 @@ uv run --project "$RUNTIME" agent-team-graph approve --thread-id demo-abc123 --d
 승인은 `--reviewed-digest`로 `status`에서 본 `reviewed_change_sha256`을 넘겨야 합니다.
 없거나 현재 값과 다르면 체크포인트를 바꾸지 않고 코드 2로 끝나며, 영수증에는
 `approved_change_sha256`으로 기록됩니다. 거절(`--decision reject`)에는 digest가 필요 없습니다.
-이 바인딩은 CLI가 강제합니다. 그래프를 직접 호출해 `"approve"` 문자열로 재개하거나 0.1.5
-이하 버전이 이미 승인 결정을 기록한 체크포인트는 digest 없이 끝나며, 영수증에 이 필드가 없습니다.
-승인 직전 작업 트리 digest 재검사는 모든 경우에 적용됩니다.
+이 바인딩은 CLI가 강제합니다. 그래프를 직접 호출해 `"approve"` 문자열로 재개하면 digest 없이
+끝나며, 영수증에 이 필드가 없습니다. 승인 직전 작업 트리 digest 재검사는 모든 경우에 적용됩니다.
+0.1.6 이하에서 시작한 run은 파일시스템 기준이 없어 이어갈 수 없습니다. 승인 결정을 이미 기록했거나
+영수증을 쓴 뒤 중단된 run이라도 `needs-human`으로 끝나며, 디스크에 남은 옛 영수증은 무효입니다.
 
 ## 종료 코드
 

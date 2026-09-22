@@ -370,7 +370,8 @@ def _ignore_rules_text(repo_root: Path) -> str:
     return "".join(part if part.endswith("\n") else part + "\n" for part in parts)
 
 
-def _isolated_listings(repo_root: Path, ignore_rules: Path) -> tuple[list[str], list[str]]:
+def _isolated_listings(repo_root: Path, ignore_rules: Path,
+                       ignorecase: bool) -> tuple[list[str], list[str]]:
     """(non-ignored, ignored) untracked listings that read nothing from `.git`.
 
     A private empty repository stands in for the real one, so no index, config,
@@ -381,6 +382,9 @@ def _isolated_listings(repo_root: Path, ignore_rules: Path) -> tuple[list[str], 
     into a new repository, `GIT_CONFIG_PARAMETERS` injects config) and the
     repository is created with no template for the same reason. A nested
     repository is listed as a single `path/` entry and never descended into.
+    `ignorecase` is the workspace's own setting, frozen at context: `git init`
+    would otherwise take it from the temporary directory's filesystem, and
+    pattern matching would differ from the real repository's.
     """
 
     with tempfile.TemporaryDirectory(prefix="agent-team-attest-") as scratch:
@@ -395,7 +399,8 @@ def _isolated_listings(repo_root: Path, ignore_rules: Path) -> tuple[list[str], 
             env=env, capture_output=True, check=True,
         )
         env |= {"GIT_DIR": git_dir, "GIT_WORK_TREE": str(repo_root)}
-        command = ["git", "-c", f"core.excludesFile={ignore_rules}", "-C", str(repo_root),
+        command = ["git", "-c", f"core.excludesFile={ignore_rules}",
+                   "-c", f"core.ignorecase={'true' if ignorecase else 'false'}", "-C", str(repo_root),
                    "ls-files", "-z", "--others", "--exclude-standard"]
         listings = []
         for extra in ([], ["--ignored"]):
@@ -492,7 +497,14 @@ def _base_manifest(
     attested for the whole run even if a later `.gitignore` edit would hide them.
     """
 
-    others, ignored = _isolated_listings(repo_root, ignore_rules)
+    configured = subprocess.run(
+        [*_GIT, "-C", str(repo_root), "config", "--bool", "--get", "core.ignorecase"],
+        capture_output=True, text=True, check=False,
+    )
+    if configured.returncode not in (0, 1):
+        raise ValueError("cannot read core.ignorecase")
+    ignorecase = configured.stdout.strip() == "true"
+    others, ignored = _isolated_listings(repo_root, ignore_rules, ignorecase)
     gitlinks = _keep(_gitlinks(repo_root), excluded)
     tracked = [path for path in _keep(_git_paths(repo_root, "ls-files", "-z"), excluded)
                if path not in set(gitlinks)]
@@ -506,8 +518,9 @@ def _base_manifest(
         "strict_ignored": strict_ignored,
         "excluded_paths": excluded,
         "ignore_rules_sha256": hashlib.sha256(ignore_rules.read_bytes()).hexdigest(),
+        "ignorecase": ignorecase,
         "gitlinks": gitlinks,
-        "boundaries": _boundaries([*others, *ignored], excluded),
+        "boundaries": _boundaries([*others, *(ignored if strict_ignored else [])], excluded),
         "files": files,
     }
 
@@ -521,6 +534,9 @@ def _classify_mismatch(paths: list[str], base: dict[str, Any],
         before, after = base.get(path), current.get(path)
         if before and after and before["sha256"] == after["sha256"]:
             reasons.add("mode-only change (core.fileMode=false?)")
+        elif before and after and before["mode"] == after["mode"]:
+            reasons.add("content change git does not report (line-ending normalization "
+                        "or a clean filter?)")
         elif before is None and path.casefold() in folded:
             reasons.add("case-only rename (case-insensitive filesystem?)")
     return sorted(reasons)
@@ -551,8 +567,12 @@ def _change_snapshot(
     document = baseline.document
     base_files: dict[str, Any] = document["files"]
     frozen = sorted({*document["gitlinks"], *document["boundaries"]})
-    others, ignored_listing = _isolated_listings(repo_root, baseline.ignore_rules)
-    boundaries = _boundaries([*others, *ignored_listing], excluded)
+    others, ignored_listing = _isolated_listings(repo_root, baseline.ignore_rules,
+                                                 document["ignorecase"])
+    # A repository inside ignored content matters only when that content is
+    # attested: without --strict-ignored nothing under it is, so a tool that
+    # installs a git checkout into node_modules or .venv must not stop the run.
+    boundaries = _boundaries([*others, *(ignored_listing if strict_ignored else [])], excluded)
     if boundaries != document["boundaries"]:
         added = sorted(set(boundaries) - set(document["boundaries"]))
         removed = sorted(set(document["boundaries"]) - set(boundaries))
@@ -1334,7 +1354,7 @@ def build_graph(
         if normalized not in {"approve", "reject"}:
             normalized = "reject"
         # The digest the caller saw. The CLI requires it for approve; a plain
-        # "approve" from a direct graph caller or a legacy checkpoint has none.
+        # "approve" from a direct graph caller has none.
         approved = decision.get("reviewed_change_sha256") if isinstance(decision, dict) else None
         return {"approval": normalized,
                 "approved_change_sha256": approved if normalized == "approve" else None}
@@ -1434,8 +1454,8 @@ def build_graph(
             "note": "approval receipt only; this runtime never pushes or force-merges",
         }
         if approved is not None:
-            # Only when supplied: a legacy receipt written before a crash must
-            # replay byte-identical into the immutable artifact.
+            # Only when supplied, so a direct graph caller's receipt keeps the
+            # shape it had; the receipt is an immutable artifact.
             receipt["approved_change_sha256"] = approved
         artifact = store.write_json(state["run_id"], "90-approval-receipt.json", receipt)
         return {"status": "approved", "artifacts": [artifact]}

@@ -469,3 +469,43 @@ def test_file_and_directory_replacements_are_a_deletion_and_an_addition(tmp_path
     changes = _snapshot(workspace, base, baseline)["changes"]
     assert sorted(changes) == sorted([old, new])
     assert changes[old] is None and changes[new]["mode"] == "100644"
+
+
+def test_repository_inside_ignored_content_matters_only_when_strict(tmp_path):
+    """A tool that installs a git checkout into ignored output must not stop a run."""
+    workspace, _ = make_repo(tmp_path)
+    (workspace / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    base = _commit_all(workspace, "ignore deps")
+    loose, strict = baseline_for(workspace, base), baseline_for(workspace, base, strict_ignored=True)
+    (workspace / "node_modules/dep").mkdir(parents=True)
+    _git(workspace / "node_modules/dep", "init", "-q")
+    (workspace / "README.md").write_text("edited\n", encoding="utf-8")
+    assert _snapshot(workspace, base, loose)["changed_paths"] == ["README.md"]
+    assert _refused(workspace, base, strict, strict=True).startswith(
+        "nested repository boundaries changed during the run (new: ['node_modules/dep']")
+
+
+def test_isolated_listing_uses_the_repository_ignorecase(tmp_path):
+    """git init takes core.ignorecase from the temp filesystem; the run freezes the repo's."""
+    workspace, _ = make_repo(tmp_path)
+    _git(workspace, "config", "core.ignorecase", "false")
+    (workspace / ".gitignore").write_text("*.LOG\n", encoding="utf-8")
+    base = _commit_all(workspace, "case-sensitive ignore")
+    baseline = baseline_for(workspace, base)
+    assert baseline.document["ignorecase"] is False
+    (workspace / "debug.log").write_text("not matched by *.LOG here\n", encoding="utf-8")
+    assert _snapshot(workspace, base, baseline)["changed_paths"] == ["debug.log"]
+
+
+def test_line_ending_only_rewrite_names_a_likely_cause(tmp_path):
+    workspace, _ = make_repo(tmp_path)
+    (workspace / ".gitattributes").write_text("* text=auto eol=lf\n", encoding="utf-8")
+    (workspace / "a.txt").write_bytes(b"one\ntwo\n")
+    base = _commit_all(workspace, "text")
+    baseline = baseline_for(workspace, base)
+    (workspace / "a.txt").write_bytes(b"one\r\ntwo\r\n")
+    assert _refused(workspace, base, baseline) == (
+        "git and the filesystem disagree on changed paths: filesystem-only ['a.txt'], "
+        "git-only []; likely content change git does not report (line-ending normalization "
+        "or a clean filter?)"
+    )
