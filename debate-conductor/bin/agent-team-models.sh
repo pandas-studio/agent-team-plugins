@@ -304,15 +304,23 @@ cmd_remove() {
   existing="$(_registry_config_json | jq -c --arg id "$id" '.models[$id] // null')"
   [ "$existing" != "null" ] || die "'$id' is not a user-defined model (built-ins cannot be removed; nothing to do)"
   # Roles in config that currently point at this model.
-  local refs
-  refs="$(_registry_config_json | jq -r --arg id "$id" '.roles | to_entries[] | select(.value == $id) | .key')"
-  if [ -n "$refs" ]; then
+  # Capture first so a jq failure still stops the script (errexit), then keep
+  # one array element per role key so a key is never word-split or globbed.
+  local refs_raw ref
+  local refs=()
+  refs_raw="$(_registry_config_json | jq -r --arg id "$id" '.roles | to_entries[] | select(.value == $id) | .key')"
+  if [ -n "$refs_raw" ]; then
+    while IFS= read -r ref; do
+      refs+=("$ref")
+    done <<< "$refs_raw"
+  fi
+  if [ "${#refs[@]}" -gt 0 ]; then
     if [ "$force" != "1" ]; then
       echo "$PROG: '$id' is in use by role(s):" >&2
-      printf '  %s\n' $refs >&2
+      printf '  %s\n' "${refs[@]}" >&2
       die "refusing to remove a model in use — re-run with: $PROG remove $id --force --fallback <model-id>"
     fi
-    [ -n "$fallback" ] || die "remove --force requires --fallback <model-id> to reassign role(s): $(printf '%s ' $refs)"
+    [ -n "$fallback" ] || die "remove --force requires --fallback <model-id> to reassign role(s): $(printf '%s ' "${refs[@]}")"
     registry_model_exists "$fallback" || die "fallback model '$fallback' does not exist"
     [ "$fallback" != "$id" ] || die "fallback cannot be the model being removed"
     # Reassign each referencing role to the fallback, then drop the model.
@@ -322,7 +330,7 @@ cmd_remove() {
            | del(.models[$id])' \
       | _cfg_save
     echo "model '$id' removed; reassigned role(s) to '$fallback':"
-    printf '  %s\n' $refs
+    printf '  %s\n' "${refs[@]}"
   else
     _registry_config_json | jq --arg id "$id" 'del(.models[$id])' | _cfg_save
     echo "model '$id' removed"

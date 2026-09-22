@@ -147,7 +147,7 @@ stage_run() {
     # Open the transcript first, outside the CLI pipeline. Its stderr never
     # enters tee or the stdout artifact. PIPESTATUS preserves both failures.
     if {
-      ( cd "$work_dir" && "$@" ) | tee "$STAGE_STDOUT"
+      ( cd "$work_dir" && "$@" ) </dev/null | tee "$STAGE_STDOUT"
       statuses=("${PIPESTATUS[@]}")
     } > "$log" 2>&1; then
       STAGE_CLI_RC=${statuses[0]}

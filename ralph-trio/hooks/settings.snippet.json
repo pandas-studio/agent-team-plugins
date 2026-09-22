@@ -16,6 +16,8 @@
     "Then start `claude` and give it any opening message (e.g. 'begin'). The hook",
     "will block each Stop event and re-inject PROMPT.md until the completion",
     "marker appears in fix_plan.md, or RALPH_MAX_ITER iterations have run.",
+    "Claude Code ends a turn after 8 consecutive Stop-hook blocks; the counter",
+    "survives, so send another message to resume the loop.",
     "",
     "Trio and debate variants stay on bash drivers — they orchestrate multiple",
     "external CLIs (Codex, Antigravity) which the in-session hook cannot launch cleanly.",

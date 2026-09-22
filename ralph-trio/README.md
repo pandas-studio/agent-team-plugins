@@ -106,7 +106,7 @@ export RALPH_VARIANT=solo
 claude
 ```
 
-Give Claude any opening message. The hook re-injects `PROMPT.md` every Stop event until the completion marker appears or `RALPH_MAX_ITER` is hit.
+Give Claude any opening message. The hook re-injects `PROMPT.md` every Stop event until the completion marker appears or `RALPH_MAX_ITER` is hit. Claude Code itself ends the turn after 8 consecutive Stop-hook blocks, so one message runs at most 8 iterations. The hook stops at that cap itself so no iteration is spent on a block Claude never sees; if a later Claude Code changes the cap, set `RALPH_HOST_BLOCK_CAP` (0 turns the check off). The counter is kept, and your next message resumes the loop where it stopped. Each iteration shows as a Stop hook error in the transcript; that is how Claude Code labels a blocking hook, not a failure.
 
 ### Trio (3-stage with Codex review)
 
@@ -189,6 +189,7 @@ $PWD/.ralph-trio/
 │   └── latest-ralph.log                           symlink to most-recent any-variant
 └── state/<team>/
     ├── iter                                       Stop-hook iteration counter
+    ├── consecutive-blocks                         Stop-hook blocks since your last message
     └── prompt.sha256                              Stop-hook tamper detection
 ```
 

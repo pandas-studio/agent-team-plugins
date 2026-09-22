@@ -18,9 +18,11 @@ check() {
 json_is() { jq -e "$2" "$1" >/dev/null; }
 cat > "$TMP/worker" <<'STUB'
 #!/usr/bin/env bash
+[ -t 0 ] || cat >> "${REVIEW_TEST_STDIN_SEEN:-/dev/null}"
 case "$2" in
   '# Role: Ralph Planner'*|'# Role: Spec-driven Planner'*)
-    echo '<allowed-paths>file.txt</allowed-paths>' ;;
+    echo '<allowed-paths>file.txt</allowed-paths>'
+    [ "${REVIEW_TEST_CASE:-}" != plan-research ] || printf '## NEED RESEARCH\n- planner question\n' ;;
   *)
     [ -z "${REVIEW_TEST_PROMPTS:-}" ] || printf '%s\n' "$2" >> "$REVIEW_TEST_PROMPTS"
     printf 'implemented\n' > file.txt
@@ -31,6 +33,7 @@ esac
 STUB
 cat > "$TMP/researcher" <<'STUB'
 #!/usr/bin/env bash
+[ -t 0 ] || cat >> "${REVIEW_TEST_STDIN_SEEN:-/dev/null}"
 printf 'research\n' >> "$REVIEW_TEST_RESEARCH"
 printf '%s\n' "$2" >> "$REVIEW_TEST_RESEARCH.prompts"
 if [ "$REVIEW_TEST_CASE" = research-denied ]; then
@@ -43,6 +46,7 @@ STUB
 cat > "$TMP/reviewer" <<'STUB'
 #!/usr/bin/env bash
 set -eu
+[ -t 0 ] || cat >> "${REVIEW_TEST_STDIN_SEEN:-/dev/null}"
 [ -z "${REVIEW_TEST_REVIEW_PROMPTS:-}" ] || printf '%s\n' "$*" >> "$REVIEW_TEST_REVIEW_PROMPTS"
 count=0
 [ ! -f "$REVIEW_TEST_COUNTER" ] || count=$(cat "$REVIEW_TEST_COUNTER")
@@ -75,7 +79,7 @@ chmod +x "$TMP/worker" "$TMP/researcher" "$TMP/reviewer"
 # given an empty path after a failed review) would dispatch it as research.
 printf '## NEED RESEARCH\n- leaked from caller stdin\n' > "$TMP/stdin-research.md"
 for plugin in ralph-trio spec-trio; do
-  for scenario in disagree malformed retarget failed retry research-denied; do
+  for scenario in disagree malformed retarget failed retry research-denied plan-research; do
     case_root="$TMP/$plugin-$scenario"
     repo="$case_root/repo"
     state="$case_root/state"
@@ -92,7 +96,7 @@ for plugin in ralph-trio spec-trio; do
     git -C "$repo" -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm baseline
     args=(--backlog "$repo/BACKLOG.md" --max-iter 1)
     [ "$plugin" != spec-trio ] || args+=(--spec "$repo/spec.md" --test-cmd 'git diff --check')
-    case "$scenario" in retarget|failed|retry|research-denied) ;; *) args+=(--no-research) ;; esac
+    case "$scenario" in retarget|failed|retry|research-denied|plan-research) ;; *) args+=(--no-research) ;; esac
     driver_rc=0
     (
       cd "$repo"
@@ -106,7 +110,7 @@ for plugin in ralph-trio spec-trio; do
         RALPH_TRIO_WORKSPACE="$state" SPEC_TRIO_WORKSPACE="$state" \
         REVIEW_TEST_CASE="$scenario" REVIEW_TEST_COUNTER="$case_root/count" \
         REVIEW_TEST_RESEARCH="$case_root/research" REVIEW_TEST_DECOY="$case_root/decoy.md" \
-        REVIEW_TEST_PROMPTS="$case_root/coder-prompts" \
+        REVIEW_TEST_PROMPTS="$case_root/coder-prompts" REVIEW_TEST_STDIN_SEEN="$case_root/stdin-seen" \
         "$ROOT/$plugin/bin/$plugin.sh" "${args[@]}"
     ) < "$TMP/stdin-research.md" > "$TMP/driver.out" 2>&1 || driver_rc=$?
     expected_rc=0
@@ -114,6 +118,9 @@ for plugin in ralph-trio spec-trio; do
     # spec-trio skips the retry coder when research fails and leaves the task pending.
     if [ "$plugin" = spec-trio ] && [ "$scenario" = research-denied ]; then expected_rc=3; fi
     check "$plugin $scenario exit status" test "$driver_rc" -eq "$expected_rc"
+    # Issue #24: no model CLI or wrapper may take the driver's stdin as input.
+    check "$plugin $scenario model CLIs never read the driver's stdin" \
+      sh -c '! grep -qs "leaked from caller stdin" "$1" "$2"' _ "$case_root/stdin-seen" "$case_root/research.prompts"
     expected_calls=1
     [ "$scenario" != retry ] || expected_calls=2
     [ "$scenario" != research-denied ] || [ "$plugin" != ralph-trio ] || expected_calls=2
@@ -136,6 +143,9 @@ for plugin in ralph-trio spec-trio; do
       check "$plugin real research request runs once" test "$(wc -l < "$case_root/research" | tr -d ' ')" -eq 1
       check "$plugin research question dispatched" grep -q 'verify the API' "$case_root/research.prompts"
       check "$plugin NEED CONTEXT not sent as research" sh -c '! grep -q "gh pr view" "$1"' _ "$case_root/research.prompts"
+    elif [ "$scenario" = plan-research ]; then
+      check "$plugin planner research request runs once" test "$(wc -l < "$case_root/research" | tr -d ' ')" -eq 1
+      check "$plugin planner research question dispatched" grep -q 'planner question' "$case_root/research.prompts"
     else
       check "$plugin never dispatches stale/failed research" test ! -e "$case_root/research"
     fi
