@@ -81,5 +81,7 @@ def baseline_for(workspace: Path, base_sha: str, excluded: list[str] | None = No
     rules = Path(tempfile.mkdtemp(prefix="attest-rules-")) / "ignore-rules.txt"
     rules.write_text(_ignore_rules_text(workspace), encoding="utf-8")
     document = _base_manifest(workspace, base_sha, sorted(excluded or []), strict_ignored, rules)
+    # Only an identity for the digest document: the graph hashes the stored
+    # artifact's bytes instead, so this value never round-trips through load_baseline.
     digest = hashlib.sha256(json.dumps(document, sort_keys=True).encode()).hexdigest()
     return Baseline(document, digest, rules)

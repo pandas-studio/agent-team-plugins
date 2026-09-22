@@ -394,6 +394,9 @@ def _isolated_listings(repo_root: Path, ignore_rules: Path,
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": os.devnull,
         }
+        # Plain `git`, not `_GIT`: `--no-replace-objects` guards reads of the
+        # workspace's objects, and this fresh repository has neither objects
+        # nor replacement refs.
         subprocess.run(
             ["git", "init", "-q", "--bare", "--template=", git_dir],
             env=env, capture_output=True, check=True,
@@ -468,6 +471,8 @@ def _hash_paths(repo_root: Path, paths: list[str]) -> dict[str, dict[str, str] |
     before = {path: _identity(repo_root, path) for path in paths}
     entries = {path: _manifest_entry(repo_root, path, real_dirs) for path in paths}
     moved = [path for path in paths if _identity(repo_root, path) != before[path]]
+    # Only directories resolved while hashing can be stale; a directory created
+    # meanwhile was never trusted, and the files under it carry their own identity.
     moved += [directory for directory, real in real_dirs.items()
               if os.path.realpath(directory) != real]
     if moved:
