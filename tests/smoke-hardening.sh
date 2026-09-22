@@ -259,6 +259,100 @@ chmod +x "$TMP/meta-bin/stat"
 (cd "$DRV" && env PATH="$TMP/meta-bin:$PATH" AGENT_TEAM=smoke TMUX="" RALPH_TRIO_WORKSPACE="$TMP/meta-ws" \
   "$ROOT/ralph-trio/bin/ralph-meta.sh" --since "1 hour ago" --variant trio >/dev/null 2>"$TMP/meta-fallback.err" </dev/null) || true
 assert_eq "$(sed -n 's/.*ralph logs found: //p' "$TMP/meta-fallback.err")" "1"
+# The reviewer must not take ralph-meta's own stdin as context.
+printf '#!/usr/bin/env bash\n[ -t 0 ] || cat > "%s"\n' "$TMP/meta-reviewer.stdin" > "$TMP/meta-bin/ask-reviewer.sh"
+printf 'META-STDIN-SENTINEL\n' > "$TMP/meta.stdin"
+(cd "$DRV" && env PATH="$TMP/meta-bin:$PATH" AGENT_TEAM=smoke TMUX="" RALPH_TRIO_WORKSPACE="$TMP/meta-ws" \
+  "$ROOT/ralph-trio/bin/ralph-meta.sh" --since "1 hour ago" >/dev/null 2>&1 <"$TMP/meta.stdin") || true
+assert_eq "$(wc -c < "$TMP/meta-reviewer.stdin" | tr -d ' ')" "0"
+
+# stop-hook: Claude Code hands a blocking Stop hook's `reason` to Claude and
+# ignores a top-level `additionalContext`, so PROMPT.md must travel in `reason`.
+HOOK="$TMP/stop-hook"
+mkdir -p "$HOOK"
+printf 'Build the thing.\nPROMPT-BODY-SENTINEL\n' > "$HOOK/PROMPT.md"
+printf '# fix_plan\n- tried FIX-PLAN-SENTINEL\n' > "$HOOK/fix_plan.md"
+# HOOK_ACTIVE=true marks a continuation, as Claude Code sends it.
+run_stop_hook() {
+  printf '{"hook_event_name":"Stop","stop_hook_active":%s}' "${HOOK_ACTIVE:-false}" \
+    | env AGENT_TEAM=hook TMUX="" RALPH_TRIO_WORKSPACE="$HOOK/ws" \
+        RALPH_PROMPT="$HOOK/PROMPT.md" RALPH_FIX_PLAN="$HOOK/fix_plan.md" "$@" \
+        "$ROOT/ralph-trio/bin/stop-hook.sh" 2>"$HOOK/err"
+}
+hook_reason_part() {
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["reason"].split("\n\n---\n\n")[int(sys.argv[1])])' "$1"
+}
+run_stop_hook > "$HOOK/out.json"
+assert_eq "$(jq -r '.decision' "$HOOK/out.json")" "block"
+assert_eq "$(jq -r 'has("additionalContext") or has("hookSpecificOutput")' "$HOOK/out.json")" "false"
+assert_eq "$(hook_reason_part 1 < "$HOOK/out.json")" "$(cat "$HOOK/PROMPT.md")"
+assert_eq "$(cat "$HOOK/ws/state/hook/iter")" "1"
+run_stop_hook RALPH_INJECT_FIX_PLAN=1 > "$HOOK/out-fp.json"
+assert_eq "$(hook_reason_part 2 < "$HOOK/out-fp.json" | sed -n '/^<fix_plan_md>$/,/^<\/fix_plan_md>$/p')" \
+  "$(printf '<fix_plan_md>\n%s\n</fix_plan_md>' "$(cat "$HOOK/fix_plan.md")")"
+assert_eq "$(cat "$HOOK/ws/state/hook/iter")" "2"
+# A PROMPT.md over Linux's 128 KiB single-argument cap still arrives whole.
+python3 -c 'print("BIG-PROMPT " + "x" * 300000)' > "$HOOK/PROMPT.md"
+rm -f "$HOOK/ws/state/hook/prompt.sha256"
+run_stop_hook > "$HOOK/out-big.json"
+assert_eq "$(hook_reason_part 1 < "$HOOK/out-big.json" | wc -c | tr -d ' ')" "$(wc -c < "$HOOK/PROMPT.md" | tr -d ' ')"
+# If the response cannot be built, the stop is allowed and no iteration is spent.
+mkdir -p "$HOOK/bin"
+printf '#!/bin/sh\nexit 1\n' > "$HOOK/bin/python3"
+chmod +x "$HOOK/bin/python3"
+before=$(cat "$HOOK/ws/state/hook/iter")
+rc=0
+run_stop_hook PATH="$HOOK/bin:$PATH" > "$HOOK/out-fail.json" || rc=$?
+assert_eq "$rc" "0"
+assert_eq "$(wc -c < "$HOOK/out-fail.json" | tr -d ' ')" "0"
+assert_eq "$(cat "$HOOK/ws/state/hook/iter")" "$before"
+assert_eq "$(grep -c 'could not build the hook response' "$HOOK/err")" "1"
+# Claude Code ends the turn after 8 consecutive blocks and never acts on a 9th.
+# The hook allows that stop itself, keeps the counter, and a new message
+# (stop_hook_active=false) starts a fresh run of blocks.
+printf 'Build the thing.\n' > "$HOOK/PROMPT.md"
+rm -f "$HOOK/ws/state/hook/prompt.sha256"
+echo 0 > "$HOOK/ws/state/hook/iter"
+blocked=0
+for n in 1 2 3 4 5 6 7 8 9; do
+  active=true
+  [ "$n" -gt 1 ] || active=false
+  HOOK_ACTIVE=$active run_stop_hook > "$HOOK/out-cap.json"
+  [ "$(jq -r '.decision // empty' "$HOOK/out-cap.json" 2>/dev/null)" != block ] || blocked=$((blocked + 1))
+done
+assert_eq "$blocked" "8"
+assert_eq "$(wc -c < "$HOOK/out-cap.json" | tr -d ' ')" "0"
+assert_eq "$(grep -c 'consecutive blocks (Claude Code cap) at iter=8' "$HOOK/err")" "1"
+assert_eq "$(cat "$HOOK/ws/state/hook/iter")" "8"
+# A new message resets the run even when the file holds an old count.
+echo 5 > "$HOOK/ws/state/hook/consecutive-blocks"
+HOOK_ACTIVE=false run_stop_hook > "$HOOK/out-cap.json"
+assert_eq "$(jq -r '.decision' "$HOOK/out-cap.json")" "block"
+assert_eq "$(cat "$HOOK/ws/state/hook/iter")" "9"
+assert_eq "$(cat "$HOOK/ws/state/hook/consecutive-blocks")" "1"
+# RALPH_HOST_BLOCK_CAP=0 turns the cap check off.
+echo 20 > "$HOOK/ws/state/hook/consecutive-blocks"
+HOOK_ACTIVE=true run_stop_hook RALPH_HOST_BLOCK_CAP=0 > "$HOOK/out-cap.json"
+assert_eq "$(jq -r '.decision' "$HOOK/out-cap.json")" "block"
+# An empty fix_plan sends no excerpt, and the log does not claim one.
+: > "$HOOK/fix_plan.md"
+run_stop_hook RALPH_INJECT_FIX_PLAN=1 > "$HOOK/out-empty.json"
+assert_eq "$(jq -r '.reason | contains("<fix_plan_md>")' "$HOOK/out-empty.json")" "false"
+assert_eq "$(grep -c 'fix_plan excerpt' "$HOOK/err")" "0"
+
+# agent-team-models remove: role keys are printed one per line, never
+# word-split or globbed (a key of `*` once listed the working directory).
+for plugin in dev-trio debate-conductor; do
+  printf '%s\n' '{"version":1,"models":{"mine":{"command":"x","args":["{prompt}"]}},"roles":{"*":"mine","a b":"mine","dev-trio.reviewer":"codex"}}' \
+    > "$TMP/refs-models.json"
+  (cd "$TMP" && AGENT_TEAM_MODELS_CONFIG="$TMP/refs-models.json" \
+    "$ROOT/$plugin/bin/agent-team-models.sh" remove mine >/dev/null 2>"$TMP/refs.err") || true
+  assert_eq "$(sed -n 's/^  //p' "$TMP/refs.err")" "$(printf '*\na b')"
+  (cd "$TMP" && AGENT_TEAM_MODELS_CONFIG="$TMP/refs-models.json" \
+    "$ROOT/$plugin/bin/agent-team-models.sh" remove mine --force --fallback codex >"$TMP/refs.out" 2>&1)
+  assert_eq "$(sed -n 's/^  //p' "$TMP/refs.out")" "$(printf '*\na b')"
+  assert_eq "$(jq -c '.roles' "$TMP/refs-models.json")" '{"*":"codex","a b":"codex","dev-trio.reviewer":"codex"}'
+done
 
 # agent-team-models must not overwrite a config it could not parse: reads fall
 # back to an empty config, and a write built on that would drop every model.

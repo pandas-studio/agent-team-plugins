@@ -1128,6 +1128,8 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
     OUT=$(round_file "$r" gen "$GEN_MODEL")
     begin_attempt "$r" gen "$GEN_MODEL" "$OUT"
     [ "$ROTATE" = "1" ] && print_header "$r" "Generator" "$GEN_MODEL" || print_header "$r" "Generator"
+    # Each attempt reads /dev/null, not debate.sh's stdin: the wrappers take any
+    # non-terminal stdin as context, and an inherited open pipe would hang them.
     # shellcheck disable=SC2046  # word-splitting on gen_args output is intentional
     if [ "$r" -eq 1 ]; then
       if [ -n "$CONTEXT_BLOCK" ]; then
@@ -1136,14 +1138,14 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
             print_marker "$r" gen "$GEN_MODEL"
             echo "$CONTEXT_BLOCK" | "$SCRIPT_DIR/../lib/ask-generator.sh" $(gen_args "$GEN_MODEL") "Topic: $TOPIC. Produce an initial substantive draft."
           } | strip_stream_controls | tee "$OUT" | tee -a "$DEBATE_DIR/stream-gen.log"
-        ) <&0 &
+        ) </dev/null &
       else
         (
           {
             print_marker "$r" gen "$GEN_MODEL"
             "$SCRIPT_DIR/../lib/ask-generator.sh" $(gen_args "$GEN_MODEL") "Topic: $TOPIC. Produce an initial substantive draft."
           } | strip_stream_controls | tee "$OUT" | tee -a "$DEBATE_DIR/stream-gen.log"
-        ) <&0 &
+        ) </dev/null &
       fi
     else
       PREV_GEN_MODEL=$(round_model "$((r-2))" gen)
@@ -1161,7 +1163,7 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
             cat "$PREV_CRIT"
           } | "$SCRIPT_DIR/../lib/ask-generator.sh" $(gen_args "$GEN_MODEL") "Topic: $TOPIC. Revise your draft, addressing the critic's Blocker and Major findings directly. Quote the critic's claim, then state your response (accept / reject with reason / modify)."
         } | strip_stream_controls | tee "$OUT" | tee -a "$DEBATE_DIR/stream-gen.log"
-      ) <&0 &
+      ) </dev/null &
     fi
     # Unconditional, so a failed attempt stops debate.sh through errexit.
     wait_attempt "$!"
@@ -1179,7 +1181,7 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
         print_marker "$r" crit "$CRIT_MODEL"
         "$SCRIPT_DIR/../lib/ask-critic.sh" $(crit_args "$CRIT_MODEL") --with-research "$PREV_GEN" "Topic: $TOPIC. Critique the latest Generator draft adversarially. Focus on weaknesses, missed cases, and better alternatives."
       } | strip_stream_controls | tee "$OUT" | tee -a "$DEBATE_DIR/stream-crit.log"
-    ) <&0 &
+    ) </dev/null &
     wait_attempt "$!"
     complete_attempt
     # Convergence check runs only on Critic (even) rounds: a STRENGTHEN verdict

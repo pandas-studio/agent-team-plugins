@@ -251,6 +251,33 @@ class DebateAnswerTests(unittest.TestCase):
         for path in debate.glob("round-*.md"):
             self.assertEqual(path.read_text().split("\n", 1)[1], answer.replace("\x1e", ""))
 
+    def test_debate_does_not_hand_its_stdin_to_a_role(self):
+        # The wrappers take any non-terminal stdin as context. debate.sh's own
+        # stdin, here a pipe that stays open, must reach no attempt.
+        # Output goes to files: an unread pipe could fill and stall debate.sh,
+        # which would look like the hang this test is about.
+        err_path = self.root / "debate.err"
+        with open(self.root / "debate.out", "w") as out, open(err_path, "w") as err, subprocess.Popen(
+            ["/bin/bash", str(PLUGIN / "bin/debate.sh"), "-n", "2", "topic"], cwd=self.root,
+            env=self.env, stdin=subprocess.PIPE, stdout=out, stderr=err,
+            text=True, start_new_session=True,
+        ) as proc:
+            proc.stdin.write("INHERITED-STDIN-SENTINEL\n")
+            proc.stdin.flush()
+            try:
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+                self.fail("debate.sh hung reading its inherited stdin")
+            finally:
+                proc.stdin.close()
+        self.assertEqual(proc.returncode, 0, err_path.read_text())
+        calls = self.calls.read_text().splitlines()
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            self.assertNotIn("INHERITED-STDIN-SENTINEL", call)
+
     def test_capture_creation_failure_does_not_start_model(self):
         result = self.run_cli("lib/ask-critic.sh", "topic", TMPDIR=str(self.root / "absent"))
         self.assertEqual(result.returncode, 6, result.stderr)

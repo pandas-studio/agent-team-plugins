@@ -1,5 +1,5 @@
 ---
-description: Install (or upgrade) the ralph-trio Stop-hook into the workspace's .claude/settings.local.json so Claude Code keeps running the ralph-solo loop until the completion marker appears or RALPH_MAX_ITER is reached. Idempotent — merges into existing hooks block, never duplicates the entry.
+description: Install (or upgrade) the ralph-trio Stop-hook into the workspace's .claude/settings.local.json so Claude Code keeps running the ralph-solo loop until the completion marker appears or RALPH_MAX_ITER is reached (at most 8 iterations per message; Claude Code's consecutive-block cap). Idempotent — merges into existing hooks block, never duplicates the entry.
 disable-model-invocation: true
 allowed-tools: Read Edit Write Bash(mkdir:*) Bash(jq:*) Bash(test:*)
 ---
@@ -12,7 +12,7 @@ This is the in-session driver for the **solo** variant only. Trio and debate sta
 
 ## Why this exists
 
-The Stop-hook pattern keeps Claude looping on a single prompt without you driving from outside. Mirrors Huntley's canonical Ralph loop but inside Claude Code: each Stop event re-feeds `PROMPT.md` (and optionally a trimmed `fix_plan.md` excerpt) as `additionalContext` until the agent writes the literal `<promise>COMPLETE</promise>` marker in `fix_plan.md`.
+The Stop-hook pattern keeps Claude looping on a single prompt without you driving from outside. Mirrors Huntley's canonical Ralph loop but inside Claude Code: each Stop event re-feeds `PROMPT.md` (and optionally a trimmed `fix_plan.md` excerpt) in the hook's `reason`, which Claude receives as its next instruction, until the agent writes the literal `<promise>COMPLETE</promise>` marker in `fix_plan.md`.
 
 ## Prerequisites the user must set BEFORE starting the looped Claude Code session
 
@@ -88,7 +88,7 @@ After write, tell the user:
 > claude
 > ```
 >
-> Then give Claude any opening message ("begin"). The hook will keep the loop alive until `<promise>COMPLETE</promise>` appears in `fix_plan.md`, or RALPH_MAX_ITER iterations have run.
+> Then give Claude any opening message ("begin"). The hook will keep the loop alive until `<promise>COMPLETE</promise>` appears in `fix_plan.md`, or RALPH_MAX_ITER iterations have run. Claude Code ends a turn after 8 consecutive Stop-hook blocks; the counter survives, so send another message to resume.
 >
 > To remove the hook: edit `.claude/settings.local.json` and delete the entry whose command is `stop-hook.sh`.
 
