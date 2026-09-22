@@ -67,3 +67,21 @@ def initial(workspace: Path, spec: Path, thread_id: str = "demo-thread") -> dict
         "usage": [],
         "errors": [],
     }
+
+
+def baseline_for(workspace: Path, base_sha: str, excluded: list[str] | None = None,
+                 strict_ignored: bool = False):
+    """The attestation baseline a run would record at context, for direct snapshot calls."""
+    import hashlib
+    import json
+    import tempfile
+
+    from agent_team_graph.graph import Baseline, _base_manifest, _ignore_rules_text
+
+    rules = Path(tempfile.mkdtemp(prefix="attest-rules-")) / "ignore-rules.txt"
+    rules.write_text(_ignore_rules_text(workspace), encoding="utf-8")
+    document = _base_manifest(workspace, base_sha, sorted(excluded or []), strict_ignored, rules)
+    # Only an identity for the digest document: the graph hashes the stored
+    # artifact's bytes instead, so this value never round-trips through load_baseline.
+    digest = hashlib.sha256(json.dumps(document, sort_keys=True).encode()).hexdigest()
+    return Baseline(document, digest, rules)

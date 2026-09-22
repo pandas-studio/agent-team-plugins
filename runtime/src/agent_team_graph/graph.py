@@ -10,6 +10,7 @@ import re
 import shlex
 import stat
 import subprocess
+import tempfile
 import uuid
 from dataclasses import asdict, dataclass
 from functools import wraps
@@ -91,6 +92,18 @@ def _git_bytes(workspace: Path, *args: str) -> bytes:
     return result.stdout
 
 
+def _split_paths(listing: bytes) -> list[str]:
+    paths: list[str] = []
+    for item in listing.split(b"\0"):
+        if not item:
+            continue
+        try:
+            paths.append(item.decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"path is not valid UTF-8: {item!r}") from exc
+    return paths
+
+
 def _git_paths(workspace: Path, *args: str) -> list[str]:
     """Run a NUL-delimited (`-z`) git path listing and return the paths verbatim.
 
@@ -101,15 +114,7 @@ def _git_paths(workspace: Path, *args: str) -> list[str]:
     ValueError (a snapshot error, so the gate fails closed): it could not be
     matched against the allowed paths or serialized into the digest document.
     """
-    paths: list[str] = []
-    for item in _git_bytes(workspace, *args).split(b"\0"):
-        if not item:
-            continue
-        try:
-            paths.append(item.decode("utf-8"))
-        except UnicodeDecodeError as exc:
-            raise ValueError(f"path is not valid UTF-8: {item!r}") from exc
-    return paths
+    return _split_paths(_git_bytes(workspace, *args))
 
 
 def _exclude_pathspecs(excluded: list[str]) -> list[str]:
@@ -187,8 +192,14 @@ def _ignored_paths(repo_root: Path, excluded: list[str]) -> list[str]:
     return _keep(listed, excluded)
 
 
-def _file_digest(repo_root: Path, relative: str) -> str:
-    """Hash an untracked path without following a symlink outside the repository."""
+def _file_digest(repo_root: Path, relative: str, *,
+                 real_dirs: dict[str, str] | None = None) -> str:
+    """Hash a path without following a symlink outside the repository.
+
+    `real_dirs` caches resolved directories for one snapshot (a snapshot hashes
+    every file, and resolving each one dominated its cost). It must not outlive
+    the snapshot: a role could replace a directory with a symlink between two.
+    """
 
     path = repo_root / relative
     metadata = path.lstat()
@@ -196,10 +207,15 @@ def _file_digest(repo_root: Path, relative: str) -> str:
         kind = b"symlink"
         content = os.fsencode(os.readlink(path))
     elif stat.S_ISREG(metadata.st_mode):
-        try:
-            path.resolve(strict=True).relative_to(repo_root.resolve())
-        except ValueError as exc:
-            raise ValueError(f"untracked path resolves outside repository: {relative}") from exc
+        cache = {} if real_dirs is None else real_dirs
+        # The last component is a regular file, not a symlink, so the file's real
+        # path is its real parent directory plus its name.
+        for directory in (str(repo_root), str(path.parent)):
+            if directory not in cache:
+                cache[directory] = os.path.realpath(directory)
+        root, parent = cache[str(repo_root)], cache[str(path.parent)]
+        if parent != root and not parent.startswith(root + os.sep):
+            raise ValueError(f"path resolves outside repository: {relative}")
         kind = b"file"
         content = path.read_bytes()
     else:
@@ -285,71 +301,361 @@ def _refuse_filtered_tracked_paths(repo_root: Path) -> None:
         )
 
 
+ATTESTATION = "fs-manifest-v1"
+BASE_MANIFEST = "02-base-manifest.json"
+IGNORE_RULES = "02-ignore-rules.txt"
+PRE_ATTESTATION = (
+    "run started before filesystem attestation (langgraph-conductor 0.1.6 or earlier); "
+    "inspect the workspace and start a new run"
+)
+
+
+class AttestationUnavailable(ValueError):
+    """The run has no filesystem baseline, so no change set can be attested."""
+
+
+@dataclass(frozen=True)
+class Baseline:
+    """What the run's attestation compares against, fixed at context.
+
+    `document` is the base manifest, `sha256` the digest of its stored bytes, and
+    `ignore_rules` the frozen copy of every ignore rule that lives outside the
+    working tree (see `_ignore_rules_text`).
+    """
+
+    document: dict[str, Any]
+    sha256: str
+    ignore_rules: Path
+
+
+def _ignore_rules_text(repo_root: Path) -> str:
+    """Every ignore rule that lives outside the working tree, as one frozen text.
+
+    That is the effective `core.excludesFile` (repository, global or system config;
+    git's XDG default when unset) and `.git/info/exclude`. Both are configuration a
+    role could rewrite mid-run, so they are captured once at context and every
+    later listing reads this copy instead. `.gitignore` files inside the tree need
+    no copy: they are attested content, so editing one is itself a change.
+    """
+
+    configured = subprocess.run(
+        [*_GIT, "-C", str(repo_root), "config", "--path", "--get", "core.excludesFile"],
+        capture_output=True,
+        check=False,
+    )
+    if configured.returncode not in (0, 1):
+        raise ValueError("cannot read core.excludesFile")
+    value = os.fsdecode(configured.stdout.rstrip(b"\n")) if configured.returncode == 0 else ""
+    if configured.returncode == 0:
+        # Relative to where git runs (`-C repo_root`), not to this process. An
+        # empty value is valid and names no file.
+        sources = [repo_root / value] if value else []
+    else:
+        xdg = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+        sources = [Path(xdg) / "git" / "ignore"]
+    info_exclude = Path(_git(repo_root, "rev-parse", "--git-path", "info/exclude"))
+    sources.append(info_exclude if info_exclude.is_absolute() else repo_root / info_exclude)
+    parts: list[str] = []
+    for source in sources:
+        try:
+            content = source.read_bytes()
+        except FileNotFoundError:
+            continue
+        try:
+            parts.append(content.decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"ignore rules are not valid UTF-8: {source}") from exc
+    # Each source ends in a newline so one file's last rule cannot merge with the
+    # next file's first.
+    return "".join(part if part.endswith("\n") else part + "\n" for part in parts)
+
+
+def _isolated_listings(repo_root: Path, ignore_rules: Path,
+                       ignorecase: bool) -> tuple[list[str], list[str]]:
+    """(non-ignored, ignored) untracked listings that read nothing from `.git`.
+
+    A private empty repository stands in for the real one, so no index, config,
+    `info/exclude` or ref of the workspace's own `.git` takes part: every file is
+    "untracked" and only the tree's `.gitignore` files plus the frozen rules
+    decide what is ignored. The environment is built from scratch because git
+    honours inherited variables (measured: `GIT_TEMPLATE_DIR` seeds `info/exclude`
+    into a new repository, `GIT_CONFIG_PARAMETERS` injects config) and the
+    repository is created with no template for the same reason. A nested
+    repository is listed as a single `path/` entry and never descended into.
+    `ignorecase` is the workspace's own setting, frozen at context: `git init`
+    would otherwise take it from the temporary directory's filesystem, and
+    pattern matching would differ from the real repository's.
+    """
+
+    with tempfile.TemporaryDirectory(prefix="agent-team-attest-") as scratch:
+        git_dir = os.path.join(scratch, "attest.git")
+        env = {
+            "PATH": os.environ.get("PATH", os.defpath),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+        }
+        # Plain `git`, not `_GIT`: `--no-replace-objects` guards reads of the
+        # workspace's objects, and this fresh repository has neither objects
+        # nor replacement refs.
+        subprocess.run(
+            ["git", "init", "-q", "--bare", "--template=", git_dir],
+            env=env, capture_output=True, check=True,
+        )
+        env |= {"GIT_DIR": git_dir, "GIT_WORK_TREE": str(repo_root)}
+        command = ["git", "-c", f"core.excludesFile={ignore_rules}",
+                   "-c", f"core.ignorecase={'true' if ignorecase else 'false'}", "-C", str(repo_root),
+                   "ls-files", "-z", "--others", "--exclude-standard"]
+        listings = []
+        for extra in ([], ["--ignored"]):
+            result = subprocess.run([*command, *extra], env=env, capture_output=True, check=False)
+            if result.returncode:
+                error = result.stderr.decode(errors="replace").strip()
+                raise ValueError(error or "isolated git listing failed")
+            listings.append(_split_paths(result.stdout))
+    return listings[0], listings[1]
+
+
+def _gitlinks(repo_root: Path) -> list[str]:
+    """Tracked submodule paths (mode 160000) — never attested, only frozen."""
+    links: list[str] = []
+    for entry in _git_bytes(repo_root, "ls-files", "-s", "-z").split(b"\0"):
+        if entry.startswith(b"160000 "):
+            path = entry.split(b"\t", 1)[1]
+            links.extend(_split_paths(path))
+    return links
+
+
+def _manifest_entry(repo_root: Path, relative: str,
+                    real_dirs: dict[str, str] | None = None) -> dict[str, str] | None:
+    """`{"mode", "sha256"}` for one path, or None when no file is there any more.
+
+    A directory where a file was (or a file where one of its parent directories
+    was) means the file is gone; whatever replaced it is listed on its own.
+    """
+    try:
+        metadata = (repo_root / relative).lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    if stat.S_ISDIR(metadata.st_mode):
+        return None
+    if stat.S_ISLNK(metadata.st_mode):
+        mode = "120000"
+    elif stat.S_ISREG(metadata.st_mode):
+        mode = "100755" if metadata.st_mode & stat.S_IXUSR else "100644"
+    else:
+        raise ValueError(f"cannot attest non-file path: {relative}")
+    return {"mode": mode, "sha256": _file_digest(repo_root, relative, real_dirs=real_dirs)}
+
+
+def _identity(repo_root: Path, relative: str) -> tuple[int, ...] | None:
+    try:
+        info = (repo_root / relative).lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    return (info.st_mode, info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+            info.st_ctime_ns)
+
+
+def _hash_paths(repo_root: Path, paths: list[str]) -> dict[str, dict[str, str] | None]:
+    """Manifest entries for `paths`, refused if anything moved while they were read.
+
+    Hashing a tree is not atomic. Each path's identity (inode, size, mtime,
+    ctime) is taken before it is read and compared once every path has been
+    hashed, and every directory resolved along the way is resolved again, so a
+    write or a directory swapped for a symlink during the snapshot fails closed
+    instead of attesting bytes that are no longer there. A change made and undone
+    inside that window, or after it, is outside what any snapshot can see.
+    """
+
+    real_dirs: dict[str, str] = {}
+    before = {path: _identity(repo_root, path) for path in paths}
+    entries = {path: _manifest_entry(repo_root, path, real_dirs) for path in paths}
+    moved = [path for path in paths if _identity(repo_root, path) != before[path]]
+    # Only directories resolved while hashing can be stale; a directory created
+    # meanwhile was never trusted, and the files under it carry their own identity.
+    moved += [directory for directory, real in real_dirs.items()
+              if os.path.realpath(directory) != real]
+    if moved:
+        raise ValueError(
+            f"workspace changed while it was being attested (first: {moved[0]!r}); "
+            "retry once writers have stopped"
+        )
+    return entries
+
+
+def _boundaries(listings: list[str], excluded: list[str]) -> list[str]:
+    """Nested repositories: the `path/` entries of the isolated listings."""
+    return _keep([path[:-1] for path in listings if path.endswith("/")], excluded)
+
+
+def _base_manifest(
+    repo_root: Path,
+    base_sha: str,
+    excluded: list[str],
+    strict_ignored: bool,
+    ignore_rules: Path,
+) -> dict[str, Any]:
+    """The run's baseline, taken at context from a workspace the operator vouches for.
+
+    Base files are the tracked paths the real index lists at this moment — the
+    operator's repository, before any role has run in this run. They stay
+    attested for the whole run even if a later `.gitignore` edit would hide them.
+    """
+
+    configured = subprocess.run(
+        [*_GIT, "-C", str(repo_root), "config", "--bool", "--get", "core.ignorecase"],
+        capture_output=True, text=True, check=False,
+    )
+    if configured.returncode not in (0, 1):
+        raise ValueError("cannot read core.ignorecase")
+    ignorecase = configured.stdout.strip() == "true"
+    others, ignored = _isolated_listings(repo_root, ignore_rules, ignorecase)
+    gitlinks = _keep(_gitlinks(repo_root), excluded)
+    tracked = [path for path in _keep(_git_paths(repo_root, "ls-files", "-z"), excluded)
+               if path not in set(gitlinks)]
+    files = _hash_paths(repo_root, tracked)
+    missing = [path for path, entry in files.items() if entry is None]
+    if missing:
+        raise ValueError(f"tracked path missing at run start: {missing[0]!r}")
+    return {
+        "attestation": ATTESTATION,
+        "base_sha": base_sha,
+        "strict_ignored": strict_ignored,
+        "excluded_paths": excluded,
+        "ignore_rules_sha256": hashlib.sha256(ignore_rules.read_bytes()).hexdigest(),
+        "ignorecase": ignorecase,
+        "gitlinks": gitlinks,
+        "boundaries": _boundaries([*others, *(ignored if strict_ignored else [])], excluded),
+        "files": files,
+    }
+
+
+def _classify_mismatch(paths: list[str], base: dict[str, Any],
+                       current: dict[str, Any]) -> list[str]:
+    """Name the known normalizations behind filesystem-only changes, where provable."""
+    reasons: set[str] = set()
+    folded = {path.casefold() for path in base}
+    for path in paths:
+        before, after = base.get(path), current.get(path)
+        if before and after and before["sha256"] == after["sha256"]:
+            reasons.add("mode-only change (core.fileMode=false?)")
+        elif before and after and before["mode"] == after["mode"]:
+            reasons.add("content change git does not report (line-ending normalization "
+                        "or a clean filter?)")
+        elif before is None and path.casefold() in folded:
+            reasons.add("case-only rename (case-insensitive filesystem?)")
+    return sorted(reasons)
+
+
 def _change_snapshot(
     repo_root: Path,
     base_sha: str,
     excluded: list[str],
     strict_ignored: bool,
+    baseline: Baseline,
 ) -> dict[str, Any]:
-    """Return a canonical identity for the exact change set covered by the gate."""
+    """Return a canonical identity for the exact change set covered by the gate.
 
-    # git answers from state a coder can rewrite; refuse the known ways that
-    # state hides working-tree content. Writes under .git remain outside the
-    # trust boundary (see SKILL.md).
+    The identity is computed from the filesystem against the run's baseline, not
+    from git: git's answers come from `.git` state (index, config, refs) that a
+    role could rewrite. Git is still asked, and must agree on which paths changed
+    — that check catches any way of making git hide or invent a path without
+    enumerating them. What it cannot prove is that git's *rendered* diff shows the
+    attested bytes, which is what the reviewer reads; the guards below narrow the
+    known ways that view can lie (see SKILL.md).
+    """
+
     _refuse_redirected_repository(repo_root)
     _refuse_hidden_index_entries(repo_root)
     _refuse_filtered_tracked_paths(repo_root)
 
-    # --no-ext-diff/--no-textconv: a configured external diff or textconv
-    # filter would replace the binary patch with lossy output, so content could
-    # change without changing the digest. --no-renames keeps the patch
-    # independent of diff.renames. Exclusions apply here too: excluded content
-    # is neither scope-checked nor attested.
-    tracked_diff = _git_bytes(
-        repo_root,
-        "diff",
-        "--binary",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--no-renames",
-        base_sha,
-        "--",
-        *_exclude_pathspecs(excluded),
-    )
-    tracked, untracked = _changed_paths(repo_root, base_sha, excluded)
-    ignored = _ignored_paths(repo_root, excluded)
-    new_files = {path: _file_digest(repo_root, path) for path in untracked}
-    ignored_files = (
-        {path: _file_digest(repo_root, path) for path in ignored} if strict_ignored else {}
-    )
-    document = {
+    document = baseline.document
+    base_files: dict[str, Any] = document["files"]
+    frozen = sorted({*document["gitlinks"], *document["boundaries"]})
+    others, ignored_listing = _isolated_listings(repo_root, baseline.ignore_rules,
+                                                 document["ignorecase"])
+    # A repository inside ignored content matters only when that content is
+    # attested: without --strict-ignored nothing under it is, so a tool that
+    # installs a git checkout into node_modules or .venv must not stop the run.
+    boundaries = _boundaries([*others, *(ignored_listing if strict_ignored else [])], excluded)
+    if boundaries != document["boundaries"]:
+        added = sorted(set(boundaries) - set(document["boundaries"]))
+        removed = sorted(set(document["boundaries"]) - set(boundaries))
+        raise ValueError(
+            "nested repository boundaries changed during the run "
+            f"(new: {added}, gone: {removed}); their content cannot be attested"
+        )
+    new_files = [path for path in _keep(others, excluded)
+                 if not path.endswith("/") and path not in base_files]
+    # The isolated index is empty, so a tracked file that matches an ignore
+    # pattern is listed as ignored too; it is a base file, hashed as such.
+    ignored = [path for path in _keep(ignored_listing, excluded)
+               if not path.endswith("/") and path not in base_files]
+    paths = {*base_files, *new_files, *(ignored if strict_ignored else [])}
+    current = _hash_paths(repo_root, sorted(paths))
+    changes = {path: current[path] for path in sorted(paths)
+               if current[path] != base_files.get(path)}
+
+    # Git's view of the same change set, with the same frozen external rules.
+    # The live index and `info/exclude` are read on purpose: they are what this
+    # comparison audits.
+    rules = f"core.excludesFile={baseline.ignore_rules}"
+    reported = _git_paths(repo_root, "diff", "--no-renames", "--name-only", "-z", base_sha, "--")
+    reported += _git_paths(repo_root, "-c", rules, "ls-files", "-z", "--others",
+                           "--exclude-standard")
+    if strict_ignored:
+        reported += _git_paths(repo_root, "-c", rules, "ls-files", "-z", "--others",
+                               "--ignored", "--exclude-standard")
+    reported = _keep(reported, excluded)
+    inside = [path for path in reported if _under(path.rstrip("/"), frozen)]
+    if inside:
+        raise ValueError(
+            f"{len(inside)} change(s) inside a non-attested repository boundary "
+            f"(first: {inside[0]!r}); submodule and nested-repository content cannot be attested"
+        )
+    git_changed = {path for path in reported if not path.endswith("/")}
+    filesystem_only = sorted(set(changes) - git_changed)
+    git_only = sorted(git_changed - set(changes))
+    if filesystem_only or git_only:
+        reasons = _classify_mismatch(filesystem_only, base_files, current)
+        raise ValueError(
+            "git and the filesystem disagree on changed paths: "
+            f"filesystem-only {filesystem_only[:5]}, git-only {git_only[:5]}"
+            + (f"; likely {', '.join(reasons)}" if reasons else "")
+        )
+
+    identity = {
+        "attestation": ATTESTATION,
         "base_sha": base_sha,
-        "tracked_diff_sha256": hashlib.sha256(tracked_diff).hexdigest(),
-        "new_files": new_files,
-        "ignored_files": ignored_files,
+        "base_manifest_sha256": baseline.sha256,
+        "changes": changes,
         "strict_ignored": strict_ignored,
     }
     encoded = json.dumps(
-        document, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode()
-    return document | {
+    return identity | {
         "change_sha256": hashlib.sha256(encoded).hexdigest(),
-        "changed_paths": sorted(set(tracked) | set(untracked)),
-        "untracked_paths": untracked,
+        "changed_paths": sorted(changes),
+        "untracked_paths": sorted(path for path in changes if path not in base_files),
         "ignored_paths": ignored,
+        "submodule_paths": frozen,
     }
 
 
 def _attestation_covers(strict_ignored: bool, excluded: list[str]) -> str:
     content = (
-        "base SHA, tracked binary diff, and untracked and ignored file content digests"
+        "base SHA and the mode and content digest of every tracked, new and ignored file, "
+        "read from the filesystem against the run's base manifest"
         if strict_ignored
-        else "base SHA, tracked binary diff, and untracked file content digests; ignored files excluded"
+        else "base SHA and the mode and content digest of every tracked and new file, read "
+        "from the filesystem against the run's base manifest; ignored files excluded"
     )
     exclusions = (
         f"; configured excluded paths omitted: {', '.join(excluded)}" if excluded else ""
     )
-    return f"{content}; HEAD SHA is informational and excluded{exclusions}"
+    return (f"{content}; submodule and nested-repository content and HEAD SHA are not "
+            f"attested{exclusions}")
 
 
 def _snapshot_error(exc: OSError | ValueError) -> str:
@@ -404,7 +710,8 @@ def _role_prompt(state: GraphState, role: str) -> str:
         + "staged and unstaged changes to tracked files; inspect the binary patches too), plus "
         + "every file listed by "
         + " and ".join(f"`{command}`" for command in listing_commands)
-        + " (new files). Do not edit files. End with exactly one line: "
+        + " (new files). Approval binds the filesystem content of these changes, not "
+        + "git's rendering of them. Do not edit files. End with exactly one line: "
         + "VERDICT: SHIP, VERDICT: NEEDS-FIX, VERDICT: DISCUSS, or VERDICT: OUT-OF-SCOPE."
     )
 
@@ -420,16 +727,18 @@ def _review_commands(state: GraphState) -> list[str]:
 
     root = state["repo_root"]
     pathspecs = ["--", *_exclude_pathspecs(state.get("excluded_paths", []))]
+    # The same frozen external ignore rules the snapshot uses, so a rule added
+    # mid-run cannot hide an attested new file from the reviewer's listing.
+    rules = state.get("attestation_ignore_rules")
+    listing = [*_GIT, "-C", root, *(["-c", f"core.excludesFile={rules}"] if rules else []),
+               "ls-files", "--others"]
     commands = [
         [*_GIT, "-C", root, "diff", "--binary", "--no-ext-diff", "--no-textconv",
          "--no-renames", state["base_sha"], *pathspecs],
-        [*_GIT, "-C", root, "ls-files", "--others", "--exclude-standard", *pathspecs],
+        [*listing, "--exclude-standard", *pathspecs],
     ]
     if state.get("strict_ignored"):
-        commands.append(
-            [*_GIT, "-C", root, "ls-files", "--others", "--ignored", "--exclude-standard",
-             *pathspecs]
-        )
+        commands.append([*listing, "--ignored", "--exclude-standard", *pathspecs])
     return [shlex.join(command) for command in commands]
 
 
@@ -576,14 +885,26 @@ def build_graph(
         excluded = context["excluded_paths"]
         try:
             changes = initial_workspace_changes(context)
-            _change_snapshot(repo_root, context["base_sha"], excluded, context["strict_ignored"])
+            dirty = sorted({path for paths in changes.values() for path in paths})
+            if not dirty:
+                # The run's attestation baseline. Written once: a re-entry after a
+                # crash must reproduce it byte for byte (immutable artifacts), so a
+                # workspace or rule change in between fails closed here.
+                rules = store.write(state["run_id"], IGNORE_RULES, _ignore_rules_text(repo_root))
+                document = _base_manifest(repo_root, context["base_sha"], excluded,
+                                          context["strict_ignored"], Path(rules["path"]))
+                manifest = store.write_json(state["run_id"], BASE_MANIFEST, document)
+                update.update(base_manifest_sha256=manifest["sha256"],
+                              attestation_ignore_rules=rules["path"],
+                              artifacts=[artifact, rules, manifest])
+                _change_snapshot(repo_root, context["base_sha"], excluded,
+                                 context["strict_ignored"], load_baseline(state | update))
         except SNAPSHOT_ERRORS as exc:
             diagnostic = store.write_json(state["run_id"], "01-preflight-error.json",
                                           {"snapshot_error": _snapshot_error(exc)})
-            update.update(status="needs-human", artifacts=[artifact, diagnostic],
+            update.update(status="needs-human", artifacts=[*update["artifacts"], diagnostic],
                           errors=[f"workspace preflight failed: {exc}"])
             return update
-        dirty = sorted({path for paths in changes.values() for path in paths})
         if dirty:
             record = store.write_json(state["run_id"], "01-dirty-workspace.json", {
                 **changes,
@@ -621,16 +942,39 @@ def build_graph(
                 }
         return run
 
-    def capture(state: GraphState) -> str:
+    def load_baseline(state: GraphState) -> Baseline:
+        """The run's base manifest, verified against the digest recorded in state."""
+        recorded = state.get("base_manifest_sha256")
+        if not recorded:
+            raise AttestationUnavailable(PRE_ATTESTATION)
+        raw = store.read(state["run_id"], BASE_MANIFEST)
+        if hashlib.sha256(raw).hexdigest() != recorded:
+            raise ValueError("base manifest does not match the digest recorded at run start")
+        document = json.loads(raw)
+        if not isinstance(document, dict) or document.get("attestation") != ATTESTATION:
+            raise ValueError("base manifest has an unknown attestation format")
+        rules = store.read(state["run_id"], IGNORE_RULES)
+        if hashlib.sha256(rules).hexdigest() != document["ignore_rules_sha256"]:
+            raise ValueError("frozen ignore rules do not match the base manifest")
+        return Baseline(document, recorded, store.path(state["run_id"], IGNORE_RULES))
+
+    def snapshot(state: GraphState) -> dict[str, Any]:
         return _change_snapshot(Path(state["repo_root"]), state["base_sha"],
                                 state.get("excluded_paths", []),
-                                bool(state.get("strict_ignored", False)))["change_sha256"]
+                                bool(state.get("strict_ignored", False)), load_baseline(state))
+
+    def capture(state: GraphState) -> str:
+        return snapshot(state)["change_sha256"]
 
     def call_record(state: GraphState, stage: str, identity: dict, invoke,
                     runtime: Runtime[CallReplay]):
         if state.get("execution_policy_version") != 1:
             raise RecoveryError("legacy external-call checkpoint has no call records; inspect "
                                 "the workspace and start a new run")
+        if not state.get("base_manifest_sha256"):
+            # Checked before the call, not at its snapshot: the journal invokes
+            # first, so an old checkpoint would otherwise run its pending role.
+            raise RecoveryError(PRE_ATTESTATION)
         journal = CallJournal(store, state["run_id"], state["attempt"], stage)
         identity = {**identity, "base_sha": state["base_sha"],
                     "workspace": state["workspace"], "excluded_paths": state.get("excluded_paths", []),
@@ -770,15 +1114,12 @@ def build_graph(
         errors = []
         if completed.timed_out:
             errors.append(f"gate attempt {state['attempt']}: test command timed out")
-        repo_root = Path(state["repo_root"])
         excluded = state.get("excluded_paths", [])
         strict_ignored = bool(state.get("strict_ignored", False))
         try:
             if snapshot_error:
                 raise ValueError(snapshot_error)
-            snapshot = _change_snapshot(
-                repo_root, state["base_sha"], excluded, strict_ignored
-            )
+            gate_snapshot = snapshot(state)
         except SNAPSHOT_ERRORS as exc:
             message = _snapshot_error(exc)
             record = {
@@ -810,8 +1151,8 @@ def build_graph(
                     f"gate attempt {state['attempt']}: cannot attest change set: {message}",
                 ],
             }
-        changed = snapshot["changed_paths"]
-        ignored = snapshot["ignored_paths"]
+        changed = gate_snapshot["changed_paths"]
+        ignored = gate_snapshot["ignored_paths"]
         scoped = sorted(set(changed) | set(ignored)) if strict_ignored else changed
         outside_scope = _outside_scope(scoped, state["allowed_paths"])
         passed = passed and not outside_scope
@@ -820,11 +1161,11 @@ def build_graph(
             "returncode": returncode,
             "passed": passed,
             "changed_paths": changed,
-            "untracked_paths": snapshot["untracked_paths"],
+            "untracked_paths": gate_snapshot["untracked_paths"],
             "ignored_paths": ignored,
             "strict_ignored": strict_ignored,
             "outside_scope": outside_scope,
-            "gated_change_sha256": snapshot["change_sha256"],
+            "gated_change_sha256": gate_snapshot["change_sha256"],
             "attestation_covers": _attestation_covers(strict_ignored, excluded),
             "output": output,
         }
@@ -849,7 +1190,7 @@ def build_graph(
         )
         update: dict[str, Any] = {
             "gate_passed": passed,
-            "gated_change_sha256": snapshot["change_sha256"],
+            "gated_change_sha256": gate_snapshot["change_sha256"],
             "reviewed_change_sha256": None,
             # Empty on a passing attempt, so an earlier failure isn't carried over.
             "gate_feedback": (
@@ -866,9 +1207,6 @@ def build_graph(
         return update
 
     def reviewer_node(state: GraphState, runtime: Runtime[CallReplay]) -> dict[str, Any]:
-        repo_root = Path(state["repo_root"])
-        excluded = state.get("excluded_paths", [])
-        strict_ignored = bool(state.get("strict_ignored", False))
         gated_digest = state.get("gated_change_sha256")
         if not gated_digest:
             # Fresh edges enforce this too; a saved checkpoint can already be
@@ -878,9 +1216,7 @@ def build_graph(
                 "errors": ["review skipped: no attested gate snapshot; inspect gate artifacts"],
             }
         try:
-            before = _change_snapshot(
-                repo_root, state["base_sha"], excluded, strict_ignored
-            )
+            before = snapshot(state)
         except SNAPSHOT_ERRORS as exc:
             message = _snapshot_error(exc)
             artifact = store.write_json(
@@ -948,9 +1284,7 @@ def build_graph(
         verdict = parse_verdict(output)
         errors: list[str] = []
         try:
-            after = _change_snapshot(
-                repo_root, state["base_sha"], excluded, strict_ignored
-            )
+            after = snapshot(state)
         except SNAPSHOT_ERRORS as exc:
             message = _snapshot_error(exc)
             drift = store.write_json(
@@ -1004,6 +1338,12 @@ def build_graph(
         return update
 
     def approval_node(state: GraphState) -> dict[str, Any]:
+        if not state.get("base_manifest_sha256"):
+            # Before the interrupt, so resuming an old approval checkpoint — by
+            # `approve`, `reject` or `resume` — lands here instead of asking again.
+            # Not a rejection: nothing was decided, the run just cannot be attested.
+            return {"approval": "blocked", "reviewed_change_sha256": None,
+                    "errors": [f"approval blocked: {PRE_ATTESTATION}"]}
         decision = interrupt(
             {
                 "kind": "ship-approval",
@@ -1019,7 +1359,7 @@ def build_graph(
         if normalized not in {"approve", "reject"}:
             normalized = "reject"
         # The digest the caller saw. The CLI requires it for approve; a plain
-        # "approve" from a direct graph caller or a legacy checkpoint has none.
+        # "approve" from a direct graph caller has none.
         approved = decision.get("reviewed_change_sha256") if isinstance(decision, dict) else None
         return {"approval": normalized,
                 "approved_change_sha256": approved if normalized == "approve" else None}
@@ -1043,9 +1383,7 @@ def build_graph(
                 "errors": ["approval blocked: approved digest differs from reviewed digest"],
             }
         try:
-            current = _change_snapshot(
-                repo_root, state["base_sha"], excluded, strict_ignored
-            )
+            current = snapshot(state)
         except SNAPSHOT_ERRORS as exc:
             message = _snapshot_error(exc)
             artifact = store.write_json(
@@ -1107,21 +1445,22 @@ def build_graph(
             "base_sha": state["base_sha"],
             "head_sha": head_sha,
             "head_sha_attested": False,
-            "tracked_diff_sha256": current["tracked_diff_sha256"],
-            "new_files": current["new_files"],
-            "ignored_files": current["ignored_files"],
+            "attestation": current["attestation"],
+            "base_manifest_sha256": current["base_manifest_sha256"],
+            "changes": current["changes"],
             "change_sha256": current["change_sha256"],
             "reviewed_change_sha256": expected,
             "ignored_paths_not_attested": (
                 [] if state.get("strict_ignored") else current["ignored_paths"]
             ),
             "excluded_paths_not_attested": excluded,
+            "submodule_paths_not_attested": current["submodule_paths"],
             "covers": _attestation_covers(strict_ignored, excluded),
             "note": "approval receipt only; this runtime never pushes or force-merges",
         }
         if approved is not None:
-            # Only when supplied: a legacy receipt written before a crash must
-            # replay byte-identical into the immutable artifact.
+            # Only when supplied, so a direct graph caller's receipt keeps the
+            # shape it had; the receipt is an immutable artifact.
             receipt["approved_change_sha256"] = approved
         artifact = store.write_json(state["run_id"], "90-approval-receipt.json", receipt)
         return {"status": "approved", "artifacts": [artifact]}

@@ -9,7 +9,7 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-from helpers import FakeRunner, initial, make_repo
+from helpers import FakeRunner, baseline_for, initial, make_repo
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
@@ -31,6 +31,12 @@ def _run(tmp_path: Path, runner: FakeRunner, state: dict, thread: str):
     config = {"configurable": {"thread_id": thread}}
     graph.invoke(state, config=config)
     return graph.get_state(config)
+
+
+def _called_from(name: str) -> bool:
+    """Whether a graph node is on the stack (snapshots run through a closure)."""
+    frame = inspect.currentframe()
+    return any(info.function == name for info in inspect.getouterframes(frame)[:6])
 
 
 def _gate_record(snapshot) -> dict:
@@ -155,11 +161,11 @@ def test_receipt_covers_untracked_files(tmp_path: Path):
     values = graph.get_state(config).values
     receipt = json.loads(Path(values["artifacts"][-1]["path"]).read_text(encoding="utf-8"))
     # `git diff` cannot see NEW.md, so a diff-only digest would silently omit it.
-    assert "NEW.md" in receipt["new_files"]
-    assert receipt["change_sha256"] != receipt["tracked_diff_sha256"]
+    assert set(receipt["changes"]) == {"NEW.md", "README.md"}
+    assert receipt["attestation"] == "fs-manifest-v1"
     assert receipt["change_sha256"] == receipt["reviewed_change_sha256"]
     assert receipt["head_sha_attested"] is False
-    assert "HEAD SHA is informational and excluded" in receipt["covers"]
+    assert "HEAD SHA are not attested" in receipt["covers"]
 
 
 def test_change_after_approval_interrupt_blocks_receipt(tmp_path: Path):
@@ -191,8 +197,7 @@ def test_change_before_review_skips_review_of_untested_content(tmp_path: Path, m
 
     def mutate_before_reviewer_snapshot(*args, **kwargs):
         nonlocal mutated
-        caller = inspect.currentframe().f_back
-        if caller and caller.f_code.co_name == "reviewer_node" and not mutated:
+        if _called_from("reviewer_node") and not mutated:
             mutated = True
             (workspace / "README.md").write_text("changed before review\n", encoding="utf-8")
         return real_snapshot(*args, **kwargs)
@@ -231,8 +236,7 @@ def test_pre_review_drift_feedback_reaches_retrying_coder(tmp_path: Path, monkey
 
     def mutate_before_first_reviewer_snapshot(*args, **kwargs):
         nonlocal mutated
-        caller = inspect.currentframe().f_back
-        if caller and caller.f_code.co_name == "reviewer_node" and not mutated:
+        if _called_from("reviewer_node") and not mutated:
             mutated = True
             (workspace / "README.md").write_text("external drift\n", encoding="utf-8")
         return real_snapshot(*args, **kwargs)
@@ -282,14 +286,14 @@ def test_snapshot_race_is_a_recorded_gate_failure(tmp_path: Path, monkeypatch):
     real_digest = graph_module._file_digest
     failed = False
 
-    def disappear_once(repo_root: Path, relative: str):
+    def disappear_once(repo_root: Path, relative: str, **kwargs):
         nonlocal failed
         if relative == "NEW.md" and not failed and any(
             frame.function == "gate_node" for frame in inspect.stack()
         ):
             failed = True
             raise FileNotFoundError("simulated list/lstat race")
-        return real_digest(repo_root, relative)
+        return real_digest(repo_root, relative, **kwargs)
 
     monkeypatch.setattr(graph_module, "_file_digest", disappear_once)
     state = initial(workspace, spec, "snapshot-race")
@@ -321,10 +325,10 @@ def test_publish_snapshot_race_blocks_receipt(tmp_path: Path, monkeypatch):
 
     real_digest = graph_module._file_digest
 
-    def fail_new_file(repo_root: Path, relative: str):
+    def fail_new_file(repo_root: Path, relative: str, **kwargs):
         if relative == "NEW.md":
             raise FileNotFoundError("simulated approval snapshot race")
-        return real_digest(repo_root, relative)
+        return real_digest(repo_root, relative, **kwargs)
 
     monkeypatch.setattr(graph_module, "_file_digest", fail_new_file)
     graph.invoke(Command(resume="approve"), config=config)
@@ -483,6 +487,7 @@ def test_digest_ignores_configured_external_diff_and_textconv(tmp_path: Path):
     (workspace / ".gitattributes").write_text("*.bin diff=lossy\n", encoding="utf-8")
     (workspace / "data.bin").write_bytes(b"\x00first")
     base = _commit_all(workspace, "binary")
+    baseline = baseline_for(workspace, base)
     lossy = tmp_path / "lossy.sh"
     lossy.write_text("#!/bin/sh\necho same\n", encoding="utf-8")
     lossy.chmod(0o755)
@@ -490,9 +495,9 @@ def test_digest_ignores_configured_external_diff_and_textconv(tmp_path: Path):
     subprocess.run(["git", "-C", workspace, "config", "diff.lossy.textconv", str(lossy)], check=True)
 
     (workspace / "data.bin").write_bytes(b"\x00second")
-    first = graph_module._change_snapshot(workspace, base, [], False)["change_sha256"]
+    first = graph_module._change_snapshot(workspace, base, [], False, baseline)["change_sha256"]
     (workspace / "data.bin").write_bytes(b"\x00third")
-    second = graph_module._change_snapshot(workspace, base, [], False)["change_sha256"]
+    second = graph_module._change_snapshot(workspace, base, [], False, baseline)["change_sha256"]
     assert first != second
 
 
@@ -501,9 +506,12 @@ def test_excluded_tracked_paths_are_not_attested(tmp_path: Path):
     (workspace / "tool-cache").mkdir()
     (workspace / "tool-cache/state.json").write_text("{}\n", encoding="utf-8")
     base = _commit_all(workspace, "tracked scratch")
+    baseline = baseline_for(workspace, base, ["tool-cache"])
 
     def digest() -> str:
-        return graph_module._change_snapshot(workspace, base, ["tool-cache"], False)["change_sha256"]
+        return graph_module._change_snapshot(
+            workspace, base, ["tool-cache"], False, baseline
+        )["change_sha256"]
 
     before = digest()
     (workspace / "tool-cache/state.json").write_text('{"touched": true}\n', encoding="utf-8")
@@ -645,7 +653,11 @@ def test_reviewer_prompt_names_base_and_root_for_committed_work(tmp_path: Path):
     root = shlex.quote(str(workspace.resolve()))
     assert f"Base commit: {base}" in prompt
     assert f"git --no-replace-objects -C {root} diff --binary --no-ext-diff --no-textconv --no-renames {base} --" in prompt
-    assert f"git --no-replace-objects -C {root} ls-files --others --exclude-standard --" in prompt
+    rules = shlex.quote(
+        f"core.excludesFile={(tmp_path / 'artifacts/run-review-scope/02-ignore-rules.txt').absolute()}"
+    )
+    assert (f"git --no-replace-objects -C {root} -c {rules} ls-files --others "
+            "--exclude-standard --") in prompt
 
 
 def test_state_dir_at_repo_root_is_refused(tmp_path: Path):
@@ -733,11 +745,12 @@ def _lossy_filter_repo(tmp_path: Path) -> tuple[Path, Path, str]:
 def test_clean_filter_on_a_tracked_path_fails_closed(tmp_path: Path):
     """A clean filter can map every edit to the committed blob, hiding it from git diff."""
     workspace, spec, base = _lossy_filter_repo(tmp_path)
+    baseline = baseline_for(workspace, base)
     (workspace / "secret.txt").write_text("tampered", encoding="utf-8")
     # Without the guard git reports no change at all.
     assert _changed_paths(workspace, base, []) == ([], [])
     try:
-        graph_module._change_snapshot(workspace, base, [], False)
+        graph_module._change_snapshot(workspace, base, [], False, baseline)
     except ValueError as exc:
         assert "clean/process filter" in str(exc) and "secret.txt" in str(exc)
     else:
@@ -759,7 +772,7 @@ def test_configured_filter_without_tracked_matches_is_allowed(tmp_path: Path):
     subprocess.run(
         ["git", "-C", workspace, "config", "filter.unused.clean", "cat"], check=True
     )
-    graph_module._change_snapshot(workspace, base, [], False)
+    graph_module._change_snapshot(workspace, base, [], False, baseline_for(workspace, base))
 
 
 def test_filter_added_while_parked_at_approval_blocks_the_receipt(tmp_path: Path):

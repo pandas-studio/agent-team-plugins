@@ -22,6 +22,8 @@ class GraphState(TypedDict, total=False):
     excluded_paths: list[str]
     strict_ignored: bool
     base_sha: str
+    base_manifest_sha256: str | None
+    attestation_ignore_rules: str | None
     attempt: int
     execution_policy_version: int
     attempt_start: str

@@ -209,6 +209,7 @@ def _initial(args: argparse.Namespace, thread_id: str) -> dict[str, Any]:
         "gate_passed": False, "gate_feedback": "",
         "gated_change_sha256": None, "reviewed_change_sha256": None,
         "approved_change_sha256": None,
+        "base_manifest_sha256": None, "attestation_ignore_rules": None,
         "artifacts": Overwrite([]), "usage": Overwrite([]), "errors": Overwrite([]),
     }
 
@@ -251,23 +252,29 @@ def _execute(args: argparse.Namespace, thread_id: str, state_dir: Path,
             if not view["awaiting_approval"]:
                 _print(view | {"error": "approve requires a ship-approval interrupt"})
                 return 2
-            digest = args.reviewed_digest
-            if args.decision == "approve":
-                reviewed = view["reviewed_change_sha256"]
-                if not digest:
-                    _print(view | {"error": "approve requires --reviewed-digest; "
-                                   "pass reviewed_change_sha256 from status"})
-                    return 2
-                if not re.fullmatch(r"[a-f0-9]{64}", digest) or digest != reviewed:
-                    _print(view | {"error": f"--reviewed-digest {digest} is not the reviewed "
-                                   f"change set {reviewed}; re-read status before approving"})
-                    return 2
+            if not snapshot.values.get("base_manifest_sha256"):
+                # Started before filesystem attestation: approval_node records
+                # needs-human before asking, so no digest is needed to reach it.
+                payload = Command(resume={"decision": args.decision,
+                                          "reviewed_change_sha256": None})
             else:
-                # Rejecting is always safe; it must not depend on what the caller saw.
-                digest = None
-            payload = Command(resume={"decision": args.decision,
-                                      "reviewed_change_sha256": digest})
-        elif view["awaiting_approval"]:
+                digest = args.reviewed_digest
+                if args.decision == "approve":
+                    reviewed = view["reviewed_change_sha256"]
+                    if not digest:
+                        _print(view | {"error": "approve requires --reviewed-digest; "
+                                       "pass reviewed_change_sha256 from status"})
+                        return 2
+                    if not re.fullmatch(r"[a-f0-9]{64}", digest) or digest != reviewed:
+                        _print(view | {"error": f"--reviewed-digest {digest} is not the reviewed "
+                                       f"change set {reviewed}; re-read status before approving"})
+                        return 2
+                else:
+                    # Rejecting is always safe; it must not depend on what the caller saw.
+                    digest = None
+                payload = Command(resume={"decision": args.decision,
+                                          "reviewed_change_sha256": digest})
+        elif view["awaiting_approval"] and snapshot.values.get("base_manifest_sha256"):
             _print(view | {"note": "use approve --decision approve --reviewed-digest "
                            "<reviewed_change_sha256>, or approve --decision reject"})
             return 3
