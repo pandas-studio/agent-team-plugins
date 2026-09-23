@@ -41,6 +41,11 @@ bullets in Markdown, and do not use `latest` artifacts.
   means the section is missing, so report that count as unknown, not zero.
   English `- None.` (case-insensitive, optional period) and Korean `- 없음` /
   `- 없음.` empty markers allow trailing whitespace and are already excluded.
+- `status: "permission-denied"` (exit 3): headless agy auto-denied a tool and
+  wrote no review. Report each `denied` entry (the allow-rule it would need;
+  empty means agy recorded no target) and `conversation_ids`, and point to the
+  README section "Resolve a confirmed agy permission denial". Do not grant
+  anything yourself.
 - `status: "parse-failed"` (exit 3) or `"invocation-failed"`: report the
   failure, its `error`, and the artifact paths. There is no verdict.
 - An empty marker mixed with finding bullets in the same severity, including

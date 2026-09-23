@@ -90,6 +90,13 @@ See [Research troubleshooting](#research-troubleshooting).
 
 The Researcher and Reviewer roles resolve through the shared model registry (the [marketplace README](../README.md#shared-model-configuration) covers it in full). Defaults are `agy` (researcher) and `codex` (reviewer); Codex PM defaults the reviewer to Claude. No model binding configuration is needed for these defaults. Each CLI still needs its own installation, authentication and applicable headless tool permissions.
 
+**Workspace-aware models (agy).** Headless agy is not told which directory it was started for, so left alone it guesses with `cd <repo> && git …` or `lsof -p $$ || pwd`, which no simple `command(...)` allow-rule matches. The built-in `agy` model therefore defines `workspace_args` (`--add-dir {cwd}`) and `log_args` (`--log-file {cli_log}`), and both wrappers, for any model that defines `workspace_args`:
+- pass the repository root (`git rev-parse --show-toplevel`, else the working directory) as `--add-dir`;
+- add an `# Execution environment` section to the prompt naming the root and the working directory, and asking for one simple read-only command per tool call — no `cd`, `&&`, `||`, `;`, pipes or redirections;
+- pin agy's own per-run log to `<agy home>/log/cli-dev-trio-<review|research>-<TS>.log`, where agy keeps its other logs (it accumulates the same way). It is only passed when that directory exists and is writable: agy given a log path it cannot create writes its whole log, including your allow list, to stderr. The wrappers read the conversation id from it and never copy it.
+
+`<agy home>` is `$DEV_TRIO_AGY_HOME`, default `~/.gemini/antigravity-cli`. A models-config entry that redefines `agy` without these fields turns all of this off. Codex and Claude prompts and argv are unchanged. The registry applies the fields only when a caller passes `REGISTRY_WORKSPACE` / `REGISTRY_CLI_LOG`; debate-conductor does not.
+
 | Role | Default | Pick a different model | Override its binary |
 | :--- | :--- | :--- | :--- |
 | `dev-trio.researcher` | `agy` | `DEV_TRIO_RESEARCHER_MODEL` env, or `agent-team-models set-role dev-trio.researcher <model>` | `RESEARCHER_CLI` (any model) · `AGY_CLI` (the `agy` model) |
@@ -107,7 +114,7 @@ The reviewer's final structured review is written to `<TS>.final.md` natively wh
 
 The result contains `schema_version: 1`, `profile`, `status`, `invocation_rc`, `exit_code`, `error`, `verdict`, `verdict_line`, and `findings` (`blocker`, `major`, `minor` arrays). Missing findings sections are `null` (unknown); empty sections are empty arrays. A successful review accepts one unfenced `## Verdict` immediately followed by `TOKEN — reason` or `TOKEN. reason`, with `TOKEN` in `SHIP`, `NEEDS-FIX`, `DISCUSS`. Duplicate headings, unclosed/unsupported code fences, missing/empty native finals, and unknown verdicts fail parsing. Raw logs and earlier runs never supply a fallback verdict.
 
-A parsed review exits **0**, including `NEEDS-FIX` or `DISCUSS`; inspect `verdict` to decide the next action. A parse failure after a successful invocation exits **3** (`status: "parse-failed"`). An invocation failure preserves its original nonzero exit code (`status: "invocation-failed"`). Both failure statuses leave `verdict: null`. `error` explains the failure. The reviewer requests `- None.` for empty sections in every language; the parser also accepts `- none` (case-insensitive, optional period) and Korean `- 없음` / `- 없음.`, allowing trailing whitespace on these markers. Other short bullets remain findings, with their text and whitespace preserved.
+A parsed review exits **0**, including `NEEDS-FIX` or `DISCUSS`; inspect `verdict` to decide the next action. A parse failure after a successful invocation exits **3** (`status: "parse-failed"`). An invocation failure preserves its original nonzero exit code (`status: "invocation-failed"`). A headless agy run that auto-denied a tool and produced no review also exits **3**, with `status: "permission-denied"`, the denied targets in `denied` (allow-rule shaped, e.g. `command(git rev-parse --show-toplevel)`; empty when agy did not record one) and agy's `conversation_ids`; see [Resolve a confirmed agy permission denial](#resolve-a-confirmed-agy-permission-denial). All failure statuses leave `verdict: null`. `error` explains the failure. The reviewer requests `- None.` for empty sections in every language; the parser also accepts `- none` (case-insensitive, optional period) and Korean `- 없음` / `- 없음.`, allowing trailing whitespace on these markers. Other short bullets remain findings, with their text and whitespace preserved.
 
 An empty marker and finding bullets in the same severity are contradictory, in either order and even across repeated headings. This fails parsing with an error naming the severity; the verdict and all finding arrays become `null`, and the dashboard reports the failure without counts. Put resolved-finding explanations and positive evidence under `## What I checked`, outside the Findings sections. The final Markdown is preserved unchanged. A `SHIP` verdict alone never clears finding arrays.
 
@@ -270,7 +277,7 @@ read the wrapper's stderr.
 | --- | --- |
 | Authentication required or login failure | Open the selected CLI in a terminal and complete its normal authentication flow. |
 | Host sandbox blocks CLI startup, networking or Keychain | Use the PM host's normal permission flow. This is separate from the child CLI's tool permissions. |
-| agy explicitly reports a headless tool permission denial | Inspect the requested action and target, then review the corresponding rule in agy's `/permissions`. |
+| agy explicitly reports a headless tool permission denial | The wrapper prints `agy denied: <kind>(<target>)` when agy recorded the target (review: `status: "permission-denied"`). Review that one rule in agy's `/permissions`. |
 | CLI exited 0 without an answer; wrapper returns 5 | Inspect the diagnostic. Headless denial is one possible cause, not a conclusion from the code alone. |
 | Answer could not be captured/inspected; wrapper returns 6 | Check the reported file, temporary-directory or write error. Do not grant tool permissions to fix a capture failure. |
 | Other failure, or no explanatory diagnostic | Keep the cause unknown and inspect the selected CLI's own diagnostics. Nonzero CLI codes, including 5 and 6, are preserved. |
@@ -281,8 +288,14 @@ Headless agy cannot display an approval prompt. It can soft-deny a tool, emit
 a notice on stderr and still exit 0. dev-trio rejects an empty answer from that
 run. See the [official headless guide](https://www.antigravity.google/docs/cli/headless/).
 
-1. Identify the action and target in the CLI diagnostic. If only the permission
-   type is present, the target is **unknown**: open interactive agy from the same
+1. Identify the action and target. The wrappers read it from agy's own record
+   of this run (`<agy home>/brain/<conversation>/.system_generated/logs/transcript_full.jsonl`)
+   and print `agy denied: <kind>(<target>)` plus `agy conversation: <id>`; the
+   review result carries the same in `denied` and `conversation_ids`. They only
+   do so when this run printed agy's headless no-output notice, never from code
+   5 or an empty answer alone. If the target is reported as unknown — agy
+   recorded none, the record was not written yet, or the log directory was not
+   writable — open interactive agy from the same
    workspace and reproduce the original question/context to see the permission
    request. This is another model call and may repeat external actions; inspect
    the request before deciding whether to grant it. Do not infer a broad permission

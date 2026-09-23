@@ -51,11 +51,16 @@ class HostTests(unittest.TestCase):
             "sys.exit(int(os.environ.get('STUB_RC','0')))\n"
         )
         self.stub.chmod(0o755)
+        # agy's home is pinned so the argv a wrapper builds never depends on
+        # whether this machine has agy installed (#103).
+        self.agy_home = self.root / "agy home"
+        (self.agy_home / "log").mkdir(parents=True)
         self.env = {k: v for k, v in os.environ.items() if not k.startswith(
             ("DEV_TRIO_", "AGENT_TEAM", "ANTHROPIC_", "CLAUDE_", "CODEX_",
              "REVIEWER_", "RESEARCHER_", "MANIFEST_", "AGY_", "STUB_"))}
         self.env.update(
             AGENT_TEAM="host-test", TMUX="", AGENT_TEAM_MODELS_CONFIG=str(self.config),
+            DEV_TRIO_AGY_HOME=str(self.agy_home),
             CLAUDE_CLI=str(self.stub), CODEX_CLI=str(self.stub), AGY_CLI=str(self.stub),
             STUB_CALLS=str(self.calls), STUB_RESPONSE=REVIEW,
             STUB_AUTH=json.dumps(dict(loggedIn=True, authMethod="claude.ai",
@@ -369,11 +374,49 @@ class HostTests(unittest.TestCase):
         log = self.workspace / ".dev-trio/log/host-test/latest-codex.log"
         self.assertIn("=== END (rc=7) ===", log.read_text())
 
+    def agy_argv(self, call, log_stem):
+        """The argv the built-in agy model gets: its own per-run log in agy's
+        log directory, the workspace root, then the prompt (#103)."""
+        root = os.path.realpath(self.workspace)
+        self.assertEqual(call[:4], ["--log-file", str(self.agy_home / "log") + "/" + call[1].rsplit("/", 1)[-1],
+                                    "--add-dir", root], call)
+        self.assertRegex(call[1].rsplit("/", 1)[-1], rf"^cli-dev-trio-{log_stem}-[0-9]{{8}}-[0-9]{{6}}-[0-9]+\.log$")
+        self.assertEqual(call[4], "-p")
+        self.assertEqual(len(call), 6, call)
+        note = call[5][call[5].index("# Execution environment"):]
+        self.assertIn(f"The repository root is `{root}`;", note)
+        self.assertIn("no pipes", note)
+
     def test_research_without_tmux_keeps_model(self):
         result = self.run_cli("ask-researcher.sh", "research question", DEV_TRIO_PM_HOST="codex")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.recorded()[0][0], "-p")
+        self.agy_argv(self.recorded()[0], "research")
         self.assert_model("agy")
+
+    def test_agy_reviewer_gets_workspace_and_log(self):
+        result = self.run_cli(DEV_TRIO_REVIEWER_MODEL="agy")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.agy_argv(self.recorded()[0], "review")
+        self.assert_model("agy")
+
+    def test_agy_without_log_dir_still_gets_workspace(self):
+        shutil.rmtree(self.agy_home / "log")
+        result = self.run_cli("ask-researcher.sh", "research question")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        call = self.recorded()[0]
+        self.assertEqual(call[:3], ["--add-dir", os.path.realpath(self.workspace), "-p"], call)
+        self.assertEqual(len(call), 4, call)
+
+    def test_codex_and_claude_prompts_carry_no_agy_note(self):
+        for host in ("claude", "codex"):
+            with self.subTest(host=host):
+                self.calls.unlink(missing_ok=True)
+                result = self.run_cli(DEV_TRIO_PM_HOST=host)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = [c for c in self.recorded() if c != ["auth", "status", "--json"]]
+                self.assertNotIn("--add-dir", calls[-1])
+                self.assertNotIn("--log-file", calls[-1])
+                self.assertNotIn("# Execution environment", calls[-1][-1])
 
     def test_layout_quotes_installed_path_and_identifies_codex_pm(self):
         import shlex

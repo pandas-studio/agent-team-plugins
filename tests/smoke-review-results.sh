@@ -6,6 +6,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../dev-trio/lib/review-result.sh
 . "$ROOT/dev-trio/lib/review-result.sh"
 TMP=$(mktemp -d)
+# agy's home is pinned to a directory that does not exist, so agy roles get
+# --add-dir but never --log-file, whatever this machine has installed (#103).
+export DEV_TRIO_AGY_HOME=/nonexistent/dev-trio-test-agy-home
 trap 'wait; rm -rf "$TMP"' EXIT
 PASS=0
 check() {
@@ -22,6 +25,7 @@ check() {
 json_is() { jq -e "$2" "$1" >/dev/null; }
 no_receipt_result() { ! review_result_from_receipt "$1" "$2" >/dev/null; }
 no_match() { ! grep -q "$1" "$2"; }
+no_match_tree() { ! grep -rq "$1" "$2"; }
 no_runstate_begin() { ! runstate_begin "$1" channel=codex wrapper=ask-reviewer.sh 2>/dev/null; }
 no_runstate_complete() { ! runstate_complete "$1" exit_code=0 2>/dev/null; }
 no_runstate_read() { ! runstate_read "$1" >/dev/null 2>&1; }
@@ -1220,5 +1224,113 @@ printf '%s' "$VALID_RUN" | jq -c '.inputs=[7]' > "$TMP/bad-inputs.run.json"
 check 'inputs that are not records are rejected' no_runstate_read "$TMP/bad-inputs.run.json"
 printf '%s' "$VALID_RUN" | jq -c 'del(.completion)' > "$TMP/no-completion.run.json"
 check 'metadata with no completion field is rejected' no_runstate_read "$TMP/no-completion.run.json"
+
+
+# #103: headless agy that auto-denies a tool exits 0 with a notice on stderr.
+# The review is reclassified from parse-failed to permission-denied only on
+# this run's own evidence, and the denied target comes from agy's transcript,
+# found through the conversation id in the --log-file the wrapper pinned.
+AGY_HOME="$TMP/agy-home"
+mkdir -p "$AGY_HOME/log"
+AGY_ID=0179d9db-25b9-4d06-97c2-4b7f60b8eb8d
+AGY_NOTICE='jetski: no output produced — a tool required the "command" permission that headless mode cannot prompt for, so it was auto-denied. Add an allow-rule under permissions.allow in settings.json (e.g. command(<target>)).'
+cat > "$TMP/agy-reviewer" <<'STUB'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$@" > "$TEST_AGY_ARGV"
+log=""
+[ "${1:-}" != --log-file ] || log="$2"
+# Like agy's own log: the conversation id, and the user's allow list.
+if [ -n "$log" ] && [ -n "${TEST_AGY_ID:-}" ]; then
+  printf 'I0923 17:51:49.1 1 server.go:1239] Created conversation %s\n' "$TEST_AGY_ID" > "$log"
+  printf 'I0923 17:51:49.2 1 cli_setting_manager.go:92] permissions=&{Allow:[command(SENTINEL-RULE)]}\n' >> "$log"
+fi
+[ -z "${TEST_AGY_STDOUT:-}" ] || cat "$TEST_AGY_STDOUT"
+[ "${TEST_AGY_NOTICE:-0}" != 1 ] || printf '%s\n' "$TEST_AGY_NOTICE_TEXT" >&2
+exit 0
+STUB
+chmod +x "$TMP/agy-reviewer"
+agy_transcript() {
+  local dir="$AGY_HOME/brain/$AGY_ID/.system_generated/logs"
+  rm -rf "$AGY_HOME/brain"
+  mkdir -p "$dir"
+  {
+    printf '[1,2]\nnot json\n{"status":"ERROR","error":5}\n'
+    jq -cn '{status:"ERROR",error:"permission check failed for command \"lsof -p $$ || pwd\": user denied permission to run command:\nlsof -p $$ || pwd"}'
+    jq -cn '{status:"ERROR",error:"permission check failed for command \"a\\x01b\": user denied"}'
+    jq -cn '{status:"ERROR",error:"permission check failed for read_url \"github.com\": user denied permission for read_url(github.com)"}'
+    jq -cn '{status:"ERROR",error:"permission check failed for command \"lsof -p $$ || pwd\": again"}'
+    printf '{"status":"ERR'
+  } > "$dir/transcript_full.jsonl"
+}
+agy_review() {
+  run_review "$@" DEV_TRIO_REVIEWER_MODEL=agy AGY_CLI="$TMP/agy-reviewer" \
+    DEV_TRIO_AGY_HOME="$AGY_HOME" TEST_AGY_ARGV="$TMP/agy-argv" \
+    TEST_AGY_NOTICE_TEXT="$AGY_NOTICE"
+}
+AGY_DENIED='["command(lsof -p $$ || pwd)","command(\"a\\x01b\")","read_url(github.com)"]'
+
+agy_transcript
+agy_review 3 TEST_AGY_ID="$AGY_ID" TEST_AGY_NOTICE=1
+check 'agy argv pins its log and the workspace' test "$(sed -n '1p;3p;5p' "$TMP/agy-argv" | tr '\n' ' ')" = '--log-file --add-dir -p '
+check 'agy workspace is the repository root' test "$(sed -n 4p "$TMP/agy-argv")" = "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+check 'agy log lives in agy home' test "$(sed -n 2p "$TMP/agy-argv")" = "$AGY_HOME/log/cli-dev-trio-review-${LOG##*/codex-}"
+check 'denial is its own status with the targets' json_is "$RESULT" ".status==\"permission-denied\" and .exit_code==3 and .invocation_rc==0 and .verdict==null and .denied==$AGY_DENIED and .conversation_ids==[\"$AGY_ID\"]"
+check 'denial keeps the parse error' json_is "$RESULT" '.error | startswith("agy denied a tool in headless mode: command(lsof") and endswith("(parse: missing Verdict heading)")'
+check 'stderr names the denied command' grep -Fxq '[ask-reviewer] agy denied: command(lsof -p $$ || pwd)' "$TMP/wrapper.err"
+check 'stderr names the conversation' grep -Fxq "[ask-reviewer] agy conversation: $AGY_ID" "$TMP/wrapper.err"
+check 'manifest records the conversation' json_is "$MANIFEST" ".inputs | any(.kind==\"agy-conversation\" and .value==\"$AGY_ID\")"
+check "agy's allow list is not copied into the wrapper's logs" no_match_tree SENTINEL-RULE "$TMP/log"
+check "agy's allow list is not echoed" no_match SENTINEL-RULE "$TMP/wrapper.err"
+check "agy's allow list is not on stdout" no_match SENTINEL-RULE "$TMP/wrapper.out"
+receipt=$(review_receipt_create "$TMP/receipt")
+agy_review 3 TEST_AGY_ID="$AGY_ID" TEST_AGY_NOTICE=1 DEV_TRIO_REVIEW_RECEIPT="$receipt"
+review_result_from_receipt "$receipt" 3 > "$TMP/receipt-result.json"
+check 'receipt carries the denial' json_is "$TMP/receipt-result.json" ".status==\"permission-denied\" and .denied==$AGY_DENIED"
+dashboard
+check 'dashboard reports the denial as a failure' grep -q 'Review failed:.*agy denied' "$TMP/dashboard.out"
+manifest_init fixture-agy-parent "$TMP/agy-parent.log"
+agy_review 3 TEST_AGY_ID="$AGY_ID" TEST_AGY_NOTICE=1 MANIFEST_PARENT_TMP="$MANIFEST_TMP"
+check 'a nested run still reports the conversation' json_is "$RESULT" ".status==\"permission-denied\" and .conversation_ids==[\"$AGY_ID\"]"
+check 'the nested run adds nothing but its role to the parent' json_is "$MANIFEST_TMP" '(.inputs | any(.kind=="agy-conversation") | not) and (.roles|length)==1'
+
+rm -rf "$AGY_HOME/brain"
+agy_review 3 TEST_AGY_NOTICE=1
+check 'a notice-only run with no record is a denial of unknown target' json_is "$RESULT" '.status=="permission-denied" and .denied==[] and .conversation_ids==[] and (.error|contains("target unknown"))'
+check 'stderr says the target is unknown' grep -q 'its target is not recorded' "$TMP/wrapper.err"
+
+printf '## Verdict\nSHIP — fine\n## Verdict\nSHIP — twice\n' > "$TMP/agy-stdout.md"
+agy_transcript
+agy_review 3 TEST_AGY_ID="$AGY_ID" TEST_AGY_STDOUT="$TMP/agy-stdout.md"
+check 'a recovered denial before a malformed review stays a parse failure' json_is "$RESULT" '.status=="parse-failed" and .error=="duplicate Verdict headings" and (has("denied")|not)'
+rm -rf "$AGY_HOME/brain"
+agy_review 3 TEST_AGY_STDOUT="$TMP/agy-stdout.md" TEST_AGY_NOTICE=1
+check 'a notice beside a malformed review, with no record, stays a parse failure' json_is "$RESULT" '.status=="parse-failed"'
+
+fixture 'SHIP — clean'
+agy_transcript
+agy_review 0 TEST_AGY_ID="$AGY_ID" TEST_AGY_STDOUT="$TMP/review.md" TEST_AGY_NOTICE=1
+check 'a review that parsed is never demoted' json_is "$RESULT" '.status=="ok" and .verdict=="SHIP"'
+
+# The same notice from a model without workspace_args is not agy's evidence.
+printf '%s\n' "$AGY_NOTICE" > "$TMP/review.md"
+agy_transcript
+run_review 3 DEV_TRIO_REVIEWER_MODEL=codex DEV_TRIO_AGY_HOME="$AGY_HOME"
+check 'codex output quoting the notice stays a parse failure' json_is "$RESULT" '.status=="parse-failed"'
+
+# A conversation id that is not a uuid never becomes part of a path: a decoy
+# transcript where "../../x" would lead is not read.
+mkdir -p "$TMP/x/.system_generated/logs"
+cp "$AGY_HOME/brain/$AGY_ID/.system_generated/logs/transcript_full.jsonl" "$TMP/x/.system_generated/logs/"
+rm -rf "$AGY_HOME/brain"
+agy_review 3 TEST_AGY_ID=../../x TEST_AGY_NOTICE=1
+check 'a traversal id reads no transcript' json_is "$RESULT" '.status=="permission-denied" and .denied==[] and .conversation_ids==[]'
+
+# Without a writable log directory agy gets no --log-file — given one it
+# cannot create, it writes its whole log to stderr — but keeps --add-dir.
+mv "$AGY_HOME/log" "$AGY_HOME/log.off"
+agy_review 3 TEST_AGY_NOTICE=1
+check 'no log directory: no --log-file' test "$(head -1 "$TMP/agy-argv")" = --add-dir
+mv "$AGY_HOME/log.off" "$AGY_HOME/log"
 
 printf 'review-result smoke: %s assertions passed\n' "$PASS"

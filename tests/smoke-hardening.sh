@@ -5,6 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # The drivers take DEV_TRIO_BIN / DEBATE_CONDUCTOR_BIN over PATH; an exported
 # override would route these smokes past their stubs.
 unset DEV_TRIO_BIN DEBATE_CONDUCTOR_BIN
+# agy's home is pinned to a directory that does not exist, so agy roles get
+# --add-dir but never --log-file, whatever this machine has installed (#103).
+export DEV_TRIO_AGY_HOME=/nonexistent/dev-trio-test-agy-home
 PASS=0
 
 assert_ok() { "$@"; PASS=$((PASS + 1)); }
@@ -1695,6 +1698,35 @@ cmp "$ROOT/dev-trio/lib/registry.sh" "$ROOT/debate-conductor/lib/registry.sh"
 PASS=$((PASS + 1))
 cmp "$ROOT/dev-trio/bin/agent-team-models.sh" "$ROOT/debate-conductor/bin/agent-team-models.sh"
 PASS=$((PASS + 1))
+
+# #103: agy's workspace_args/log_args are prefixed only when the caller passes
+# REGISTRY_WORKSPACE / REGISTRY_CLI_LOG, each on its own; with neither, argv is
+# what it always was (debate-conductor never sets them).
+REG_TMP=$(mktemp -d)
+printf '#!/bin/sh\nfor a in "$@"; do printf "[%%s]" "$a"; done\necho\n' > "$REG_TMP/rec"
+chmod +x "$REG_TMP/rec"
+registry_argv() {
+  env -u REGISTRY_WORKSPACE -u REGISTRY_CLI_LOG -u REGISTRY_CMD_OVERRIDE \
+    AGENT_TEAM_MODELS_CONFIG="$REG_TMP/none.json" AGY_CLI="$REG_TMP/rec" CODEX_CLI="$REG_TMP/rec" \
+    "$@" bash -c '. "$1/dev-trio/lib/registry.sh"; shift; eval "$*"' _ "$ROOT" "$REG_CALL"
+}
+REG_CALL='registry_run agy P'
+assert_eq "$(registry_argv)" '[-p][P]'
+REG_CALL='REGISTRY_WORKSPACE=/r registry_run agy P'
+assert_eq "$(registry_argv)" '[--add-dir][/r][-p][P]'
+REG_CALL='REGISTRY_CLI_LOG=/l registry_run agy P'
+assert_eq "$(registry_argv)" '[--log-file][/l][-p][P]'
+REG_CALL='REGISTRY_WORKSPACE=/r REGISTRY_CLI_LOG=/l registry_run agy P'
+assert_eq "$(registry_argv)" '[--log-file][/l][--add-dir][/r][-p][P]'
+REG_CALL='REGISTRY_WORKSPACE= REGISTRY_CLI_LOG= registry_run agy P'
+assert_eq "$(registry_argv REGISTRY_WORKSPACE=/stale REGISTRY_CLI_LOG=/stale)" '[-p][P]'
+REG_CALL='REGISTRY_WORKSPACE=/r REGISTRY_CLI_LOG=/l registry_run codex P'
+assert_eq "$(registry_argv)" '[exec][--skip-git-repo-check][P]'
+REG_CALL='REGISTRY_WORKSPACE=/r REGISTRY_CLI_LOG=/l registry_run_answer agy P; echo "rc=$?"'
+assert_eq "$(registry_argv)" "$(printf '[--log-file][/l][--add-dir][/r][-p][P]\nrc=0')"
+REG_CALL='registry_has_workspace agy && ! registry_has_workspace codex && echo yes'
+assert_eq "$(registry_argv)" yes
+rm -rf "$REG_TMP"
 
 # namespace.sh is vendored the same way registry.sh is.
 for plugin in debate-conductor ralph-trio spec-trio; do

@@ -135,6 +135,31 @@ review_result_parse() {
     else . end'
 }
 
+# review_result_permission_denied PARSED_JSON [CONVERSATION_ID...] -- [TARGET...]
+# Turn a parse-failed result into the headless-denial result (#103): agy
+# auto-denied a tool and produced no review. The exit code stays 3 — callers
+# see the same contract as a parse failure — and the status, the denied
+# targets and agy's conversation ids say what happened. The parse error is
+# kept in `error`. The caller decides *whether* this applies; see ask-reviewer.
+review_result_permission_denied() {
+  local parsed="$1" ids=() targets=() in_targets=0 arg
+  shift
+  for arg in "$@"; do
+    if [ "$in_targets" -eq 0 ] && [ "$arg" = -- ]; then in_targets=1; continue; fi
+    if [ "$in_targets" -eq 1 ]; then targets+=("$arg"); else ids+=("$arg"); fi
+  done
+  printf '%s\n' "$parsed" | jq -c \
+    --argjson ids "$(printf '%s\n' ${ids[@]+"${ids[@]}"} | jq -Rsc 'split("\n") | map(select(length > 0))')" \
+    --argjson denied "$(printf '%s\n' ${targets[@]+"${targets[@]}"} | jq -Rsc 'split("\n") | map(select(length > 0))')" '
+    .status = "permission-denied" | .exit_code = 3 | .invocation_rc = 0 |
+    .verdict = null | .verdict_line = null |
+    .findings = {blocker: null, major: null, minor: null} |
+    .error = ("agy denied a tool in headless mode: " +
+      (if ($denied | length) > 0 then ($denied | join(", ")) else "target unknown" end) +
+      " (parse: " + (.error // "no review") + ")") |
+    .denied = $denied | .conversation_ids = $ids'
+}
+
 # Consumers load one atomic JSON snapshot; malformed/old files are unavailable,
 # never an invitation to infer a verdict from another artifact.
 review_result_read() {
@@ -150,9 +175,15 @@ review_result_read() {
        (.profile == "spec" and .verdict == "OUT-OF-SCOPE")) and
       (.verdict_line | type == "string")
     else
-      (.status == "parse-failed" or .status == "invocation-failed") and
+      (.status == "parse-failed" or .status == "invocation-failed" or
+       .status == "permission-denied") and
       .exit_code != 0 and .verdict == null and (.error | type == "string")
     end) |
+    select(if .status == "permission-denied" then
+      .exit_code == 3 and
+      (.denied | type == "array" and all(.[]; type == "string")) and
+      (.conversation_ids | type == "array" and all(.[]; type == "string"))
+    else true end) |
     select(.findings | type == "object") |
     select(all(.findings.blocker, .findings.major, .findings.minor;
       . == null or (type == "array" and all(.[]; type == "string"))))

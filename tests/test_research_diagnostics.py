@@ -38,6 +38,10 @@ class ResearchDiagnosticsTests(unittest.TestCase):
             "#!/bin/sh\n"
             'printf "%s\\n" "$*" >> "$DIAG_CALLS"\n'
             'if [ "$1" = --version ]; then echo "fixture CLI 1.2.7"; exit 0; fi\n'
+            # Like agy, record the conversation in the pinned --log-file.
+            'if [ "$1" = --log-file ] && [ -n "${DIAG_CONVERSATION:-}" ]; then\n'
+            '  printf "I0923 1 server.go:1239] Created conversation %s\\n" "$DIAG_CONVERSATION" > "$2"\n'
+            'fi\n'
             'printf "%s" "${DIAG_ANSWER:-}"\n'
             'printf "%s" "${DIAG_STDERR:-}" >&2\n'
             'exit "${DIAG_RC:-0}"\n'
@@ -48,8 +52,11 @@ class ResearchDiagnosticsTests(unittest.TestCase):
         self.env = {k: v for k, v in os.environ.items() if not k.startswith(
             ("DEV_TRIO_", "AGENT_TEAM", "AGY_", "CLAUDE_", "CODEX_",
              "RESEARCHER_", "REVIEWER_", "MANIFEST_", "DIAG_"))}
+        self.agy_home = self.root / "agy home"
+        (self.agy_home / "log").mkdir(parents=True)
         self.env.update(
             PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}",
+            DEV_TRIO_AGY_HOME=str(self.agy_home),
             AGENT_TEAM="diagnostic-test", TMUX="", DEV_TRIO_PM_HOST="codex",
             AGENT_TEAM_MODELS_CONFIG=str(self.config), DIAG_CALLS=str(self.calls),
         )
@@ -233,6 +240,45 @@ class ResearchDiagnosticsTests(unittest.TestCase):
             result = self.run_script("dev-trio-doctor.sh", *args)
             self.assertEqual(result.returncode, 2)
             self.assertFalse(self.calls.exists())
+
+    NOTICE = ('jetski: no output produced — a tool required the "command" permission '
+              'that headless mode cannot prompt for, so it was auto-denied.')
+    CONVERSATION = "0179d9db-25b9-4d06-97c2-4b7f60b8eb8d"
+
+    def record_denial(self, target='lsof -p $$ || pwd'):
+        logs = self.agy_home / "brain" / self.CONVERSATION / ".system_generated/logs"
+        logs.mkdir(parents=True)
+        error = f"permission check failed for command {json.dumps(target)}: user denied permission"
+        (logs / "transcript_full.jsonl").write_text(json.dumps({"status": "ERROR", "error": error}) + "\n")
+
+    def test_recorded_denial_names_its_target(self):
+        self.record_denial()
+        result = self.run_script("ask-researcher.sh", "question", DIAG_RC="0", DIAG_ANSWER="",
+                                 DIAG_STDERR=self.NOTICE, DIAG_CONVERSATION=self.CONVERSATION)
+        self.assertEqual(result.returncode, 5, result.stderr)
+        lines = result.stderr.splitlines()
+        self.assertIn("[ask-researcher] agy denied: command(lsof -p $$ || pwd)", lines)
+        self.assertIn(f"[ask-researcher] agy conversation: {self.CONVERSATION}", lines)
+        self.assertNotIn("rc=5 alone does not establish permission denial", result.stderr)
+        manifest = json.loads(next(self.workspace.glob(".dev-trio/log/*/*.manifest.json")).read_text())
+        self.assertIn({"kind": "agy-conversation", "value": self.CONVERSATION}, manifest["inputs"])
+
+    def test_notice_quoted_in_the_question_is_not_evidence(self):
+        # The transcript does record a denial, but this run printed no notice:
+        # only the question quotes it, and that sits before the run's output.
+        self.record_denial()
+        result = self.run_script("ask-researcher.sh", f"Why did I see this?\n{self.NOTICE}", DIAG_RC="0",
+                                 DIAG_ANSWER="", DIAG_STDERR="", DIAG_CONVERSATION=self.CONVERSATION)
+        self.assertEqual(result.returncode, 5, result.stderr)
+        self.assertNotIn("agy denied:", result.stderr)
+        self.assertIn("rc=5 alone does not establish permission denial", result.stderr)
+
+    def test_notice_without_a_recorded_target_keeps_the_old_hint(self):
+        result = self.run_script("ask-researcher.sh", "question", DIAG_RC="0", DIAG_ANSWER="",
+                                 DIAG_STDERR=self.NOTICE, DIAG_CONVERSATION=self.CONVERSATION)
+        self.assertEqual(result.returncode, 5, result.stderr)
+        self.assertNotIn("agy denied:", result.stderr)
+        self.assertIn("rc=5 alone does not establish permission denial", result.stderr)
 
     def test_failed_research_codes_do_not_become_permission_diagnoses(self):
         for cli_rc, answer, diagnostic, expected in (

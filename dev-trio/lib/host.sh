@@ -45,3 +45,40 @@ dev_trio_check_cli() {
     return 2
   fi
 }
+
+# ---- agy workspace (#103) ---------------------------------------------------
+# Headless agy does not know which directory it was started for. Left to guess,
+# it builds `cd <repo> && git …` or `lsof -p $$ || pwd`, which no simple
+# command(...) allow-rule matches, and print mode auto-denies them. These give
+# the wrappers what to tell it; they apply to any model that defines
+# workspace_args (registry_has_workspace), not to a binary name.
+
+# The directory handed to --add-dir and named in the prompt.
+dev_trio_workspace_root() {
+  git rev-parse --show-toplevel 2>/dev/null || pwd
+}
+
+dev_trio_agy_home() {
+  printf '%s\n' "${DEV_TRIO_AGY_HOME:-$HOME/.gemini/antigravity-cli}"
+}
+
+# A per-run --log-file path inside agy's own log directory, or nothing. agy
+# 1.2.9 given a log path it cannot create still runs, but writes its whole log
+# — including the settings' allow list — to stderr, which is the wrapper's
+# transcript (measured 2026-09-23: rc 0, 24.8 KB on stderr). So the path is
+# offered only where agy already writes its logs and can write this one.
+dev_trio_agy_cli_log() {
+  local dir
+  dir="$(dev_trio_agy_home)/log"
+  [ -d "$dir" ] && [ -w "$dir" ] || return 0
+  printf '%s/cli-dev-trio-%s.log\n' "$dir" "$1"
+}
+
+# Prompt section for a workspace-aware model. Kept outside the untrusted tags.
+dev_trio_agy_exec_note() {
+  cat <<EOF_NOTE
+# Execution environment
+The repository root is \`$1\`; your working directory is \`$PWD\`. The root is also added to your workspace with --add-dir.
+Tool commands run in headless mode, where a command that no allow-rule matches is denied and ends this run with no answer at all. Keep shell commands to these read-only git forms, one simple command per tool call: \`git status --short\` (it also lists untracked files), \`git diff\`, \`git log\` and \`git show\`, with arguments as needed. No \`cd\`, no \`&&\`, \`||\` or \`;\`, no pipes, and no redirections such as \`2>/dev/null\`. Read and search files with your built-in file viewer and search tools, not with shell commands such as \`cat\`, \`grep\`, \`git grep\`, \`find\` or \`git ls-files\`. Do not run tests, builds, interpreters such as \`python3\` or \`node\`, or scripts; if confirming something would need one, say so in your answer instead. If a command is denied, do not retry a variant of it.
+EOF_NOTE
+}
