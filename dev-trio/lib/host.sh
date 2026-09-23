@@ -65,13 +65,17 @@ dev_trio_agy_home() {
 # A per-run --log-file path inside agy's own log directory, or nothing. agy
 # 1.2.9 given a log path it cannot create still runs, but writes its whole log
 # — including the settings' allow list — to stderr, which is the wrapper's
-# transcript (measured 2026-09-23: rc 0, 24.8 KB on stderr). So the path is
-# offered only where agy already writes its logs and can write this one.
+# transcript (measured 2026-09-23: rc 0, 24.8 KB on stderr). A writable
+# directory is not enough to know it can (no search permission, a full disk),
+# so the file itself is created here, private and new, and only a file that
+# exists is offered. agy writes into a file that already exists and leaves its
+# mode alone (measured: 0600 kept, nothing on stderr).
 dev_trio_agy_cli_log() {
-  local dir
-  dir="$(dev_trio_agy_home)/log"
-  [ -d "$dir" ] && [ -w "$dir" ] || return 0
-  printf '%s/cli-dev-trio-%s.log\n' "$dir" "$1"
+  local path
+  path="$(dev_trio_agy_home)/log/cli-dev-trio-$1.log"
+  ( umask 077 && set -C && : > "$path" ) 2>/dev/null || return 0
+  [ -f "$path" ] && [ -w "$path" ] || return 0
+  printf '%s\n' "$path"
 }
 
 # Prompt section for a workspace-aware model. Kept outside the untrusted tags.

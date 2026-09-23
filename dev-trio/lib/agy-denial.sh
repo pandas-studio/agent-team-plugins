@@ -55,25 +55,46 @@ agy_denial_targets() {
   return 0
 }
 
+# Both scanners below read their whole input. An early-exiting `grep -q` at
+# the end of a pipeline gets its producer killed by SIGPIPE, and under the
+# wrappers' pipefail that turned a match into 141 — or, negated, a mismatch
+# into success (measured, bash 3.2.57, a notice followed by 200,000 lines).
+#
+# _agy_denial_scan: prints "<notices> <other non-blank lines>".
+_agy_denial_scan() {
+  awk -v notice="$_AGY_DENIAL_NOTICE" '
+    index($0, notice) == 1 && /permission/ { n++; next }
+    /[^[:space:]]/ { o++ }
+    END { printf "%d %d\n", n, o }
+  '
+}
+
 # agy_denial_notice_in FILE [OFFSET END] — rc 0 iff a line of FILE (or of its
 # byte range OFFSET..END) is agy's headless no-output notice about a permission.
 agy_denial_notice_in() {
-  local file="$1" offset="${2:-}" end="${3:-}"
+  local file="$1" offset="${2:-}" end="${3:-}" counts
   [ -f "$file" ] && [ -r "$file" ] || return 1
   if [ -n "$offset" ] && [ -n "$end" ]; then
     [ "$end" -gt "$offset" ] || return 1
-    tail -c "+$((offset + 1))" "$file" 2>/dev/null | head -c "$((end - offset))" 2>/dev/null
+    # `head` stops at END and `tail` then dies of SIGPIPE, so this pipeline's
+    # status is not the answer; the scanner's output, which saw the whole
+    # range, is.
+    counts="$(tail -c "+$((offset + 1))" "$file" 2>/dev/null \
+      | head -c "$((end - offset))" 2>/dev/null | _agy_denial_scan)" || true
   else
-    cat "$file" 2>/dev/null
-  fi | grep -q "^${_AGY_DENIAL_NOTICE}.*permission"
+    counts="$(_agy_denial_scan < "$file")" || return 1
+  fi
+  case "$counts" in [0-9]*" "[0-9]*) ;; *) return 1 ;; esac
+  [ "${counts%% *}" -gt 0 ]
 }
 
 # agy_denial_notice_only FILE — rc 0 iff FILE has at least one such notice and
 # no other non-blank line: the whole "answer" of a run that produced nothing.
 agy_denial_notice_only() {
+  local counts
   [ -f "$1" ] && [ -r "$1" ] || return 1
-  grep -q "^${_AGY_DENIAL_NOTICE}.*permission" "$1" 2>/dev/null || return 1
-  ! grep -v "^${_AGY_DENIAL_NOTICE}.*permission" "$1" 2>/dev/null | grep -q '[^[:space:]]'
+  counts="$(_agy_denial_scan < "$1")" || return 1
+  [ "${counts%% *}" -gt 0 ] && [ "${counts##* }" -eq 0 ]
 }
 
 # agy_denial_describe TARGET — one line for a human. unsandboxed(...) rules

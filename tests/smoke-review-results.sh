@@ -1247,6 +1247,9 @@ if [ -n "$log" ] && [ -n "${TEST_AGY_ID:-}" ]; then
 fi
 [ -z "${TEST_AGY_STDOUT:-}" ] || cat "$TEST_AGY_STDOUT"
 [ "${TEST_AGY_NOTICE:-0}" != 1 ] || printf '%s\n' "$TEST_AGY_NOTICE_TEXT" >&2
+# Enough output after the notice that an early-exiting scanner's producer
+# dies of SIGPIPE.
+[ "${TEST_AGY_NOISE:-0}" != 1 ] || seq 1 200000 >&2
 exit 0
 STUB
 chmod +x "$TMP/agy-reviewer"
@@ -1325,6 +1328,24 @@ cp "$AGY_HOME/brain/$AGY_ID/.system_generated/logs/transcript_full.jsonl" "$TMP/
 rm -rf "$AGY_HOME/brain"
 agy_review 3 TEST_AGY_ID=../../x TEST_AGY_NOTICE=1
 check 'a traversal id reads no transcript' json_is "$RESULT" '.status=="permission-denied" and .denied==[] and .conversation_ids==[]'
+
+# A large transcript: the notice is still found, and a final that is mostly
+# other text is still not "notice only" (#103 review: an early-exiting grep
+# under pipefail turned both answers around).
+agy_transcript
+agy_review 3 TEST_AGY_ID="$AGY_ID" TEST_AGY_NOTICE=1 TEST_AGY_NOISE=1
+check 'a notice followed by much output is still found' json_is "$RESULT" ".status==\"permission-denied\" and .denied==$AGY_DENIED"
+rm -rf "$AGY_HOME/brain"
+agy_review 3 TEST_AGY_NOTICE=1 TEST_AGY_NOISE=1
+check 'much other output is not a notice-only final' json_is "$RESULT" '.status=="parse-failed"'
+
+# A log directory agy could not create a file in gets no --log-file either:
+# the wrapper creates the file itself first, and here it cannot.
+chmod 600 "$AGY_HOME/log"
+agy_review 3 TEST_AGY_NOTICE=1
+chmod 700 "$AGY_HOME/log"
+check 'unsearchable log directory: no --log-file' test "$(head -1 "$TMP/agy-argv")" = --add-dir
+check 'the reserved agy log is private' test "$(find "$AGY_HOME/log" -name 'cli-dev-trio-review-*' ! -perm 600 | wc -l | tr -d ' ')" = 0
 
 # Without a writable log directory agy gets no --log-file — given one it
 # cannot create, it writes its whole log to stderr — but keeps --add-dir.
