@@ -2,6 +2,9 @@
 # Real loop drivers + reviewer wrapper, with only the model CLIs replaced.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The drivers take DEV_TRIO_BIN / DEBATE_CONDUCTOR_BIN over PATH; an exported
+# override would route these smokes past their stubs.
+unset DEV_TRIO_BIN DEBATE_CONDUCTOR_BIN
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1

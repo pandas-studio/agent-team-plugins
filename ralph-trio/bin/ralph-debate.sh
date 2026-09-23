@@ -18,7 +18,7 @@
 #                   [--fix-plan PATH] [--max-runtime SPEC] [--worktree]
 #                   [--base-branch BR] [--dry-run]
 #
-# Prerequisites: debate-conductor plugin installed (provides debate.sh on PATH).
+# Prerequisites: debate-conductor plugin (debate.sh via DEBATE_CONDUCTOR_BIN, PATH or `claude plugin list`).
 #
 # Logs:
 #   $RALPH_TRIO_WORKSPACE/log/<team>/ralph-debate-<TS>.log              per-run summary
@@ -31,6 +31,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck disable=SC1091
 . "$PLUGIN_ROOT/lib/common.sh"
+# shellcheck source=SCRIPTDIR/../lib/plugin-deps.sh
+. "$PLUGIN_ROOT/lib/plugin-deps.sh" || { echo "ralph-debate: failed to load lib/plugin-deps.sh" >&2; exit 2; }
 
 MAX_ITER=""
 MAX_RUNTIME_SPEC="0"
@@ -80,12 +82,16 @@ fi
 # too old to publish run receipts does not ship it. Probing the executable
 # instead would miss a forwarding wrapper, and running a sample debate would tie
 # detection to model configuration.
+DEBATE_SH=""
 if [ "$DRY_RUN" != "1" ]; then
-  command -v debate.sh >/dev/null 2>&1 || { echo "ERROR: ralph-debate requires the debate-conductor plugin (debate.sh not on PATH). Install: /plugin install debate-conductor@pandas-studio" >&2; exit 2; }
-  DEBATE_BIN_DIR=$(dirname "$(command -v debate.sh)")
+  DEP_RC=0
+  resolve_plugin_script DEBATE_CONDUCTOR_BIN debate-conductor@pandas-studio debate.sh || DEP_RC=$?
+  [ "$DEP_RC" -eq 0 ] || { plugin_deps_error ralph-debate debate-conductor debate.sh DEBATE_CONDUCTOR_BIN "$DEP_RC"; exit 2; }
+  DEBATE_SH="$RESOLVED_SCRIPT"
+  DEBATE_BIN_DIR=$(dirname "$DEBATE_SH")
   # shellcheck source=/dev/null
   . "$DEBATE_BIN_DIR/../lib/debate-result.sh" 2>/dev/null || {
-    echo "ERROR: update debate-conductor; shared debate-result.sh is required" >&2
+    echo "ERROR: update debate-conductor; shared debate-result.sh is required (looked in $DEBATE_BIN_DIR/../lib, debate.sh via $RESOLVED_SOURCE)" >&2
     exit 2
   }
   command -v debate_receipt_read >/dev/null 2>&1 || {
@@ -279,9 +285,9 @@ while :; do
     fi
     DEBATE_RC=0
     if [ -n "$PROMPT_FILE" ]; then
-      ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEBATE_LOG_DIR="$DEBATE_LOG_BASE" DEBATE_RECEIPT="$DEBATE_RECEIPT" debate.sh -n "$ROUNDS" "$TASK" "$PROMPT_FILE" >&2 ) || DEBATE_RC=$?
+      ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEBATE_LOG_DIR="$DEBATE_LOG_BASE" DEBATE_RECEIPT="$DEBATE_RECEIPT" "$DEBATE_SH" -n "$ROUNDS" "$TASK" "$PROMPT_FILE" >&2 ) || DEBATE_RC=$?
     else
-      ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEBATE_LOG_DIR="$DEBATE_LOG_BASE" DEBATE_RECEIPT="$DEBATE_RECEIPT" debate.sh -n "$ROUNDS" "$TASK" >&2 ) || DEBATE_RC=$?
+      ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEBATE_LOG_DIR="$DEBATE_LOG_BASE" DEBATE_RECEIPT="$DEBATE_RECEIPT" "$DEBATE_SH" -n "$ROUNDS" "$TASK" >&2 ) || DEBATE_RC=$?
     fi
     # What this invocation produced comes from its own receipt, never from the
     # team-wide `latest-debate` symlink: any other debate started in the same

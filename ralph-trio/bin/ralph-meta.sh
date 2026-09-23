@@ -19,7 +19,7 @@
 #   --base-ref REF                git ref to compare against (default: HEAD's
 #                                 first commit before SINCE; falls back to HEAD~10)
 #
-# Prerequisites: dev-trio plugin installed (provides ask-reviewer.sh on PATH).
+# Prerequisites: dev-trio plugin (ask-reviewer.sh via DEV_TRIO_BIN, PATH or `claude plugin list`).
 
 set -uo pipefail
 
@@ -27,6 +27,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck disable=SC1091
 . "$PLUGIN_ROOT/lib/common.sh"
+# shellcheck source=SCRIPTDIR/../lib/plugin-deps.sh
+. "$PLUGIN_ROOT/lib/plugin-deps.sh" || { echo "ralph-meta: failed to load lib/plugin-deps.sh" >&2; exit 2; }
 
 SINCE=""
 SINCE_LATEST=0
@@ -48,8 +50,12 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-# Cross-plugin dependency check: ask-reviewer.sh comes from the dev-trio plugin.
-command -v ask-reviewer.sh >/dev/null 2>&1 || { echo "ERROR: ralph-meta requires the dev-trio plugin (ask-reviewer.sh not on PATH). Install: /plugin install dev-trio@pandas-studio" >&2; exit 2; }
+# Cross-plugin dependency check: ask-reviewer.sh comes from the dev-trio plugin
+# (lib/plugin-deps.sh finds it without relying on PATH).
+DEP_RC=0
+resolve_plugin_script DEV_TRIO_BIN dev-trio@pandas-studio ask-reviewer.sh || DEP_RC=$?
+[ "$DEP_RC" -eq 0 ] || { plugin_deps_error ralph-meta dev-trio ask-reviewer.sh DEV_TRIO_BIN "$DEP_RC"; exit 2; }
+ASK_REVIEWER="$RESOLVED_SCRIPT"
 
 TEAM=$(detect_team) || exit 2
 LOG_DIR=$(init_log_dir)
@@ -249,7 +255,7 @@ CODEX_OUT="$LOG_DIR/ralph-meta-$TS-codex.log"
 # its review — which is exactly when the streamed transcript degrades into the
 # echoed role prompt); fall back to the === RESPONSE === section of the log.
 CODEX_STDERR=$(mktemp -t ralph-meta-stderr.XXXXXX)
-( AGENT_TEAM="$TEAM" ask-reviewer.sh "$FOCUS" </dev/null 2>"$CODEX_STDERR" ) | tee "$CODEX_OUT" >/dev/null || true
+( AGENT_TEAM="$TEAM" "$ASK_REVIEWER" "$FOCUS" </dev/null 2>"$CODEX_STDERR" ) | tee "$CODEX_OUT" >/dev/null || true
 cat "$CODEX_STDERR" >> "$CODEX_OUT"
 DEV_CODEX_LOG=$(awk -F'[(),]' '/^\(log: / { for (i=1; i<=NF; i++) { if ($i ~ /log: /) { sub(/^[[:space:]]*log:[[:space:]]*/, "", $i); print $i; exit } } }' "$CODEX_STDERR")
 DEV_CODEX_FINAL=$(awk -F'[(),]' '/^\(log: / { for (i=1; i<=NF; i++) { if ($i ~ /final: /) { sub(/^[[:space:]]*final:[[:space:]]*/, "", $i); print $i; exit } } }' "$CODEX_STDERR")

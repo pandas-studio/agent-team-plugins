@@ -19,8 +19,8 @@
 #                 [--max-runtime SPEC] [--worktree] [--base-branch BR] [--no-research]
 #                 [--autoship] [--dry-run]
 #
-# Prerequisites: dev-trio plugin installed (provides ask-reviewer.sh, ask-researcher.sh
-# on PATH). Run /ralph-trio:doctor or `ralph-trio-doctor.sh` to verify.
+# Prerequisites: dev-trio plugin (ask-reviewer.sh, ask-researcher.sh; found via DEV_TRIO_BIN,
+# PATH, or `claude plugin list`). Run /ralph-trio:doctor or `ralph-trio-doctor.sh` to verify.
 #
 # Logs land in $RALPH_TRIO_WORKSPACE/log/<team>/ (default $PWD/.ralph-trio/log/<team>/):
 #   ralph-trio-<TS>.log                       per-run summary
@@ -37,6 +37,8 @@ ROLES_DIR="$PLUGIN_ROOT/lib/roles"
 . "$PLUGIN_ROOT/lib/stage-result.sh" || exit 2
 # shellcheck disable=SC1091
 . "$PLUGIN_ROOT/lib/manifest.sh" || { echo "ralph-trio: failed to load lib/manifest.sh (jq missing?)" >&2; exit 2; }
+# shellcheck source=SCRIPTDIR/../lib/plugin-deps.sh
+. "$PLUGIN_ROOT/lib/plugin-deps.sh" || { echo "ralph-trio: failed to load lib/plugin-deps.sh" >&2; exit 2; }
 
 MAX_ITER=""
 MAX_RUNTIME_SPEC="0"
@@ -82,13 +84,19 @@ done
 BACKLOG_FILE="$(cd "$(dirname "$BACKLOG_FILE")" && pwd)/$(basename "$BACKLOG_FILE")"
 
 # Cross-plugin dependency check: ask-reviewer.sh + ask-researcher.sh are provided by
-# the dev-trio plugin on PATH. Skip the dry-run path (no model calls).
+# the dev-trio plugin (lib/plugin-deps.sh finds them without relying on PATH, and
+# the call sites run the absolute paths). Skip the dry-run path (no model calls).
+ASK_REVIEWER=""
+ASK_RESEARCHER=""
 if [ "$DRY_RUN" != "1" ] && [ "$AUTOSHIP" != "1" ]; then
-  command -v ask-reviewer.sh  >/dev/null 2>&1 || { echo "ERROR: ralph-trio requires the dev-trio plugin (ask-reviewer.sh not on PATH). Install: /plugin install dev-trio@pandas-studio" >&2; exit 2; }
-  REVIEWER_BIN_DIR=$(dirname "$(command -v ask-reviewer.sh)")
+  DEP_RC=0
+  resolve_plugin_script DEV_TRIO_BIN dev-trio@pandas-studio ask-reviewer.sh || DEP_RC=$?
+  [ "$DEP_RC" -eq 0 ] || { plugin_deps_error ralph-trio dev-trio ask-reviewer.sh DEV_TRIO_BIN "$DEP_RC"; exit 2; }
+  ASK_REVIEWER="$RESOLVED_SCRIPT"
+  REVIEWER_BIN_DIR=$(dirname "$ASK_REVIEWER")
   # shellcheck source=/dev/null
   . "$REVIEWER_BIN_DIR/../lib/review-result.sh" || {
-    echo "ERROR: update dev-trio; shared review-result.sh is required" >&2
+    echo "ERROR: update dev-trio; shared review-result.sh is required (looked in $REVIEWER_BIN_DIR/../lib, ask-reviewer.sh via $RESOLVED_SOURCE)" >&2
     exit 2
   }
 fi
@@ -98,7 +106,10 @@ if [ "$DRY_RUN" != "1" ] && [ "$NO_RESEARCH" != "1" ]; then
   # before Stage 3 is skipped) and reviewer-driven post-coding research
   # (Stage 3.5). Either can fire unless --no-research, so require it whenever a
   # real run with research is possible. (--dry-run makes no model calls.)
-  command -v ask-researcher.sh >/dev/null 2>&1 || { echo "ERROR: ralph-trio requires the dev-trio plugin (ask-researcher.sh not on PATH). Install: /plugin install dev-trio@pandas-studio  (or pass --no-research)" >&2; exit 2; }
+  DEP_RC=0
+  resolve_plugin_script DEV_TRIO_BIN dev-trio@pandas-studio ask-researcher.sh || DEP_RC=$?
+  [ "$DEP_RC" -eq 0 ] || { plugin_deps_error ralph-trio dev-trio ask-researcher.sh DEV_TRIO_BIN "$DEP_RC" "(or pass --no-research)"; exit 2; }
+  ASK_RESEARCHER="$RESOLVED_SCRIPT"
 fi
 
 if [ -z "$FIX_PLAN_FILE" ]; then
@@ -408,7 +419,7 @@ while :; do
       # research body is captured via the tee into $PLAN_RESEARCH_LOG.
       RESEARCH_RC=0
       ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$LOG_DIR/agy" \
-          MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-researcher.sh "$PLAN_RESEARCH_QS" </dev/null 2>&1 ) | tee "$PLAN_RESEARCH_LOG" >/dev/null || RESEARCH_RC=$?
+          MANIFEST_PARENT_TMP="$MANIFEST_TMP" "$ASK_RESEARCHER" "$PLAN_RESEARCH_QS" </dev/null 2>&1 ) | tee "$PLAN_RESEARCH_LOG" >/dev/null || RESEARCH_RC=$?
       [ "$RESEARCH_RC" -ne 0 ] && manifest_add_input kind=research-rc value="$RESEARCH_RC"
       manifest_finalize
       PARENT_RUN_ID="$PLAN_RESEARCH_RUN_ID"  # coder's parent becomes research
@@ -551,7 +562,7 @@ while :; do
     # tree (survives worktree teardown — see CODEX_FINAL_ROOT above).
     REVIEW_RECEIPT=$(review_receipt_create "$REVIEW_LOG") || exit 2
     ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$CODEX_FINAL_ROOT" \
-        DEV_TRIO_REVIEW_RECEIPT="$REVIEW_RECEIPT" MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-reviewer.sh "$REVIEW_FOCUS" </dev/null 2>&1 ) | tee "$REVIEW_LOG" >/dev/null
+        DEV_TRIO_REVIEW_RECEIPT="$REVIEW_RECEIPT" MANIFEST_PARENT_TMP="$MANIFEST_TMP" "$ASK_REVIEWER" "$REVIEW_FOCUS" </dev/null 2>&1 ) | tee "$REVIEW_LOG" >/dev/null
     # PIPESTATUS[0] = ask-reviewer.sh's rc (the subshell). Non-zero here means
     # invocation or result processing failed — even if the output echoes the role-prompt
     # `Verdict: <one of: ...>` placeholder, so naive parsing would yield a
@@ -600,7 +611,7 @@ while :; do
         manifest_add_input kind=question value="$RESEARCH_QS"
         RESEARCH_RC=0
         ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$LOG_DIR/agy" \
-            MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-researcher.sh "$RESEARCH_QS" </dev/null 2>&1 ) | tee "$RESEARCH_LOG" >/dev/null || RESEARCH_RC=$?
+            MANIFEST_PARENT_TMP="$MANIFEST_TMP" "$ASK_RESEARCHER" "$RESEARCH_QS" </dev/null 2>&1 ) | tee "$RESEARCH_LOG" >/dev/null || RESEARCH_RC=$?
         [ "$RESEARCH_RC" -ne 0 ] && manifest_add_input kind=research-rc value="$RESEARCH_RC"
         manifest_finalize
         # Stage 5: Code2 (parent = research)
@@ -661,7 +672,7 @@ $RESEARCH"
           REVIEW2_FOCUS="Re-review the same task after research-informed retry: '$TASK'.${RANGE_HINT2}"
           REVIEW_RECEIPT=$(review_receipt_create "$REVIEW2_LOG") || exit 2
           ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$CODEX_FINAL_ROOT" \
-              DEV_TRIO_REVIEW_RECEIPT="$REVIEW_RECEIPT" MANIFEST_PARENT_TMP="$MANIFEST_TMP" ask-reviewer.sh "$REVIEW2_FOCUS" </dev/null 2>&1 ) | tee "$REVIEW2_LOG" >/dev/null
+              DEV_TRIO_REVIEW_RECEIPT="$REVIEW_RECEIPT" MANIFEST_PARENT_TMP="$MANIFEST_TMP" "$ASK_REVIEWER" "$REVIEW2_FOCUS" </dev/null 2>&1 ) | tee "$REVIEW2_LOG" >/dev/null
           CODEX2_RC=${PIPESTATUS[0]}
           REVIEW_DATA=$(review_result_from_receipt "$REVIEW_RECEIPT" "$CODEX2_RC") || REVIEW_DATA=""
           VERDICT="UNKNOWN"

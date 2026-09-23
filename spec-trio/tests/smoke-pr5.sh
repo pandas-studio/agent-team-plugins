@@ -13,6 +13,9 @@
 # Usage: bash <plugin>/tests/smoke-pr5.sh
 
 set -uo pipefail
+# The drivers take DEV_TRIO_BIN / DEBATE_CONDUCTOR_BIN over PATH; an exported
+# override would route these smokes past their stubs.
+unset DEV_TRIO_BIN DEBATE_CONDUCTOR_BIN
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"

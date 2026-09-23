@@ -25,7 +25,8 @@
 #
 # Dependencies: bash, git, jq, and the configured model CLIs; reviewed runs
 # need dev-trio's ask-reviewer.sh and shared review-result.sh. Research needs
-# ask-researcher.sh. Logs and frozen specs live under .spec-trio/log/<team>/.
+# ask-researcher.sh (both via DEV_TRIO_BIN, PATH, or `claude plugin list`).
+# Logs and frozen specs live under .spec-trio/log/<team>/.
 
 set -uo pipefail
 
@@ -45,6 +46,8 @@ export REVIEWER_ROLE_FILE
 . "$PLUGIN_ROOT/lib/spec-helpers.sh"
 # shellcheck disable=SC1091
 . "$PLUGIN_ROOT/lib/manifest.sh" || { echo "spec-trio: failed to load lib/manifest.sh (jq missing?)" >&2; exit 2; }
+# shellcheck source=SCRIPTDIR/../lib/plugin-deps.sh
+. "$PLUGIN_ROOT/lib/plugin-deps.sh" || { echo "spec-trio: failed to load lib/plugin-deps.sh" >&2; exit 2; }
 
 TEST_CMD=""
 MAX_ITER=""
@@ -115,22 +118,31 @@ BACKLOG_FILE="$(cd -P "$(dirname "$BACKLOG_FILE")" && pwd -P)/$(basename "$BACKL
 BACKLOG_TARGET=$(spec_resolve_target "$BACKLOG_FILE") || exit 1
 
 # Cross-plugin dependency check: ask-reviewer.sh / ask-researcher.sh are provided by
-# the dev-trio plugin on PATH. ask-reviewer.sh (reviewer) is skipped under
+# the dev-trio plugin (lib/plugin-deps.sh finds them without relying on PATH, and
+# the call sites run the absolute paths). ask-reviewer.sh (reviewer) is skipped under
 # --autoship (Stage 3 doesn't run); ask-researcher.sh (Antigravity researcher) is
 # reachable from BOTH research paths, including planner-driven pre-coding
 # research (Stage 1.5) which fires even under --autoship — so require it
 # whenever research is possible (anything but --dry-run / --no-research).
+ASK_REVIEWER=""
+ASK_RESEARCHER=""
 if [ "$DRY_RUN" != "1" ] && [ "$AUTOSHIP" != "1" ]; then
-  command -v ask-reviewer.sh  >/dev/null 2>&1 || { echo "ERROR: spec-trio requires the dev-trio plugin (ask-reviewer.sh not on PATH). Install: /plugin install dev-trio@pandas-studio" >&2; exit 2; }
-  REVIEWER_BIN_DIR=$(dirname "$(command -v ask-reviewer.sh)")
+  DEP_RC=0
+  resolve_plugin_script DEV_TRIO_BIN dev-trio@pandas-studio ask-reviewer.sh || DEP_RC=$?
+  [ "$DEP_RC" -eq 0 ] || { plugin_deps_error spec-trio dev-trio ask-reviewer.sh DEV_TRIO_BIN "$DEP_RC"; exit 2; }
+  ASK_REVIEWER="$RESOLVED_SCRIPT"
+  REVIEWER_BIN_DIR=$(dirname "$ASK_REVIEWER")
   # shellcheck source=/dev/null
   . "$REVIEWER_BIN_DIR/../lib/review-result.sh" || {
-    echo "ERROR: update dev-trio; shared review-result.sh is required" >&2
+    echo "ERROR: update dev-trio; shared review-result.sh is required (looked in $REVIEWER_BIN_DIR/../lib, ask-reviewer.sh via $RESOLVED_SOURCE)" >&2
     exit 2
   }
 fi
 if [ "$DRY_RUN" != "1" ] && [ "$NO_RESEARCH" != "1" ]; then
-  command -v ask-researcher.sh >/dev/null 2>&1 || { echo "ERROR: spec-trio requires the dev-trio plugin (ask-researcher.sh not on PATH). Install: /plugin install dev-trio@pandas-studio  (or pass --no-research)" >&2; exit 2; }
+  DEP_RC=0
+  resolve_plugin_script DEV_TRIO_BIN dev-trio@pandas-studio ask-researcher.sh || DEP_RC=$?
+  [ "$DEP_RC" -eq 0 ] || { plugin_deps_error spec-trio dev-trio ask-researcher.sh DEV_TRIO_BIN "$DEP_RC" "(or pass --no-research)"; exit 2; }
+  ASK_RESEARCHER="$RESOLVED_SCRIPT"
 fi
 
 if [ -z "$FIX_PLAN_FILE" ]; then
@@ -621,7 +633,7 @@ while :; do
       # research body is captured via the tee into $PLAN_RESEARCH_LOG.
       RESEARCH_RC=0
       ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$LOG_DIR/agy" \
-          MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage ask-researcher.sh "$PLAN_RESEARCH_QS" </dev/null 2>&1 ) | tee "$PLAN_RESEARCH_LOG" >/dev/null || RESEARCH_RC=$?
+          MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage "$ASK_RESEARCHER" "$PLAN_RESEARCH_QS" </dev/null 2>&1 ) | tee "$PLAN_RESEARCH_LOG" >/dev/null || RESEARCH_RC=$?
       spec_check_or_stop
       [ "$RESEARCH_RC" -ne 0 ] && manifest_add_input kind=research-rc value="$RESEARCH_RC"
       manifest_finalize || exit 1
@@ -794,7 +806,7 @@ while :; do
     RANGE_HINT=$(build_range_hint "$ITER_BASE_SHA" "$WORK_DIR")
     REVIEW_RECEIPT=$(review_receipt_create "$REVIEW_LOG") || exit 2
     ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$CODEX_FINAL_ROOT" \
-        DEV_TRIO_REVIEW_PROFILE=spec DEV_TRIO_REVIEW_RECEIPT="$REVIEW_RECEIPT" MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage ask-reviewer.sh --with-spec "$SPEC_FILE" "Review uncommitted+committed changes related to this task: '$TASK'.${RANGE_HINT} Use the standard SHIP/NEEDS-FIX/DISCUSS/OUT-OF-SCOPE verdict format from your role prompt." </dev/null 2>&1 ) | tee "$REVIEW_LOG" >/dev/null
+        DEV_TRIO_REVIEW_PROFILE=spec DEV_TRIO_REVIEW_RECEIPT="$REVIEW_RECEIPT" MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage "$ASK_REVIEWER" --with-spec "$SPEC_FILE" "Review uncommitted+committed changes related to this task: '$TASK'.${RANGE_HINT} Use the standard SHIP/NEEDS-FIX/DISCUSS/OUT-OF-SCOPE verdict format from your role prompt." </dev/null 2>&1 ) | tee "$REVIEW_LOG" >/dev/null
     # PIPESTATUS[0] = ask-reviewer.sh's rc (the subshell). Non-zero means codex
     # invocation or result processing failed — even if it echoes the verdict
     # placeholder, so naive parsing would yield a bogus verdict. Force UNKNOWN
@@ -845,7 +857,7 @@ while :; do
         manifest_add_input kind=question value="$RESEARCH_QS" || exit 1
         RESEARCH_RC=0
         ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$LOG_DIR/agy" \
-            MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage ask-researcher.sh "$RESEARCH_QS" </dev/null 2>&1 ) | tee "$RESEARCH_LOG" >/dev/null || RESEARCH_RC=$?
+            MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage "$ASK_RESEARCHER" "$RESEARCH_QS" </dev/null 2>&1 ) | tee "$RESEARCH_LOG" >/dev/null || RESEARCH_RC=$?
         spec_check_or_stop
         manifest_add_input kind=research-rc value="$RESEARCH_RC" || exit 1
         manifest_finalize || exit 1
@@ -918,7 +930,7 @@ $RESEARCH"
           RANGE_HINT2=$(build_range_hint "$ITER_BASE_SHA" "$WORK_DIR")
           REVIEW_RECEIPT=$(review_receipt_create "$REVIEW2_LOG") || exit 2
           ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$CODEX_FINAL_ROOT" \
-              DEV_TRIO_REVIEW_PROFILE=spec DEV_TRIO_REVIEW_RECEIPT="$REVIEW_RECEIPT" MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage ask-reviewer.sh --with-spec "$SPEC_FILE" "Re-review the same task after research-informed retry: '$TASK'.${RANGE_HINT2} Use the standard SHIP/NEEDS-FIX/DISCUSS/OUT-OF-SCOPE verdict format from your role prompt." </dev/null 2>&1 ) | tee "$REVIEW2_LOG" >/dev/null
+              DEV_TRIO_REVIEW_PROFILE=spec DEV_TRIO_REVIEW_RECEIPT="$REVIEW_RECEIPT" MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage "$ASK_REVIEWER" --with-spec "$SPEC_FILE" "Re-review the same task after research-informed retry: '$TASK'.${RANGE_HINT2} Use the standard SHIP/NEEDS-FIX/DISCUSS/OUT-OF-SCOPE verdict format from your role prompt." </dev/null 2>&1 ) | tee "$REVIEW2_LOG" >/dev/null
           CODEX2_RC=${PIPESTATUS[0]}
           spec_check_or_stop
           REVIEW_DATA=$(review_result_from_receipt "$REVIEW_RECEIPT" "$CODEX2_RC") || REVIEW_DATA=""

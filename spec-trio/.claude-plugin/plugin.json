@@ -1,7 +1,7 @@
 {
   "name": "spec-trio",
-  "version": "0.2.5",
-  "description": "Spec-anchored ralph-trio: an external spec.md gates planner / coder / reviewer with allowlist scope checks + §-citation coverage. Planner can request pre-coding research (Antigravity). Uses ask-reviewer.sh + ask-researcher.sh from the dev-trio plugin on PATH.",
+  "version": "0.2.6",
+  "description": "Spec-anchored ralph-trio: an external spec.md gates planner / coder / reviewer with allowlist scope checks + §-citation coverage. Planner can request pre-coding research (Antigravity). Uses ask-reviewer.sh + ask-researcher.sh from the dev-trio plugin.",
   "author": { "name": "pandas-studio" },
   "homepage": "https://github.com/pandas-studio/agent-team-plugins/tree/main/spec-trio",
   "repository": "https://github.com/pandas-studio/agent-team-plugins",

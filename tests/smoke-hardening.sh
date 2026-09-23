@@ -2,6 +2,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The drivers take DEV_TRIO_BIN / DEBATE_CONDUCTOR_BIN over PATH; an exported
+# override would route these smokes past their stubs.
+unset DEV_TRIO_BIN DEBATE_CONDUCTOR_BIN
 PASS=0
 
 assert_ok() { "$@"; PASS=$((PASS + 1)); }
