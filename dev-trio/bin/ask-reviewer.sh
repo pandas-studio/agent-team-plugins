@@ -31,8 +31,9 @@
 # Result: sibling *.review.json contains verdict, findings and failure status.
 # Sibling *.run.json carries this invocation's metadata for the dashboard
 # (model, start time, inputs, completion) — see lib/runstate.sh.
-# Exit: 0 parsed review (any valid verdict), 3 parse failure after a successful
-# invocation; reviewer failures keep their original nonzero exit code.
+# Exit: 0 parsed review (any valid verdict), 3 no parseable review after a
+# successful invocation (status parse-failed, or permission-denied when headless
+# agy auto-denied a tool); reviewer failures keep their original nonzero code.
 # DEV_TRIO_REVIEW_PROFILE=spec additionally permits OUT-OF-SCOPE for spec-trio.
 # DEV_TRIO_REVIEW_RECEIPT optionally names a fresh absolute caller receipt file.
 #

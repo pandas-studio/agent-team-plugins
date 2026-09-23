@@ -386,6 +386,10 @@ class HostTests(unittest.TestCase):
         note = call[5][call[5].index("# Execution environment"):]
         self.assertIn(f"The repository root is `{root}`;", note)
         self.assertIn("no pipes", note)
+        # The reviewer role lists untracked files with git ls-files, which has
+        # no allow-rule; the note names the git status form that replaces it.
+        self.assertIn("use `git status --short --untracked-files=all` instead of `git ls-files`", note)
+        self.assertIn("record the gap in your answer", note)
 
     def test_research_without_tmux_keeps_model(self):
         result = self.run_cli("ask-researcher.sh", "research question", DEV_TRIO_PM_HOST="codex")

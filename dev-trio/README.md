@@ -95,7 +95,7 @@ The Researcher and Reviewer roles resolve through the shared model registry (the
 - add an `# Execution environment` section to the prompt naming the root and the working directory, and asking for one simple read-only command per tool call — no `cd`, `&&`, `||`, `;`, pipes or redirections;
 - pin agy's own per-run log to `<agy home>/log/cli-dev-trio-<review|research>-<TS>.log`, where agy keeps its other logs (it accumulates the same way). The wrapper creates that file itself (mode 0600, never an existing file) and passes it only if that worked: agy given a log path it cannot create writes its whole log, including your allow list, to stderr. The wrappers read the conversation id from it and never copy it.
 
-`<agy home>` is `$DEV_TRIO_AGY_HOME`, default `~/.gemini/antigravity-cli`. A models-config entry that redefines `agy` without these fields turns all of this off. Codex and Claude prompts and argv are unchanged. The registry applies the fields only when a caller passes `REGISTRY_WORKSPACE` / `REGISTRY_CLI_LOG`; debate-conductor does not.
+`<agy home>` is `$DEV_TRIO_AGY_HOME`, default `~/.gemini/antigravity-cli`. A models-config entry that redefines `agy` without these fields turns all of this off; any model that defines `workspace_args` is treated as agy-compatible and gets the same note and diagnosis (the diagnosis only fires on agy's own no-output notice). Codex and Claude prompts and argv are unchanged. The registry applies the fields only when a caller passes `REGISTRY_WORKSPACE` / `REGISTRY_CLI_LOG`; debate-conductor does not.
 
 | Role | Default | Pick a different model | Override its binary |
 | :--- | :--- | :--- | :--- |
@@ -310,10 +310,11 @@ run. See the [official headless guide](https://www.antigravity.google/docs/cli/h
 3. If agy warns that `unsandboxed(...)` rules are ignored, follow the guidance
    for that installed CLI. The doctor only flags their presence: support varies
    by version/platform, so neither it nor plugin installation migrates them.
-4. Re-run `dev-trio-doctor.sh --research`, then explicitly request research again
-   with the original question and stdin context. This is a new run and may
-   repeat external calls; it is not automatic resumption. A different needed
-   tool may require another permission decision.
+4. Re-run `dev-trio-doctor.sh --research`, then explicitly request the failed
+   run again with its original inputs — the question and stdin context for
+   research, the focus and every `--with-*` file for a review. This is a new
+   run and may repeat external calls; it is not automatic resumption. A
+   different needed tool may require another permission decision.
 
 Do not enable blanket permission bypass as the default fix. Successful recovery
 requires exit 0 **and** a nonempty final answer that addresses the question with
