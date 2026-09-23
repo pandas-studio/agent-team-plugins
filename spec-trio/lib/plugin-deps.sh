@@ -17,9 +17,9 @@
 #      directory if relative). Set but lacking the script is an error (rc 2):
 #      an explicit choice is never silently replaced by another copy.
 #   2. PATH (`command -v`) — what a Claude Code session provides.
-#   3. `claude plugin list --json`, run in the current directory. CLAUDE_CLI is
-#      used for it only when it names a binary called `claude`: it is also the
-#      planner/coder override, and a wrapper may take any argv as a prompt.
+#   3. `claude plugin list --json`, with the `claude` found on PATH, run in the
+#      current directory. Never CLAUDE_CLI: that is the planner/coder model
+#      override, and a wrapper there may take any argv as a prompt.
 #      Claude Code decides whether the plugin is enabled here; its `enabled`
 #      flag is per plugin id, not per install entry, so project/local entries
 #      count only when their projectPath is this directory. Remaining entries
@@ -44,7 +44,7 @@ _plugin_deps_absolute() {
 
 resolve_plugin_script() {
   local var="$1" id="$2" script="$3"
-  local dir p cli out rc cwd cwd_phys cands path version scope tab
+  local dir p out rc cwd cwd_phys cands path version scope tab
   RESOLVED_SCRIPT=""; RESOLVED_SOURCE=""; RESOLVED_WHY=""
 
   dir="${!var:-}"
@@ -67,23 +67,22 @@ resolve_plugin_script() {
   fi
   RESOLVED_WHY="$RESOLVED_WHY; not on PATH"
 
-  cli="${CLAUDE_CLI:-claude}"
-  case "$(basename -- "$cli")" in
-    claude) ;;
-    *) cli=claude ;;
-  esac
+  if ! command -v claude >/dev/null 2>&1; then
+    RESOLVED_WHY="$RESOLVED_WHY; no claude on PATH to ask for its plugin list"
+    return 1
+  fi
   if ! command -v jq >/dev/null 2>&1; then
-    RESOLVED_WHY="$RESOLVED_WHY; jq not found, so '$cli plugin list' was not read"
+    RESOLVED_WHY="$RESOLVED_WHY; jq not found, so 'claude plugin list' was not read"
     return 1
   fi
   rc=0
-  out=$("$cli" plugin list --json </dev/null 2>/dev/null) || rc=$?
+  out=$(claude plugin list --json </dev/null 2>/dev/null) || rc=$?
   if [ "$rc" -ne 0 ] || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$out"; then
-    RESOLVED_WHY="$RESOLVED_WHY; '$cli plugin list --json' failed (rc=$rc)"
+    RESOLVED_WHY="$RESOLVED_WHY; 'claude plugin list --json' failed (rc=$rc)"
     return 1
   fi
   if ! jq -e --arg id "$id" 'any(.[]; type == "object" and .id == $id)' >/dev/null 2>&1 <<<"$out"; then
-    RESOLVED_WHY="$RESOLVED_WHY; $id is not installed ('$cli plugin list')"
+    RESOLVED_WHY="$RESOLVED_WHY; $id is not installed ('claude plugin list')"
     return 1
   fi
   cwd=$(pwd)
@@ -120,7 +119,7 @@ resolve_plugin_script() {
 # message for a failed resolve_plugin_script call to stderr.
 plugin_deps_error() {
   if [ "$5" = "2" ]; then
-    echo "ERROR: $1: $RESOLVED_WHY (it must name the $2 plugin's bin/ directory)" >&2
+    echo "ERROR: $1: $RESOLVED_WHY (it must name the $2 plugin's bin/ directory)${6:+  $6}" >&2
   else
     echo "ERROR: $1 requires $3 from the $2 plugin — $RESOLVED_WHY. Install: /plugin install $2@pandas-studio, or set $4=<$2 plugin>/bin${6:+  $6}" >&2
   fi

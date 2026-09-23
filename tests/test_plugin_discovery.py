@@ -9,6 +9,7 @@ the suite may well have the installed plugins' bins on its own PATH.
 
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -18,6 +19,11 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 HELPERS = [ROOT / "ralph-trio/lib/plugin-deps.sh", ROOT / "spec-trio/lib/plugin-deps.sh"]
 SIBLINGS = ("ask-reviewer.sh", "ask-researcher.sh", "debate.sh")
+BARE_CALL = re.compile(r'(?:^|[;&|({]|\bthen\b|\bdo\b|\bspec_run_stage\b)\s*'
+                       r'(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|\S+)\s+)*'
+                       r'(?:ask-reviewer|ask-researcher|debate)\.sh(?=\s|$)')
+DRIVERS = ["ralph-trio/bin/ralph-trio.sh", "ralph-trio/bin/ralph-meta.sh", "ralph-trio/bin/ralph-debate.sh",
+           "spec-trio/bin/spec-trio.sh"]
 
 RESOLVE = r'''
 set -uo pipefail
@@ -55,22 +61,24 @@ class DiscoveryCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix="plugin-discovery-")
         self.addCleanup(self.tmp.cleanup)
         self.dir = Path(os.path.realpath(self.tmp.name))
-        self.path = scrubbed_path()
-        for name in SIBLINGS:
-            self.assertIsNone(shutil.which(name, path=self.path),
-                              f"{name} is on the scrubbed PATH {self.path}")
+        # `claude` must be absent too: step 3 runs the one on PATH, and the stub
+        # below has to be the only one the helper can reach.
+        self.bare_path = scrubbed_path()
+        for name in (*SIBLINGS, "claude"):
+            self.assertIsNone(shutil.which(name, path=self.bare_path),
+                              f"{name} is on the scrubbed PATH {self.bare_path}")
         self.stub_log = self.dir / "claude.log"
         self.called_log = self.dir / "called.log"
         self.plugin_list = self.dir / "plugin-list.json"
         self.set_plugin_list([])
-        self.claude = self.executable(self.dir / "claude", CLAUDE_STUB)
+        self.claude = self.executable(self.dir / "claude-bin/claude", CLAUDE_STUB)
+        self.path = f"{self.claude.parent}{os.pathsep}{self.bare_path}"
         home = self.dir / "home"
         home.mkdir()
         self.env = {
             "PATH": self.path,
             "HOME": str(home),
             "CLAUDE_CONFIG_DIR": str(home / ".claude"),
-            "CLAUDE_CLI": str(self.claude),
             "STUB_LOG": str(self.stub_log),
             "CALLED_LOG": str(self.called_log),
             "PLUGIN_LIST": str(self.plugin_list),
@@ -258,7 +266,7 @@ class ResolveTests(DiscoveryCase):
 
     def test_unusable_plugin_list(self):
         cases = {
-            "missing CLI": ({"CLAUDE_CLI": str(self.dir / "nonexistent")}, "failed (rc=127)"),
+            "no claude on PATH": ({"PATH": self.bare_path}, "no claude on PATH to ask for its plugin list"),
             "non-zero exit": ({"PLUGIN_LIST_RC": "3"}, "failed (rc=3)"),
         }
         for name, (env, reason) in cases.items():
@@ -286,15 +294,18 @@ class ResolveTests(DiscoveryCase):
         got = self.resolve(env={"PATH": f"{broken}:{self.path}"})
         self.assertEqual(got["script"], str(installed / "bin/ask-reviewer.sh"))
 
-    def test_claude_cli_under_another_name_is_not_asked(self):
-        # CLAUDE_CLI is also the planner/coder override; a wrapper could take
-        # `plugin list --json` as a prompt, so only a `claude` binary is asked.
-        wrapper = self.executable(self.dir / "my-wrapper", CLAUDE_STUB)
-        self.set_plugin_list([entry(self.plugin_tree("installed", ["ask-reviewer.sh"]))])
-        got = self.resolve(env={"CLAUDE_CLI": str(wrapper)})
-        self.assertEqual(got["rc"], 1)
-        self.assertIn("'claude plugin list --json' failed (rc=127)", got["why"])
-        self.assertEqual(self.claude_calls(), [])
+    def test_claude_cli_is_never_asked(self):
+        # CLAUDE_CLI is the planner/coder override; a wrapper there could take
+        # `plugin list --json` as a prompt, so step 3 uses the claude on PATH.
+        decoy_log = self.dir / "decoy.log"
+        decoy = self.executable(self.dir / "decoy/claude", f'#!/bin/sh\necho "$*" >> "{decoy_log}"\nexit 1\n')
+        installed = self.plugin_tree("installed", ["ask-reviewer.sh"])
+        self.set_plugin_list([entry(installed)])
+        got = self.resolve(env={"CLAUDE_CLI": str(decoy)})
+        self.assertEqual(got["script"], str(installed / "bin/ask-reviewer.sh"))
+        self.assertFalse(decoy_log.exists())
+        self.assertEqual(self.claude_calls(), [f"plugin list --json|{self.cwd}"])
+        self.assertIsNone(shutil.which("claude", path=self.bare_path))
 
     def test_empty_version_and_scope_keep_the_label_readable(self):
         installed = self.plugin_tree("installed", ["ask-reviewer.sh"])
@@ -400,6 +411,18 @@ class DriverTests(DiscoveryCase):
                                       env=dict(self.env, PLANNER_CLI=str(planner), DEV_TRIO_BIN=str(self.dev / "bin")),
                                       stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
                 self.assertIn(str(self.dev / "bin/ask-researcher.sh"), self.called(), proc.stderr)
+
+    def test_no_driver_runs_a_sibling_by_bare_name(self):
+        # Driver runs reach only some call sites; this catches the rest. A name in
+        # command position (after env assignments, or as spec_run_stage's command)
+        # would be looked up on PATH again. Checked to flag all 11 call sites on
+        # main f6e53b1.
+        for rel in DRIVERS:
+            for number, line in enumerate((ROOT / rel).read_text().splitlines(), 1):
+                if line.lstrip().startswith("#"):
+                    continue
+                with self.subTest(file=rel, line=number):
+                    self.assertIsNone(BARE_CALL.search(line), line)
 
     def test_plugin_list_supplies_the_sibling(self):
         self.set_plugin_list([entry(self.dev, version="9.9.9")])
