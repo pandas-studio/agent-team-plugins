@@ -37,7 +37,8 @@ agy_denial_conversations() {
 # would need, "<kind>(<target>)", unique and in the order agy recorded them.
 # A target that is not valid JSON once unquoted (Go's \x.. and \a escapes are
 # not) is kept in its raw quoted form rather than dropping the rest. Control
-# characters are removed: the target is text the model wrote.
+# characters are shown escaped (\n, \t, \u001b), not removed: the target is
+# text the model wrote, and deleting them would name a different command.
 agy_denial_targets() {
   local home="$1" log="$2" id transcript
   for id in $(agy_denial_conversations "$log"); do
@@ -49,7 +50,7 @@ agy_denial_targets() {
       | capture("^permission check failed for (?<kind>[A-Za-z_]+) (?<q>\"([^\"\\\\]|\\\\.)*\")")?
       | .q as $q
       | "\(.kind)(\($q | try fromjson catch $q))"
-      | gsub("[[:cntrl:]]"; "")
+      | gsub("(?<c>[[:cntrl:]])"; .c | tojson | .[1:-1])
     ' "$transcript" 2>/dev/null || true
   done | awk '!seen[$0]++'
   return 0

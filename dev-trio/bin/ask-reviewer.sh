@@ -586,10 +586,11 @@ result_output_failed() {
 }
 # A review that failed to parse is a headless denial (#103) only when all of
 # this run's own evidence says so: a workspace-aware model, agy's no-output
-# permission notice inside this run's frozen transcript range, and either a
-# denial agy recorded for this run's conversation or a final that is nothing
-# but the notice. A review that parsed is never touched, and a denial agy
-# recovered from before writing a malformed review stays a parse failure.
+# permission notice inside this run's frozen transcript range, and a final
+# that is nothing but that notice. A review that parsed is never touched, and
+# any other text in the final — a malformed review, a denial agy recovered
+# from — keeps it a parse failure. The denials agy recorded for this run's
+# conversation are what the result reports, not what decides it.
 # Echoes the replacement result, or fails and leaves the parse result alone.
 AGY_DENIED=()
 AGY_CONVERSATIONS=()
@@ -604,7 +605,7 @@ agy_denial_result() {
     while IFS= read -r line; do AGY_DENIED+=("$line"); done \
       < <(agy_denial_targets "$(dev_trio_agy_home)" "$AGY_CLI_LOG")
   fi
-  [ "${#AGY_DENIED[@]}" -gt 0 ] || agy_denial_notice_only "$FINAL" || return 1
+  agy_denial_notice_only "$FINAL" || return 1
   review_result_permission_denied "$(cat "$RESULT_TMP")" \
     ${AGY_CONVERSATIONS[@]+"${AGY_CONVERSATIONS[@]}"} -- ${AGY_DENIED[@]+"${AGY_DENIED[@]}"}
 }

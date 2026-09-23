@@ -1262,6 +1262,7 @@ agy_transcript() {
     jq -cn '{status:"ERROR",error:"permission check failed for command \"lsof -p $$ || pwd\": user denied permission to run command:\nlsof -p $$ || pwd"}'
     jq -cn '{status:"ERROR",error:"permission check failed for command \"a\\x01b\": user denied"}'
     jq -cn '{status:"ERROR",error:"permission check failed for read_url \"github.com\": user denied permission for read_url(github.com)"}'
+    jq -cn '{status:"ERROR",error:("permission check failed for command " + ("echo a\nb\tc\u001bd" | tojson) + ": user denied")}'
     jq -cn '{status:"ERROR",error:"permission check failed for command \"lsof -p $$ || pwd\": again"}'
     printf '{"status":"ERR'
   } > "$dir/transcript_full.jsonl"
@@ -1271,7 +1272,7 @@ agy_review() {
     DEV_TRIO_AGY_HOME="$AGY_HOME" TEST_AGY_ARGV="$TMP/agy-argv" \
     TEST_AGY_NOTICE_TEXT="$AGY_NOTICE"
 }
-AGY_DENIED='["command(lsof -p $$ || pwd)","command(\"a\\x01b\")","read_url(github.com)"]'
+AGY_DENIED='["command(lsof -p $$ || pwd)","command(\"a\\x01b\")","read_url(github.com)","command(echo a\\nb\\tc\\u001bd)"]'
 
 agy_transcript
 agy_review 3 TEST_AGY_ID="$AGY_ID" TEST_AGY_NOTICE=1
@@ -1332,12 +1333,18 @@ check 'a traversal id reads no transcript' json_is "$RESULT" '.status=="permissi
 # A large transcript: the notice is still found, and a final that is mostly
 # other text is still not "notice only" (#103 review: an early-exiting grep
 # under pipefail turned both answers around).
+seq 1 200000 > "$TMP/agy-noise"
+{ printf '%s\n' "$AGY_NOTICE"; cat "$TMP/agy-noise"; } > "$TMP/agy-noisy"
+agy_scan() { bash -c 'set -euo pipefail; . "$1/dev-trio/lib/agy-denial.sh"; shift; "$@"' _ "$ROOT" "$@"; }
+check 'a notice followed by much output is still found' agy_scan agy_denial_notice_in "$TMP/agy-noisy"
+check 'a notice early in a byte range is still found' agy_scan agy_denial_notice_in "$TMP/agy-noisy" 0 300
+check 'much other output is not notice-only' eval '! agy_scan agy_denial_notice_only "$TMP/agy-noisy"'
 agy_transcript
 agy_review 3 TEST_AGY_ID="$AGY_ID" TEST_AGY_NOTICE=1 TEST_AGY_NOISE=1
-check 'a notice followed by much output is still found' json_is "$RESULT" ".status==\"permission-denied\" and .denied==$AGY_DENIED"
-rm -rf "$AGY_HOME/brain"
-agy_review 3 TEST_AGY_NOTICE=1 TEST_AGY_NOISE=1
-check 'much other output is not a notice-only final' json_is "$RESULT" '.status=="parse-failed"'
+check 'a notice beside other output stays a parse failure even with recorded denials' json_is "$RESULT" '.status=="parse-failed" and (has("denied")|not)'
+agy_transcript
+agy_review 3 TEST_AGY_ID="$AGY_ID" TEST_AGY_NOTICE=1 TEST_AGY_STDOUT="$TMP/agy-stdout.md"
+check 'a notice, recorded denials and a malformed review stay a parse failure' json_is "$RESULT" '.status=="parse-failed" and .error=="duplicate Verdict headings"'
 
 # A log directory agy could not create a file in gets no --log-file either:
 # the wrapper creates the file itself first, and here it cannot.
