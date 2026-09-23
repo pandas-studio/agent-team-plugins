@@ -893,6 +893,31 @@ assert_eq "$(ls -d /tmp/ralph-"$RD106_TEAM"-iter-* 2>/dev/null | wc -l | tr -d '
 assert_eq "$(git -C "$WTR/repo" branch --list "ralph/$RD106_TEAM-*" | wc -l | tr -d ' ')" "0"
 assert_eq "$(git -C "$WTR/repo" worktree list | wc -l | tr -d ' ')" "1"
 assert_eq "$(grep -c '^- \[ \] task wt$' "$WTR/BACKLOG.md")" "1"
+assert_eq "$(grep -c '^  worktree: discarded$' "$RD106_WT_LOG")" "1"
+# A failed dispatch takes the end-of-iteration worktree path, so a worktree that
+# cannot be discarded is recorded where it was left instead of dropped silently. The shim
+# runs inside the worktree and switches it off its generated branch, which makes
+# merge_or_discard_worktree refuse (rc=1) and preserve it.
+cat > "$RD/bin/debate.sh" <<'SHIM9'
+#!/bin/sh
+git checkout -q -b rd106-moved
+exit 1
+SHIM9
+chmod +x "$RD/bin/debate.sh"
+printf -- '- [ ] task wt\n' > "$WTR/BACKLOG.md"
+assert_eq "$( (cd "$WTR/repo" && env PATH="$ROOT/dev-trio/bin:$PATH" DEBATE_CONDUCTOR_BIN="$RD/bin" \
+  AGENT_TEAM="$RD106_TEAM" TMUX="" RALPH_TRIO_WORKSPACE="$TMP/rw106wt" \
+  "$ROOT/ralph-trio/bin/ralph-debate.sh" --backlog "$WTR/BACKLOG.md" --max-iter 1 --worktree \
+  >/dev/null 2>"$TMP/rd106wt.err" </dev/null; echo "rc=$?") )" "rc=1"
+RD106_KEPT="$(sed -n 's/^  worktree: PRESERVED (not merged or discarded: \(.*\))$/\1/p' "$RD106_WT_LOG")"
+case "$RD106_KEPT" in /tmp/ralph-"$RD106_TEAM"-iter-1.*) assert_eq kept kept ;; *) assert_eq "$RD106_KEPT" "/tmp/ralph-$RD106_TEAM-iter-1.*" ;; esac
+assert_ok test -d "$RD106_KEPT"
+assert_eq "$(grep '^## iter [0-9]' "$WTR/fix_plan.md" | tail -1 | sed 's/^## iter \([0-9]*\) · [0-9TZ:-]* · /iter \1 /')" "iter 1 WORKTREE-MERGE-BLOCK"
+assert_eq "$(grep '^Worktree: ' "$WTR/fix_plan.md" | tail -1)" "Worktree: $RD106_KEPT"
+# The blocked worktree is what stops the run here, as on any other iteration.
+assert_eq "$(sed -n 's/^=== STOP (\(.*\)) completed=\(.*\) ===$/\1 \2/p' "$RD106_WT_LOG")" "worktree-blocked 0"
+assert_eq "$(grep -c '^- \[ \] task wt$' "$WTR/BACKLOG.md")" "1"
+git -C "$WTR/repo" worktree remove --force "$RD106_KEPT"
 
 # A relative RALPH_TRIO_WORKSPACE still yields an absolute receipt path, which
 # debate.sh requires: $LOG_DIR is relative in that case and is resolved once in

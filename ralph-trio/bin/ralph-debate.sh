@@ -327,8 +327,10 @@ while :; do
     # A dispatch that never produced a debate is not an UNKNOWN verdict. An
     # outage (auth, quota, a missing model) would fail every later topic the
     # same way, and treating it as a finished iteration consumed the whole
-    # backlog and exited 0 (#106). Put the topic back and stop instead.
+    # backlog and exited 0 (#106). Put the topic back here; the iteration then
+    # takes the normal worktree path as not passed, and the run stops after it.
     if [ "$DISPATCH_FAILED" = "1" ]; then
+      VERDICT="DISPATCH-FAILED"
       printf '  dispatch: FAILED (rc=%s)\n' "$DEBATE_RC" >> "$SUMMARY_LOG"
       RESTORED="topic restored"
       if ! append_to_backlog "$BACKLOG_FILE" "$TASK"; then
@@ -341,13 +343,7 @@ while :; do
       printf '## iter %d · %s · DISPATCH-FAILED (%s)\nTopic: %s\ndebate.sh rc=%s · receipt: %s\n\n' \
         "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RESTORED" "$TASK" "$DEBATE_RC" "$RECEIPT_NOTE" \
         >> "$FIX_PLAN_FILE"
-      [ -z "$WT" ] || merge_or_discard_worktree "$WT" "$ITER" 0 "$ORIGINAL_DIR" || true
-      ralph_log "debate dispatch failed on iter $ITER ($RESTORED). Stopping."
-      echo "=== STOP (dispatch-failed) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
-      RUN_FAILED=1
-      break
-    fi
-    if [ -z "$DEBATE_DIR" ]; then
+    elif [ -z "$DEBATE_DIR" ]; then
       VERDICT="UNKNOWN"
     else
       printf '  debate dir: %s\n' "$DEBATE_DIR" >> "$SUMMARY_LOG"
@@ -362,7 +358,8 @@ while :; do
     fi
   fi
 
-  printf '  verdict:  %s\n' "$VERDICT" >> "$SUMMARY_LOG"
+  # A failed dispatch has no verdict to report; its fix_plan entry is written.
+  [ "$VERDICT" = "DISPATCH-FAILED" ] || printf '  verdict:  %s\n' "$VERDICT" >> "$SUMMARY_LOG"
 
   PASSED=0
   case "$VERDICT" in
@@ -385,6 +382,8 @@ while :; do
         "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TASK" \
         "$([ -n "${DEBATE_DIR:-}" ] && echo "Transcript: $DEBATE_DIR" || echo "(no transcript dir)")" \
         >> "$FIX_PLAN_FILE"
+      ;;
+    DISPATCH-FAILED)
       ;;
     *)
       printf '## iter %d · %s · UNKNOWN verdict\nTopic: %s\n\n' \
@@ -431,6 +430,13 @@ while :; do
       break
     fi
     unset RALPH_WT_DIR
+  fi
+
+  if [ "$VERDICT" = "DISPATCH-FAILED" ]; then
+    ralph_log "debate dispatch failed on iter $ITER ($RESTORED). Stopping."
+    echo "=== STOP (dispatch-failed) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
+    RUN_FAILED=1
+    break
   fi
 
   COMPLETED=$ITER
