@@ -51,7 +51,8 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 TMP="$(mktemp -d)"
 LOCKWT=""
 # with_worktree creates worktrees under /tmp, outside $TMP.
-trap '[ -n "$LOCKWT" ] && rm -rf "$LOCKWT"; rm -rf "$TMP"' EXIT
+# The #106 worktree case names its worktrees after this shell's PID.
+trap '[ -n "$LOCKWT" ] && rm -rf "$LOCKWT"; rm -rf "$TMP" /tmp/ralph-rd106-$$-iter-*' EXIT
 git init -q "$TMP/repo"
 git -C "$TMP/repo" config user.email test@example.com
 git -C "$TMP/repo" config user.name Test
@@ -741,10 +742,23 @@ RD61_DIR="$(sed -n 's/^  debate dir: *//p' "$RD61_LOG")"
 assert_eq "$(basename "$(dirname "$RD61_DIR")")" "smoke"
 case "$RD61_DIR" in *debate-19700101-000000) assert_eq "own dir" "foreign dir" ;; *) assert_eq "own dir" "own dir" ;; esac
 assert_ok test -f "$RD61_DIR/round-2-crit.md"
-# A successful dispatch whose receipt is gone is UNKNOWN, never a fallback read
-# of whatever the symlink happens to point at now.
-assert_eq "$(run_rd61 env RD61_DROP_RECEIPT=1)" "rc=0"
-assert_eq "$(sed -n 's/^  verdict: *//p' "$TMP/rw61/log/smoke/latest-ralph-debate.log")" "UNKNOWN"
+# A successful dispatch whose receipt is gone is a failed dispatch, never a
+# fallback read of whatever the symlink happens to point at now. A failed
+# dispatch has no verdict: the topic goes back on the backlog and the run stops
+# with exit 1, without counting the iteration (#106). One row per outcome: the
+# STOP reason and completed count, pending copies of the topic, verdict rows in
+# the summary, and the last fix_plan header without its timestamp.
+rd106_outcome() {
+  local log="$TMP/rw61/log/smoke/latest-ralph-debate.log"
+  printf '%s|pending=%s|verdicts=%s|%s\n' \
+    "$(sed -n 's/^=== STOP (\(.*\)) completed=\(.*\) ===$/\1 \2/p' "$log")" \
+    "$(grep -c '^- \[ \] task 61$' "$DRV/BACKLOG.md" || true)" \
+    "$(grep -c '^  verdict:' "$log" || true)" \
+    "$(grep '^## iter [0-9]' "$DRV/fix_plan.md" | tail -1 | sed 's/^## iter \([0-9]*\) · [0-9TZ:-]* · /iter \1 /')"
+}
+RD106_FAILED="dispatch-failed 0|pending=1|verdicts=0|iter 1 DISPATCH-FAILED (topic restored)"
+assert_eq "$(run_rd61 env RD61_DROP_RECEIPT=1)" "rc=1"
+assert_eq "$(rd106_outcome)" "$RD106_FAILED"
 # ralph_log writes to stderr, not the summary log.
 assert_ok grep -q 'receipt is missing or unusable' "$TMP/rd61.err"
 # The receipt is kept beside the logs as a per-dispatch audit artifact, and the
@@ -760,9 +774,11 @@ cat > "$RD/bin/debate.sh" <<SHIM3
 exit 7
 SHIM3
 chmod +x "$RD/bin/debate.sh"
-assert_eq "$(run_rd61 env)" "rc=0"
-assert_eq "$(sed -n 's/^  verdict: *//p' "$TMP/rw61/log/smoke/latest-ralph-debate.log")" "UNKNOWN"
+assert_eq "$(run_rd61 env)" "rc=1"
+assert_eq "$(rd106_outcome)" "$RD106_FAILED"
 assert_eq "$(find "$TMP/rw61/log/smoke" -name 'debate-receipt-*' -size 0 | wc -l | tr -d ' ')" "0"
+# The fix_plan record does not point at the reservation it just reclaimed.
+assert_eq "$(grep '^debate.sh rc=' "$DRV/fix_plan.md" | tail -1)" "debate.sh rc=7 · receipt: none published"
 # ...while the published one from the first dispatch is still there.
 # A receipt with contents is never reclaimed, even when the reader rejects it:
 # its bytes are the evidence of what the producer got wrong.
@@ -775,8 +791,8 @@ printf 'not a receipt\n' > "\$DEBATE_RECEIPT"
 exit \$rc
 SHIM2
 chmod +x "$RD/bin/debate.sh"
-assert_eq "$(run_rd61 env)" "rc=0"
-assert_eq "$(sed -n 's/^  verdict: *//p' "$TMP/rw61/log/smoke/latest-ralph-debate.log")" "UNKNOWN"
+assert_eq "$(run_rd61 env)" "rc=1"
+assert_eq "$(rd106_outcome)" "$RD106_FAILED"
 assert_eq "$(grep -lx 'not a receipt' "$TMP/rw61/log/smoke"/debate-receipt-*.* | wc -l | tr -d ' ')" "1"
 # Two receipts survive the whole block: the one a successful dispatch published
 # and the one whose contents a rejected dispatch left as evidence. The empty
@@ -785,9 +801,9 @@ assert_eq "$(find "$TMP/rw61/log/smoke" -name 'debate-receipt-*' -size 0 | wc -l
 assert_eq "$(find "$TMP/rw61/log/smoke" -name 'debate-receipt-*' ! -size 0 | wc -l | tr -d ' ')" "2"
 
 # A dispatch that published a perfectly good receipt and *then* failed is still
-# UNKNOWN: the exit code gates the read, because a signal after publication can
-# leave a valid receipt behind for a run that did not finish. The receipt itself
-# is kept — it records what the producer published.
+# a failed dispatch: the exit code gates the read, because a signal after
+# publication can leave a valid receipt behind for a run that did not finish.
+# The receipt itself is kept — it records what the producer published.
 cat > "$RD/bin/debate.sh" <<SHIM4
 #!/bin/sh
 "$ROOT/debate-conductor/bin/debate.sh" "\$@"
@@ -795,10 +811,85 @@ cat > "$RD/bin/debate.sh" <<SHIM4
 exit 7
 SHIM4
 chmod +x "$RD/bin/debate.sh"
-assert_eq "$(run_rd61 env)" "rc=0"
-assert_eq "$(sed -n 's/^  verdict: *//p' "$TMP/rw61/log/smoke/latest-ralph-debate.log")" "UNKNOWN"
+assert_eq "$(run_rd61 env)" "rc=1"
+assert_eq "$(rd106_outcome)" "$RD106_FAILED"
 RD61_LAST="$(sed -n 's/^  receipt: *//p' "$TMP/rw61/log/smoke/latest-ralph-debate.log" | sed 's/ (rc=.*//')"
 assert_ok jq -e '.schema_version == 1' "$RD61_LAST"
+# ...and the fix_plan record names that kept receipt.
+assert_eq "$(grep '^debate.sh rc=' "$DRV/fix_plan.md" | tail -1)" "debate.sh rc=7 · receipt: $RD61_LAST"
+
+# A failed dispatch stops the run: later topics are neither consumed nor
+# dispatched, and --max-iter 0 (unlimited) still ends after one iteration
+# (--max-runtime only bounds the test if that ever regresses). The driver is
+# reached through DEBATE_CONDUCTOR_BIN, as in #106's repro.
+cat > "$RD/bin/debate.sh" <<SHIM6
+#!/bin/sh
+echo run >> "$RD/shim-runs"
+exit 1
+SHIM6
+chmod +x "$RD/bin/debate.sh"
+rm -f "$RD/shim-runs"
+printf -- '- [ ] task 61\n- [ ] task two\n' > "$DRV/BACKLOG.md"
+assert_eq "$( (cd "$DRV" && env PATH="$ROOT/dev-trio/bin:$PATH" DEBATE_CONDUCTOR_BIN="$RD/bin" \
+  AGENT_TEAM=smoke TMUX="" RALPH_TRIO_WORKSPACE="$TMP/rw61" \
+  "$ROOT/ralph-trio/bin/ralph-debate.sh" --backlog BACKLOG.md --max-iter 0 --max-runtime 60 \
+  >/dev/null 2>"$TMP/rd106.err" </dev/null; echo "rc=$?") )" "rc=1"
+assert_eq "$(wc -l < "$RD/shim-runs" | tr -d ' ')" "1"
+assert_eq "$(rd106_outcome)" "$RD106_FAILED"
+# task two keeps its place; only the failed topic moved behind it.
+assert_eq "$(grep -n '^- \[ \] ' "$DRV/BACKLOG.md" | tr '\n' ' ')" "2:- [ ] task two 3:- [ ] task 61 "
+
+# When the topic cannot be put back, the record says so and still carries the
+# topic text. A backlog of its own, so the read-only file cannot break later
+# writes to the shared one; root ignores mode bits, so the case is skipped there.
+if [ "$(id -u)" != 0 ]; then
+  RO="$TMP/rd106-ro"
+  mkdir -p "$RO"
+  printf -- '- [ ] task ro\n' > "$RO/BACKLOG.md"
+  cat > "$RD/bin/debate.sh" <<SHIM7
+#!/bin/sh
+chmod a-w "$RO/BACKLOG.md"
+exit 1
+SHIM7
+  chmod +x "$RD/bin/debate.sh"
+  RO_RC=$( (cd "$RO" && env PATH="$ROOT/dev-trio/bin:$PATH" DEBATE_CONDUCTOR_BIN="$RD/bin" \
+    AGENT_TEAM=smoke TMUX="" RALPH_TRIO_WORKSPACE="$TMP/rw106ro" \
+    "$ROOT/ralph-trio/bin/ralph-debate.sh" --backlog BACKLOG.md --max-iter 1 \
+    >/dev/null 2>"$TMP/rd106ro.err" </dev/null; echo "rc=$?") )
+  chmod u+w "$RO/BACKLOG.md"
+  assert_eq "$RO_RC" "rc=1"
+  assert_eq "$(grep '^## iter [0-9]' "$RO/fix_plan.md" | sed 's/^## iter \([0-9]*\) · [0-9TZ:-]* · /iter \1 /')" \
+    "iter 1 DISPATCH-FAILED (topic NOT restored)"
+  assert_ok grep -qx 'Topic: task ro' "$RO/fix_plan.md"
+  assert_eq "$(cat "$RO/BACKLOG.md")" "- [x] task ro"
+  assert_ok grep -q 'could not restore the topic to BACKLOG' "$TMP/rd106ro.err"
+fi
+
+# With --worktree, a failed dispatch discards the iteration's worktree and its
+# branch before stopping. A team name of its own keeps the /tmp paths unique to
+# this run, and the EXIT trap removes them if an assertion fails first.
+WTR="$TMP/rd106-wt"
+git init -q "$WTR/repo"
+git -C "$WTR/repo" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
+printf -- '- [ ] task wt\n' > "$WTR/BACKLOG.md"
+cat > "$RD/bin/debate.sh" <<SHIM8
+#!/bin/sh
+exit 1
+SHIM8
+chmod +x "$RD/bin/debate.sh"
+assert_eq "$( (cd "$WTR/repo" && env PATH="$ROOT/dev-trio/bin:$PATH" DEBATE_CONDUCTOR_BIN="$RD/bin" \
+  AGENT_TEAM="rd106-$$" TMUX="" RALPH_TRIO_WORKSPACE="$TMP/rw106wt" \
+  "$ROOT/ralph-trio/bin/ralph-debate.sh" --backlog "$WTR/BACKLOG.md" --max-iter 1 --worktree \
+  >/dev/null 2>"$TMP/rd106wt.err" </dev/null; echo "rc=$?") )" "rc=1"
+RD106_WT_LOG="$TMP/rw106wt/log/rd106-$$/latest-ralph-debate.log"
+assert_eq "$(sed -n 's/^=== STOP (\(.*\)) completed=\(.*\) ===$/\1 \2/p' "$RD106_WT_LOG")" "dispatch-failed 0"
+# A worktree really was created for the iteration...
+assert_eq "$(grep -c "^  worktree: /tmp/ralph-rd106-$$-iter-1\." "$RD106_WT_LOG")" "1"
+# ...and nothing of it is left: no directory, no branch, no registered worktree.
+assert_eq "$(ls -d /tmp/ralph-rd106-$$-iter-* 2>/dev/null | wc -l | tr -d ' ')" "0"
+assert_eq "$(git -C "$WTR/repo" branch --list "ralph/rd106-$$-*" | wc -l | tr -d ' ')" "0"
+assert_eq "$(git -C "$WTR/repo" worktree list | wc -l | tr -d ' ')" "1"
+assert_eq "$(grep -c '^- \[ \] task wt$' "$WTR/BACKLOG.md")" "1"
 
 # A relative RALPH_TRIO_WORKSPACE still yields an absolute receipt path, which
 # debate.sh requires: $LOG_DIR is relative in that case and is resolved once in
@@ -818,6 +909,29 @@ assert_eq "$( (cd "$DRV" && env PATH="$RD/bin:$ROOT/dev-trio/bin:$PATH" \
   >/dev/null 2>"$TMP/rd61rel.err" </dev/null; echo "rc=$?") )" "rc=0"
 assert_eq "$(sed -n 's/^  verdict: *//p' "$DRV/rel-ws/log/smoke/latest-ralph-debate.log")" "RECONSIDER"
 assert_ok grep -qE '^  receipt: +/' "$DRV/rel-ws/log/smoke/latest-ralph-debate.log"
+
+# An UNKNOWN from a debate that did finish (the critic gave no parseable
+# verdict) is not a failed dispatch and keeps its old handling: logged to
+# fix_plan.md, not re-queued, and the run carries on to exit 0. The critic stub
+# also writes its critique to --output-last-message, as `answer` does, or native
+# final capture reports no answer.
+cat > "$TMP/worker-cli/noverdict" <<'STUB'
+#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --output-last-message ]; then
+    printf '## Critique\nNo verdict here.\n' > "$2"
+    break
+  fi
+  shift
+done
+echo "## Critique"
+echo "No verdict here."
+STUB
+chmod +x "$TMP/worker-cli/noverdict"
+assert_eq "$(run_rd61 env CRITIC_CLI="$TMP/worker-cli/noverdict")" "rc=0"
+assert_eq "$(rd106_outcome)" "max-iter 1|pending=0|verdicts=1|iter 1 UNKNOWN verdict"
+assert_eq "$(sed -n 's/^  verdict: *//p' "$TMP/rw61/log/smoke/latest-ralph-debate.log")" "UNKNOWN"
+assert_eq "$(cat "$DRV/BACKLOG.md")" "- [x] task 61"
 
 # A debate-conductor too old to ship the shared receipt library is refused up
 # front, not once per iteration.
