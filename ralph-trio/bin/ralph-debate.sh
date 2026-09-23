@@ -9,6 +9,9 @@
 #        STRENGTHEN  → log SHIP to fix_plan.md (proposal accepted as-is)
 #        RECONSIDER  → re-queue to BACKLOG with note
 #        OVERTURN    → log to fix_plan.md, do not re-queue (human attention)
+#      A dispatch that failed (debate.sh non-zero, or no usable receipt) has no
+#      verdict: the topic goes back on BACKLOG and the run stops with exit 1,
+#      since the next topic would meet the same outage.
 #
 # Note: this variant produces *text artifacts* (proposals + critiques), not
 # code diffs. It does NOT auto-apply or auto-commit code.
@@ -46,7 +49,7 @@ NO_VALIDATE=0
 MAX_DIFF_LINES=10000
 DRY_RUN=0
 
-usage() { sed -n '2,25p' "$0" >&2; }
+usage() { sed -n '2,29p' "$0" >&2; }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -251,7 +254,7 @@ while :; do
       # pop_top_task already marked the task done; put it back.
       [ "$DRY_RUN" = "1" ] || append_to_backlog "$BACKLOG_FILE" "$TASK"
       echo "=== STOP (worktree-failed) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
-      WORKTREE_FAILED=1
+      RUN_FAILED=1
       break
     fi
     WORK_DIR="$WT"
@@ -280,7 +283,7 @@ while :; do
       [ "$DRY_RUN" = "1" ] || append_to_backlog "$BACKLOG_FILE" "$TASK"
       [ -z "$WT" ] || merge_or_discard_worktree "$WT" "$ITER" 0 "$ORIGINAL_DIR" || true
       echo "=== STOP (receipt-failed) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
-      WORKTREE_FAILED=1
+      RUN_FAILED=1
       break
     fi
     DEBATE_RC=0
@@ -301,9 +304,12 @@ while :; do
     printf '  receipt:    %s (rc=%s)\n' "$DEBATE_RECEIPT" "$DEBATE_RC" >> "$SUMMARY_LOG"
     DEBATE_DIR=""
     LAST_CRIT=""
+    DISPATCH_FAILED=0
     if [ "$DEBATE_RC" -ne 0 ]; then
+      DISPATCH_FAILED=1
       ralph_log "  WARNING: debate.sh failed (rc=$DEBATE_RC) — not reading its receipt"
     elif ! RECEIPT_DATA=$(debate_receipt_read "$DEBATE_RECEIPT"); then
+      DISPATCH_FAILED=1
       ralph_log "  WARNING: debate.sh exited 0 but its receipt is missing or unusable ($DEBATE_RECEIPT)"
     else
       DEBATE_DIR=$(printf '%s\n' "$RECEIPT_DATA" | jq -r '.debate_dir')
@@ -318,7 +324,26 @@ while :; do
     # SIGKILL runs no cleanup at all, and the writer's own `.tmp.XXXXXX` can
     # outlive it too.
     [ -s "$DEBATE_RECEIPT" ] || rm -f "$DEBATE_RECEIPT"
-    if [ -z "$DEBATE_DIR" ]; then
+    # A dispatch that never produced a debate is not an UNKNOWN verdict. An
+    # outage (auth, quota, a missing model) would fail every later topic the
+    # same way, and treating it as a finished iteration consumed the whole
+    # backlog and exited 0 (#106). Put the topic back here; the iteration then
+    # takes the normal worktree path as not passed, and the run stops after it.
+    if [ "$DISPATCH_FAILED" = "1" ]; then
+      VERDICT="DISPATCH-FAILED"
+      printf '  dispatch: FAILED (rc=%s)\n' "$DEBATE_RC" >> "$SUMMARY_LOG"
+      RESTORED="topic restored"
+      if ! append_to_backlog "$BACKLOG_FILE" "$TASK"; then
+        RESTORED="topic NOT restored"
+        ralph_log "  could not restore the topic to BACKLOG ($BACKLOG_FILE): $TASK"
+      fi
+      # The empty reservation was reclaimed above; only name a receipt that is kept.
+      RECEIPT_NOTE="none published"
+      [ ! -e "$DEBATE_RECEIPT" ] || RECEIPT_NOTE="$DEBATE_RECEIPT"
+      printf '## iter %d · %s · DISPATCH-FAILED (%s)\nTopic: %s\ndebate.sh rc=%s · receipt: %s\n\n' \
+        "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RESTORED" "$TASK" "$DEBATE_RC" "$RECEIPT_NOTE" \
+        >> "$FIX_PLAN_FILE"
+    elif [ -z "$DEBATE_DIR" ]; then
       VERDICT="UNKNOWN"
     else
       printf '  debate dir: %s\n' "$DEBATE_DIR" >> "$SUMMARY_LOG"
@@ -333,7 +358,8 @@ while :; do
     fi
   fi
 
-  printf '  verdict:  %s\n' "$VERDICT" >> "$SUMMARY_LOG"
+  # A failed dispatch has no verdict to report; its fix_plan entry is written.
+  [ "$VERDICT" = "DISPATCH-FAILED" ] || printf '  verdict:  %s\n' "$VERDICT" >> "$SUMMARY_LOG"
 
   PASSED=0
   case "$VERDICT" in
@@ -356,6 +382,8 @@ while :; do
         "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TASK" \
         "$([ -n "${DEBATE_DIR:-}" ] && echo "Transcript: $DEBATE_DIR" || echo "(no transcript dir)")" \
         >> "$FIX_PLAN_FILE"
+      ;;
+    DISPATCH-FAILED)
       ;;
     *)
       printf '## iter %d · %s · UNKNOWN verdict\nTopic: %s\n\n' \
@@ -398,10 +426,17 @@ while :; do
       # keep one more full worktree each time.
       ralph_log "worktree for iter $ITER needs attention (blocked). Stopping."
       echo "=== STOP (worktree-blocked) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
-      WORKTREE_FAILED=1
+      RUN_FAILED=1
       break
     fi
     unset RALPH_WT_DIR
+  fi
+
+  if [ "$VERDICT" = "DISPATCH-FAILED" ]; then
+    ralph_log "debate dispatch failed on iter $ITER ($RESTORED). Stopping."
+    echo "=== STOP (dispatch-failed) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
+    RUN_FAILED=1
+    break
   fi
 
   COMPLETED=$ITER
@@ -415,5 +450,6 @@ done
 
 echo "=== ralph-debate done (completed=$COMPLETED) ===" | tee -a "$SUMMARY_LOG" >&2
 echo "summary: $SUMMARY_LOG" >&2
-# A worktree that could not be created, merged or discarded: don't report success.
-if [ "${WORKTREE_FAILED:-0}" = "1" ]; then exit 1; fi
+# A run stopped by a failure (a debate dispatch, a receipt reservation, or a
+# worktree that could not be created, merged or discarded): don't report success.
+if [ "${RUN_FAILED:-0}" = "1" ]; then exit 1; fi
