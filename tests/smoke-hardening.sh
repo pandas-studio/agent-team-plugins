@@ -51,8 +51,10 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 TMP="$(mktemp -d)"
 LOCKWT=""
 # with_worktree creates worktrees under /tmp, outside $TMP.
-# The #106 worktree case names its worktrees after this shell's PID.
-trap '[ -n "$LOCKWT" ] && rm -rf "$LOCKWT"; rm -rf "$TMP" /tmp/ralph-rd106-$$-iter-*' EXIT
+# The #106 worktree case runs under a team named after $TMP's unique suffix
+# (not the PID, which can be recycled), so this glob only matches its own paths.
+RD106_TEAM="rd106-$(basename "$TMP" | tr -cd 'A-Za-z0-9')"
+trap '[ -n "$LOCKWT" ] && rm -rf "$LOCKWT"; rm -rf "$TMP" /tmp/ralph-"$RD106_TEAM"-iter-*' EXIT
 git init -q "$TMP/repo"
 git -C "$TMP/repo" config user.email test@example.com
 git -C "$TMP/repo" config user.name Test
@@ -866,8 +868,9 @@ SHIM7
 fi
 
 # With --worktree, a failed dispatch discards the iteration's worktree and its
-# branch before stopping. A team name of its own keeps the /tmp paths unique to
-# this run, and the EXIT trap removes them if an assertion fails first.
+# branch before stopping. A team name of its own ($RD106_TEAM) keeps the /tmp
+# paths unique to this run, and the EXIT trap removes them if an assertion fails
+# first; the fixture repo, and with it the worktree registration, is under $TMP.
 WTR="$TMP/rd106-wt"
 git init -q "$WTR/repo"
 git -C "$WTR/repo" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
@@ -878,16 +881,16 @@ exit 1
 SHIM8
 chmod +x "$RD/bin/debate.sh"
 assert_eq "$( (cd "$WTR/repo" && env PATH="$ROOT/dev-trio/bin:$PATH" DEBATE_CONDUCTOR_BIN="$RD/bin" \
-  AGENT_TEAM="rd106-$$" TMUX="" RALPH_TRIO_WORKSPACE="$TMP/rw106wt" \
+  AGENT_TEAM="$RD106_TEAM" TMUX="" RALPH_TRIO_WORKSPACE="$TMP/rw106wt" \
   "$ROOT/ralph-trio/bin/ralph-debate.sh" --backlog "$WTR/BACKLOG.md" --max-iter 1 --worktree \
   >/dev/null 2>"$TMP/rd106wt.err" </dev/null; echo "rc=$?") )" "rc=1"
-RD106_WT_LOG="$TMP/rw106wt/log/rd106-$$/latest-ralph-debate.log"
+RD106_WT_LOG="$TMP/rw106wt/log/$RD106_TEAM/latest-ralph-debate.log"
 assert_eq "$(sed -n 's/^=== STOP (\(.*\)) completed=\(.*\) ===$/\1 \2/p' "$RD106_WT_LOG")" "dispatch-failed 0"
 # A worktree really was created for the iteration...
-assert_eq "$(grep -c "^  worktree: /tmp/ralph-rd106-$$-iter-1\." "$RD106_WT_LOG")" "1"
+assert_eq "$(grep -c "^  worktree: /tmp/ralph-$RD106_TEAM-iter-1\." "$RD106_WT_LOG")" "1"
 # ...and nothing of it is left: no directory, no branch, no registered worktree.
-assert_eq "$(ls -d /tmp/ralph-rd106-$$-iter-* 2>/dev/null | wc -l | tr -d ' ')" "0"
-assert_eq "$(git -C "$WTR/repo" branch --list "ralph/rd106-$$-*" | wc -l | tr -d ' ')" "0"
+assert_eq "$(ls -d /tmp/ralph-"$RD106_TEAM"-iter-* 2>/dev/null | wc -l | tr -d ' ')" "0"
+assert_eq "$(git -C "$WTR/repo" branch --list "ralph/$RD106_TEAM-*" | wc -l | tr -d ' ')" "0"
 assert_eq "$(git -C "$WTR/repo" worktree list | wc -l | tr -d ' ')" "1"
 assert_eq "$(grep -c '^- \[ \] task wt$' "$WTR/BACKLOG.md")" "1"
 
