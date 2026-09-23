@@ -71,7 +71,8 @@ Report model, exit code, cause and one recovery step. Distinguish authentication
 (authenticate the CLI interactively), host sandbox/keychain restrictions
 (use the host's permission flow), and confirmed agy headless permission denial
 (inspect `/permissions`). For a confirmed denial, show the action/target only
-if the CLI supplied it, and explain `command(<target>)`, `read_url(<domain>)`,
+if the wrapper printed it (`agy denied: <kind>(<target>)`, read from agy's own
+record of this run), and explain `command(<target>)`, `read_url(<domain>)`,
 or `mcp(<server/tool>)` as appropriate. If the target is missing, say it is
 unknown and direct the user to reproduce the question/context in interactive
 agy to see the request, then use `/permissions`. This is another model call,

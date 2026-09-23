@@ -8,6 +8,9 @@ unset DEV_TRIO_BIN DEBATE_CONDUCTOR_BIN
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+# agy's home is pinned: the argv an agy role gets must not depend on whether
+# this machine has agy installed (#103).
+export DEV_TRIO_AGY_HOME="$TMP/agy-home"
 PASS=0
 check() {
   local label="$1"; shift
@@ -38,7 +41,8 @@ cat > "$TMP/researcher" <<'STUB'
 #!/usr/bin/env bash
 [ -t 0 ] || cat >> "${REVIEW_TEST_STDIN_SEEN:-/dev/null}"
 printf 'research\n' >> "$REVIEW_TEST_RESEARCH"
-printf '%s\n' "$2" >> "$REVIEW_TEST_RESEARCH.prompts"
+# The prompt is the last argument: agy also gets --add-dir/--log-file (#103).
+printf '%s\n' "${!#}" >> "$REVIEW_TEST_RESEARCH.prompts"
 if [ "$REVIEW_TEST_CASE" = research-denied ]; then
   # agy print mode after a soft-denied tool: guidance on stderr, exit 0.
   echo 'no output produced — tool auto-denied' >&2

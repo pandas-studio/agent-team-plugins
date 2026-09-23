@@ -126,11 +126,26 @@ unset _REGISTRY_LIB
 
 # shellcheck source=../lib/runstate.sh
 . "$PLUGIN_ROOT/lib/runstate.sh" || exit 2
+# shellcheck source=../lib/agy-denial.sh
+. "$PLUGIN_ROOT/lib/agy-denial.sh" || exit 2
 
 # shellcheck source=../lib/host.sh
 . "$PLUGIN_ROOT/lib/host.sh"
 PM_HOST="$(dev_trio_host)" || exit $?
 LOG=""
+AGY_WORKSPACE=""
+AGY_CLI_LOG=""
+LOG_OFFSET=""
+AGY_DENIED=""
+
+# The denied targets agy recorded for this run, one per line — only when this
+# run's own transcript (after the header, which quotes the question and
+# context) carries agy's no-output permission notice. Empty otherwise.
+research_agy_denials() {
+  [ -n "$AGY_WORKSPACE" ] && [ -n "$AGY_CLI_LOG" ] && [ -n "$LOG" ] && [ -n "$LOG_OFFSET" ] || return 0
+  agy_denial_notice_in "$LOG" "$LOG_OFFSET" "$(wc -c < "$LOG" 2>/dev/null || echo 0)" || return 0
+  agy_denial_targets "$(dev_trio_agy_home)" "$AGY_CLI_LOG"
+}
 
 research_failure_hint() {
   local env_name
@@ -150,7 +165,16 @@ research_failure_hint() {
     fi
   done
   printf ' %q --research\n' "$SCRIPT_DIR/dev-trio-doctor.sh" >&2
-  if [ "$RESEARCHER_MODEL" = agy ] && [ "$1" -eq 5 ]; then
+  if [ "$1" -eq 5 ] && [ -n "$AGY_DENIED" ]; then
+    local target id
+    printf '%s\n' "$AGY_DENIED" | while IFS= read -r target; do
+      printf '[ask-researcher] agy denied: %s\n' "$(agy_denial_describe "$target")" >&2
+    done
+    for id in $(agy_denial_conversations "$AGY_CLI_LOG"); do
+      printf '[ask-researcher] agy conversation: %s\n' "$id" >&2
+    done
+    echo '[ask-researcher] allow only the rule you need; see the README section "Resolve a confirmed agy permission denial".' >&2
+  elif [ "$RESEARCHER_MODEL" = agy ] && [ "$1" -eq 5 ]; then
     echo '[ask-researcher] rc=5 alone does not establish permission denial. Check the CLI diagnostic for a headless denial before changing permissions.' >&2
   fi
   printf '[ask-researcher] recovery guide: %s/README.md#research-troubleshooting\n' "$PLUGIN_ROOT" >&2
@@ -194,6 +218,17 @@ $STDIN_CONTEXT
 </user_context>"
 fi
 
+# A workspace-aware model (built-in agy) is told where the repository is and
+# how to run commands there, and gets it as --add-dir (#103). Other models'
+# prompts and argv are unchanged. The note is part of the prompt the manifest
+# hashes below.
+if registry_has_workspace "$RESEARCHER_MODEL"; then
+  AGY_WORKSPACE="$(dev_trio_workspace_root)"
+  PROMPT="$PROMPT
+
+$(dev_trio_agy_exec_note "$AGY_WORKSPACE")"
+fi
+
 CHECK_RC=0
 REGISTRY_CMD_OVERRIDE="${RESEARCHER_CLI:-}" dev_trio_check_cli "$RESEARCHER_MODEL" || CHECK_RC=$?
 if [ "$CHECK_RC" -ne 0 ]; then
@@ -211,6 +246,10 @@ LOG="$LOG_DIR/agy-$TS.log"
 # URLs from here; it must never have to find the answer inside the transcript,
 # where the researcher's own output can quote the wrapper's framing.
 FINAL="$LOG_DIR/agy-$TS.final.md"
+# agy's own per-run log, pinned so its conversation id — and through it a
+# denied command — can be found after the run. It stays in agy's log
+# directory: it holds the user's whole allow list, so it is never copied here.
+[ -z "$AGY_WORKSPACE" ] || AGY_CLI_LOG="$(dev_trio_agy_cli_log "research-$TS")"
 LATEST_TMP=""
 RUNSTATE_LOG=""
 cleanup_research() {
@@ -342,10 +381,23 @@ if ! exec 8>>"$LOG"; then
   echo "[ask-researcher] the transcript could not be logged; $LOG may be incomplete" >&2
   exec 8>/dev/null
 fi
+# Where this run's own output starts: a notice quoted in the question or the
+# context above it is not evidence of a denial.
+LOG_OFFSET="$(wc -c < "$LOG" 2>/dev/null)" || LOG_OFFSET=""
 set +e
-REGISTRY_CMD_OVERRIDE="${RESEARCHER_CLI:-}" registry_run_answer "$RESEARCHER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8
+REGISTRY_WORKSPACE="$AGY_WORKSPACE" REGISTRY_CLI_LOG="$AGY_CLI_LOG" \
+  REGISTRY_CMD_OVERRIDE="${RESEARCHER_CLI:-}" registry_run_answer "$RESEARCHER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8
 RC=$?
 set -e
+# Only an empty answer (5) is looked into: a run that answered is not a denial.
+if [ "$RC" -eq 5 ]; then
+  AGY_DENIED="$(research_agy_denials 2>/dev/null)" || AGY_DENIED=""
+  if [ -n "$AGY_DENIED" ]; then
+    for AGY_ID in $(agy_denial_conversations "$AGY_CLI_LOG"); do
+      manifest_add_input kind=agy-conversation value="$AGY_ID" 2>/dev/null || true
+    done
+  fi
+fi
 
 # This wrapper's stdout is the answer — that is what ralph-trio and spec-trio
 # inject into their loops. The transcript and the CLI's diagnostics went to the

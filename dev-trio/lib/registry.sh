@@ -19,6 +19,15 @@
 # should write its final/last message to. Templates are expanded into an argv
 # ARRAY (no eval, no word-splitting) so a multi-line {prompt} stays one argv.
 #
+# Two optional, caller-gated prefixes (built-in agy defines both):
+#   "workspace_args": ["--add-dir", "{cwd}"]      # {cwd} = $REGISTRY_WORKSPACE
+#   "log_args":       ["--log-file", "{cli_log}"] # {cli_log} = $REGISTRY_CLI_LOG
+# registry_run puts log_args, then workspace_args, before the template — each
+# only when its variable is non-empty, so a caller that sets neither gets
+# exactly the argv it got before. dev-trio's wrappers pass both as prefix
+# assignments on the call (empty for other models); like REGISTRY_CMD_OVERRIDE,
+# a caller that exports them gets them applied, and the CLI inherits them.
+#
 # Built-in models: agy, codex, codex-no-memories, claude, claude-write ("claude"
 # is read-only in headless -p mode; "claude-write" adds --permission-mode
 # acceptEdits so a coder role can actually edit files; "codex-no-memories" turns
@@ -50,7 +59,9 @@ _registry_builtin_models() {
   "agy": {
     "command": "agy",
     "env_command": "AGY_CLI",
-    "args": ["-p", "{prompt}"]
+    "args": ["-p", "{prompt}"],
+    "workspace_args": ["--add-dir", "{cwd}"],
+    "log_args": ["--log-file", "{cli_log}"]
   },
   "codex": {
     "command": "codex",
@@ -194,7 +205,8 @@ _registry_model_def() {
   _registry_models_merged | jq -c --arg id "$1" '.[$id] // null'
 }
 
-# Echo each element of a model's array field (args|final_args) on its own line.
+# Echo each element of a model's array field (args|final_args|workspace_args|
+# log_args) on its own line.
 _registry_model_array() {
   local id="$1" field="$2"
   _registry_model_def "$id" | jq -r --arg f "$field" '(.[$f] // [])[]'
@@ -206,6 +218,15 @@ registry_model_exists() {
   local def
   def="$(_registry_model_def "$1")"
   [ -n "$def" ] && [ "$def" != "null" ]
+}
+
+# rc=0 iff the model defines a non-empty workspace_args template — callers key
+# workspace-aware behaviour on this rather than on the binary's name.
+registry_has_workspace() {
+  local def
+  def="$(_registry_model_def "$1")"
+  if [ -z "$def" ] || [ "$def" = "null" ]; then return 1; fi
+  [ "$(printf '%s' "$def" | jq -r '((.workspace_args // []) | length) > 0')" = "true" ]
 }
 
 # rc=0 iff the model defines a non-empty final_args template.
@@ -294,6 +315,7 @@ registry_config_role() {
 #   from the streamed log (see registry_extract_response).
 registry_run() {
   local id="$1" prompt="$2" final_file="${3:-}"
+  local workspace="${REGISTRY_WORKSPACE:-}" cli_log="${REGISTRY_CLI_LOG:-}"
   local bin field a line
   bin="$(registry_resolve_command "$id")" || return $?
   field="args"
@@ -308,12 +330,29 @@ registry_run() {
     echo "registry: model '$id' has no '$field' template" >&2
     return 3
   fi
+  # Caller-gated prefixes: log_args, then workspace_args, then the template.
+  if [ -n "$workspace" ]; then
+    local ws=()
+    while IFS= read -r line; do
+      ws+=("$line")
+    done < <(_registry_model_array "$id" workspace_args)
+    [ "${#ws[@]}" -eq 0 ] || tmpl=("${ws[@]}" "${tmpl[@]}")
+  fi
+  if [ -n "$cli_log" ]; then
+    local lg=()
+    while IFS= read -r line; do
+      lg+=("$line")
+    done < <(_registry_model_array "$id" log_args)
+    [ "${#lg[@]}" -eq 0 ] || tmpl=("${lg[@]}" "${tmpl[@]}")
+  fi
   local argv=()
   for a in "${tmpl[@]}"; do
     case "$a" in
-      "{prompt}") argv+=("$prompt") ;;
-      "{final}")  argv+=("$final_file") ;;
-      *)          argv+=("$a") ;;
+      "{prompt}")  argv+=("$prompt") ;;
+      "{final}")   argv+=("$final_file") ;;
+      "{cwd}")     argv+=("$workspace") ;;
+      "{cli_log}") argv+=("$cli_log") ;;
+      *)           argv+=("$a") ;;
     esac
   done
   if command -v stdbuf >/dev/null 2>&1; then

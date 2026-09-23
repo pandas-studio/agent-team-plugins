@@ -78,7 +78,8 @@ Report the selected model, exit code, cause and the next recovery step:
 - Authentication failure: authenticate the selected CLI in a terminal.
 - Host sandbox/keychain restriction: use the host's normal permission flow.
 - **Confirmed agy headless denial:** identify the action and target only when
-  present in the actual CLI diagnostic. Explain the corresponding
+  the wrapper printed it (`agy denied: <kind>(<target>)`, read from agy's own
+  record of this run). Explain the corresponding
   `command(<target>)`, `read_url(<domain>)`, or `mcp(<server/tool>)` allow rule
   using [the recovery guide](../../README.md#research-troubleshooting).
   If the target is absent, say it is unknown and direct the user to inspect

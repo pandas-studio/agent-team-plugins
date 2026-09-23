@@ -31,8 +31,9 @@
 # Result: sibling *.review.json contains verdict, findings and failure status.
 # Sibling *.run.json carries this invocation's metadata for the dashboard
 # (model, start time, inputs, completion) — see lib/runstate.sh.
-# Exit: 0 parsed review (any valid verdict), 3 parse failure after a successful
-# invocation; reviewer failures keep their original nonzero exit code.
+# Exit: 0 parsed review (any valid verdict), 3 no parseable review after a
+# successful invocation (status parse-failed, or permission-denied when headless
+# agy auto-denied a tool); reviewer failures keep their original nonzero code.
 # DEV_TRIO_REVIEW_PROFILE=spec additionally permits OUT-OF-SCOPE for spec-trio.
 # DEV_TRIO_REVIEW_RECEIPT optionally names a fresh absolute caller receipt file.
 #
@@ -167,6 +168,8 @@ unset _REGISTRY_LIB
 
 # shellcheck source=../lib/review-result.sh
 . "$PLUGIN_ROOT/lib/review-result.sh" || exit 2
+# shellcheck source=../lib/agy-denial.sh
+. "$PLUGIN_ROOT/lib/agy-denial.sh" || exit 2
 # shellcheck source=../lib/runstate.sh
 . "$PLUGIN_ROOT/lib/runstate.sh" || exit 2
 REVIEW_PROFILE="${DEV_TRIO_REVIEW_PROFILE:-default}"
@@ -265,6 +268,19 @@ $CONTEXT
 </remote_context>"
 fi
 
+# A workspace-aware model (built-in agy) is told where the repository is and
+# how to run commands there, and gets it as --add-dir (#103). Other models'
+# prompts and argv are unchanged. The note is part of the prompt the manifest
+# hashes below.
+AGY_WORKSPACE=""
+AGY_CLI_LOG=""
+if registry_has_workspace "$REVIEWER_MODEL"; then
+  AGY_WORKSPACE="$(dev_trio_workspace_root)"
+  PROMPT="$PROMPT
+
+$(dev_trio_agy_exec_note "$AGY_WORKSPACE")"
+fi
+
 REGISTRY_CMD_OVERRIDE="${REVIEWER_CLI:-}" dev_trio_check_cli "$REVIEWER_MODEL" || exit $?
 
 mkdir -p "$LOG_DIR"
@@ -282,6 +298,10 @@ LOG="$LOG_DIR/codex-$TS.log"
 # wrapper parses into the shared review result. See `--output-last-message` below.
 FINAL="$LOG_DIR/codex-$TS.final.md"
 RESULT="$LOG_DIR/codex-$TS.review.json"
+# agy's own per-run log, pinned so its conversation id — and through it the
+# denied command — can be found after the run. It stays in agy's log
+# directory: it holds the user's whole allow list, so it is never copied here.
+[ -z "$AGY_WORKSPACE" ] || AGY_CLI_LOG="$(dev_trio_agy_cli_log "review-$TS")"
 RUNSTATE_LOG=""
 REVIEW_PUBLISHED=0
 cleanup_review() {
@@ -304,7 +324,7 @@ cleanup_review() {
     echo "[ask-reviewer] no review was published; the transcript is at $TRANSCRIPT_TMP" >&2
     TRANSCRIPT_TMP=""
   fi
-  [ -z "${RESULT_TMP:-}" ] || rm -f "$RESULT_TMP" || true
+  [ -z "${RESULT_TMP:-}" ] || rm -f "$RESULT_TMP" "$RESULT_TMP.denied" || true
   [ -z "${LATEST_TMP:-}" ] || rm -f "$LATEST_TMP" || true
   [ -z "${TRANSCRIPT_TMP:-}" ] || rm -f "$TRANSCRIPT_TMP" || true
   [ -z "${TRANSCRIPT_SNAP:-}" ] || rm -f "$TRANSCRIPT_SNAP" || true
@@ -488,7 +508,8 @@ SIGNAL_RC=0
 trap 'SIGNAL_RC=130' INT
 trap 'SIGNAL_RC=143' TERM
 set +e
-REGISTRY_CMD_OVERRIDE="${REVIEWER_CLI:-}" registry_run "$REVIEWER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8
+REGISTRY_WORKSPACE="$AGY_WORKSPACE" REGISTRY_CLI_LOG="$AGY_CLI_LOG" \
+  REGISTRY_CMD_OVERRIDE="${REVIEWER_CLI:-}" registry_run "$REVIEWER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8
 RC=$?
 set -e
 trap 'exit 130' INT
@@ -564,8 +585,39 @@ result_output_failed() {
   [ -z "$RUNSTATE_LOG" ] || runstate_complete "$RUNSTATE_LOG" exit_code="$RC" reason=result-write-failed || true
   exit "$RC"
 }
+# A review that failed to parse is a headless denial (#103) only when all of
+# this run's own evidence says so: a workspace-aware model, agy's no-output
+# permission notice inside this run's frozen transcript range, and a final
+# that is nothing but that notice. A review that parsed is never touched, and
+# any other text in the final — a malformed review, a denial agy recovered
+# from — keeps it a parse failure. The denials agy recorded for this run's
+# conversation are what the result reports, not what decides it.
+# Echoes the replacement result, or fails and leaves the parse result alone.
+AGY_DENIED=()
+AGY_CONVERSATIONS=()
+agy_denial_result() {
+  local line
+  [ -n "$AGY_WORKSPACE" ] && [ "$RC" -eq 0 ] || return 1
+  jq -e '.status == "parse-failed"' "$RESULT_TMP" >/dev/null 2>&1 || return 1
+  agy_denial_notice_in "$TRANSCRIPT_PATH" "$TRANSCRIPT_OFFSET" "$TRANSCRIPT_END" || return 1
+  if [ -n "$AGY_CLI_LOG" ]; then
+    while IFS= read -r line; do AGY_CONVERSATIONS+=("$line"); done \
+      < <(agy_denial_conversations "$AGY_CLI_LOG")
+    while IFS= read -r line; do AGY_DENIED+=("$line"); done \
+      < <(agy_denial_targets "$(dev_trio_agy_home)" "$AGY_CLI_LOG")
+  fi
+  agy_denial_notice_only "$FINAL" || return 1
+  review_result_permission_denied "$(cat "$RESULT_TMP")" \
+    ${AGY_CONVERSATIONS[@]+"${AGY_CONVERSATIONS[@]}"} -- ${AGY_DENIED[@]+"${AGY_DENIED[@]}"}
+}
 RESULT_TMP=$(mktemp "$RESULT.tmp.XXXXXX") || result_output_failed 'create result temporary file'
 review_result_parse "$FINAL" "$RC" "$REVIEW_PROFILE" > "$RESULT_TMP" || result_output_failed 'parse result'
+if [ -n "$AGY_WORKSPACE" ] && AGY_DENIAL_JSON="$(agy_denial_result 2>/dev/null)" \
+   && [ -n "$AGY_DENIAL_JSON" ]; then
+  # Best-effort: if the replacement cannot be written, the parse result stands.
+  printf '%s\n' "$AGY_DENIAL_JSON" > "$RESULT_TMP.denied" 2>/dev/null \
+    && mv -f "$RESULT_TMP.denied" "$RESULT_TMP" 2>/dev/null || rm -f "$RESULT_TMP.denied" 2>/dev/null || true
+fi
 mv "$RESULT_TMP" "$RESULT" || result_output_failed 'publish result'
 RESULT_TMP=""
 RESULT_JSON=$(review_result_read "$RESULT") || result_output_failed 'read result'
@@ -573,6 +625,14 @@ RC=$(printf '%s\n' "$RESULT_JSON" | jq -r '.exit_code') || result_output_failed 
 VERDICT=$(printf '%s\n' "$RESULT_JSON" | jq -r '.verdict // ""') || result_output_failed 'read verdict'
 manifest_add_input kind=review-result path="$RESULT" || result_output_failed 'record result'
 manifest_set_verdict "$VERDICT" || result_output_failed 'record verdict'
+STATUS=$(printf '%s\n' "$RESULT_JSON" | jq -r '.status') || result_output_failed 'read status'
+if [ "$STATUS" = permission-denied ]; then
+  # Recorded in the result above, which also reaches nested callers; the
+  # manifest entry is for a standalone run and is never worth failing over.
+  for AGY_ID in $(printf '%s\n' "$RESULT_JSON" | jq -r '.conversation_ids[]' 2>/dev/null); do
+    manifest_add_input kind=agy-conversation value="$AGY_ID" 2>/dev/null || true
+  done
+fi
 if [ -n "$RECEIPT" ]; then
   review_receipt_write "$RECEIPT" "$RESULT" "$FINAL" || result_output_failed 'publish receipt'
 fi
@@ -585,6 +645,19 @@ echo || true
 if [ "$RC" -ne 0 ]; then
   ERROR=$(printf '%s\n' "$RESULT_JSON" | jq -r '.error')
   echo "[ask-reviewer] review failed: $ERROR (result: $RESULT)" >&2
+fi
+if [ "$STATUS" = permission-denied ]; then
+  {
+    printf '%s\n' "$RESULT_JSON" | jq -r '.denied[]' | while IFS= read -r AGY_TARGET; do
+      echo "[ask-reviewer] agy denied: $(agy_denial_describe "$AGY_TARGET")"
+    done
+    printf '%s\n' "$RESULT_JSON" | jq -e '.denied | length == 0' >/dev/null \
+      && echo "[ask-reviewer] agy denied a tool; its target is not recorded (reproduce in interactive agy)"
+    printf '%s\n' "$RESULT_JSON" | jq -r '.conversation_ids[]' | while IFS= read -r AGY_ID; do
+      echo "[ask-reviewer] agy conversation: $AGY_ID"
+    done
+    echo "[ask-reviewer] allow only the rule you need; see $PLUGIN_ROOT/README.md#resolve-a-confirmed-agy-permission-denial"
+  } >&2 || true
 fi
 echo "(log: $LOG, final: $FINAL, result: $RESULT, rc=$RC)" >&2
 # Last, so nothing fallible runs after it: a completion recording rc=0 that the
