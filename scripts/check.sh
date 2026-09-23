@@ -38,6 +38,12 @@ python3 -m unittest discover -s "$ROOT/tests" -p 'test_*.py'
 "$ROOT/spec-trio/tests/smoke-pr5.sh"
 python3 "$SPEC_VERIFICATION_TEST"
 
+# The doctors' stub smokes drive the real wrappers and loops, so a contract
+# change can break them; outside this script that went unnoticed (#105).
+bash "$ROOT/dev-trio/bin/dev-trio-doctor.sh"
+bash "$ROOT/ralph-trio/bin/ralph-trio-doctor.sh"
+bash "$ROOT/spec-trio/bin/spec-trio-doctor.sh"
+
 if [ -x "$ROOT/runtime/.venv/bin/pytest" ]; then
   "$ROOT/runtime/.venv/bin/ruff" check "$ROOT/runtime/src" "$ROOT/runtime/tests"
   "$ROOT/runtime/.venv/bin/pytest" "$ROOT/runtime/tests"

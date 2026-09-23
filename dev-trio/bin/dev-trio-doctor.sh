@@ -12,7 +12,7 @@
 #      lib/runstate.sh /
 #      lib/roles/*.md / lib/pm.md).
 #   3. Stub-CLI smoke: runs ask-researcher.sh against a tmp stub matching
-#      `agy -p "$2"` shape (with an isolated empty models config so the
+#      `agy [flags] -p PROMPT` shape (with an isolated empty models config so the
 #      built-in researcher=agy default applies), then asserts the manifest
 #      JSON is well-formed and contains variant=dev-trio-research with
 #      role[0].model=agy.
@@ -145,9 +145,10 @@ else
   STUB_AGY="$TMPDIR_SMOKE/stub-agy.sh"
   cat > "$STUB_AGY" <<'STUB'
 #!/usr/bin/env bash
-# Stub matching `agy -p "$2"` shape per smoke-test stub-wrapper rule.
+# Stub matching `agy [--log-file F] [--add-dir D] -p PROMPT` per smoke-test
+# stub-wrapper rule: the prompt stays last, flags may precede -p (#103).
 # Echoes a canonical-shaped lead paragraph so dashboard.sh can parse it.
-if [ "${1:-}" != "-p" ]; then echo "stub-agy: expected -p as \$1, got: ${1:-}" >&2; exit 2; fi
+if [ "$#" -lt 2 ] || [ "${@: -2:1}" != "-p" ]; then echo "stub-agy: expected -p PROMPT last, got: $*" >&2; exit 2; fi
 cat <<'OUT'
 LangGraph streaming can use the async iterator returned by graph.astream(input).
 
@@ -156,6 +157,10 @@ OUT
 STUB
   chmod +x "$STUB_AGY"
 
+  # agy home inside the smoke dir: the wrapper pins a --log-file under
+  # $DEV_TRIO_AGY_HOME/log when writable, and the real one must not collect
+  # a stub run's log on every check.
+  mkdir -p "$TMPDIR_SMOKE/agy-home/log"
   pushd "$TMPDIR_SMOKE" >/dev/null
   # Isolate from the user's shared config + role/CLI envs so the built-in
   # researcher=agy default (and the AGY_CLI stub) deterministically apply.
@@ -166,9 +171,10 @@ STUB
   DEV_TRIO_RESEARCHER_MODEL="" \
   RESEARCHER_CLI="" \
   AGY_CLI="$STUB_AGY" \
+  DEV_TRIO_AGY_HOME="$TMPDIR_SMOKE/agy-home" \
   TMUX="" \
     "$PLUGIN_ROOT/bin/ask-researcher.sh" "doctor smoke: what is LangGraph streaming?" \
-    >"$TMPDIR_SMOKE/smoke.out" 2>"$TMPDIR_SMOKE/smoke.err"
+    </dev/null >"$TMPDIR_SMOKE/smoke.out" 2>"$TMPDIR_SMOKE/smoke.err"
   RC=$?
   popd >/dev/null
 
@@ -220,8 +226,11 @@ if [ "$FAILED" = "1" ]; then
   warn "skipping registry smoke — prior checks failed"
 else
   # Neutralize ambient role overrides so config-binding resolution is observable.
+  # Every name in registry.sh's _registry_role_envname: its doctor checks all roles.
   unset DEV_TRIO_RESEARCHER_MODEL DEV_TRIO_REVIEWER_MODEL \
-        DEBATE_GENERATOR_MODEL DEBATE_CRITIC_MODEL 2>/dev/null || true
+        DEBATE_GENERATOR_MODEL DEBATE_CRITIC_MODEL \
+        LANGGRAPH_CONDUCTOR_PLANNER_MODEL LANGGRAPH_CONDUCTOR_CODER_MODEL \
+        LANGGRAPH_CONDUCTOR_RESEARCHER_MODEL LANGGRAPH_CONDUCTOR_REVIEWER_MODEL 2>/dev/null || true
   ATM="$PLUGIN_ROOT/bin/agent-team-models.sh"
   REG_TMP=$(mktemp -d)
   REG_CFG="$REG_TMP/models.json"
