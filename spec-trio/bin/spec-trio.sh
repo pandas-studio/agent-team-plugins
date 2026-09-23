@@ -46,7 +46,7 @@ export REVIEWER_ROLE_FILE
 . "$PLUGIN_ROOT/lib/spec-helpers.sh"
 # shellcheck disable=SC1091
 . "$PLUGIN_ROOT/lib/manifest.sh" || { echo "spec-trio: failed to load lib/manifest.sh (jq missing?)" >&2; exit 2; }
-# shellcheck source=../lib/plugin-deps.sh
+# shellcheck source=SCRIPTDIR/../lib/plugin-deps.sh
 . "$PLUGIN_ROOT/lib/plugin-deps.sh" || { echo "spec-trio: failed to load lib/plugin-deps.sh" >&2; exit 2; }
 
 TEST_CMD=""

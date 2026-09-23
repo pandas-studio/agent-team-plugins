@@ -43,7 +43,7 @@ note() { printf '    %s%s%s\n' "$DIM"    "$1"     "$RESET"; }
 
 FAILED=0
 if [ -f "$PLUGIN_ROOT/lib/plugin-deps.sh" ]; then
-  # shellcheck source=../lib/plugin-deps.sh
+  # shellcheck source=SCRIPTDIR/../lib/plugin-deps.sh
   . "$PLUGIN_ROOT/lib/plugin-deps.sh"
 fi
 

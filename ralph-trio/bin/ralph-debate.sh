@@ -31,7 +31,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck disable=SC1091
 . "$PLUGIN_ROOT/lib/common.sh"
-# shellcheck source=../lib/plugin-deps.sh
+# shellcheck source=SCRIPTDIR/../lib/plugin-deps.sh
 . "$PLUGIN_ROOT/lib/plugin-deps.sh" || { echo "ralph-debate: failed to load lib/plugin-deps.sh" >&2; exit 2; }
 
 MAX_ITER=""

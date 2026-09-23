@@ -37,7 +37,7 @@ ROLES_DIR="$PLUGIN_ROOT/lib/roles"
 . "$PLUGIN_ROOT/lib/stage-result.sh" || exit 2
 # shellcheck disable=SC1091
 . "$PLUGIN_ROOT/lib/manifest.sh" || { echo "ralph-trio: failed to load lib/manifest.sh (jq missing?)" >&2; exit 2; }
-# shellcheck source=../lib/plugin-deps.sh
+# shellcheck source=SCRIPTDIR/../lib/plugin-deps.sh
 . "$PLUGIN_ROOT/lib/plugin-deps.sh" || { echo "ralph-trio: failed to load lib/plugin-deps.sh" >&2; exit 2; }
 
 MAX_ITER=""

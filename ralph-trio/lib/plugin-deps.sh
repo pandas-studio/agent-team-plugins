@@ -17,12 +17,15 @@
 #      directory if relative). Set but lacking the script is an error (rc 2):
 #      an explicit choice is never silently replaced by another copy.
 #   2. PATH (`command -v`) — what a Claude Code session provides.
-#   3. `${CLAUDE_CLI:-claude} plugin list --json`, run in the current directory.
+#   3. `claude plugin list --json`, run in the current directory. CLAUDE_CLI is
+#      used for it only when it names a binary called `claude`: it is also the
+#      planner/coder override, and a wrapper may take any argv as a prompt.
 #      Claude Code decides whether the plugin is enabled here; its `enabled`
 #      flag is per plugin id, not per install entry, so project/local entries
 #      count only when their projectPath is this directory. Remaining entries
-#      rank local > project > user > other, then by installPath. No timeout:
-#      macOS ships none, and this step runs only when PATH has no copy.
+#      rank local > project > user > other, then by installPath (an installPath
+#      holding a tab, newline or backslash never matches: @tsv escapes it). No
+#      timeout: macOS ships none, and this step runs only when PATH has no copy.
 #
 # Results (globals, reset on every call — never call this inside $(...)):
 #   RESOLVED_SCRIPT  absolute path of the script
@@ -54,16 +57,21 @@ resolve_plugin_script() {
     RESOLVED_WHY="$var=$dir has no executable $script"
     return 2
   fi
-  RESOLVED_WHY="$var unset"
+  RESOLVED_WHY="$var unset or empty"
 
+  # bash 3.2 returns a non-executable match when no executable one exists.
   p=$(command -v -- "$script" 2>/dev/null) || p=""
-  if [ -n "$p" ] && [ -f "$p" ] && _plugin_deps_absolute "$p"; then
+  if [ -n "$p" ] && [ -f "$p" ] && [ -x "$p" ] && _plugin_deps_absolute "$p"; then
     RESOLVED_SOURCE="PATH"
     return 0
   fi
   RESOLVED_WHY="$RESOLVED_WHY; not on PATH"
 
   cli="${CLAUDE_CLI:-claude}"
+  case "$(basename -- "$cli")" in
+    claude) ;;
+    *) cli=claude ;;
+  esac
   if ! command -v jq >/dev/null 2>&1; then
     RESOLVED_WHY="$RESOLVED_WHY; jq not found, so '$cli plugin list' was not read"
     return 1
@@ -92,8 +100,8 @@ resolve_plugin_script() {
                or .projectPath == $cwd or .projectPath == $phys)
       | { rank: ({"local": 0, "project": 1, "user": 2}[(.scope // "") | tostring] // 3),
           path: ((.installPath // "") | tostring),
-          version: ((.version // "?") | tostring),
-          scope: ((.scope // "?") | tostring) } ]
+          version: ((.version // "?") | tostring | if . == "" then "?" else . end),
+          scope: ((.scope // "?") | tostring | if . == "" then "?" else . end) } ]
     | sort_by(.rank, .path)
     | .[] | [.path, .version, .scope] | @tsv' 2>/dev/null <<<"$out") || cands=""
   while IFS="$tab" read -r path version scope; do

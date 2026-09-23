@@ -219,8 +219,9 @@ class ResolveTests(DiscoveryCase):
         self.assertIn("no dev-trio@pandas-studio install that applies to", got["why"])
 
     def test_scope_ranking_for_this_directory(self):
-        trees = {name: self.plugin_tree(name, ["ask-reviewer.sh"])
-                 for name in ("managed", "user", "project", "local")}
+        # installPath order runs against rank, so only the rank can pick the winner.
+        trees = {name: self.plugin_tree(f"{prefix}-{name}", ["ask-reviewer.sh"])
+                 for prefix, name in (("a", "managed"), ("b", "user"), ("c", "project"), ("d", "local"))}
         entries = [entry(trees["managed"], scope="managed"), entry(trees["user"]),
                    entry(trees["project"], scope="project", project=self.cwd),
                    entry(trees["local"], scope="local", project=self.cwd)]
@@ -273,7 +274,33 @@ class ResolveTests(DiscoveryCase):
     def test_reasons_list_every_step(self):
         got = self.resolve()
         self.assertEqual(got["rc"], 1)
-        self.assertTrue(got["why"].startswith("DEV_TRIO_BIN unset; not on PATH; "), got["why"])
+        self.assertTrue(got["why"].startswith("DEV_TRIO_BIN unset or empty; not on PATH; "), got["why"])
+
+    def test_non_executable_path_match_is_skipped(self):
+        # bash 3.2's `command -v` returns such a file when nothing executable matches.
+        broken = self.dir / "broken-bin"
+        broken.mkdir()
+        (broken / "ask-reviewer.sh").write_text("#!/bin/sh\n")
+        installed = self.plugin_tree("installed", ["ask-reviewer.sh"])
+        self.set_plugin_list([entry(installed)])
+        got = self.resolve(env={"PATH": f"{broken}:{self.path}"})
+        self.assertEqual(got["script"], str(installed / "bin/ask-reviewer.sh"))
+
+    def test_claude_cli_under_another_name_is_not_asked(self):
+        # CLAUDE_CLI is also the planner/coder override; a wrapper could take
+        # `plugin list --json` as a prompt, so only a `claude` binary is asked.
+        wrapper = self.executable(self.dir / "my-wrapper", CLAUDE_STUB)
+        self.set_plugin_list([entry(self.plugin_tree("installed", ["ask-reviewer.sh"]))])
+        got = self.resolve(env={"CLAUDE_CLI": str(wrapper)})
+        self.assertEqual(got["rc"], 1)
+        self.assertIn("'claude plugin list --json' failed (rc=127)", got["why"])
+        self.assertEqual(self.claude_calls(), [])
+
+    def test_empty_version_and_scope_keep_the_label_readable(self):
+        installed = self.plugin_tree("installed", ["ask-reviewer.sh"])
+        item = entry(installed, version="")
+        self.set_plugin_list([item])
+        self.assertEqual(self.resolve()["source"], "plugin list: dev-trio@pandas-studio ? (user)")
 
 
 class DriverTests(DiscoveryCase):
@@ -331,7 +358,7 @@ class DriverTests(DiscoveryCase):
                 proc = self.run_driver(name)
                 self.assertEqual(proc.returncode, 2, proc.stderr)
                 self.assertIn(f"requires {script}", proc.stderr)
-                self.assertIn(f"{var} unset; not on PATH;", proc.stderr)
+                self.assertIn(f"{var} unset or empty; not on PATH;", proc.stderr)
                 self.assertIn(f"or set {var}=", proc.stderr)
                 self.assertEqual(self.called(), [])
 
@@ -345,6 +372,34 @@ class DriverTests(DiscoveryCase):
                 self.assertIn(str(bin_dir / script), self.called(), proc.stderr)
         # Every sibling came from the override: `claude plugin list` never ran.
         self.assertFalse([c for c in self.claude_calls() if c.startswith("plugin list")])
+
+    def test_override_without_the_script_stops_the_driver(self):
+        empty = self.dir / "empty-bin"
+        empty.mkdir()
+        proc = self.run_driver("ralph-meta", {"DEV_TRIO_BIN": str(empty)})
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn(f"ERROR: ralph-meta: DEV_TRIO_BIN={empty} has no executable ask-reviewer.sh", proc.stderr)
+
+    def test_override_runs_the_researcher(self):
+        # The planner asks for research; both drivers must run the resolved
+        # ask-researcher.sh (--autoship: no reviewer stage).
+        planner = self.executable(self.dir / "research-planner", (
+            "#!/bin/sh\necho '## Plan'\necho '- Append a line to work.txt (spec: the work file changes).'\n"
+            "echo '<allowed-paths>'\necho 'work.txt'\necho '</allowed-paths>'\n"
+            "echo '## NEED RESEARCH'\necho '- What does the work file hold?'\n"))
+        cases = {
+            "ralph-trio": ["ralph-trio/bin/ralph-trio.sh", "--max-iter", "1", "--autoship", "--backlog", "BACKLOG.md"],
+            "spec-trio": ["spec-trio/bin/spec-trio.sh", "--max-iter", "1", "--autoship", "--spec", "spec.md",
+                          "--test-cmd", "true", "--backlog", "BACKLOG.md"],
+        }
+        for name, argv in cases.items():
+            with self.subTest(driver=name):
+                self.called_log.unlink(missing_ok=True)
+                self.setUp_fresh_repo()
+                proc = subprocess.run([str(ROOT / argv[0]), *argv[1:]], cwd=self.repo,
+                                      env=dict(self.env, PLANNER_CLI=str(planner), DEV_TRIO_BIN=str(self.dev / "bin")),
+                                      stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+                self.assertIn(str(self.dev / "bin/ask-researcher.sh"), self.called(), proc.stderr)
 
     def test_plugin_list_supplies_the_sibling(self):
         self.set_plugin_list([entry(self.dev, version="9.9.9")])
