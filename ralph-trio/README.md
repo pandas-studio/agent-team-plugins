@@ -16,6 +16,7 @@ Iterative LLM-driven coder loops, in four variants. The "Ralph Wiggum" pattern: 
 - `jq` 1.6+ — required for RFC 0004 run manifests
 - `python3` — used by the Stop-hook JSON emitter
 - `claude` (Claude Code CLI) — for `ralph-solo.sh` / `ralph-trio.sh` planner & coder stages
+- `dev-trio` plugin for `ralph-trio.sh` / `ralph-meta.sh`, `debate-conductor` plugin for `ralph-debate.sh` (see [Sibling plugins outside a Claude Code session](#sibling-plugins-outside-a-claude-code-session))
 - Optional: `tmux` (only for `dashboard.sh`)
 
 Override the model CLI per stage:
@@ -28,6 +29,16 @@ WORKER_CLI=...                  # overrides for solo's single stage
 ```
 
 The trio reviewer and re-reviewer require dev-trio 0.4.3 or newer. Each dispatch returns a fresh receipt identifying its exact `.review.json` and `.final.md`. The parent manifest links the JSON and uses its verdict; `latest` artifacts and legacy `Verdict:` prose are not parsed. Malformed reviews (including blank lines before the token, bold tokens, or hyphen/colon separators) deliberately become UNKNOWN. Update both plugins together.
+
+### Sibling plugins outside a Claude Code session
+
+A plugin's `bin/` is on PATH only inside a Claude Code session with that plugin enabled. Started from a plain terminal, launchd or cron, the drivers find `ask-reviewer.sh` / `ask-researcher.sh` (dev-trio) and `debate.sh` (debate-conductor) in this order:
+
+1. `DEV_TRIO_BIN` / `DEBATE_CONDUCTOR_BIN` — the plugin's `bin/` directory. When it is set but lacks the script, the driver stops; it never falls back to another copy.
+2. `PATH`, as inside a session.
+3. `claude plugin list --json` (through `CLAUDE_CLI`), run in the directory the driver starts in: an enabled `dev-trio@pandas-studio` / `debate-conductor@pandas-studio` install. A project or local install counts only when the driver starts in that project's root. When several apply, local wins over project over user.
+
+Under cron or launchd, either set `DEV_TRIO_BIN` / `DEBATE_CONDUCTOR_BIN` to the installed plugin's real `bin/` (not a directory of symlinks; the scripts find their `lib/` next to it), or set `CLAUDE_CLI` to the absolute path of `claude` (e.g. `~/.local/bin/claude`) — a wrapper standing in for it must also answer `plugin list --json`. The model CLIs those scripts start (`codex`, `agy`, `claude`) still come from PATH or their own `*_CLI` variables. The doctor shows which step found each script.
 
 ### Planner and coder success
 
@@ -219,6 +230,7 @@ ralph-trio/
 │   └── ralph-trio-doctor.sh      # env probe + stub smoke
 ├── lib/                          # internal (sourced, not on PATH)
 │   ├── common.sh                 # detect_team, init_log_dir, worktree helpers, …
+│   ├── plugin-deps.sh            # find dev-trio / debate-conductor scripts outside a session (same file in both plugins)
 │   ├── manifest.sh               # RFC 0004 run manifest helper (vendored from core/lib/)
 │   └── roles/
 │       ├── planner.md            # trio Stage 1 role prompt

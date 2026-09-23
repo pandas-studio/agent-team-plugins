@@ -7,9 +7,11 @@
 #   1. Required tools on PATH: bash, git, jq, sha256sum/shasum.
 #   2. Optional tools: tmux (team-name detection), claude (real runs).
 #   3. Plugin layout intact (bin/, lib/, lib/roles/, prompts/).
-#   4. Cross-plugin dependencies on PATH:
+#   4. Cross-plugin dependencies, found as the driver finds them (DEV_TRIO_BIN, then
+#      PATH, then `claude plugin list`; the source is shown):
 #        - ask-reviewer.sh / ask-researcher.sh from dev-trio plugin (always required
-#          unless --dry-run / --autoship / --no-research; warn-not-fail here).
+#          unless --dry-run / --autoship / --no-research; warn-not-fail here, but an
+#          override that names no such script fails).
 #   5. Stub smoke: runs spec-trio.sh --dry-run --max-iter 1 in a temp dir and
 #      asserts the three stage manifests are well-formed with the spec-* variant
 #      strings and verdict=SHIP on the dry-run reviewer manifest.
@@ -40,6 +42,28 @@ fail() { printf '  %s✗%s %s\n' "$RED"    "$RESET" "$1"; FAILED=1; }
 note() { printf '    %s%s%s\n' "$DIM"    "$1"     "$RESET"; }
 
 FAILED=0
+if [ -f "$PLUGIN_ROOT/lib/plugin-deps.sh" ]; then
+  # shellcheck source=../lib/plugin-deps.sh
+  . "$PLUGIN_ROOT/lib/plugin-deps.sh"
+fi
+
+# report_dep VAR PLUGIN SCRIPT NEEDED-FOR MISSING-HINT — resolve SCRIPT the way the
+# drivers do (lib/plugin-deps.sh) and report where it came from. Sets DEP_FOUND.
+report_dep() {
+  local rc=0
+  DEP_FOUND=""
+  if ! command -v resolve_plugin_script >/dev/null 2>&1; then
+    fail "$3 — cannot check: lib/plugin-deps.sh did not load"
+    return 1
+  fi
+  resolve_plugin_script "$1" "$2@pandas-studio" "$3" || rc=$?
+  case "$rc" in
+    0) DEP_FOUND="$RESOLVED_SCRIPT"
+       ok "$3 — $RESOLVED_SCRIPT (via $RESOLVED_SOURCE; $2 plugin; $4)" ;;
+    2) fail "$3 — $RESOLVED_WHY (it must name the $2 plugin's bin/ directory)" ;;
+    *) warn "$3 — missing: $RESOLVED_WHY ($5)" ;;
+  esac
+}
 
 echo "spec-trio doctor — plugin root: $PLUGIN_ROOT"
 echo
@@ -68,7 +92,7 @@ done
 echo
 echo "3. Plugin layout"
 for rel in bin/spec-trio.sh bin/spec-coverage.sh bin/spec-trio-doctor.sh \
-           lib/common.sh lib/manifest.sh lib/spec-helpers.sh lib/verification.sh lib/pm.md \
+           lib/common.sh lib/manifest.sh lib/plugin-deps.sh lib/spec-helpers.sh lib/verification.sh lib/pm.md \
            lib/roles/planner.md lib/roles/worker.md lib/roles/reviewer.md \
            prompts/spec.md.template prompts/BACKLOG.md.template prompts/fix_plan.md.template \
            tests/smoke-pr5.sh \
@@ -80,17 +104,15 @@ for rel in bin/spec-trio.sh bin/spec-coverage.sh bin/spec-trio-doctor.sh \
 done
 
 echo
-echo "4. Cross-plugin dependencies (PATH)"
-if command -v ask-reviewer.sh >/dev/null 2>&1; then
-  ok "ask-reviewer.sh — $(command -v ask-reviewer.sh) (dev-trio plugin; required for the reviewer stage)"
-else
-  warn "ask-reviewer.sh — missing (install dev-trio plugin: /plugin install dev-trio@pandas-studio; only --dry-run / --autoship can run without it)"
-fi
-if command -v ask-researcher.sh >/dev/null 2>&1; then
-  ok "ask-researcher.sh — $(command -v ask-researcher.sh) (dev-trio plugin; Antigravity researcher; required for the NEED RESEARCH branches)"
-else
-  warn "ask-researcher.sh — missing (install dev-trio plugin; or pass --no-research)"
-fi
+echo "4. Cross-plugin dependencies"
+report_dep DEV_TRIO_BIN dev-trio ask-reviewer.sh "required for the reviewer stage" \
+  "install dev-trio plugin: /plugin install dev-trio@pandas-studio; only --dry-run / --autoship can run without it"
+REVIEWER_FOUND="$DEP_FOUND"
+report_dep DEV_TRIO_BIN dev-trio ask-researcher.sh "Antigravity researcher; required for the NEED RESEARCH branches" \
+  "install dev-trio plugin; or pass --no-research"
+# The stub smokes below put their stubs first on PATH. An exported override
+# would win over them and route a smoke to the real scripts, so drop it here.
+unset DEV_TRIO_BIN DEBATE_CONDUCTOR_BIN
 
 echo
 echo "5. Stub smoke (spec-trio --dry-run --max-iter 1 → 3 manifests)"
@@ -196,7 +218,7 @@ else
   # must exercise the same receipt contract as production.
   REVIEW_RESULT_LIB="$PLUGIN_ROOT/../dev-trio/lib/review-result.sh"
   if [ ! -f "$REVIEW_RESULT_LIB" ]; then
-    REVIEW_RESULT_LIB="$(dirname "$(command -v ask-reviewer.sh)")/../lib/review-result.sh"
+    REVIEW_RESULT_LIB="$(dirname "${REVIEWER_FOUND:-.}")/../lib/review-result.sh"
   fi
   if [ ! -f "$REVIEW_RESULT_LIB" ]; then
     fail "dev-trio review-result.sh missing; update/install dev-trio for reviewer smoke"

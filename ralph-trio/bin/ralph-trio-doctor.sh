@@ -9,10 +9,12 @@
 #   3. Plugin layout intact (bin/ralph-{solo,trio,debate,meta}.sh, dashboard.sh,
 #      stop-hook.sh, lib/common.sh, lib/manifest.sh, lib/roles/{planner,worker}.md,
 #      prompts/*.template, hooks/settings.snippet.json).
-#   4. Cross-plugin dependencies on PATH:
+#   4. Cross-plugin dependencies, found as the drivers find them (DEV_TRIO_BIN /
+#      DEBATE_CONDUCTOR_BIN, then PATH, then `claude plugin list`; the source is shown):
 #        - ask-reviewer.sh / ask-researcher.sh from dev-trio plugin (needed for trio/meta)
 #        - debate.sh from debate-conductor plugin (needed for debate)
-#      Missing cross-plugin deps WARN (not fail) — solo doesn't need them.
+#      Missing cross-plugin deps WARN (not fail) — solo doesn't need them. An
+#      override that names no such script FAILs (the drivers refuse to start).
 #   5. Stub-CLI smoke: runs ralph-solo.sh --max-iter 1 --dry-run in a temp dir
 #      and asserts the manifest JSON is well-formed with variant=ralph-solo.
 #
@@ -35,6 +37,28 @@ fail()  { printf '  %s✗%s %s\n'  "$RED"    "$RESET" "$1"; FAILED=1; }
 note()  { printf '    %s%s%s\n'  "$DIM"    "$1"     "$RESET"; }
 
 FAILED=0
+if [ -f "$PLUGIN_ROOT/lib/plugin-deps.sh" ]; then
+  # shellcheck source=../lib/plugin-deps.sh
+  . "$PLUGIN_ROOT/lib/plugin-deps.sh"
+fi
+
+# report_dep VAR PLUGIN SCRIPT NEEDED-FOR MISSING-HINT — resolve SCRIPT the way the
+# drivers do (lib/plugin-deps.sh) and report where it came from. Sets DEP_FOUND.
+report_dep() {
+  local rc=0
+  DEP_FOUND=""
+  if ! command -v resolve_plugin_script >/dev/null 2>&1; then
+    fail "$3 — cannot check: lib/plugin-deps.sh did not load"
+    return 1
+  fi
+  resolve_plugin_script "$1" "$2@pandas-studio" "$3" || rc=$?
+  case "$rc" in
+    0) DEP_FOUND="$RESOLVED_SCRIPT"
+       ok "$3 — $RESOLVED_SCRIPT (via $RESOLVED_SOURCE; $2 plugin; $4)" ;;
+    2) fail "$3 — $RESOLVED_WHY (it must name the $2 plugin's bin/ directory)" ;;
+    *) warn "$3 — missing: $RESOLVED_WHY ($5)" ;;
+  esac
+}
 
 echo "ralph-trio doctor — plugin root: $PLUGIN_ROOT"
 echo
@@ -64,7 +88,7 @@ echo
 echo "3. Plugin layout"
 for rel in bin/ralph-solo.sh bin/ralph-trio.sh bin/ralph-debate.sh bin/ralph-meta.sh \
            bin/dashboard.sh bin/stop-hook.sh \
-           lib/common.sh lib/manifest.sh lib/pm.md lib/roles/planner.md lib/roles/worker.md \
+           lib/common.sh lib/manifest.sh lib/plugin-deps.sh lib/pm.md lib/roles/planner.md lib/roles/worker.md \
            prompts/PROMPT.md.template prompts/BACKLOG.md.template prompts/fix_plan.md.template \
            hooks/settings.snippet.json \
            templates/launchd/com.user.ralph.plist.template \
@@ -76,22 +100,17 @@ for rel in bin/ralph-solo.sh bin/ralph-trio.sh bin/ralph-debate.sh bin/ralph-met
 done
 
 echo
-echo "4. Cross-plugin dependencies (PATH)"
-if command -v ask-reviewer.sh >/dev/null 2>&1; then
-  ok "ask-reviewer.sh — $(command -v ask-reviewer.sh) (dev-trio plugin; needed for ralph-trio, ralph-meta)"
-else
-  warn "ask-reviewer.sh — missing (install dev-trio plugin to use ralph-trio.sh / ralph-meta.sh; ralph-solo.sh works without it)"
-fi
-if command -v ask-researcher.sh >/dev/null 2>&1; then
-  ok "ask-researcher.sh — $(command -v ask-researcher.sh) (dev-trio plugin; needed for ralph-trio NEED RESEARCH branch)"
-else
-  warn "ask-researcher.sh — missing (install dev-trio plugin; or pass --no-research to ralph-trio.sh)"
-fi
-if command -v debate.sh >/dev/null 2>&1; then
-  ok "debate.sh — $(command -v debate.sh) (debate-conductor plugin; needed for ralph-debate)"
-else
-  warn "debate.sh — missing (install debate-conductor plugin to use ralph-debate.sh)"
-fi
+echo "4. Cross-plugin dependencies"
+report_dep DEV_TRIO_BIN dev-trio ask-reviewer.sh "needed for ralph-trio, ralph-meta" \
+  "install dev-trio plugin to use ralph-trio.sh / ralph-meta.sh; ralph-solo.sh works without it"
+REVIEWER_FOUND="$DEP_FOUND"
+report_dep DEV_TRIO_BIN dev-trio ask-researcher.sh "needed for ralph-trio NEED RESEARCH branch" \
+  "install dev-trio plugin; or pass --no-research to ralph-trio.sh"
+report_dep DEBATE_CONDUCTOR_BIN debate-conductor debate.sh "needed for ralph-debate" \
+  "install debate-conductor plugin to use ralph-debate.sh"
+# The stub smokes below put their stubs first on PATH. An exported override
+# would win over them and route a smoke to the real scripts, so drop it here.
+unset DEV_TRIO_BIN DEBATE_CONDUCTOR_BIN
 
 echo
 echo "5. Stub-CLI smoke (ralph-solo --max-iter 1 --dry-run → manifest)"
@@ -188,7 +207,7 @@ else
   # must exercise the same receipt contract as production.
   REVIEW_RESULT_LIB="$PLUGIN_ROOT/../dev-trio/lib/review-result.sh"
   if [ ! -f "$REVIEW_RESULT_LIB" ]; then
-    REVIEW_RESULT_LIB="$(dirname "$(command -v ask-reviewer.sh)")/../lib/review-result.sh"
+    REVIEW_RESULT_LIB="$(dirname "${REVIEWER_FOUND:-.}")/../lib/review-result.sh"
   fi
   if [ ! -f "$REVIEW_RESULT_LIB" ]; then
     fail "dev-trio review-result.sh missing; update/install dev-trio for reviewer smoke"

@@ -11,6 +11,12 @@
   on PATH inside a `claude` session are NOT discoverable when launchd fires
   out-of-band. You need the absolute path.
 
+  The trio variants (ralph-trio.sh, ralph-meta.sh, ralph-debate.sh) also run
+  scripts from the dev-trio / debate-conductor plugins. Out of a session, add
+  DEV_TRIO_BIN / DEBATE_CONDUCTOR_BIN (the installed plugin's bin/) or an
+  absolute CLAUDE_CLI to EnvironmentVariables; see the README section
+  "Sibling plugins outside a Claude Code session".
+
   Setup steps:
     1. Inside a shell that has the ralph-trio plugin active (any shell where
        `claude` would activate plugins works), discover the absolute path:
