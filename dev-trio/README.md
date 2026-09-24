@@ -449,7 +449,12 @@ ancestor, including a symlink target, must be owned by root or the caller. A
 writable ancestor is accepted only when it is sticky (as with `/tmp`) or is
 caller-owned in a verified user-private primary group. That check requires the
 group name to match the username and account enumeration to find no other
-supplementary or primary members; if enumeration fails, the path is rejected.
+supplementary or primary members. On Linux the UPG exception also requires
+local-only `passwd` and `group` NSS sources; LDAP, SSSD, other sources, or
+unavailable enumeration disable the exception because a successful partial
+listing cannot prove exclusivity. On macOS, every path component is checked
+for ACLs: deny entries are accepted, while an allow entry for anyone other
+than the caller is rejected even when mode bits appear safe.
 This is a snapshot of account membership, so remove group write from ancestors
 if group membership can change independently of the caller. The wrappers reject
 unsafe paths before invoking a model and never change permissions on an existing

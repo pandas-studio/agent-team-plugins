@@ -285,8 +285,13 @@ manifest_add_role researcher "$RESEARCHER_MODEL" "$ROLE_FILE" "$(manifest_sha256
 manifest_add_input kind=question value="$QUERY"
 [ -n "$STDIN_CONTEXT" ] && manifest_add_input kind=context value="$STDIN_CONTEXT"
 
-# Create and keep the raw log's exclusive 0600 descriptor. A pre-existing path
-# (including a symlink) is refused. Restore the caller's umask after opening.
+# Refuse an existing path before opening (including nonregular files that Bash
+# noclobber permits), then verify the descriptor before writing the header.
+if [ -e "$LOG" ] || [ -L "$LOG" ]; then
+  echo "[ask-researcher] raw log path already exists: $LOG" >&2
+  exit 2
+fi
+LOG_UID=$(id -u) || exit 2
 LOG_UMASK=$(umask)
 umask 077
 set -C
@@ -297,6 +302,11 @@ if ! exec 8>"$LOG"; then
 fi
 set +C
 umask "$LOG_UMASK"
+if ! dev_trio_new_log_fd_is_private "$LOG" 8 "$LOG_UID"; then
+  echo "[ask-researcher] raw log is not a new private regular file: $LOG" >&2
+  exec 8>&-
+  exit 2
+fi
 {
   echo "=== ask-researcher.sh @ $TS ==="
   echo "=== QUERY ==="

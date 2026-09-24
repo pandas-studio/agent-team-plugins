@@ -122,6 +122,79 @@ class HostTests(unittest.TestCase):
                     self.assertEqual(len(files), 1, files)
                     self.assertEqual(files[0].stat().st_mode & 0o777, 0o600)
 
+    def test_preexisting_nonregular_raw_log_path_is_refused_without_opening(self):
+        shim_dir = self.root / "fixed date shim"
+        shim_dir.mkdir()
+        shim = shim_dir / "date"
+        shim.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = +%Y%m%d-%H%M%S ]; then\n"
+            "  : > \"$DATE_READY\"\n"
+            "  while [ ! -e \"$DATE_RELEASE\" ]; do sleep 0.02; done\n"
+            "  echo 20260925-010101\n"
+            "else exec /bin/date \"$@\"; fi\n"
+        )
+        shim.chmod(0o755)
+        for wrapper, stem in (("ask-reviewer.sh", "codex"),
+                              ("ask-researcher.sh", "agy")):
+            for kind in ("symlink", "fifo"):
+                with self.subTest(wrapper=wrapper, kind=kind):
+                    ready = self.root / "date ready"
+                    release = self.root / "date release"
+                    ready.unlink(missing_ok=True)
+                    release.unlink(missing_ok=True)
+                    process = subprocess.Popen(
+                        [str(self.plugin / "bin" / wrapper), "private input"],
+                        cwd=self.workspace,
+                        env=self.env | dict(PATH=f"{shim_dir}:{self.env['PATH']}",
+                                            DATE_READY=str(ready),
+                                            DATE_RELEASE=str(release)),
+                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, text=True)
+                    try:
+                        deadline = time.monotonic() + 10
+                        while not ready.exists() and process.poll() is None \
+                                and time.monotonic() < deadline:
+                            time.sleep(0.02)
+                        self.assertTrue(ready.exists(), "wrapper did not reach log naming")
+                        log = (self.workspace / ".dev-trio/log/host-test" /
+                               f"{stem}-20260925-010101-{process.pid}.log")
+                        if kind == "symlink":
+                            log.symlink_to("/dev/null")
+                        else:
+                            os.mkfifo(log)
+                        release.touch()
+                        _, stderr = process.communicate(timeout=10)
+                        self.assertEqual(process.returncode, 2, stderr)
+                        self.assertIn("raw log path already exists", stderr)
+                    finally:
+                        release.touch()
+                        if process.poll() is None:
+                            process.kill()
+                            process.communicate(timeout=5)
+
+    def test_raw_log_fd_validation_rejects_nonregular_or_exposed_files(self):
+        target = self.root / "opened log"
+        script = r'''
+. "$1"
+uid=$(id -u)
+exec 8>/dev/null
+! dev_trio_new_log_fd_is_private /dev/null 8 "$uid" || exit 10
+exec 8>&-
+(umask 077; : > "$2")
+exec 8>"$2"
+dev_trio_new_log_fd_is_private "$2" 8 "$uid" || exit 11
+chmod 644 "$2"
+! dev_trio_new_log_fd_is_private "$2" 8 "$uid" || exit 12
+chmod 600 "$2"
+printf x >&8
+! dev_trio_new_log_fd_is_private "$2" 8 "$uid" || exit 13
+'''
+        result = subprocess.run(
+            ["bash", "-c", script, "_", str(self.plugin / "lib/host.sh"),
+             str(target)], text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_unsafe_existing_team_directory_is_rejected_before_model(self):
         root = self.root / "custom logs"
         team = root / "host-test"
@@ -169,6 +242,38 @@ class HostTests(unittest.TestCase):
         self.assertIn(str(root / "host-test"), result.stderr)
         self.assertNotIn(str(alias / "host-test"), result.stderr)
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS ACL syntax")
+    def test_macos_acl_allow_rejects_ancestor_and_team_before_model(self):
+        for location in ("ancestor", "team"):
+            with self.subTest(location=location):
+                root = self.root / f"acl {location}"
+                team = root / "host-test"
+                team.mkdir(parents=True)
+                target = root if location == "ancestor" else team
+                subprocess.run(
+                    ["chmod", "+a",
+                     "group:everyone allow add_file,add_subdirectory,delete_child",
+                     str(target)], check=True, capture_output=True)
+                for wrapper in ("ask-reviewer.sh", "ask-researcher.sh"):
+                    result = self.run_cli(wrapper, "private input",
+                                          DEV_TRIO_LOG_DIR=str(root))
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("unsafe log ACL", result.stderr)
+                self.assertEqual(list(team.iterdir()), [])
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS ACL syntax")
+    def test_macos_acl_deny_does_not_block_private_log(self):
+        root = self.root / "deny ACL root"
+        root.mkdir()
+        subprocess.run(["chmod", "+a", "group:everyone deny delete", str(root)],
+                       check=True, capture_output=True)
+        try:
+            result = self.run_cli("ask-reviewer.sh", "private input",
+                                  DEV_TRIO_LOG_DIR=str(root))
+            self.assertEqual(result.returncode, 0, result.stderr)
+        finally:
+            subprocess.run(["chmod", "-N", str(root)], check=True, capture_output=True)
+
     def test_log_ancestor_owner_and_private_group_rules(self):
         script = r'''
 . "$1"
@@ -179,6 +284,7 @@ _dev_trio_dir_mode_owner() {
     printf '755 0 0\n'
   fi
 }
+_dev_trio_darwin_acl_safe() { return 0; }
 _dev_trio_check_log_ancestors "$CHECK_PATH" "$CHECK_TEAM" "$CHECK_UID" "$PRIVATE_GID"
 '''
         uid, gid = os.getuid(), os.getgid()
@@ -218,7 +324,7 @@ _dev_trio_check_log_ancestors "$CHECK_PATH" "$CHECK_TEAM" "$CHECK_UID" "$PRIVATE
             env=self.env | dict(PATH=f"{shim_dir}:{self.env['PATH']}"),
             text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn("unsafe log ancestor", result.stderr)
+        self.assertIn("cannot identify caller", result.stderr)
         self.assertFalse((root / "host-test").exists())
 
     def test_private_group_requires_exclusive_enumerated_membership(self):
@@ -269,7 +375,7 @@ _dev_trio_check_log_ancestors "$CHECK_PATH" "$CHECK_TEAM" "$CHECK_UID" "$PRIVATE
                                  + ("peer:x:60607:60606::/tmp:/bin/sh\n" if peer else ""))
                     users_fixture.write_text(users if enumerable else "")
                     result = subprocess.run(
-                        ["bash", "-c", '. "$1"; _dev_trio_private_group_gid', "_",
+                        ["bash", "-c", '. "$1"; _dev_trio_linux_local_accounts() { return 0; }; _dev_trio_private_group_gid', "_",
                          str(self.plugin / "lib/host.sh")],
                         env=self.env | dict(PATH=f"{shim_dir}:{self.env['PATH']}",
                                             TEST_PLATFORM=platform,
@@ -280,6 +386,20 @@ _dev_trio_check_log_ancestors "$CHECK_PATH" "$CHECK_TEAM" "$CHECK_UID" "$PRIVATE
                     if allowed:
                         self.assertEqual(result.stdout.strip(), "60606")
 
+    def test_linux_upg_requires_local_only_account_sources(self):
+        config = self.root / "nsswitch.conf"
+        for lines, allowed in (("passwd: files\ngroup: files\n", True),
+                               ("passwd: files sss\ngroup: files\n", False),
+                               ("passwd: files\ngroup: files ldap\n", False),
+                               ("passwd: files\n", False)):
+            with self.subTest(config=lines):
+                config.write_text(lines)
+                result = subprocess.run(
+                    ["bash", "-c", '. "$1"; _dev_trio_linux_local_accounts "$2"',
+                     "_", str(self.plugin / "lib/host.sh"), str(config)],
+                    text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode == 0, allowed, result.stderr)
+
     def test_untrusted_symlink_owner_is_rejected(self):
         target = self.root / "trusted target"
         target.mkdir()
@@ -289,6 +409,7 @@ _dev_trio_check_log_ancestors "$CHECK_PATH" "$CHECK_TEAM" "$CHECK_UID" "$PRIVATE
 . "$1"
 _dev_trio_symlink_owner() { printf '99999\n'; }
 _dev_trio_dir_mode_owner() { printf '755 0 0\n'; }
+_dev_trio_darwin_acl_safe() { return 0; }
 _dev_trio_check_log_ancestors "$CHECK_PATH" '' "$CHECK_UID" -1
 '''
         result = subprocess.run(
