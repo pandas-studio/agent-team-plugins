@@ -181,12 +181,15 @@ manifest_init() {
   log_base=$(basename "$log_path")
   log_base="${log_base%.log}"
   MANIFEST_PATH="$log_dir/$log_base.manifest.json"
-  MANIFEST_TMP="$MANIFEST_PATH.tmp"
+  local manifest_tmp
+  manifest_tmp=$(mktemp "$MANIFEST_PATH.tmp.XXXXXX") || {
+    echo "manifest_init: cannot create a private temporary file next to $MANIFEST_PATH" >&2
+    return 1
+  }
   local rand
   rand=$(printf '%04x' "$((RANDOM % 65536))")
   local run_id="$log_base-$rand"
-  MANIFEST_RUN_ID="$run_id"
-  jq -n \
+  if ! jq -n \
     --arg run_id "$run_id" \
     --arg variant "$variant" \
     --arg started_at "$(_manifest_now_iso)" \
@@ -202,7 +205,13 @@ manifest_init() {
        inputs: [],
        verdict: null,
        log_path: $log_path
-     }' > "$MANIFEST_TMP"
+     }' > "$manifest_tmp"; then
+    rm -f "$manifest_tmp"
+    echo "manifest_init: cannot initialize $MANIFEST_PATH" >&2
+    return 1
+  fi
+  MANIFEST_TMP="$manifest_tmp"
+  MANIFEST_RUN_ID="$run_id"
 }
 
 manifest_set_parent() {
