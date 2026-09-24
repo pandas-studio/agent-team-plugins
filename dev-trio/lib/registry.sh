@@ -25,12 +25,14 @@
 #                     the CLI starts; macOS only caps the total. So registry_run
 #                     refuses such a prompt itself, on every platform, rc 3.
 #                     REGISTRY_ARGV_MAX_BYTES overrides the 131072 limit.
-#   "stdin"           the templates carry no {prompt}; the prompt is piped to
-#                     the CLI's stdin (printf is a builtin, so no argument
-#                     limit applies, and nothing is written to disk). The CLI
-#                     never sees the caller's stdin. Built-in claude and codex
-#                     models use it (`claude -p`, `codex exec -`); agy has no
-#                     documented text form and stays on argv.
+#   "stdin"           the templates carry no {prompt}; the prompt, followed by
+#                     a newline, is the CLI's stdin through a bash here-string
+#                     (bash writes it in full before the CLI starts and removes
+#                     any temp file itself; no writer process outlives the
+#                     start). The CLI never sees the caller's stdin. Built-in
+#                     claude and codex models use it (`claude -p`,
+#                     `codex exec -`); agy has no documented text form and
+#                     stays on argv.
 # A "stdin" template that contains {prompt}, or any other prompt_via value, is
 # a configuration error (rc 3), as `agent-team-models doctor` reports.
 #
@@ -420,8 +422,14 @@ registry_run() {
     esac
   done
   if [ "$via" = stdin ]; then
-    _registry_pipe_prompt "$prompt" "$bin" "${argv[@]}"
-    return $?
+    # A here-string, not `printf | cli`: a pipeline writer would wait on a
+    # child the CLI leaves holding stdin, and its SIGPIPE would need handling.
+    if command -v stdbuf >/dev/null 2>&1; then
+      stdbuf -oL "$bin" "${argv[@]}" <<< "$prompt"
+    else
+      "$bin" "${argv[@]}" <<< "$prompt"
+    fi
+    return
   fi
   local limit bytes=0
   limit="${REGISTRY_ARGV_MAX_BYTES:-131072}"
@@ -438,26 +446,6 @@ registry_run() {
     "$bin" "${argv[@]}"
   fi
 }
-
-# _registry_pipe_prompt PROMPT BIN [ARGS...] — run BIN with PROMPT piped to its
-# stdin, and return BIN's status. The writer's status is ignored: a CLI that
-# exits without reading all of it kills the writer with SIGPIPE, and under a
-# caller's pipefail that would otherwise replace the CLI's own status (a caller
-# that ignores SIGPIPE sees one "write error: Broken pipe" line instead). The
-# same shape as ralph-solo's `printf | claude -p` since #13.
-_registry_pipe_prompt() (
-  prompt="$1"
-  shift
-  set +e
-  if command -v stdbuf >/dev/null 2>&1; then
-    printf '%s' "$prompt" | stdbuf -oL "$@"
-    statuses=("${PIPESTATUS[@]}")
-  else
-    printf '%s' "$prompt" | "$@"
-    statuses=("${PIPESTATUS[@]}")
-  fi
-  exit "${statuses[1]}"
-)
 
 # registry_run_answer ID PROMPT [ANSWER_PATH] — registry_run for a role whose
 # output is an answer, streamed unchanged as it arrives (stderr stays on stderr).

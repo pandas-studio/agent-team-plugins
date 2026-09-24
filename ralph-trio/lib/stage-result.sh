@@ -118,18 +118,6 @@ stage_snapshot() (
     end' || return 6
 )
 
-# stage_pipe_prompt WORK_DIR PROMPT COMMAND [ARGS...] — run COMMAND in WORK_DIR
-# with PROMPT piped to its stdin; the status is COMMAND's, never the writer's.
-stage_pipe_prompt() (
-  cd "$1" || exit
-  prompt="$2"
-  shift 2
-  set +e
-  printf '%s' "$prompt" | "$@"
-  statuses=("${PIPESTATUS[@]}")
-  exit "${statuses[1]}"
-)
-
 stage_reset_result() {
   STAGE_CLI_RC=''
   STAGE_EVIDENCE=none
@@ -140,9 +128,11 @@ stage_reset_result() {
 # Sets STAGE_CLI_RC (empty if not invoked), STAGE_EVIDENCE, STAGE_STDOUT.
 # Returns original nonzero CLI rc, 6 for capture/inspection errors, 5 for missing
 # evidence, or 0. The caller records these fields in its open stage manifest.
-# With STAGE_PROMPT set, it is piped to the CLI's stdin (one argument is capped
-# at 128 KiB on Linux, #102); otherwise the CLI's stdin is /dev/null. Never the
-# caller's stdin. The CLI's status is kept even if it leaves the prompt unread.
+# With STAGE_PROMPT set, it is the CLI's stdin, followed by a newline, through a
+# bash here-string (one argument is capped at 128 KiB on Linux, #102; bash
+# writes it in full before the CLI starts, so no writer process can outlive or
+# hold up the stage); otherwise the CLI's stdin is /dev/null. Never the
+# caller's stdin.
 stage_run() {
   local role="$1" work_dir="$2" log="$3"
   local has_prompt=${STAGE_PROMPT+1} prompt="${STAGE_PROMPT-}"
@@ -168,7 +158,7 @@ stage_run() {
     # enters tee or the stdout artifact. PIPESTATUS preserves both failures.
     if {
       if [ -n "$has_prompt" ]; then
-        stage_pipe_prompt "$work_dir" "$prompt" "$@" </dev/null | tee "$STAGE_STDOUT"
+        ( cd "$work_dir" && "$@" ) <<< "$prompt" | tee "$STAGE_STDOUT"
       else
         ( cd "$work_dir" && "$@" ) </dev/null | tee "$STAGE_STDOUT"
       fi

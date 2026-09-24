@@ -1886,27 +1886,41 @@ mkdir "$REG_TMP/stage"
 count_argv() { registry_argv CLAUDE_CLI="$REG_TMP/count" CODEX_CLI="$REG_TMP/count" TMPDIR="$REG_TMP/stage" "$@"; }
 BIG='big=$(printf "%300000s" "" | tr " " x); '
 REG_CALL="${BIG}registry_run claude \"\$big\""
-assert_eq "$(count_argv)" '[-p] stdin=300000'
+assert_eq "$(count_argv)" '[-p] stdin=300001'
 REG_CALL="${BIG}registry_run claude-write \"\$big\""
-assert_eq "$(count_argv)" '[-p][--permission-mode][acceptEdits] stdin=300000'
+assert_eq "$(count_argv)" '[-p][--permission-mode][acceptEdits] stdin=300001'
 REG_CALL="${BIG}registry_run codex \"\$big\""
-assert_eq "$(count_argv)" '[exec][--skip-git-repo-check][-] stdin=300000'
+assert_eq "$(count_argv)" '[exec][--skip-git-repo-check][-] stdin=300001'
 REG_CALL="${BIG}registry_run codex-no-memories \"\$big\" /f"
-assert_eq "$(count_argv)" '[exec][--skip-git-repo-check][-c][features.memories=false][--output-last-message][/f][-] stdin=300000'
+assert_eq "$(count_argv)" '[exec][--skip-git-repo-check][-c][features.memories=false][--output-last-message][/f][-] stdin=300001'
 REG_CALL="${BIG}registry_run_answer codex \"\$big\"; echo \"rc=\$?\""
-assert_eq "$(count_argv)" "$(printf '[exec][--skip-git-repo-check][-] stdin=300000\nrc=0')"
-# The prompt is piped, never written to disk, and the caller's own stdin never
-# reaches the CLI.
+assert_eq "$(count_argv)" "$(printf '[exec][--skip-git-repo-check][-] stdin=300001\nrc=0')"
+# The prompt (plus the here-string's newline) is the CLI's stdin; bash leaves
+# no temp file behind, and the caller's own stdin never reaches the CLI.
 assert_eq "$(ls -A "$REG_TMP/stage")" ''
 REG_CALL='echo CALLER-STDIN | registry_run claude P'
-assert_eq "$(count_argv)" '[-p] stdin=1'
-# A CLI that exits without reading the prompt kills the writer with SIGPIPE;
-# under the caller's pipefail the status is still the CLI's own.
+assert_eq "$(count_argv)" '[-p] stdin=2'
+# A CLI that exits without reading the prompt keeps its own status, also
+# under the caller's pipefail.
 printf '#!/bin/sh\nexit "$STUB_RC"\n' > "$REG_TMP/early"
 chmod +x "$REG_TMP/early"
 REG_CALL="set -o pipefail; ${BIG}registry_run claude \"\$big\"; echo \"rc=\$?\""
 assert_eq "$(count_argv CLAUDE_CLI="$REG_TMP/early" STUB_RC=0)" 'rc=0'
 assert_eq "$(count_argv CLAUDE_CLI="$REG_TMP/early" STUB_RC=7)" 'rc=7'
+# A child the CLI leaves holding stdin must not keep the call waiting (a
+# `printf | cli` writer would block on a 300 KB prompt). The child waits at most 10 s
+# for the release file and leaves a marker if it had to give up.
+cat > "$REG_TMP/leaky" <<'STUB'
+#!/bin/sh
+( i=0
+  while [ ! -e "$LEAK_RELEASE" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -e "$LEAK_RELEASE" ] || : > "$LEAK_RELEASE.gave-up" ) <&0 >/dev/null 2>&1 &
+echo answered
+STUB
+chmod +x "$REG_TMP/leaky"
+REG_CALL="${BIG}registry_run claude \"\$big\"; echo \"rc=\$?\"; ls \"\$LEAK_RELEASE.gave-up\" 2>/dev/null"
+assert_eq "$(count_argv CLAUDE_CLI="$REG_TMP/leaky" LEAK_RELEASE="$REG_TMP/release")" "$(printf 'answered\nrc=0')"
+: > "$REG_TMP/release"
 # agy stays on argv and refuses what one Linux argument cannot hold.
 REG_CALL="${BIG}registry_run agy \"\$big\"; echo \"rc=\$?\""
 assert_eq "$(count_argv 2>"$REG_TMP/agy.err")" 'rc=3'
@@ -1930,7 +1944,7 @@ printf '%s\n' '{"models":{
   "odd":{"command":"x","env_command":"CLAUDE_CLI","prompt_via":"file","args":["-p"]},
   "mine":{"command":"x","env_command":"CLAUDE_CLI","prompt_via":"stdin","args":["--print"]}}}' > "$REG_TMP/via.json"
 REG_CALL='registry_run leaky P; echo "rc=$?"; registry_run odd P; echo "rc=$?"; registry_run mine P'
-assert_eq "$(count_argv AGENT_TEAM_MODELS_CONFIG="$REG_TMP/via.json" 2>/dev/null)" "$(printf 'rc=3\nrc=3\n[--print] stdin=1')"
+assert_eq "$(count_argv AGENT_TEAM_MODELS_CONFIG="$REG_TMP/via.json" 2>/dev/null)" "$(printf 'rc=3\nrc=3\n[--print] stdin=2')"
 rm -rf "$REG_TMP"
 
 # namespace.sh is vendored the same way registry.sh is.
