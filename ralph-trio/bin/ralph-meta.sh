@@ -241,8 +241,9 @@ ralph_log "  ralph commits found: ${#RALPH_COMMITS[@]}"
 ralph_log "audit brief written: $META_LOG"
 ralph_log "calling ask-reviewer.sh ..."
 
-# Pass the brief as a focus argument (codex reads the file via the focus text)
-FOCUS="Audit ralph run since $SINCE for team $TEAM. Read this brief: $(cat "$META_LOG"). Inspect the actual commits via git show, then categorize each into shipped / revert / retry-with-context per the format in the brief."
+# The brief goes as --with-context, a file the reviewer prompt inlines; inside
+# the focus argument it grew with the run past Linux's 128 KiB argument cap (#102).
+FOCUS="Audit ralph run since $SINCE for team $TEAM. Read the brief in <remote_context>. Inspect the actual commits via git show, then categorize each into shipped / revert / retry-with-context per the format in the brief."
 
 CODEX_OUT="$LOG_DIR/ralph-meta-$TS-codex.log"
 # ask-reviewer.sh writes the authoritative final review verbatim to a
@@ -255,7 +256,7 @@ CODEX_OUT="$LOG_DIR/ralph-meta-$TS-codex.log"
 # its review — which is exactly when the streamed transcript degrades into the
 # echoed role prompt); fall back to the === RESPONSE === section of the log.
 CODEX_STDERR=$(mktemp -t ralph-meta-stderr.XXXXXX)
-( AGENT_TEAM="$TEAM" "$ASK_REVIEWER" "$FOCUS" </dev/null 2>"$CODEX_STDERR" ) | tee "$CODEX_OUT" >/dev/null || true
+( AGENT_TEAM="$TEAM" "$ASK_REVIEWER" --with-context "$META_LOG" "$FOCUS" </dev/null 2>"$CODEX_STDERR" ) | tee "$CODEX_OUT" >/dev/null || true
 cat "$CODEX_STDERR" >> "$CODEX_OUT"
 DEV_CODEX_LOG=$(awk -F'[(),]' '/^\(log: / { for (i=1; i<=NF; i++) { if ($i ~ /log: /) { sub(/^[[:space:]]*log:[[:space:]]*/, "", $i); print $i; exit } } }' "$CODEX_STDERR")
 DEV_CODEX_FINAL=$(awk -F'[(),]' '/^\(log: / { for (i=1; i<=NF; i++) { if ($i ~ /final: /) { sub(/^[[:space:]]*final:[[:space:]]*/, "", $i); print $i; exit } } }' "$CODEX_STDERR")

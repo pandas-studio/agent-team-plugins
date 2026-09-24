@@ -91,6 +91,8 @@ The two sources are treated differently on purpose:
 
 A model definition is a CLI adapter: a `command`, an optional `env_command` (env var that overrides the binary), an `args` argv template containing `{prompt}`, and an optional `final_args` template (with `{prompt}` and `{final}`) for CLIs that can write their last message to a file. Models without `final_args` still produce a compatible `*.final.md` — it is synthesised from the streamed transcript.
 
+**Where the prompt goes.** By default `{prompt}` is one argument. Linux refuses a single argument of 128 KiB or more before the CLI even starts (macOS only caps the total), so the registry refuses such a prompt itself, on every platform, with rc 3 and the byte count; `REGISTRY_ARGV_MAX_BYTES` moves the 131072-byte limit. A model with `"prompt_via": "stdin"` takes the prompt on stdin instead, and its templates hold no `{prompt}`; the built-in `claude`, `claude-write`, `codex` and `codex-no-memories` models work this way (`claude -p`, `codex exec … -`). Add one with `agent-team-models add my-llm --command my-cli --stdin` (args default to `-p`), or switch an existing one with `edit my-llm --stdin --arg …`. `agent-team-models doctor` flags a stdin model that still has `{prompt}` in a template.
+
 ### Example: route reviews through Kimi Code
 
 ```bash

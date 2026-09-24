@@ -3,8 +3,8 @@
 #
 # Exercises spec-trio.sh's manifest emission and spec-coverage.sh's
 # --manifest-history consumer through 9 cases, with no real LLM calls.
-# Stub CLIs match the `claude -p "$2"` and `codex exec "$2"` shapes
-# (per the upstream "Smoke-test stub wrappers" convention). Each case runs
+# Stub CLIs match the `claude -p` and `codex exec ... -` shapes, prompt on
+# stdin (#102; per the upstream "Smoke-test stub wrappers" convention). Each case runs
 # under AGENT_TEAM=smoke-pr5-caseN, and SPEC_TRIO_WORKSPACE is forced to a
 # fresh tmpdir for the whole smoke run, so all per-case logs land under
 # $SPEC_TRIO_WORKSPACE/log/smoke-pr5-caseN/ regardless of where this script
@@ -118,7 +118,7 @@ EOF
   # "# Role: Spec-driven Worker". Variables interpolated from caller scope.
   cat > wrap-claude.sh <<EOF
 #!/usr/bin/env bash
-PROMPT="\$2"
+PROMPT=\$(cat)
 if printf '%s' "\$PROMPT" | grep -q 'Spec-driven Planner'; then
   cat <<'PLAN'
 ${plan_out}
@@ -136,9 +136,10 @@ EOF
 
   cat > wrap-codex.sh <<EOF
 #!/usr/bin/env bash
-# The trailing argv slot is the reviewer prompt; keep it when asked so a case
-# can check what scope the reviewer was pointed at.
-[ -n "\${CODEX_PROMPT_CAPTURE:-}" ] && printf '%s' "\${@: -1}" > "\$CODEX_PROMPT_CAPTURE"
+# The reviewer prompt arrives on stdin; keep it when asked so a case can
+# check what scope the reviewer was pointed at.
+PROMPT=\$(cat)
+[ -n "\${CODEX_PROMPT_CAPTURE:-}" ] && printf '%s' "\$PROMPT" > "\$CODEX_PROMPT_CAPTURE"
 FINAL=""
 while [ \$# -gt 0 ]; do
   if [ "\$1" = --output-last-message ]; then FINAL="\$2"; break; fi
@@ -402,7 +403,7 @@ EOF
   printf -- '- [ ] §5.1 add foo() (multi-commit)\n' > BACKLOG.md
   cat > wrap-claude.sh <<'CLAUDE_EOF'
 #!/usr/bin/env bash
-PROMPT="$2"
+PROMPT=$(cat)
 if printf '%s' "$PROMPT" | grep -q 'Spec-driven Planner'; then
   cat <<'PLAN'
 <allowed-paths>foo.py</allowed-paths>

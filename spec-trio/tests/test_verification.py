@@ -337,15 +337,19 @@ def driver_process(args, *, cwd, env, scale, test_id):
 
 
 STUB = r"""#!/usr/bin/env python3
-import os, sys, signal, subprocess
+import os, stat, sys, signal, subprocess
 from pathlib import Path
 args = sys.argv[1:]
+# claude and codex read the prompt on stdin (#102); the agy researcher still
+# takes it as the last argument, and its stdin is empty.
+prompt = sys.stdin.read() if stat.S_ISREG(os.fstat(0).st_mode) else ''
+prompt = prompt or (args[-1] if args else '')
 state = Path(os.environ['FIXTURE_STATE'])
-role = 'reviewer' if '--output-last-message' in args else 'planner' if '# Role: Spec-driven Planner' in args[-1] else 'researcher' if Path(sys.argv[0]).name == 'researcher' else 'coder'
+role = 'reviewer' if '--output-last-message' in args else 'planner' if '# Role: Spec-driven Planner' in prompt else 'researcher' if Path(sys.argv[0]).name == 'researcher' else 'coder'
 counter = state / (role + '.count')
 n = int(counter.read_text()) + 1 if counter.exists() else 1
 counter.write_text(str(n))
-(state / (role + str(n) + '.prompt')).write_text(args[-1])
+(state / (role + str(n) + '.prompt')).write_text(prompt)
 mutate = os.environ.get('MUTATE')
 if mutate == role:
     Path(os.environ['FIXTURE_SPEC']).write_text('changed contract')

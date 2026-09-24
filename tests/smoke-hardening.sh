@@ -81,8 +81,10 @@ unset TEAM
 STUB_CLI="$TMP/stub-cli"
 cat > "$STUB_CLI" <<'STUB'
 #!/usr/bin/env bash
-# Record every argv slot except the trailing prompt, one per line.
-printf '%s\n' "${@:1:$#-1}" > "$STUB_ARGV"
+# Record every argv slot, one per line, and stdin, which carries the prompt
+# for the built-in codex models (#102).
+printf '%s\n' "$@" > "$STUB_ARGV"
+cat > "$STUB_ARGV.stdin"
 # Honour native final capture rather than relying on the old log fallback.
 while [ $# -gt 0 ]; do
   if [ "$1" = --output-last-message ]; then
@@ -97,7 +99,7 @@ chmod +x "$STUB_CLI"
 run_ask_codex() {
   # Clear the previous run's artifacts so a run that spawns nothing cannot pass
   # on them (several cases expect the same argv).
-  rm -f "$TMP/argv" "$TMP/log/smoke/latest-codex.final.md"
+  rm -f "$TMP/argv" "$TMP/argv.stdin" "$TMP/log/smoke/latest-codex.final.md"
   (cd "$TMP/repo" && env -u REVIEWER_CLI -u DEV_TRIO_REVIEWER_MODEL \
     -u DEV_TRIO_PM_HOST \
     -u MANIFEST_PARENT_TMP -u REVIEWER_ROLE_FILE -u DEV_TRIO_REVIEW_PROFILE \
@@ -108,8 +110,12 @@ run_ask_codex() {
 }
 final_path() { printf '%s/log/smoke/%s' "$TMP" "$(readlink "$TMP/log/smoke/latest-codex.final.md")"; }
 # Compare argv slot by slot (one per line) so a merged "-c features.memories=false"
-# slot cannot pass for the two slots codex needs.
-assert_argv() { assert_eq "$(cat "$TMP/argv")" "$(printf '%s\n' "$@" "$(final_path)")"; }
+# slot cannot pass for the two slots codex needs. The prompt is not in argv:
+# codex gets "-" last and the review prompt, focus included, on stdin.
+assert_argv() {
+  assert_eq "$(cat "$TMP/argv")" "$(printf '%s\n' "$@" "$(final_path)" -)"
+  assert_ok grep -q '^focus$' "$TMP/argv.stdin"
+}
 # Refusal is rc=2 and must happen before any CLI is spawned.
 assert_refused() {
   local rc=0
@@ -1863,11 +1869,59 @@ assert_eq "$(registry_argv)" '[--log-file][/l][--add-dir][/r][-p][P]'
 REG_CALL='REGISTRY_WORKSPACE= REGISTRY_CLI_LOG= registry_run agy P'
 assert_eq "$(registry_argv REGISTRY_WORKSPACE=/stale REGISTRY_CLI_LOG=/stale)" '[-p][P]'
 REG_CALL='REGISTRY_WORKSPACE=/r REGISTRY_CLI_LOG=/l registry_run codex P'
-assert_eq "$(registry_argv)" '[exec][--skip-git-repo-check][P]'
+assert_eq "$(registry_argv)" '[exec][--skip-git-repo-check][-]'
 REG_CALL='REGISTRY_WORKSPACE=/r REGISTRY_CLI_LOG=/l registry_run_answer agy P; echo "rc=$?"'
 assert_eq "$(registry_argv)" "$(printf '[--log-file][/l][--add-dir][/r][-p][P]\nrc=0')"
 REG_CALL='registry_has_workspace agy && ! registry_has_workspace codex && echo yes'
 assert_eq "$(registry_argv)" yes
+
+# #102: one argument is capped at 128 KiB on Linux (MAX_ARG_STRLEN). The claude
+# and codex built-ins take the prompt on stdin, whole; argv models refuse a
+# prompt that one argument cannot hold, on every platform. The big prompt is
+# built inside the call: passing it in REG_CALL would itself be one argument.
+# Only Linux CI proves the kernel side; the byte counts below hold everywhere.
+printf '#!/bin/sh\nfor a in "$@"; do printf "[%%s]" "$a"; done\nprintf " stdin=%%s\\n" "$(wc -c | tr -d " ")"\n' > "$REG_TMP/count"
+chmod +x "$REG_TMP/count"
+mkdir "$REG_TMP/stage"
+count_argv() { registry_argv CLAUDE_CLI="$REG_TMP/count" CODEX_CLI="$REG_TMP/count" TMPDIR="$REG_TMP/stage" "$@"; }
+BIG='big=$(printf "%300000s" "" | tr " " x); '
+REG_CALL="${BIG}registry_run claude \"\$big\""
+assert_eq "$(count_argv)" '[-p] stdin=300000'
+REG_CALL="${BIG}registry_run claude-write \"\$big\""
+assert_eq "$(count_argv)" '[-p][--permission-mode][acceptEdits] stdin=300000'
+REG_CALL="${BIG}registry_run codex \"\$big\""
+assert_eq "$(count_argv)" '[exec][--skip-git-repo-check][-] stdin=300000'
+REG_CALL="${BIG}registry_run codex-no-memories \"\$big\" /f"
+assert_eq "$(count_argv)" '[exec][--skip-git-repo-check][-c][features.memories=false][--output-last-message][/f][-] stdin=300000'
+REG_CALL="${BIG}registry_run_answer codex \"\$big\"; echo \"rc=\$?\""
+assert_eq "$(count_argv)" "$(printf '[exec][--skip-git-repo-check][-] stdin=300000\nrc=0')"
+# Nothing staged is left behind, and the caller's own stdin never reaches the CLI.
+assert_eq "$(ls -A "$REG_TMP/stage")" ''
+REG_CALL='echo CALLER-STDIN | registry_run claude P'
+assert_eq "$(count_argv)" '[-p] stdin=1'
+# A prompt that cannot be staged is rc 6, and nothing starts.
+REG_CALL='registry_run claude P; echo "rc=$?"'
+assert_eq "$(count_argv TMPDIR="$REG_TMP/missing" 2>/dev/null)" 'rc=6'
+# agy stays on argv and refuses what one Linux argument cannot hold.
+REG_CALL="${BIG}registry_run agy \"\$big\"; echo \"rc=\$?\""
+assert_eq "$(count_argv 2>"$REG_TMP/agy.err")" 'rc=3'
+assert_ok grep -q '300000 bytes; Linux refuses a single argument of 131072 bytes or more' "$REG_TMP/agy.err"
+# The limit counts bytes (NUL included, so the limit itself is refused), and
+# REGISTRY_ARGV_MAX_BYTES moves it.
+REG_CALL='registry_run agy 0123456789abcdef; echo "rc=$?"'
+assert_eq "$(count_argv REGISTRY_ARGV_MAX_BYTES=16 2>/dev/null)" 'rc=3'
+REG_CALL='registry_run agy 0123456789abcde'
+assert_eq "$(count_argv REGISTRY_ARGV_MAX_BYTES=16)" '[-p][0123456789abcde]'
+REG_CALL='registry_run agy "한글ab"; echo "rc=$?"'
+assert_eq "$(count_argv REGISTRY_ARGV_MAX_BYTES=8 2>/dev/null)" 'rc=3'
+assert_eq "$(count_argv REGISTRY_ARGV_MAX_BYTES=9)" "$(printf '[-p][한글ab]\nrc=0')"
+# Configuration errors are refused before anything runs.
+printf '%s\n' '{"models":{
+  "leaky":{"command":"x","env_command":"CLAUDE_CLI","prompt_via":"stdin","args":["-p","{prompt}"]},
+  "odd":{"command":"x","env_command":"CLAUDE_CLI","prompt_via":"file","args":["-p"]},
+  "mine":{"command":"x","env_command":"CLAUDE_CLI","prompt_via":"stdin","args":["--print"]}}}' > "$REG_TMP/via.json"
+REG_CALL='registry_run leaky P; echo "rc=$?"; registry_run odd P; echo "rc=$?"; registry_run mine P'
+assert_eq "$(count_argv AGENT_TEAM_MODELS_CONFIG="$REG_TMP/via.json" 2>/dev/null)" "$(printf 'rc=3\nrc=3\n[--print] stdin=1')"
 rm -rf "$REG_TMP"
 
 # namespace.sh is vendored the same way registry.sh is.

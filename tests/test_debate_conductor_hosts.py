@@ -31,8 +31,13 @@ class DebateHostTests(unittest.TestCase):
         self.stub = self.root / "record cli"
         self.stub.write_text(
             f"#!{sys.executable}\n"
-            "import json, os, sys\n"
+            "import json, os, stat, sys\n"
             "args = sys.argv[1:]\n"
+            # claude and codex get the prompt on stdin, a staged regular file
+            # (#102); it is recorded after a '<stdin>' marker. Anything else on
+            # stdin (a tty, /dev/null, an inherited pipe) is not read.
+            "if stat.S_ISREG(os.fstat(0).st_mode):\n"
+            "    args = args + ['<stdin>', sys.stdin.read()]\n"
             "with open(os.environ['STUB_CALLS'], 'a') as f:\n"
             "    f.write(json.dumps(args)+'\\n')\n"
             "if args == ['auth','status','--json']:\n"
@@ -567,8 +572,13 @@ class DebateHostTests(unittest.TestCase):
         stub = self.root / f"blocking cli {ready.name}"
         stub.write_text(
             f"#!{sys.executable}\n"
-            "import json, os, sys, time\n"
+            "import json, os, stat, sys, time\n"
             "args = sys.argv[1:]\n"
+            # claude and codex get the prompt on stdin, a staged regular file
+            # (#102); it is recorded after a '<stdin>' marker. Anything else on
+            # stdin (a tty, /dev/null, an inherited pipe) is not read.
+            "if stat.S_ISREG(os.fstat(0).st_mode):\n"
+            "    args = args + ['<stdin>', sys.stdin.read()]\n"
             "with open(os.environ['STUB_CALLS'], 'a') as f:\n"
             "    f.write(json.dumps(args)+'\\n')\n"
             "if args == ['auth','status','--json']:\n"

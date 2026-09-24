@@ -116,7 +116,9 @@ Generator and Critic resolve through the shared model registry (the [marketplace
 
 For models declaring `final_args`, `GENERATOR_CLI` and `CRITIC_CLI` wrappers
 must forward all arguments to the selected CLI (for example, `exec codex "$@"`).
-Codex receives `--output-last-message <path>` before the prompt. Wrappers that
+For the built-in `claude` and `codex` models they must also pass stdin through:
+the prompt arrives there, and codex gets `--output-last-message <path>` and a
+final `-` instead of a prompt argument. Wrappers that
 assume a fixed prompt position must be updated; a successful CLI exit without
 a native final-answer file fails with rc=5 and an explicit capture diagnostic.
 There is no fallback to console output.

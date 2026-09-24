@@ -194,7 +194,7 @@ while :; do
   manifest_add_input kind=task value="iter-$ITER"
   if [ "$DRY_RUN" = "1" ]; then
     manifest_add_input kind=skip-reason value=dry-run
-    echo "[dry-run] would invoke: claude -p \"\$(cat $PROMPT_FILE)\" in $WORK_DIR" | tee "$ITER_LOG"
+    echo "[dry-run] would invoke: claude -p < $PROMPT_FILE in $WORK_DIR" | tee "$ITER_LOG"
   else
     manifest_add_role worker claude "$PROMPT_FILE"
     manifest_add_input kind=prompt-md path="$PROMPT_FILE"
