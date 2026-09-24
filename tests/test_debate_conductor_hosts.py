@@ -33,7 +33,7 @@ class DebateHostTests(unittest.TestCase):
             f"#!{sys.executable}\n"
             "import json, os, sys\n"
             "args = sys.argv[1:]\n"
-            # claude and codex get the prompt piped to stdin (#102); it is
+            # claude and codex read the prompt from stdin (#102); it is
             # recorded after a '<stdin>' marker. run_cli gives the wrappers an
             # empty, closed stdin, so an argv model reads nothing here.
             "data = '' if sys.stdin.isatty() else sys.stdin.read()\n"
@@ -575,7 +575,7 @@ class DebateHostTests(unittest.TestCase):
             f"#!{sys.executable}\n"
             "import json, os, sys, time\n"
             "args = sys.argv[1:]\n"
-            # claude and codex get the prompt piped to stdin (#102); it is
+            # claude and codex read the prompt from stdin (#102); it is
             # recorded after a '<stdin>' marker. run_cli gives the wrappers an
             # empty, closed stdin, so an argv model reads nothing here.
             "data = '' if sys.stdin.isatty() else sys.stdin.read()\n"
