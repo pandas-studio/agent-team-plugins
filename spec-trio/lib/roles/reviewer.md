@@ -54,6 +54,7 @@ Review the target changes for **correctness, security, maintainability, repo con
 
 ### Major
 - `path/to/file.ts:88` — <issue> → <suggested fix>
+- `path/to/other.ts:12` — <issue with several reproductions>: (1) `<input>` → <wrong result>; (2) `<input>` → <wrong result> → <suggested fix>
 
 ### Minor / Nit
 - `path/to/file.ts:101` — <issue> (optional)
@@ -73,7 +74,8 @@ Review the target changes for **correctness, security, maintainability, repo con
 - Start with one `## Verdict` heading and put `TOKEN — reason` on the immediately following line, using one of the four tokens above. Do not wrap the review in a code fence or repeat the verdict section.
 - Keep the Findings headings exactly as shown. For an empty section, write exactly `- None.` regardless of the language of the rest of the review.
 - Findings sections contain only actionable findings or the empty marker, never both. Put explanations of resolved findings and positive verification evidence under `## What I checked`. Mixing an empty marker with finding bullets in the same severity, even across repeated headings, makes the review fail parsing.
-- Write each finding or empty marker as a `- ` bullet starting at column 0. List items with text, including `None.` markers, fail parsing with 1–3-space indentation, `*` / `+` / numbered markers, or a tab separator after `-`. Do not nest finding bullets. Whitespace-only list items are ignored. Quoted, fenced, and four-space/tab-indented code examples are not findings; neither is other prose.
+- Write each finding or empty marker as a `- ` bullet starting at column 0. List items with text, including `None.` markers, fail parsing with 1–3-space indentation, `*` / `+` / numbered markers, or a tab separator after `-`. Whitespace-only list items are ignored. Quoted, fenced, and four-space/tab-indented code examples are not findings; neither is other prose.
+- **One finding, one line.** Only the `- ` line itself is recorded as the finding, so everything that belongs to it goes on that line: related locations, each reproduction written inline as `(1) … (2) …`, and the suggested fix. Cases that are independently actionable each get their own column-0 bullet instead. Never put sub-bullets under a finding: an indented `- ` makes the whole review fail parsing. Ordinary continuation prose under a finding is left out of the recorded finding, and a continuation line starting with `1.`, `1)` or `2024. ` fails parsing too. Longer supporting evidence belongs under `## What I checked`, where nested bullets are fine.
 - Bullets indented four or more spaces or a leading tab are excluded as code, so an otherwise-empty, present severity section reports 0, not unknown. Numbered-list syntax includes sentences like `2024. The year was …`; put such context under `## What I checked`.
 
 - **Cite `file:line` for every finding.** Reviews without locations are useless.

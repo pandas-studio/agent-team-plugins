@@ -48,7 +48,10 @@ bullets in Markdown, and do not use `latest` artifacts.
   README section "Resolve a confirmed agy permission denial". Do not grant
   anything yourself.
 - `status: "parse-failed"` (exit 3) or `"invocation-failed"`: report the
-  failure, its `error`, and the artifact paths. There is no verdict.
+  failure, its `error`, and the artifact paths. There is no verdict. A
+  `parse-failed` result with `invocation_rc: 0` is a finished review that broke
+  the output format (#125); re-run it once for a structured result rather than
+  reading a verdict or counts out of `.final.md`.
 - An empty marker mixed with finding bullets in the same severity, including
   repeated headings, is a parse failure. Resolved explanations belong under
   `## What I checked`. Report the failure; do not reinterpret its bullets or

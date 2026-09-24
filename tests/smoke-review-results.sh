@@ -108,6 +108,45 @@ done
 printf '## Verdict\nSHIP — nested bullets are ambiguous\n## Findings\n### Major\n- A real finding.\n  - Supporting detail.\n' > "$TMP/review.md"
 parse
 check 'nested bullets fail instead of inflating finding counts' json_is "$TMP/parsed.json" '.status=="parse-failed" and .findings.major==null'
+# #125: the role's own template is the documented form, so it must parse, with
+# one finding per example line — including the one with several reproductions.
+for role in dev-trio spec-trio; do
+  awk '/^## Output format/ { on = 1; next }
+       on && /^```/ { if (block) exit; block = 1; next }
+       block' "$ROOT/$role/lib/roles/reviewer.md" \
+    | sed 's/^<one of: [^>]*> — <[^>]*>$/NEEDS-FIX — template example/' > "$TMP/review.md"
+  parse
+  check "$role output template parses with one finding per example line" json_is "$TMP/parsed.json" \
+    '.status=="ok" and .verdict=="NEEDS-FIX" and (.findings|map_values(length))=={blocker:1,major:2,minor:1}'
+done
+# #125: the shape two completed Claude reviews produced — reproductions and the
+# suggested fix as sub-bullets, continuation prose between them.
+review_125() {
+  printf '## Verdict\nNEEDS-FIX — two hints lose true statements\n\n## Findings\n\n### Blocker\n- None.\n\n### Major\n%s\n\n### Minor / Nit\n- `tests/test_hints.py:334` — one exercise is special-cased.\n\n## What I checked\n%s\n' "$1" "$2" > "$TMP/review.md"
+}
+major_125_is() { jq -e --arg major "$MAJOR_125" "$1" "$TMP/parsed.json" >/dev/null; }
+MAJOR_125='- `scripts/hints.py:977` (same pattern: `scripts/hints.py:716`) — the new hints drop true statements.'
+review_125 "$MAJOR_125"'
+  - `ex02b` with `{"Shareholding"}`: the hint no longer names the missing class.
+  - `ex06` with `{"payer"}`: the hint only repeats the default.
+
+  Several removed sentences were true whenever they fired.
+  - Suggestion: keep the true sentences and rewrite only the ones that guess a cause.' '- The diff and the fired hints.'
+parse
+check 'sub-bullet reproductions fail with unknown counts' json_is "$TMP/parsed.json" \
+  '.status=="parse-failed" and .exit_code==3 and .verdict==null and .findings=={blocker:null,major:null,minor:null} and (.error|contains("noncanonical major"))'
+MAJOR_125='- `scripts/hints.py:977` (same pattern: `scripts/hints.py:716`) — the new hints drop true statements: (1) `ex02b` with `{"Shareholding"}` → the hint no longer names the missing class; (2) `ex06` with `{"payer"}` → the hint only repeats the default → keep the true sentences and rewrite only the ones that guess a cause.'
+review_125 "$MAJOR_125" '- Several removed sentences were true whenever they fired:
+  - `ex02b` named the missing class.
+  - `ex06` named both parties.'
+parse
+check 'inline reproductions parse as one finding with both cases' major_125_is \
+  '.status=="ok" and .findings.major==[$major] and (.findings.minor|length)==1 and .findings.blocker==[]'
+review_125 "$MAJOR_125"'
+
+  Several removed sentences were true whenever they fired.' '- The diff and the fired hints.'
+parse
+check 'continuation prose neither counts nor joins the finding' major_125_is '.status=="ok" and .findings.major==[$major]'
 for bullet in '* A real finding.' '+ A real finding.' '1. A real finding.' '12) A real finding.' $'-\tA real finding.' '* None.'; do
   for indent in '' '  '; do
     printf '## Verdict\nSHIP — unsupported list markers must not hide findings\n## Findings\n### Major\n- None.\n%s%s\n' "$indent" "$bullet" > "$TMP/review.md"
