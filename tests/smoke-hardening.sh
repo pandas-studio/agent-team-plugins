@@ -1931,10 +1931,61 @@ REG_CALL='registry_run agy 0123456789abcdef; echo "rc=$?"'
 assert_eq "$(count_argv REGISTRY_ARGV_MAX_BYTES=16 2>/dev/null)" 'rc=3'
 REG_CALL='registry_run agy 0123456789abcde'
 assert_eq "$(count_argv REGISTRY_ARGV_MAX_BYTES=16)" '[-p][0123456789abcde]'
-# A template with no {prompt} never passes the prompt: size is no reason to refuse.
-printf '%s\n' '{"models":{"bare":{"command":"x","env_command":"AGY_CLI","args":["--ping"]}}}' > "$REG_TMP/bare.json"
-REG_CALL="${BIG}registry_run bare \"\$big\" </dev/null"
-assert_eq "$(count_argv AGENT_TEAM_MODELS_CONFIG="$REG_TMP/bare.json")" '[--ping]'
+# #119: an argv template with no {prompt} would run the CLI without the prompt.
+# It is refused, rc 3, before anything starts, whatever the prompt's size. A
+# final-capable model is checked on the template a call selects: its unused
+# args may lack {prompt}, until a call without a final file selects it.
+printf '%s\n' '{"models":{
+  "bare":{"command":"x","env_command":"AGY_CLI","args":["--ping"]},
+  "finalonly":{"command":"x","env_command":"AGY_CLI","args":["--ping"],"final_args":["--final","{final}","{prompt}"]}}}' > "$REG_TMP/bare.json"
+NO_PROMPT=' takes its prompt as an argument (prompt_via "argv") but its args template has no {prompt}, so the CLI would never see the prompt'
+REG_CALL="${BIG}registry_run bare \"\$big\" </dev/null; echo \"rc=\$?\""
+assert_eq "$(count_argv AGENT_TEAM_MODELS_CONFIG="$REG_TMP/bare.json" 2>&1)" \
+  "$(printf "registry: model 'bare'%s; add {prompt} where the prompt belongs, or use prompt_via \"stdin\"\nrc=3" "$NO_PROMPT")"
+REG_CALL='registry_run finalonly P /f; echo "rc=$?"; registry_run finalonly P; echo "rc=$?"'
+assert_eq "$(count_argv AGENT_TEAM_MODELS_CONFIG="$REG_TMP/bare.json" 2>&1)" \
+  "$(printf "[--final][/f][P]\nrc=0\nregistry: model 'finalonly'%s; nothing was started\nrc=3" "$NO_PROMPT")"
+# registry_check_def is the whole rule. Shapes the runtime's preflight refuses
+# are refused here too, and an empty final_args is never the running template.
+check_def_rc() { bash -c '. "$1/dev-trio/lib/registry.sh"; registry_check_def m "$2" 2>/dev/null; echo $?' _ "$ROOT" "$1"; }
+for def in '{"args":["{prompt}"]}' '{"prompt_via":"argv","args":["-p","{prompt}"]}' \
+           '{"args":["{prompt}"],"final_args":[]}' '{"args":["-p"],"final_args":["{final}","{prompt}"]}' \
+           '{"prompt_via":"stdin","args":["-p"]}'; do
+  assert_eq "$(check_def_rc "$def")" 0
+done
+for def in '{"prompt_via":null,"args":["{prompt}"]}' '{"prompt_via":false,"args":["{prompt}"]}' \
+           '{"args":["{prompt}"],"final_args":"x"}' '{"args":["{prompt}"],"final_args":null}' \
+           '{"args":"-p {prompt}"}' '{"args":[1,"{prompt}"]}' '"invalid"' 'not json' \
+           '{"args":["-p"],"final_args":[]}' '{"args":["{prompt}"],"final_args":["{final}"]}'; do
+  assert_eq "$(check_def_rc "$def")" 3
+done
+# agent-team-models applies the same rule: add/edit refuse to save such a model,
+# preset add checks what it saves, and doctor fails one written by hand.
+for plugin in dev-trio debate-conductor; do
+  printf '%s\n' '{"version":1,"models":{"mine":{"command":"x","args":["{prompt}"]}}}' > "$REG_TMP/atm.json"
+  for cmd in "add z --command z --arg -p" "add z --command z --arg -p --final-arg {final}" \
+             "edit mine --arg -p" "edit mine --argv --arg -p"; do
+    rc=0
+    # shellcheck disable=SC2086  # $cmd is a word list on purpose
+    AGENT_TEAM_MODELS_CONFIG="$REG_TMP/atm.json" "$ROOT/$plugin/bin/agent-team-models.sh" $cmd \
+      >/dev/null 2>"$REG_TMP/atm.err" || rc=$?
+    assert_eq "$rc" 2
+    assert_eq "$(grep -c 'template has no {prompt}' "$REG_TMP/atm.err")" 1
+    assert_eq "$(jq -c .models "$REG_TMP/atm.json")" '{"mine":{"command":"x","args":["{prompt}"]}}'
+  done
+  AGENT_TEAM_MODELS_CONFIG="$REG_TMP/atm.json" "$ROOT/$plugin/bin/agent-team-models.sh" \
+    add f --command f --arg -p --final-arg {final} --final-arg {prompt} >/dev/null 2>&1
+  AGENT_TEAM_MODELS_CONFIG="$REG_TMP/atm.json" "$ROOT/$plugin/bin/agent-team-models.sh" \
+    preset add kimi-code >/dev/null 2>&1
+  assert_eq "$(jq -c '.models["kimi-code"].args' "$REG_TMP/atm.json")" '["-p","{prompt}"]'
+  assert_eq "$(jq -c .models.f "$REG_TMP/atm.json")" '{"command":"f","args":["-p"],"final_args":["{final}","{prompt}"]}'
+  rc=0
+  AGENT_TEAM_MODELS_CONFIG="$REG_TMP/bare.json" "$ROOT/$plugin/bin/agent-team-models.sh" doctor \
+    >"$REG_TMP/doctor.out" 2>&1 || rc=$?
+  assert_eq "$rc" 1
+  assert_eq "$(grep -c "^  \[FAIL\] bare: model 'bare'$NO_PROMPT;" "$REG_TMP/doctor.out")" 1
+  assert_eq "$(grep -c '^  \[FAIL\] finalonly' "$REG_TMP/doctor.out")" 0
+done
 REG_CALL='registry_run agy "한글ab"; echo "rc=$?"'
 assert_eq "$(count_argv REGISTRY_ARGV_MAX_BYTES=8 2>/dev/null)" 'rc=3'
 assert_eq "$(count_argv REGISTRY_ARGV_MAX_BYTES=9)" "$(printf '[-p][한글ab]\nrc=0')"

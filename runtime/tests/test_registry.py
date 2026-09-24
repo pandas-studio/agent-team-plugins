@@ -81,8 +81,10 @@ def test_zero_exit_without_stdout_is_a_failure(tmp_path: Path):
 def _native_runner(tmp_path, code):
     config = tmp_path / "native.json"
     config.write_text(json.dumps({
+        # args lacks {prompt} on purpose: with final_args it never runs, and an
+        # unused template is not a delivery error (#119).
         "models": {"native": {"command": sys.executable, "args": ["-c", "print('wrong')"],
-                              "final_args": ["-c", code, "{final}"]}},
+                              "final_args": ["-c", code, "{final}", "{prompt}"]}},
         "roles": {"langgraph-conductor.planner": "native"},
     }))
     return RoleRunner(ModelRegistry(config))
@@ -132,7 +134,7 @@ def test_stdout_answer_keeps_stderr_separate(tmp_path):
     config = tmp_path / "model.json"
     config.write_text(json.dumps({
         "models": {"fake": {"command": sys.executable, "args": ["-c",
-                   "import os; os.write(1,b'answer\\xff'); os.write(2,b'diagnostic')"]}},
+                   "import os; os.write(1,b'answer\\xff'); os.write(2,b'diagnostic')", "{prompt}"]}},
         "roles": {"langgraph-conductor.planner": "fake"},
     }))
     result = RoleRunner(ModelRegistry(config)).run("langgraph-conductor.planner", "q", tmp_path)
@@ -148,7 +150,7 @@ def test_relative_path_entries_are_resolved_in_workspace(tmp_path, monkeypatch):
     model.chmod(0o755)
     config = tmp_path / "relative.json"
     config.write_text(json.dumps({
-        "models": {"fake": {"command": "local-model", "args": []}},
+        "models": {"fake": {"command": "local-model", "args": ["{prompt}"]}},
         "roles": {"langgraph-conductor.planner": "fake"},
     }))
     monkeypatch.setenv("PATH", "bin")
@@ -202,7 +204,35 @@ def test_prompt_delivery_misconfiguration_is_refused_before_anything_runs(tmp_pa
         runner.preflight(tmp_path)
 
 
-def test_argv_model_without_a_prompt_argument_ignores_the_limit(tmp_path):
-    """A template with no {prompt} never passes the prompt, so size is no reason to refuse."""
-    runner = _planner_config(tmp_path, {"command": sys.executable, "args": ["-c", "print('ran')"]})
-    assert runner.run("langgraph-conductor.planner", "x" * (2 * ARGV_MAX_BYTES), tmp_path).output == "ran\n"
+@pytest.mark.parametrize("templates, field", [
+    ({"args": ["-c", "{code}"]}, "args"),
+    ({"args": ["-c", "{code}"], "final_args": []}, "args"),
+    ({"args": ["-c", "{code}", "{prompt}"], "final_args": ["-c", "{code}", "{final}"]}, "final_args"),
+    ({"prompt_via": "argv", "args": ["-c", "{code}"]}, "args"),
+])
+def test_argv_model_whose_running_template_has_no_prompt_is_refused(tmp_path, templates, field):
+    """#119: the CLI would run without ever seeing the prompt; nothing may start."""
+    marker = tmp_path / "started"
+    code = f"open({str(marker)!r}, 'w').close()"
+    definition = {key: [code if item == "{code}" else item for item in value] if isinstance(value, list) else value
+                  for key, value in templates.items()}
+    runner = _planner_config(tmp_path, {"command": sys.executable, **definition})
+    message = f"its {field} template has no {{prompt}}"
+    with pytest.raises(RegistryError, match=message):
+        runner.preflight(tmp_path)
+    with pytest.raises(RegistryError, match=message):
+        runner.run("langgraph-conductor.planner", "x" * (2 * ARGV_MAX_BYTES), tmp_path)
+    assert not marker.exists()
+
+
+def test_unused_args_without_prompt_is_accepted_beside_final_args(tmp_path):
+    # preflight checks every role, so all four use this model: a passing
+    # preflight must not depend on which CLIs the host has installed.
+    config = tmp_path / "models.json"
+    config.write_text(json.dumps({
+        "models": {"fake": {"command": sys.executable, "args": ["-c", "pass"],
+                            "final_args": ["-c", "pass", "{final}", "{prompt}"]}},
+        "roles": {f"langgraph-conductor.{role}": "fake"
+                  for role in ("planner", "researcher", "coder", "reviewer")},
+    }))
+    RoleRunner(ModelRegistry(config)).preflight(tmp_path)

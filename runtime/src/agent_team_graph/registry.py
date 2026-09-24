@@ -85,6 +85,16 @@ def check_prompt_delivery(model_id: str, definition: dict[str, Any]) -> str:
             if isinstance(template, list) and "{prompt}" in template:
                 raise RegistryError(
                     f"model {model_id!r} takes its prompt on stdin but its {field} template contains {{prompt}}")
+    else:
+        # The template that runs must carry the prompt, or the CLI never sees it
+        # (#119). run() uses final_args whenever it is non-empty. A template that
+        # is not a list is left to the shape checks in preflight() and run().
+        field = "final_args" if definition.get("final_args") else "args"
+        template = definition.get(field)
+        if isinstance(template, list) and "{prompt}" not in template:
+            raise RegistryError(
+                f"model {model_id!r} takes its prompt as an argument but its {field} template has no "
+                "{prompt}, so the CLI would never see the prompt")
     return via
 
 BUILTIN_ROLES = {
@@ -243,10 +253,8 @@ class RoleRunner:
         # The bytes the OS would see: os.fsencode's encoding for argv, and the
         # same bytes on stdin, so neither path rejects what the other accepts.
         encoded = prompt.encode("utf-8", errors="surrogateescape")
-        # Only a template that puts {prompt} in argv can hit the limit.
-        field = "final_args" if definition.get("final_args") else "args"
-        in_argv = via == "argv" and "{prompt}" in (definition.get(field) or [])
-        if in_argv and len(encoded) >= ARGV_MAX_BYTES:
+        # An argv template that runs always carries {prompt} (check_prompt_delivery).
+        if via == "argv" and len(encoded) >= ARGV_MAX_BYTES:
             raise RegistryError(
                 f"model {model_id!r} takes its prompt as one argument, and this prompt is "
                 f"{len(encoded)} bytes; Linux refuses a single argument of {ARGV_MAX_BYTES} bytes "
