@@ -447,14 +447,20 @@ missing log directories with private permissions. An existing team log directory
 must be owned by the caller and must not be writable by group or others. Every
 ancestor, including a symlink target, must be owned by root or the caller. A
 writable ancestor is accepted only when it is sticky (as with `/tmp`) or is
-caller-owned in a primary group with the caller's username. The wrappers reject
+caller-owned in a verified user-private primary group. That check requires the
+group name to match the username and account enumeration to find no other
+supplementary or primary members; if enumeration fails, the path is rejected.
+This is a snapshot of account membership, so remove group write from ancestors
+if group membership can change independently of the caller. The wrappers reject
 unsafe paths before invoking a model and never change permissions on an existing
 directory. Choose a private log root or repair its permissions yourself if
 validation fails. Existing team directories created as `0775` under `umask 002`
 must have group write removed before reuse (for example,
 `chmod g-w .dev-trio/log/<team>`). The same applies to existing
 `<ralph-or-spec-root>/log/<team>/{agy,codex}/<team>` directories. The wrappers
-do not change their modes.
+do not change their modes. The team-directory rule is deliberately stricter
+than the UPG ancestor exception as a conservative policy; it does not by itself
+remove the risk from a group-writable ancestor.
 
 ## Live dashboard
 

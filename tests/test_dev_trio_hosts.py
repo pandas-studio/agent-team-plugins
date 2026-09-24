@@ -134,6 +134,7 @@ class HostTests(unittest.TestCase):
                                           DEV_TRIO_LOG_DIR=str(root))
                     self.assertEqual(result.returncode, 2, result.stderr)
                     self.assertIn("unsafe team log directory", result.stderr)
+                    self.assertIn("chmod go-w", result.stderr)
                     self.assertEqual(list(team.iterdir()), [])
                     self.assertEqual(self.recorded(), [])
                     self.assertEqual(team.stat().st_mode & 0o777, mode)
@@ -220,6 +221,65 @@ _dev_trio_check_log_ancestors "$CHECK_PATH" "$CHECK_TEAM" "$CHECK_UID" "$PRIVATE
         self.assertIn("unsafe log ancestor", result.stderr)
         self.assertFalse((root / "host-test").exists())
 
+    def test_private_group_requires_exclusive_enumerated_membership(self):
+        shim_dir = self.root / "account shims"
+        shim_dir.mkdir()
+        group_fixture = self.root / "group fixture"
+        users_fixture = self.root / "users fixture"
+        identifier = shim_dir / "id"
+        identifier.write_text("#!/bin/sh\n"
+                              "case \"$1\" in\n"
+                              "  -un|-gn) echo isolated ;;\n"
+                              "  -g) echo 60606 ;;\n"
+                              "  *) exit 1 ;;\n"
+                              "esac\n")
+        identifier.chmod(0o755)
+        (shim_dir / "uname").write_text("#!/bin/sh\necho \"$TEST_PLATFORM\"\n")
+        (shim_dir / "dscacheutil").write_text(
+            "#!/bin/sh\n"
+            "case \"$2\" in\n"
+            "  group) cat \"$GROUP_FIXTURE\" ;;\n"
+            "  user) cat \"$USERS_FIXTURE\" ;;\n"
+            "  *) exit 1 ;;\n"
+            "esac\n")
+        (shim_dir / "getent").write_text(
+            "#!/bin/sh\n"
+            "case \"$1\" in\n"
+            "  group) cat \"$GROUP_FIXTURE\" ;;\n"
+            "  passwd) cat \"$USERS_FIXTURE\" ;;\n"
+            "  *) exit 1 ;;\n"
+            "esac\n")
+        for name in ("uname", "dscacheutil", "getent"):
+            (shim_dir / name).chmod(0o755)
+        for platform in ("Darwin", "Linux"):
+            for members, peer, enumerable, allowed in (("", False, True, True),
+                                                       ("peer", False, True, False),
+                                                       ("", True, True, False),
+                                                       ("", False, False, False)):
+                with self.subTest(platform=platform, members=members,
+                                  primary_peer=peer, enumerable=enumerable):
+                    if platform == "Darwin":
+                        group_fixture.write_text("name: isolated\ngid: 60606\n"
+                                                 f"users: {members}\n")
+                        users = ("name: isolated\ngid: 60606\n\n"
+                                 + ("name: peer\ngid: 60606\n" if peer else ""))
+                    else:
+                        group_fixture.write_text(f"isolated:x:60606:{members}\n")
+                        users = ("isolated:x:60606:60606::/tmp:/bin/sh\n"
+                                 + ("peer:x:60607:60606::/tmp:/bin/sh\n" if peer else ""))
+                    users_fixture.write_text(users if enumerable else "")
+                    result = subprocess.run(
+                        ["bash", "-c", '. "$1"; _dev_trio_private_group_gid', "_",
+                         str(self.plugin / "lib/host.sh")],
+                        env=self.env | dict(PATH=f"{shim_dir}:{self.env['PATH']}",
+                                            TEST_PLATFORM=platform,
+                                            GROUP_FIXTURE=str(group_fixture),
+                                            USERS_FIXTURE=str(users_fixture)),
+                        text=True, capture_output=True, timeout=10)
+                    self.assertEqual(result.returncode == 0, allowed, result.stderr)
+                    if allowed:
+                        self.assertEqual(result.stdout.strip(), "60606")
+
     def test_untrusted_symlink_owner_is_rejected(self):
         target = self.root / "trusted target"
         target.mkdir()
@@ -291,6 +351,37 @@ _dev_trio_check_log_ancestors "$CHECK_PATH" '' "$CHECK_UID" -1
                 self.assertIn(REVIEW, original.read_text())
                 self.assertIn("=== END (rc=0) ===", original.read_text())
                 log.unlink()
+                original.rename(log)
+
+    def test_research_fallback_ends_original_log_inode(self):
+        shim_dir = self.root / "research mv shim"
+        shim_dir.mkdir()
+        shim = shim_dir / "mv"
+        shim.write_text(
+            "#!/bin/sh\n"
+            "/bin/mv \"$@\" || exit $?\n"
+            "for destination do :; done\n"
+            "if [ \"$destination\" = \"$SWAP_ROOT/latest-agy.final.md\" ]; then\n"
+            "  target=\"$SWAP_ROOT/$(readlink \"$SWAP_ROOT/latest-agy.log\")\"\n"
+            "  /bin/mv \"$target\" \"$target.saved\" && mkdir \"$target\"\n"
+            "fi\n"
+        )
+        shim.chmod(0o755)
+        logdir = self.workspace / ".dev-trio/log/host-test"
+        result = self.run_cli(
+            "ask-researcher.sh", "private input", SWAP_ROOT=str(logdir),
+            PATH=f"{shim_dir}:{self.env['PATH']}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = logdir / os.readlink(logdir / "latest-agy.log")
+        original = Path(str(log) + ".saved")
+        try:
+            self.assertTrue(log.is_dir())
+            self.assertIn("=== END (rc=0) ===", original.read_text())
+            self.assertNotIn(REVIEW, original.read_text())
+        finally:
+            if log.is_dir():
+                log.rmdir()
+            if original.exists():
                 original.rename(log)
 
     def test_log_root_symlink_replacement_cannot_redirect_artifacts(self):

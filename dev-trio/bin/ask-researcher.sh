@@ -145,11 +145,12 @@ AGY_DENIED=""
 research_agy_denials() {
   local snapshot
   [ -n "$AGY_WORKSPACE" ] && [ -n "$AGY_CLI_LOG" ] && [ -n "$LOG_OFFSET" ] && [ -n "$LOG_END" ] || return 0
-  snapshot=$(mktemp "${TMPDIR:-/tmp}/ask-researcher-frozen.XXXXXX") || return 0
-  RESEARCH_SNAPSHOT_PATH="$snapshot"
-  trap 'rm -f "$RESEARCH_SNAPSHOT_PATH"' EXIT
+  RESEARCH_SNAPSHOT_PATH=""
+  trap '[ -z "$RESEARCH_SNAPSHOT_PATH" ] || rm -f "$RESEARCH_SNAPSHOT_PATH"' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  snapshot=$(mktemp "${TMPDIR:-/tmp}/ask-researcher-frozen.XXXXXX") || return 0
+  RESEARCH_SNAPSHOT_PATH="$snapshot"
   tail -c "+$((LOG_OFFSET + 1))" <&7 \
     | head -c "$((LOG_END - LOG_OFFSET))" > "$snapshot" || true
   if [ "$(wc -c < "$snapshot")" -ne "$((LOG_END - LOG_OFFSET))" ] \
@@ -361,6 +362,7 @@ LATEST_TMP=""
 
 echo "[ask-researcher] running ($RESEARCHER_MODEL) — monitor: dashboard.sh agy  (raw: tail -F $LOG_DIR/latest-agy.log)" >&2
 RC=0
+ORIGINAL_LOG_FD=8
 # Legacy RESEARCHER_CLI still wins as a per-role binary override; otherwise the
 # registry resolves the binary from the model's env_command/command.
 #
@@ -406,6 +408,8 @@ if exec 7<"$LOG" \
   LOG_OFFSET="$(dev_trio_fd_size 8)" || LOG_OFFSET=""
 else
   echo "[ask-researcher] the transcript could not be logged; $LOG may be incomplete" >&2
+  # Preserve the original inode for END even when the model uses /dev/null.
+  if exec 9>&8; then ORIGINAL_LOG_FD=9; fi
   exec 8>&- 7<&- || true
   exec 8>/dev/null
 fi
@@ -413,7 +417,7 @@ fi
 # context above it is not evidence of a denial.
 set +e
 REGISTRY_WORKSPACE="$AGY_WORKSPACE" REGISTRY_CLI_LOG="$AGY_CLI_LOG" \
-  REGISTRY_CMD_OVERRIDE="${RESEARCHER_CLI:-}" registry_run_answer "$RESEARCHER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8 7<&-
+  REGISTRY_CMD_OVERRIDE="${RESEARCHER_CLI:-}" registry_run_answer "$RESEARCHER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8 7<&- 9>&-
 RC=$?
 set -e
 [ -z "$LOG_OFFSET" ] || LOG_END="$(dev_trio_fd_size 8)" || LOG_END=""
@@ -437,10 +441,13 @@ fi
 manifest_finalize
 # As in ask-reviewer, END is best-effort framing; the answer and run metadata
 # determine the outcome even when this final log write fails.
-if ! printf '\n=== END (rc=%d) ===\n' "$RC" >&8; then
+if [ "$ORIGINAL_LOG_FD" -eq 9 ]; then
+  printf '\n=== END (rc=%d) ===\n' "$RC" >&9 || \
+    echo "[ask-researcher] final log append failed; $LOG may be incomplete" >&2 || true
+elif ! printf '\n=== END (rc=%d) ===\n' "$RC" >&8; then
   echo "[ask-researcher] final log append failed; $LOG may be incomplete" >&2 || true
 fi
-exec 8>&-
+exec 8>&- 9>&- || true
 exec 7<&- || true
 echo || true
 echo "(log: $LOG, final: $FINAL, rc=$RC)" >&2 || true

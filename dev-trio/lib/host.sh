@@ -65,6 +65,47 @@ _dev_trio_symlink_owner() {
   fi
 }
 
+# A matching user/group name alone does not establish that a group is private.
+# Refuse the UPG exception when the account database cannot enumerate members.
+_dev_trio_private_group_gid() {
+  local user_name group_name gid group_record user_records
+  user_name=$(id -un) && group_name=$(id -gn) && gid=$(id -g) || return 1
+  [ -n "$user_name" ] && [ "$user_name" = "$group_name" ] || return 1
+  if [ "$(uname -s)" = Darwin ]; then
+    group_record=$(dscacheutil -q group -a gid "$gid") || return 1
+    user_records=$(dscacheutil -q user) || return 1
+    printf '%s\n' "$group_record" | awk -v user="$user_name" -v gid="$gid" '
+      $1 == "name:" { names++; if ($2 != user) bad = 1 }
+      $1 == "gid:" { gids++; if ($2 != gid) bad = 1 }
+      $1 == "users:" { for (i = 2; i <= NF; i++) if ($i != user) bad = 1 }
+      END { exit (bad || names != 1 || gids != 1) }
+    ' || return 1
+    printf '%s\n' "$user_records" | awk -v user="$user_name" -v gid="$gid" '
+      $1 == "name:" { name = $2 }
+      $1 == "gid:" && $2 == gid { if (name == user) own = 1; else bad = 1 }
+      END { exit (bad || !own) }
+    ' || return 1
+  else
+    group_record=$(getent group "$gid") || return 1
+    user_records=$(getent passwd) || return 1
+    printf '%s\n' "$group_record" | awk -F: -v user="$user_name" -v gid="$gid" '
+      NR == 1 && $1 == user && $3 == gid {
+        if ($4 != "") {
+          n = split($4, members, ",")
+          for (i = 1; i <= n; i++) if (members[i] != user) bad = 1
+        }
+        found = 1
+      }
+      END { exit (!found || bad || NR != 1) }
+    ' || return 1
+    printf '%s\n' "$user_records" | awk -F: -v user="$user_name" -v gid="$gid" '
+      $4 == gid { if ($1 == user) own = 1; else bad = 1 }
+      END { exit (bad || !own) }
+    ' || return 1
+  fi
+  printf '%s\n' "$gid"
+}
+
 _dev_trio_check_log_ancestors() {
   local path="$1" team_dir="$2" uid="$3" private_gid="$4" mode owner gid details link_owner
   while :; do
@@ -79,8 +120,11 @@ _dev_trio_check_log_ancestors() {
     read -r mode owner gid <<<"$details"
     mode=$((8#$mode))
     if [ "$path" = "$team_dir" ]; then
-      if [ "$owner" != "$uid" ] || (( (mode & 0022) != 0 )); then
-        echo "dev-trio: unsafe team log directory: $path (must be caller-owned and not writable by other users)" >&2
+      if [ "$owner" != "$uid" ]; then
+        echo "dev-trio: unsafe team log directory: $path (must be caller-owned)" >&2
+        return 1
+      elif (( (mode & 0022) != 0 )); then
+        printf 'dev-trio: unsafe team log directory: %s (remove group/other write: chmod go-w %q)\n' "$path" "$path" >&2
         return 1
       fi
     elif [ "$owner" != 0 ] && [ "$owner" != "$uid" ]; then
@@ -105,14 +149,10 @@ _dev_trio_check_log_ancestors() {
 # Check the existing path before creating anything, then return the physical
 # team directory so artifact paths cannot re-traverse a validated symlink.
 dev_trio_prepare_log_dir() {
-  local requested="$1" physical uid private_gid existing existing_physical team_arg user_name group_name
+  local requested="$1" physical uid private_gid existing existing_physical team_arg
   case "$requested" in /*) ;; *) requested="$PWD/$requested" ;; esac
   uid=$(id -u) || return 2
-  private_gid=-1
-  if user_name=$(id -un) && group_name=$(id -gn) \
-     && [ -n "$user_name" ] && [ "$user_name" = "$group_name" ]; then
-    private_gid=$(id -g) || return 2
-  fi
+  private_gid=$(_dev_trio_private_group_gid) || private_gid=-1
   existing="$requested"
   while [ ! -e "$existing" ] && [ ! -L "$existing" ]; do
     existing=$(dirname "$existing")
