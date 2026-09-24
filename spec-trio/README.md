@@ -313,7 +313,7 @@ spec-trio/
 ├── lib/                          # internal (sourced, not on PATH)
 │   ├── common.sh                 # workspace / team / log / worktree / promise — vendored from ralph-trio
 │   ├── plugin-deps.sh            # find dev-trio scripts outside a session (same file as ralph-trio's)
-│   ├── manifest.sh               # RFC 0004 run manifest helper — vendored from ralph-trio
+│   ├── manifest.sh               # RFC 0004 run manifest helper — byte-identical copy of ralph-trio's
 │   ├── verification.sh           # frozen contract, test gate and task lifecycle
 │   ├── spec-helpers.sh           # parse_allowed_paths, check_scope, parse_test_criteria, criterion_keywords
 │   └── roles/

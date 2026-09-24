@@ -541,7 +541,7 @@ dev-trio/
 │   ├── team-layout.sh         # tmux 3-pane splitter
 │   └── dev-trio-doctor.sh     # env probe + stub-CLI smoke
 ├── lib/                       # internal
-│   ├── manifest.sh            # RFC 0004 run-manifest helper (vendored)
+│   ├── manifest.sh            # RFC 0004 run-manifest helper (byte-identical copy of ralph-trio's)
 │   ├── registry.sh            # shared model registry + runner (vendored)
 │   ├── host.sh                # host defaults and CLI/login checks
 │   ├── pm.md                  # Claude PM policy
