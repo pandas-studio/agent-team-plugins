@@ -228,19 +228,24 @@ def test_valid_definitions_run_the_same_argv_on_both(bash, tmp_path, isolated):
 @pytest.mark.parametrize("bash", BASHES)
 @pytest.mark.parametrize("workspace, cli_log, argv", [
     ("", "", []),
-    ("/r", "", ["--add-dir", "/r"]),
-    ("", "/l", ["--log-file", "/l"]),
-    ("/r", "/l", ["--log-file", "/l", "--add-dir", "/r"]),
+    ("/r", "", ["--add-dir", "/r", "ws\nline", "ws-trail\n"]),
+    ("", "/l", ["--log-file", "/l", "log\nline", "log-trail\n"]),
+    ("/r", "/l", ["--log-file", "/l", "log\nline", "log-trail\n",
+                  "--add-dir", "/r", "ws\nline", "ws-trail\n"]),
 ])
 def test_empty_args_with_each_prefix(bash, tmp_path, workspace, cli_log, argv):
-    """bash 3.2 under `set -u` fails on an empty array expanded bare; the runtime has no prefixes."""
+    """bash 3.2 under `set -u` fails on an empty array expanded bare; the runtime has no prefixes.
+
+    Prefix elements holding newlines stay whole, as template elements do.
+    """
     recorder = tmp_path / "recorder"
     recorder.write_text(RECORDER)
     recorder.chmod(0o755)
     config = tmp_path / "models.json"
     config.write_text(json.dumps({"models": {"m": {
         "command": str(recorder), "prompt_via": "stdin", "args": [],
-        "workspace_args": ["--add-dir", "{cwd}"], "log_args": ["--log-file", "{cli_log}"]}}}))
+        "workspace_args": ["--add-dir", "{cwd}", "ws\nline", "ws-trail\n"],
+        "log_args": ["--log-file", "{cli_log}", "log\nline", "log-trail\n"]}}}))
     out = tmp_path / "argv"
     subprocess.run([bash, "-c", 'set -euo pipefail; . "$1"; registry_run m P </dev/null', "_", str(REGISTRY_SH)],
                    check=True, env=_bash_env(tmp_path, AGENT_TEAM_MODELS_CONFIG=str(config), REC_OUT=str(out),
