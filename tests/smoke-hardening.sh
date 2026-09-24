@@ -49,6 +49,7 @@ done
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 
 TMP="$(mktemp -d)"
+TMP="$(cd "$TMP" && pwd -P)"
 LOCKWT=""
 # with_worktree creates worktrees under /tmp, outside $TMP.
 # The #106 worktree case runs under a team named after $TMP's unique suffix
@@ -1851,6 +1852,7 @@ PASS=$((PASS + 1))
 # REGISTRY_WORKSPACE / REGISTRY_CLI_LOG, each on its own; with neither, argv is
 # what it always was (debate-conductor never sets them).
 REG_TMP=$(mktemp -d)
+REG_TMP=$(cd "$REG_TMP" && pwd -P)
 printf '#!/bin/sh\nfor a in "$@"; do printf "[%%s]" "$a"; done\necho\n' > "$REG_TMP/rec"
 chmod +x "$REG_TMP/rec"
 registry_argv() {

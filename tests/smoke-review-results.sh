@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../dev-trio/lib/review-result.sh
 . "$ROOT/dev-trio/lib/review-result.sh"
 TMP=$(mktemp -d)
+TMP=$(cd "$TMP" && pwd -P)
 # agy's home is pinned to a directory that does not exist, so agy roles get
 # --add-dir but never --log-file, whatever this machine has installed (#103).
 export DEV_TRIO_AGY_HOME=/nonexistent/dev-trio-test-agy-home
@@ -779,28 +780,29 @@ check 'a short capture leaves no partial final' test ! -s "${short_log%.log}.fin
 fixture 'SHIP — leaked descendant'
 
 # A log that becomes unopenable between its header and the descriptor check
-# falls back to an out-of-band transcript. Inject the swap at the first stat
-# used to compare the open descriptor with the log pathname.
-mkdir -p "$TMP/statshim"
-cat > "$TMP/statshim/stat" <<'SHIM'
+# falls back to an out-of-band transcript. Swap it as the latest final link is
+# published, immediately before the wrapper opens its held read descriptor.
+mkdir -p "$TMP/swapshim"
+cat > "$TMP/swapshim/mv" <<'SHIM'
 #!/bin/sh
-if [ "${3:-}" = '%i %u' ] && [ -n "${STAT_SHIM_DIR:-}" ]; then
-  target="$STAT_SHIM_DIR/$(readlink "$STAT_SHIM_DIR/latest-codex.log")"
-  if [ ! -e "$STAT_SHIM_FIRED" ]; then
-    : > "$STAT_SHIM_FIRED"
+/bin/mv "$@" || exit $?
+for destination do :; done
+if [ "$destination" = "$SWAP_SHIM_DIR/latest-codex.final.md" ]; then
+  target="$SWAP_SHIM_DIR/$(readlink "$SWAP_SHIM_DIR/latest-codex.log")"
+  if [ ! -e "$SWAP_SHIM_FIRED" ]; then
+    : > "$SWAP_SHIM_FIRED"
     /bin/mv "$target" "$target.saved" && mkdir "$target"
   fi
 fi
-exec /usr/bin/stat "$@"
 SHIM
-chmod +x "$TMP/statshim/stat"
-rm -f "$TMP/stat-fired"
+chmod +x "$TMP/swapshim/mv"
+rm -f "$TMP/swap-fired"
 fixture 'SHIP — out of band'
 oob_rc=0
 invoke CODEX_CLI="$TMP/leaky-reviewer" CLAUDE_CLI="$TMP/leaky-reviewer" \
   LEAK_RELEASE="$TMP/oob-release" LEAK_DONE="$TMP/oob-done" LEAK_STREAM=stderr \
-  DEV_TRIO_REVIEWER_MODEL=claude PATH="$TMP/statshim:$PATH" \
-  STAT_SHIM_DIR="$TMP/log/review-test" STAT_SHIM_FIRED="$TMP/stat-fired" \
+  DEV_TRIO_REVIEWER_MODEL=claude PATH="$TMP/swapshim:$PATH" \
+  SWAP_SHIM_DIR="$TMP/log/review-test" SWAP_SHIM_FIRED="$TMP/swap-fired" \
   > "$TMP/oob.out" 2> "$TMP/oob.err" || oob_rc=$?
 : > "$TMP/oob-release"
 oob_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-codex.log")"
@@ -815,6 +817,7 @@ check 'the out-of-band run still publishes a verdict' \
   json_is "${oob_log%.log}.review.json" '.verdict=="SHIP" and .exit_code==0'
 check 'the out-of-band transcript is not left beside the logs' \
   test -z "$(find "$TMP/log/review-test" -name '*.transcript.*' -print -quit)"
+check 'out-of-band END reaches the original log inode' grep -q '^=== END (rc=0) ===' "$oob_log"
 fixture 'SHIP — leaked descendant'
 
 # An interrupted run owes the caller no review and no transcript on stdout — it
@@ -902,12 +905,12 @@ done
 # the out-of-band transcript and says where it is — retention cannot depend on
 # the replay having worked.
 fixture 'SHIP — nowhere else to go'
-rm -f "$TMP/stat-fired-oob" "$TMP/oob2-ready" "$TMP/oob2-release"
+rm -f "$TMP/swap-fired-oob" "$TMP/oob2-ready" "$TMP/oob2-release"
 set -m
 env "${INVOKE_ENV[@]}" CODEX_CLI="$TMP/slow-reviewer" CLAUDE_CLI="$TMP/slow-reviewer" \
   SLOW_READY="$TMP/oob2-ready" SLOW_RELEASE="$TMP/oob2-release" \
-  DEV_TRIO_REVIEWER_MODEL=claude PATH="$TMP/statshim:$PATH" \
-  STAT_SHIM_DIR="$TMP/log/review-test" STAT_SHIM_FIRED="$TMP/stat-fired-oob" \
+  DEV_TRIO_REVIEWER_MODEL=claude PATH="$TMP/swapshim:$PATH" \
+  SWAP_SHIM_DIR="$TMP/log/review-test" SWAP_SHIM_FIRED="$TMP/swap-fired-oob" \
   "$ROOT/dev-trio/bin/ask-reviewer.sh" 'fixture review' \
   >&- 2> "$TMP/oob2.err" &
 oob2_pid=$!

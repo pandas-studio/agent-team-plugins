@@ -465,6 +465,7 @@ RC=0
 # errexit is lifted around the call so the CLI's own status survives as $RC.
 TRANSCRIPT_PATH=""
 TRANSCRIPT_OFFSET=""
+ORIGINAL_LOG_FD=8
 # Declared before the call so the range is always a defined pair: a run that
 # ends before the freeze below skips the replay on an empty bound rather than
 # reading an unset variable under `set -u`.
@@ -500,6 +501,8 @@ if exec 7<"$LOG" \
    && dev_trio_fd_matches_path "$LOG" 7; then
   TRANSCRIPT_OFFSET="$(dev_trio_fd_size 8)" || TRANSCRIPT_OFFSET=""
 else
+  # Keep the original inode for END while fd 8 captures the out-of-band run.
+  if exec 9>&8; then ORIGINAL_LOG_FD=9; fi
   exec 8>&- 7<&- || true
   TRANSCRIPT_TMP="$(mktemp "$LOG.transcript.XXXXXX")" || TRANSCRIPT_TMP=""
   if [ -n "$TRANSCRIPT_TMP" ] && exec 8>>"$TRANSCRIPT_TMP" && exec 7<"$TRANSCRIPT_TMP"; then
@@ -526,7 +529,7 @@ trap 'SIGNAL_RC=130' INT
 trap 'SIGNAL_RC=143' TERM
 set +e
 REGISTRY_WORKSPACE="$AGY_WORKSPACE" REGISTRY_CLI_LOG="$AGY_CLI_LOG" \
-  REGISTRY_CMD_OVERRIDE="${REVIEWER_CLI:-}" registry_run "$REVIEWER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8
+  REGISTRY_CMD_OVERRIDE="${REVIEWER_CLI:-}" registry_run "$REVIEWER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8 7<&- 9>&-
 RC=$?
 set -e
 trap 'exit 130' INT
@@ -598,7 +601,10 @@ INVOCATION_RC="$RC"
 finish_review_log() {
   # The result and run metadata carry the outcome. A missing END marker must
   # not replace it with a logging error or prevent completion publication.
-  if ! printf '\n=== END (rc=%d) ===\n' "$RC" >&8; then
+  if [ "$ORIGINAL_LOG_FD" -eq 9 ]; then
+    printf '\n=== END (rc=%d) ===\n' "$RC" >&9 || \
+      echo "[ask-reviewer] final log append failed; $LOG may be incomplete" >&2 || true
+  elif ! printf '\n=== END (rc=%d) ===\n' "$RC" >&8; then
     echo "[ask-reviewer] final log append failed; $LOG may be incomplete" >&2 || true
   fi
 }
@@ -615,7 +621,7 @@ result_output_failed() {
   # exits — without the replay here, a result-write failure would lose it.
   emit_transcript
   finish_review_log
-  exec 8>&- 7<&- || true
+  exec 8>&- 7<&- 9>&- || true
   echo "[ask-reviewer] result write failed: $1 (log: $LOG, final: $FINAL, rc=$RC)" >&2
   # Last, so nothing fallible can change the code after it is recorded.
   [ -z "$RUNSTATE_LOG" ] || runstate_complete "$RUNSTATE_LOG" exit_code="$RC" reason=result-write-failed || true
@@ -676,7 +682,7 @@ manifest_finalize || result_output_failed 'finalize manifest'
 # Completion is published only after the final, result and manifest are ready.
 emit_transcript
 finish_review_log
-exec 8>&- 7<&- || true
+exec 8>&- 7<&- 9>&- || true
 echo || true
 if [ "$RC" -ne 0 ]; then
   ERROR=$(printf '%s\n' "$RESULT_JSON" | jq -r '.error')

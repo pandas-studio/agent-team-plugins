@@ -146,14 +146,16 @@ research_agy_denials() {
   local snapshot
   [ -n "$AGY_WORKSPACE" ] && [ -n "$AGY_CLI_LOG" ] && [ -n "$LOG_OFFSET" ] && [ -n "$LOG_END" ] || return 0
   snapshot=$(mktemp "${TMPDIR:-/tmp}/ask-researcher-frozen.XXXXXX") || return 0
+  RESEARCH_SNAPSHOT_PATH="$snapshot"
+  trap 'rm -f "$RESEARCH_SNAPSHOT_PATH"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   tail -c "+$((LOG_OFFSET + 1))" <&7 \
     | head -c "$((LOG_END - LOG_OFFSET))" > "$snapshot" || true
   if [ "$(wc -c < "$snapshot")" -ne "$((LOG_END - LOG_OFFSET))" ] \
      || ! agy_denial_notice_in "$snapshot" 0 "$((LOG_END - LOG_OFFSET))"; then
-    rm -f "$snapshot"
     return 0
   fi
-  rm -f "$snapshot"
   agy_denial_targets "$(dev_trio_agy_home)" "$AGY_CLI_LOG"
 }
 
@@ -411,7 +413,7 @@ fi
 # context above it is not evidence of a denial.
 set +e
 REGISTRY_WORKSPACE="$AGY_WORKSPACE" REGISTRY_CLI_LOG="$AGY_CLI_LOG" \
-  REGISTRY_CMD_OVERRIDE="${RESEARCHER_CLI:-}" registry_run_answer "$RESEARCHER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8
+  REGISTRY_CMD_OVERRIDE="${RESEARCHER_CLI:-}" registry_run_answer "$RESEARCHER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8 7<&-
 RC=$?
 set -e
 [ -z "$LOG_OFFSET" ] || LOG_END="$(dev_trio_fd_size 8)" || LOG_END=""

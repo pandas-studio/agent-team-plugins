@@ -68,7 +68,7 @@ init_log_dir() {
   : "${TEAM:?init_log_dir: TEAM not set}"
   local d
   d="$(ralph_workspace_root)/log/$TEAM"
-  mkdir -p "$d"
+  (umask 077; mkdir -p "$d")
   echo "$d"
 }
 
@@ -354,6 +354,6 @@ spec_init_log_dir() {
   : "${TEAM:?spec_init_log_dir: TEAM not set}"
   local d
   d="$(spec_workspace_root)/log/$TEAM"
-  mkdir -p "$d"
+  (umask 077; mkdir -p "$d")
   echo "$d"
 }
