@@ -226,6 +226,13 @@ def test_argv_model_whose_running_template_has_no_prompt_is_refused(tmp_path, te
 
 
 def test_unused_args_without_prompt_is_accepted_beside_final_args(tmp_path):
-    runner = _planner_config(tmp_path, {"command": sys.executable, "args": ["-c", "pass"],
-                                        "final_args": ["-c", "pass", "{final}", "{prompt}"]})
-    runner.preflight(tmp_path)
+    # preflight checks every role, so all four use this model: a passing
+    # preflight must not depend on which CLIs the host has installed.
+    config = tmp_path / "models.json"
+    config.write_text(json.dumps({
+        "models": {"fake": {"command": sys.executable, "args": ["-c", "pass"],
+                            "final_args": ["-c", "pass", "{final}", "{prompt}"]}},
+        "roles": {f"langgraph-conductor.{role}": "fake"
+                  for role in ("planner", "researcher", "coder", "reviewer")},
+    }))
+    RoleRunner(ModelRegistry(config)).preflight(tmp_path)
