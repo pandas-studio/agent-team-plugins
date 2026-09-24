@@ -74,28 +74,69 @@ BUILTIN_MODELS: dict[str, dict[str, Any]] = {
 ARGV_MAX_BYTES = 131072
 
 
-def check_prompt_delivery(model_id: str, definition: dict[str, Any]) -> str:
-    """Return the model's prompt_via, or raise what registry.sh rejects with rc 3."""
-    via = definition.get("prompt_via", "argv")
-    if via not in ("argv", "stdin"):
-        raise RegistryError(f"model {model_id!r} has prompt_via {via!r}; use 'argv' or 'stdin'")
-    if via == "stdin":
+# Placeholders a template may not hold. args runs exactly when nothing captures
+# a final answer, so {final} there has no meaning; {cwd} and {cli_log} belong
+# to registry.sh's caller-gated prefixes, which this runtime never applies.
+_REFUSED_PLACEHOLDERS = {
+    "args": ("{final}", "{cwd}", "{cli_log}"),
+    "final_args": ("{cwd}", "{cli_log}"),
+    # Checked only so a definition gets one verdict everywhere: registry.sh
+    # reads these NUL-delimited, and a NUL would split an element in two.
+    "workspace_args": (),
+    "log_args": (),
+}
+
+
+def _template_problem(definition: dict[str, Any], field: str) -> str | None:
+    template = definition[field]
+    if not isinstance(template, list) or not all(isinstance(item, str) for item in template):
+        return f"has {'an' if field == 'args' else 'a'} {field} template that is not an array of strings"
+    if any("\0" in item for item in template):
+        return f"has a NUL byte in its {field} template, which no argument can carry"
+    for item in template:
+        if item in _REFUSED_PLACEHOLDERS[field]:
+            return (f"has {item} in its {field} template; {{final}} belongs in final_args, "
+                    "{cwd} and {cli_log} in workspace_args and log_args")
+    return None
+
+
+def definition_problem(definition: Any) -> tuple[str, str] | None:
+    """The model-definition rule: None, or (field, reason) for the first rule broken.
+
+    registry.sh's _registry_def_problem applies the same rules in the same
+    order; runtime/tests/test_registry_differential.py holds the two to one
+    verdict and one field (#130).
+    """
+    if not isinstance(definition, dict):
+        return "definition", "is not a JSON object"
+    if "prompt_via" in definition and definition["prompt_via"] not in ("argv", "stdin"):
+        return "prompt_via", f"has prompt_via {definition['prompt_via']!r}; use 'argv' or 'stdin'"
+    if "args" not in definition:
+        return "args", "has no args template; give one, [] for a stdin CLI that takes no arguments"
+    for field in ("args", "final_args", "workspace_args", "log_args"):
+        if field in definition and (why := _template_problem(definition, field)):
+            return field, why
+    if definition.get("prompt_via") == "stdin":
         for field in ("args", "final_args"):
-            template = definition.get(field) or []
-            if isinstance(template, list) and "{prompt}" in template:
-                raise RegistryError(
-                    f"model {model_id!r} takes its prompt on stdin but its {field} template contains {{prompt}}")
-    else:
-        # The template that runs must carry the prompt, or the CLI never sees it
-        # (#119). run() uses final_args whenever it is non-empty. A template that
-        # is not a list is left to the shape checks in preflight() and run().
-        field = "final_args" if definition.get("final_args") else "args"
-        template = definition.get(field)
-        if isinstance(template, list) and "{prompt}" not in template:
-            raise RegistryError(
-                f"model {model_id!r} takes its prompt as an argument but its {field} template has no "
-                "{prompt}, so the CLI would never see the prompt")
-    return via
+            if "{prompt}" in definition.get(field, []):
+                return field, (f"takes its prompt on stdin but its {field} template contains {{prompt}}; "
+                               "remove it")
+        return None
+    # The template that runs must carry the prompt, or the CLI never sees it
+    # (#119). run() uses final_args whenever it is non-empty.
+    field = "final_args" if definition.get("final_args") else "args"
+    if "{prompt}" not in definition[field]:
+        return field, (f"takes its prompt as an argument but its {field} template has no {{prompt}}, "
+                       "so the CLI would never see the prompt")
+    return None
+
+
+def check_definition(model_id: str, definition: Any) -> str:
+    """Return the model's prompt_via, or raise what registry.sh rejects with rc 3."""
+    problem = definition_problem(definition)
+    if problem is not None:
+        raise RegistryError(f"model {model_id!r} {problem[1]}")
+    return definition.get("prompt_via", "argv")
 
 BUILTIN_ROLES = {
     "langgraph-conductor.planner": "claude",
@@ -208,13 +249,7 @@ class RoleRunner:
     def preflight(self, workspace: Path) -> None:
         for role in BUILTIN_ROLES:
             model_id, definition, _ = self.resolve_adapter(role, workspace)
-            check_prompt_delivery(model_id, definition)
-            for field in ("args", "final_args"):
-                if field == "final_args" and field not in definition:
-                    continue
-                template = definition.get(field)
-                if not isinstance(template, list) or not all(isinstance(x, str) and "\0" not in x for x in template):
-                    raise RegistryError(f"role {role!r} has an invalid {field} template")
+            check_definition(model_id, definition)
 
     def resolve_adapter(self, role: str, workspace: Path) -> tuple[str, dict[str, Any], str]:
         """Resolve the model, definition and executable used for execution and call identity."""
@@ -249,11 +284,12 @@ class RoleRunner:
     ) -> RoleResult:
         timeout = self.timeout_seconds if timeout is None else timeout
         model_id, definition, command = self.resolve_adapter(role, workspace)
-        via = check_prompt_delivery(model_id, definition)
+        # The whole definition, not only the template this call selects (#130).
+        via = check_definition(model_id, definition)
         # The bytes the OS would see: os.fsencode's encoding for argv, and the
         # same bytes on stdin, so neither path rejects what the other accepts.
         encoded = prompt.encode("utf-8", errors="surrogateescape")
-        # An argv template that runs always carries {prompt} (check_prompt_delivery).
+        # An argv template that runs always carries {prompt} (check_definition).
         if via == "argv" and len(encoded) >= ARGV_MAX_BYTES:
             raise RegistryError(
                 f"model {model_id!r} takes its prompt as one argument, and this prompt is "
@@ -264,10 +300,7 @@ class RoleRunner:
             capture = (final_path or Path(temporary) / "answer.md") if native else None
             if capture is not None and os.path.lexists(capture):
                 raise RegistryError(f"final-answer path already exists: {capture}")
-            field = "final_args" if native else "args"
-            template = definition.get(field)
-            if not isinstance(template, list) or not all(isinstance(item, str) for item in template):
-                raise RegistryError(f"model {model_id!r} has an invalid {field} template")
+            template = definition["final_args" if native else "args"]
             replacements = {"{final}": str(capture or "")}
             if via == "argv":
                 replacements["{prompt}"] = prompt
