@@ -16,6 +16,14 @@ set -uo pipefail
 # The drivers take DEV_TRIO_BIN / DEBATE_CONDUCTOR_BIN over PATH; an exported
 # override would route these smokes past their stubs.
 unset DEV_TRIO_BIN DEBATE_CONDUCTOR_BIN
+# Every model call goes to the stubs below (CLAUDE_CLI / CODEX_CLI, or a case's
+# own PLANNER_CLI / CODER_CLI). A role override or a CLI override would send it
+# to another CLI instead (#116); the models config is pinned further down.
+unset DEV_TRIO_REVIEWER_MODEL DEV_TRIO_RESEARCHER_MODEL REVIEWER_CLI RESEARCHER_CLI \
+      PLANNER_CLI CODER_CLI
+# agy's home is pinned to a directory that does not exist, as in
+# tests/smoke-hardening.sh, so a stray agy run never writes a log there (#103).
+export DEV_TRIO_AGY_HOME=/nonexistent/spec-trio-test-agy-home
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -29,6 +37,9 @@ MANIFEST_LIB="$PLUGIN_ROOT/lib/manifest.sh"
 # (lib/common.sh) resolve to this dir instead of the caller's $PWD/.spec-trio.
 SPEC_TRIO_WORKSPACE=$(mktemp -d -t spec-pr5-ws-XXXXXX)
 export SPEC_TRIO_WORKSPACE
+# An absent models config, so the built-in role defaults apply whatever the
+# caller's config binds (#116).
+export AGENT_TEAM_MODELS_CONFIG="$SPEC_TRIO_WORKSPACE/models.json"
 SPEC_LOG_BASE="$SPEC_TRIO_WORKSPACE/log"
 mkdir -p "$SPEC_LOG_BASE"
 
@@ -38,15 +49,14 @@ mkdir -p "$SPEC_LOG_BASE"
 
 # spec-trio.sh checks PATH for ask-reviewer.sh / ask-researcher.sh before running any
 # non-dry-run / non-autoship case. If we can find a sibling dev-trio plugin
-# checkout (the monorepo arrangement), prepend its bin/ to PATH. The cases
+# checkout (the monorepo arrangement), prepend its bin/ to PATH, even when it is
+# already there: an installed dev-trio earlier on PATH would otherwise be the
+# copy under test (#116). The cases
 # stub the underlying `codex` binary via CODEX_CLI, so ask-reviewer.sh itself
 # still runs end-to-end — only the LLM call inside it is stubbed.
 SIBLING_DEV_BIN="$(cd "$PLUGIN_ROOT/../dev-trio/bin" 2>/dev/null && pwd)"
 if [ -n "$SIBLING_DEV_BIN" ] && [ -x "$SIBLING_DEV_BIN/ask-reviewer.sh" ]; then
-  case ":$PATH:" in
-    *":$SIBLING_DEV_BIN:"*) ;;
-    *) export PATH="$SIBLING_DEV_BIN:$PATH" ;;
-  esac
+  export PATH="$SIBLING_DEV_BIN:$PATH"
 fi
 command -v ask-reviewer.sh  >/dev/null 2>&1 || { echo "smoke prereq missing: ask-reviewer.sh (install dev-trio plugin or run from a sibling-checkout layout)" >&2; exit 2; }
 command -v ask-researcher.sh >/dev/null 2>&1 || { echo "smoke prereq missing: ask-researcher.sh (install dev-trio plugin)" >&2; exit 2; }
