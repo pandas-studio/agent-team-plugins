@@ -1284,6 +1284,9 @@ class VerificationTests(unittest.TestCase):
             FIXTURE_FIX=str(self.repo / "fix_plan.md"),
             DEV_TRIO_REVIEWER_MODEL="codex",
             DEV_TRIO_RESEARCHER_MODEL="agy",
+            # An agy home that does not exist: the researcher gets --add-dir
+            # but no --log-file, so no run leaves a log in the real one (#103).
+            DEV_TRIO_AGY_HOME=str(self.base / "no-agy-home"),
         )
         for name in ("worker", "reviewer", "researcher"):
             path = self.bin / name

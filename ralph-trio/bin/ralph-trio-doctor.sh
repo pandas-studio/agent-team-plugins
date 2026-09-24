@@ -256,9 +256,26 @@ echo "(log: $LOG, final: $FINAL, result: $RESULT, rc=$RC)" >&2
 exit "$RC"
 STUB
   chmod +x "$STUB_BIN/ask-reviewer.sh"
+  # Planner and coder must print something: a stage that exits 0 with empty
+  # stdout and no tree change is a failed stage (#88), which would skip the
+  # reviewer these cases exist to check. No NEED RESEARCH, no tree change.
+  cat > "$STUB_BIN/stub-planner.sh" <<'STUB'
+#!/usr/bin/env bash
+cat <<'PLAN'
+## Plan
+1. stub smoke task
+## Verify
+- nothing to verify (stub)
+PLAN
+STUB
+  cat > "$STUB_BIN/stub-coder.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "coder ran (stub)"
+STUB
+  chmod +x "$STUB_BIN/stub-planner.sh" "$STUB_BIN/stub-coder.sh"
 
   # run_trio_case MODE CWD — runs a single-iter trio loop in a fresh git repo
-  # under $CWD with the stub on PATH and claude stubbed to `true` (no real model).
+  # under $CWD with the stubs on PATH and planner/coder stubbed (no real model).
   run_trio_case() {
     local mode="$1" cwd="$2"
     mkdir -p "$cwd"
@@ -275,7 +292,7 @@ STUB
       AGENT_TEAM="doctor-trio" \
       RALPH_TRIO_WORKSPACE="$cwd/.ralph-trio" \
       STUB_MODE="$mode" \
-      PLANNER_CLI=true CODER_CLI=true \
+      PLANNER_CLI="$STUB_BIN/stub-planner.sh" CODER_CLI="$STUB_BIN/stub-coder.sh" \
       TMUX="" \
       PATH="$STUB_BIN:$PATH" \
       "$PLUGIN_ROOT/bin/ralph-trio.sh" --max-iter 1 --no-research --backlog "$cwd/BACKLOG.md" \
@@ -288,6 +305,17 @@ STUB
     local cwd="$1" m
     m=$(ls "$cwd/.ralph-trio/log/doctor-trio"/ralph-trio-*-iter-1-review.manifest.json 2>/dev/null | tail -1)
     [ -n "$m" ] && jq -r '.verdict' "$m" 2>/dev/null
+  }
+
+  review_status() {
+    # Echo .status of the review result the iter-1 review manifest links to.
+    # A missing or rejected receipt also forces verdict=null, so Case B needs
+    # this to show the empty final was actually parsed.
+    local cwd="$1" m r
+    m=$(ls "$cwd/.ralph-trio/log/doctor-trio"/ralph-trio-*-iter-1-review.manifest.json 2>/dev/null | tail -1)
+    [ -n "$m" ] || return 0
+    r=$(jq -r '[.inputs[] | select(.kind == "review-result") | .path][0] // empty' "$m" 2>/dev/null)
+    [ -n "$r" ] && jq -r '.status' "$r" 2>/dev/null
   }
 
   # --- Case A: final-ship — verdict comes from .final.md, not the decoy stream.
@@ -325,6 +353,12 @@ STUB
     ok "empty final + placeholder stream → verdict=null (no bogus verdict leaked)"
   else
     fail "expected verdict=null for placeholder-only stream, got: ${VB:-<no manifest>}"
+  fi
+  SB=$(review_status "$CASE_B")
+  if [ "$SB" = "parse-failed" ]; then
+    ok "empty final reached the parser → review result status=parse-failed"
+  else
+    fail "expected review result status=parse-failed for empty final, got: ${SB:-<no review result>}"
   fi
 fi
 

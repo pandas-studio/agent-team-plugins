@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # dev-trio-doctor.sh — environment probe + stub-CLI smoke for dev-trio.
 #
-# Usage: dev-trio-doctor.sh [--research]
+# Usage: dev-trio-doctor.sh [--research | --smoke-only]
 # --research is a read-only researcher check: no inference, auth subprocess,
 # stub runs, or configuration writes. A pass does not verify research access.
+# --smoke-only skips the PM host and role CLI/login probes, which read this
+# machine's configuration and auth state, and keeps the rest. It is how
+# scripts/check.sh runs the doctor.
 #
 # Default-mode checks (without --research):
 #   1. Helpers and resolved role CLIs; Claude login for Codex PM; optional tmux.
@@ -12,7 +15,7 @@
 #      lib/runstate.sh /
 #      lib/roles/*.md / lib/pm.md).
 #   3. Stub-CLI smoke: runs ask-researcher.sh against a tmp stub matching
-#      `agy -p "$2"` shape (with an isolated empty models config so the
+#      `agy [flags] -p PROMPT` shape (with an isolated empty models config so the
 #      built-in researcher=agy default applies), then asserts the manifest
 #      JSON is well-formed and contains variant=dev-trio-research with
 #      role[0].model=agy.
@@ -24,16 +27,19 @@
 set -uo pipefail
 
 RESEARCH_ONLY=false
+SMOKE_ONLY=false
 case "${1:-}" in
   '') ;;
   --research) RESEARCH_ONLY=true; shift ;;
+  --smoke-only) SMOKE_ONLY=true; shift ;;
   --help|-h)
-    echo 'usage: dev-trio-doctor.sh [--research]'
-    echo '  --research  Read-only researcher setup checks; no inference or settings changes.'
+    echo 'usage: dev-trio-doctor.sh [--research | --smoke-only]'
+    echo '  --research    Read-only researcher setup checks; no inference or settings changes.'
+    echo '  --smoke-only  Skip the PM host and role CLI/login probes; run the rest.'
     exit 0 ;;
-  *) echo 'usage: dev-trio-doctor.sh [--research]' >&2; exit 2 ;;
+  *) echo 'usage: dev-trio-doctor.sh [--research | --smoke-only]' >&2; exit 2 ;;
 esac
-[ "$#" -eq 0 ] || { echo 'usage: dev-trio-doctor.sh [--research]' >&2; exit 2; }
+[ "$#" -eq 0 ] || { echo 'usage: dev-trio-doctor.sh [--research | --smoke-only]' >&2; exit 2; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -41,7 +47,8 @@ PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$PLUGIN_ROOT/lib/registry.sh" || exit 2
 # shellcheck source=../lib/host.sh
 . "$PLUGIN_ROOT/lib/host.sh"
-PM_HOST="$(dev_trio_host)" || exit $?
+# The smokes pin their own host; only the live probes read the caller's.
+if [ "$SMOKE_ONLY" = false ]; then PM_HOST="$(dev_trio_host)" || exit $?; fi
 
 GREEN=$'\033[1;32m'
 YELLOW=$'\033[1;33m'
@@ -100,24 +107,28 @@ for t in jq python3; do
 done
 if command -v tmux >/dev/null 2>&1; then ok "tmux — optional dashboards available"
 else warn "tmux missing — research and review still work"; fi
-for role in researcher reviewer; do
-  model="$(dev_trio_resolve_role "$role")" || { fail "$role resolution failed"; continue; }
-  case "$role" in
-    researcher) override="${RESEARCHER_CLI:-}" ;;
-    reviewer) override="${REVIEWER_CLI:-}" ;;
-  esac
-  binary="$(REGISTRY_CMD_OVERRIDE="$override" registry_resolve_command "$model")" || {
-    fail "$role binary resolution failed"; continue;
-  }
-  if command -v "$binary" >/dev/null 2>&1; then
-    ok "$role -> $model ($binary); PM=$PM_HOST"
-    if ! REGISTRY_CMD_OVERRIDE="$override" dev_trio_check_cli "$model"; then
-      fail "$role CLI/login check failed"
+if [ "$SMOKE_ONLY" = true ]; then
+  note "role CLI/login checks skipped (--smoke-only)"
+else
+  for role in researcher reviewer; do
+    model="$(dev_trio_resolve_role "$role")" || { fail "$role resolution failed"; continue; }
+    case "$role" in
+      researcher) override="${RESEARCHER_CLI:-}" ;;
+      reviewer) override="${REVIEWER_CLI:-}" ;;
+    esac
+    binary="$(REGISTRY_CMD_OVERRIDE="$override" registry_resolve_command "$model")" || {
+      fail "$role binary resolution failed"; continue;
+    }
+    if command -v "$binary" >/dev/null 2>&1; then
+      ok "$role -> $model ($binary); PM=$PM_HOST"
+      if ! REGISTRY_CMD_OVERRIDE="$override" dev_trio_check_cli "$model"; then
+        fail "$role CLI/login check failed"
+      fi
+    else
+      warn "$role -> $model: $binary missing; live invocation unavailable"
     fi
-  else
-    warn "$role -> $model: $binary missing; live invocation unavailable"
-  fi
-done
+  done
+fi
 if command -v sha256sum >/dev/null 2>&1; then ok "sha256sum — $(command -v sha256sum)"
 elif command -v shasum >/dev/null 2>&1; then ok "shasum — $(command -v shasum) (manifest.sh fallback)"
 else fail "neither sha256sum nor shasum found — manifest hashing will fail"; fi
@@ -145,9 +156,10 @@ else
   STUB_AGY="$TMPDIR_SMOKE/stub-agy.sh"
   cat > "$STUB_AGY" <<'STUB'
 #!/usr/bin/env bash
-# Stub matching `agy -p "$2"` shape per smoke-test stub-wrapper rule.
+# Stub matching `agy [--log-file F] [--add-dir D] -p PROMPT` per smoke-test
+# stub-wrapper rule: the prompt stays last, flags may precede -p (#103).
 # Echoes a canonical-shaped lead paragraph so dashboard.sh can parse it.
-if [ "${1:-}" != "-p" ]; then echo "stub-agy: expected -p as \$1, got: ${1:-}" >&2; exit 2; fi
+if [ "$#" -lt 2 ] || [ "${@: -2:1}" != "-p" ]; then echo "stub-agy: expected -p PROMPT last, got: $*" >&2; exit 2; fi
 cat <<'OUT'
 LangGraph streaming can use the async iterator returned by graph.astream(input).
 
@@ -156,6 +168,10 @@ OUT
 STUB
   chmod +x "$STUB_AGY"
 
+  # agy home inside the smoke dir: the wrapper pins a --log-file under
+  # $DEV_TRIO_AGY_HOME/log when writable, and the real one must not collect
+  # a stub run's log on every check.
+  mkdir -p "$TMPDIR_SMOKE/agy-home/log"
   pushd "$TMPDIR_SMOKE" >/dev/null
   # Isolate from the user's shared config + role/CLI envs so the built-in
   # researcher=agy default (and the AGY_CLI stub) deterministically apply.
@@ -166,9 +182,10 @@ STUB
   DEV_TRIO_RESEARCHER_MODEL="" \
   RESEARCHER_CLI="" \
   AGY_CLI="$STUB_AGY" \
+  DEV_TRIO_AGY_HOME="$TMPDIR_SMOKE/agy-home" \
   TMUX="" \
     "$PLUGIN_ROOT/bin/ask-researcher.sh" "doctor smoke: what is LangGraph streaming?" \
-    >"$TMPDIR_SMOKE/smoke.out" 2>"$TMPDIR_SMOKE/smoke.err"
+    </dev/null >"$TMPDIR_SMOKE/smoke.out" 2>"$TMPDIR_SMOKE/smoke.err"
   RC=$?
   popd >/dev/null
 
@@ -220,8 +237,11 @@ if [ "$FAILED" = "1" ]; then
   warn "skipping registry smoke — prior checks failed"
 else
   # Neutralize ambient role overrides so config-binding resolution is observable.
+  # Every name in registry.sh's _registry_role_envname: its doctor checks all roles.
   unset DEV_TRIO_RESEARCHER_MODEL DEV_TRIO_REVIEWER_MODEL \
-        DEBATE_GENERATOR_MODEL DEBATE_CRITIC_MODEL 2>/dev/null || true
+        DEBATE_GENERATOR_MODEL DEBATE_CRITIC_MODEL \
+        LANGGRAPH_CONDUCTOR_PLANNER_MODEL LANGGRAPH_CONDUCTOR_CODER_MODEL \
+        LANGGRAPH_CONDUCTOR_RESEARCHER_MODEL LANGGRAPH_CONDUCTOR_REVIEWER_MODEL 2>/dev/null || true
   ATM="$PLUGIN_ROOT/bin/agent-team-models.sh"
   REG_TMP=$(mktemp -d)
   REG_CFG="$REG_TMP/models.json"

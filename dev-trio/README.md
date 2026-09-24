@@ -555,6 +555,8 @@ dev-trio-doctor.sh
 
 Checks required helpers and resolved role binaries, probes Claude login for the Codex host, treats tmux as optional, verifies that `ask-researcher.sh` produces a well-formed RFC 0004 manifest under stub CLIs, and exercises the `agent-team-models` registry CLI (list / preset / set-role / doctor / remove against an isolated config). **Stub smokes are necessary but not sufficient** — verdict / dashboard / parse-affecting changes need a real-CLI dry-run on top.
 
+`dev-trio-doctor.sh --smoke-only` skips the PM host and role CLI/login probes, which depend on this machine's configuration and login state, and runs everything else. `scripts/check.sh` runs it this way.
+
 ## Development checks
 
 ```bash
