@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # dev-trio-doctor.sh — environment probe + stub-CLI smoke for dev-trio.
 #
-# Usage: dev-trio-doctor.sh [--research]
+# Usage: dev-trio-doctor.sh [--research | --smoke-only]
 # --research is a read-only researcher check: no inference, auth subprocess,
 # stub runs, or configuration writes. A pass does not verify research access.
+# --smoke-only skips the PM host and role CLI/login probes, which read this
+# machine's configuration and auth state, and keeps the rest. It is how
+# scripts/check.sh runs the doctor.
 #
 # Default-mode checks (without --research):
 #   1. Helpers and resolved role CLIs; Claude login for Codex PM; optional tmux.
@@ -24,16 +27,19 @@
 set -uo pipefail
 
 RESEARCH_ONLY=false
+SMOKE_ONLY=false
 case "${1:-}" in
   '') ;;
   --research) RESEARCH_ONLY=true; shift ;;
+  --smoke-only) SMOKE_ONLY=true; shift ;;
   --help|-h)
-    echo 'usage: dev-trio-doctor.sh [--research]'
-    echo '  --research  Read-only researcher setup checks; no inference or settings changes.'
+    echo 'usage: dev-trio-doctor.sh [--research | --smoke-only]'
+    echo '  --research    Read-only researcher setup checks; no inference or settings changes.'
+    echo '  --smoke-only  Skip the PM host and role CLI/login probes; run the rest.'
     exit 0 ;;
-  *) echo 'usage: dev-trio-doctor.sh [--research]' >&2; exit 2 ;;
+  *) echo 'usage: dev-trio-doctor.sh [--research | --smoke-only]' >&2; exit 2 ;;
 esac
-[ "$#" -eq 0 ] || { echo 'usage: dev-trio-doctor.sh [--research]' >&2; exit 2; }
+[ "$#" -eq 0 ] || { echo 'usage: dev-trio-doctor.sh [--research | --smoke-only]' >&2; exit 2; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -41,7 +47,8 @@ PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$PLUGIN_ROOT/lib/registry.sh" || exit 2
 # shellcheck source=../lib/host.sh
 . "$PLUGIN_ROOT/lib/host.sh"
-PM_HOST="$(dev_trio_host)" || exit $?
+# The smokes pin their own host; only the live probes read the caller's.
+if [ "$SMOKE_ONLY" = false ]; then PM_HOST="$(dev_trio_host)" || exit $?; fi
 
 GREEN=$'\033[1;32m'
 YELLOW=$'\033[1;33m'
@@ -100,24 +107,28 @@ for t in jq python3; do
 done
 if command -v tmux >/dev/null 2>&1; then ok "tmux — optional dashboards available"
 else warn "tmux missing — research and review still work"; fi
-for role in researcher reviewer; do
-  model="$(dev_trio_resolve_role "$role")" || { fail "$role resolution failed"; continue; }
-  case "$role" in
-    researcher) override="${RESEARCHER_CLI:-}" ;;
-    reviewer) override="${REVIEWER_CLI:-}" ;;
-  esac
-  binary="$(REGISTRY_CMD_OVERRIDE="$override" registry_resolve_command "$model")" || {
-    fail "$role binary resolution failed"; continue;
-  }
-  if command -v "$binary" >/dev/null 2>&1; then
-    ok "$role -> $model ($binary); PM=$PM_HOST"
-    if ! REGISTRY_CMD_OVERRIDE="$override" dev_trio_check_cli "$model"; then
-      fail "$role CLI/login check failed"
+if [ "$SMOKE_ONLY" = true ]; then
+  note "role CLI/login checks skipped (--smoke-only)"
+else
+  for role in researcher reviewer; do
+    model="$(dev_trio_resolve_role "$role")" || { fail "$role resolution failed"; continue; }
+    case "$role" in
+      researcher) override="${RESEARCHER_CLI:-}" ;;
+      reviewer) override="${REVIEWER_CLI:-}" ;;
+    esac
+    binary="$(REGISTRY_CMD_OVERRIDE="$override" registry_resolve_command "$model")" || {
+      fail "$role binary resolution failed"; continue;
+    }
+    if command -v "$binary" >/dev/null 2>&1; then
+      ok "$role -> $model ($binary); PM=$PM_HOST"
+      if ! REGISTRY_CMD_OVERRIDE="$override" dev_trio_check_cli "$model"; then
+        fail "$role CLI/login check failed"
+      fi
+    else
+      warn "$role -> $model: $binary missing; live invocation unavailable"
     fi
-  else
-    warn "$role -> $model: $binary missing; live invocation unavailable"
-  fi
-done
+  done
+fi
 if command -v sha256sum >/dev/null 2>&1; then ok "sha256sum — $(command -v sha256sum)"
 elif command -v shasum >/dev/null 2>&1; then ok "shasum — $(command -v shasum) (manifest.sh fallback)"
 else fail "neither sha256sum nor shasum found — manifest hashing will fail"; fi

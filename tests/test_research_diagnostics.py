@@ -235,8 +235,33 @@ class ResearchDiagnosticsTests(unittest.TestCase):
                 self.assertFalse(self.calls.exists())
                 self.assertFalse((self.workspace / ".dev-trio").exists())
 
+    def test_smoke_only_skips_live_login_probe(self):
+        # The fixture claude answers `auth status` with nothing, like a
+        # logged-out install; a Codex PM makes the doctor ask it.
+        result = self.run_script("dev-trio-doctor.sh")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("reviewer CLI/login check failed", result.stdout)
+        self.assertIn("auth status --json", self.calls.read_text())
+        self.calls.unlink()
+        result = self.run_script("dev-trio-doctor.sh", "--smoke-only")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("role CLI/login checks skipped (--smoke-only)", result.stdout)
+        self.assertNotIn("✗", result.stdout)
+        # The smokes themselves ran: section 3's manifest and section 4's last check.
+        self.assertIn("ask-researcher.sh stub run completed (rc=0)", result.stdout)
+        self.assertIn("variant=dev-trio-research", result.stdout)
+        self.assertIn("remove --force --fallback codex reassigns role then deletes", result.stdout)
+        self.assertFalse(self.calls.exists())
+
+    def test_smoke_only_ignores_the_callers_pm_host(self):
+        result = self.run_script("dev-trio-doctor.sh", DEV_TRIO_PM_HOST="bogus")
+        self.assertEqual(result.returncode, 2)
+        result = self.run_script("dev-trio-doctor.sh", "--smoke-only", DEV_TRIO_PM_HOST="bogus")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_doctor_rejects_unknown_arguments(self):
-        for args in (("--research", "--apply"), ("--unknown",)):
+        for args in (("--research", "--apply"), ("--unknown",), ("--smoke-only", "--research"),
+                     ("--research", "--smoke-only"), ("--smoke",)):
             result = self.run_script("dev-trio-doctor.sh", *args)
             self.assertEqual(result.returncode, 2)
             self.assertFalse(self.calls.exists())

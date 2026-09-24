@@ -40,9 +40,15 @@ python3 "$SPEC_VERIFICATION_TEST"
 
 # The doctors' stub smokes drive the real wrappers and loops, so a contract
 # change can break them; outside this script that went unnoticed (#105).
-bash "$ROOT/dev-trio/bin/dev-trio-doctor.sh"
-bash "$ROOT/ralph-trio/bin/ralph-trio-doctor.sh"
-bash "$ROOT/spec-trio/bin/spec-trio-doctor.sh"
+# --smoke-only: a developer's CLI login state is not a property of the code.
+bash "$ROOT/dev-trio/bin/dev-trio-doctor.sh" --smoke-only
+# Their dependency checks honour DEV_TRIO_BIN / DEBATE_CONDUCTOR_BIN; an
+# exported override naming another install is not a property of this checkout.
+(
+  unset DEV_TRIO_BIN DEBATE_CONDUCTOR_BIN
+  bash "$ROOT/ralph-trio/bin/ralph-trio-doctor.sh"
+  bash "$ROOT/spec-trio/bin/spec-trio-doctor.sh"
+)
 
 if [ -x "$ROOT/runtime/.venv/bin/pytest" ]; then
   "$ROOT/runtime/.venv/bin/ruff" check "$ROOT/runtime/src" "$ROOT/runtime/tests"
