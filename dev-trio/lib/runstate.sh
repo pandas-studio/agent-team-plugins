@@ -31,7 +31,9 @@
 #     final_path,       # absolute, or null
 #     final_source,     # "native" | "stdout" | "none"
 #     result_path,      # absolute *.review.json, or null (research has none)
-#     inputs: [ { kind, value? , path? } ],
+#     inputs: [ { kind, value?, path?, bytes?, sha256? } ],
+#                       # bytes + sha256 (from inputdigest=) stand in for a
+#                       # text too large to keep here, e.g. a research context
 #     completion: null | { ended_at, exit_code, verdict, reason }
 #                       # reason: ok | failed | aborted | result-write-failed
 #                       #       | final-write-failed
@@ -99,12 +101,57 @@ _runstate_publish() {
   fi
 }
 
+# _runstate_sha256 <string> — sha256 of the literal string, no newline added.
+# Fails rather than printing a bad digest, with or without the caller's pipefail.
+_runstate_sha256() {
+  local out
+  if command -v sha256sum >/dev/null 2>&1; then
+    out=$(printf '%s' "$1" | sha256sum) || return 1
+  else
+    out=$(printf '%s' "$1" | shasum -a 256) || return 1
+  fi
+  out="${out%% *}"
+  [ "${#out}" -eq 64 ] || return 1
+  printf '%s\n' "$out"
+}
+
+# _runstate_bytes <string> — its length in bytes, not characters.
+_runstate_bytes() {
+  local LC_ALL=C
+  printf '%s\n' "${#1}"
+}
+
+# _runstate_input <key> <kind> <text> — one inputs[] element as compact JSON.
+# Text reaches jq on stdin, never as an argument: a research context can exceed
+# Linux's 128 KiB per-argument limit (#118). The here-string appends exactly
+# one newline, which the filter drops.
+_runstate_input() {
+  local key="$1" kind="$2" text="$3" bytes sha
+  case "$key" in
+    input)
+      jq -nc --arg kind "$kind" --rawfile raw /dev/stdin \
+        '{kind: $kind, value: $raw[:-1]}' <<<"$text"
+      ;;
+    inputpath)
+      jq -nc --arg kind "$kind" --arg path "$text" '{kind: $kind, path: $path}'
+      ;;
+    inputdigest)
+      bytes=$(_runstate_bytes "$text") || return 1
+      sha=$(_runstate_sha256 "$text") || return 1
+      jq -nc --arg kind "$kind" --argjson bytes "$bytes" --arg sha256 "$sha" \
+        '{kind: $kind, bytes: $bytes, sha256: $sha256}'
+      ;;
+  esac
+}
+
 # runstate_begin <log_path> key=value ...
 #   Recognised keys: channel wrapper variant team run_stem started_display pid
 #                    role model pm_host nested log_path final_path final_source
 #                    result_path
 #   Inputs are passed as repeated input=<kind>:<value> / inputpath=<kind>:<path>
-#   so a caller can record the focus/query text and referenced files.
+#   so a caller can record the focus/query text and referenced files, or as
+#   inputdigest=<kind>:<text> to record only the text's byte count and sha256
+#   (the bytes the caller holds, e.g. a context before it goes into a prompt).
 runstate_begin() {
   local log_path="${1:-}"
   shift || true
@@ -115,7 +162,7 @@ runstate_begin() {
   local channel="" wrapper="" variant="" team="" run_stem="" started_display=""
   local pid="" role="" model="" pm_host="" nested="false"
   local final_path="" final_source="none" result_path=""
-  local inputs_json="[]"
+  local inputs_lines="" element
   local arg k v kind rest
   for arg in "$@"; do
     k="${arg%%=*}"
@@ -135,22 +182,20 @@ runstate_begin() {
       final_path)      final_path="$v" ;;
       final_source)    final_source="$v" ;;
       result_path)     result_path="$v" ;;
-      input|inputpath)
+      input|inputpath|inputdigest)
         kind="${v%%:*}"
         rest="${v#*:}"
-        if [ "$k" = input ]; then
-          inputs_json=$(printf '%s' "$inputs_json" \
-            | jq -c --arg kind "$kind" --arg value "$rest" '. + [{kind: $kind, value: $value}]') || return 1
-        else
-          inputs_json=$(printf '%s' "$inputs_json" \
-            | jq -c --arg kind "$kind" --arg path "$rest" '. + [{kind: $kind, path: $path}]') || return 1
-        fi
+        element=$(_runstate_input "$k" "$kind" "$rest") || return 1
+        inputs_lines="$inputs_lines$element
+"
         ;;
       *) echo "runstate_begin: unknown key '$k'" >&2; return 2 ;;
     esac
   done
   local doc
-  doc=$(jq -n \
+  # The elements are slurped from stdin into the inputs array, so no input
+  # travels as an argument here either (#118).
+  doc=$(printf '%s' "$inputs_lines" | jq -s \
     --argjson schema_version "$RUNSTATE_SCHEMA_VERSION" \
     --arg channel "$channel" \
     --arg wrapper "$wrapper" \
@@ -168,7 +213,6 @@ runstate_begin() {
     --arg final_path "$final_path" \
     --arg final_source "$final_source" \
     --arg result_path "$result_path" \
-    --argjson inputs "$inputs_json" \
     '{
        schema_version: $schema_version,
        channel: $channel,
@@ -187,7 +231,7 @@ runstate_begin() {
        final_path:  ( if $final_path  == "" then null else $final_path  end ),
        final_source: $final_source,
        result_path: ( if $result_path == "" then null else $result_path end ),
-       inputs: $inputs,
+       inputs: .,
        completion: null
      }') || {
     echo "runstate_begin: could not build run metadata for $log_path" >&2
@@ -294,6 +338,13 @@ _RUNSTATE_READ_FILTER='
         and (.kind | type) == "string"
         and (if has("value") then (.value | type) == "string" else true end)
         and (if has("path")  then (.path  | type) == "string" else true end)
+        and (if has("bytes") then
+               (.bytes | type) == "number" and .bytes >= 0 and (.bytes | floor) == .bytes
+             else true end)
+        and (if has("sha256") then
+               (.sha256 | type) == "string" and (.sha256 | length) == 64
+               and (.sha256 | explode | all((. >= 48 and . <= 57) or (. >= 97 and . <= 102)))
+             else true end)
       ))
     | select(has("completion"))
     | select(

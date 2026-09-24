@@ -362,6 +362,9 @@ $PWD/.dev-trio/log/<team>/
 atomically beside its log: `channel` (`agy`/`codex` — the log stream, never a
 model), `role`, the resolved `model`, `team`, `started_at`, `pid`, `pm_host`,
 `nested`, the absolute artifact paths, and the `inputs` the wrapper was given.
+A research stdin context is recorded there only as its `bytes` and `sha256`,
+so a large context cannot push the file past the dashboard's size bound; the
+manifest keeps its full text.
 A second atomic rewrite of the same file adds `completion`
 (`ended_at`, `exit_code`, `verdict`, `reason`) when the run ends — including on
 an abort, published from the wrapper's EXIT trap, so an interrupted run does not

@@ -238,8 +238,13 @@ manifest_add_input() {
   if [ -n "$path" ] && [ -f "$path" ]; then
     file_hash=$(_manifest_sha256 "$path")
   fi
+  # The value reaches jq on stdin, never as an argument: a research context can
+  # exceed Linux's 128 KiB per-argument limit (#118). The here-string appends
+  # exactly one newline, which the filter drops. Invalid UTF-8 becomes U+FFFD,
+  # as it did through --arg.
   _manifest_jq_inplace \
-    '.inputs += [
+    '($raw[:-1]) as $value
+     | .inputs += [
        (
          { kind: $kind }
          + ( if $ref     != "" then { ref:     $ref     } else {} end )
@@ -252,11 +257,11 @@ manifest_add_input() {
      ]' \
     --arg kind "$kind" \
     --arg ref "$ref" \
-    --arg value "$value" \
+    --rawfile raw /dev/stdin \
     --arg path "$path" \
     --arg h "$file_hash" \
     --arg verdict "$verdict" \
-    --arg action "$action"
+    --arg action "$action" <<<"$value"
 }
 
 manifest_set_verdict() {

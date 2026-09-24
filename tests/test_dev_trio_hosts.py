@@ -1,11 +1,13 @@
 """Exercise the real wrappers with recording CLIs, never provider calls."""
 
+import hashlib
 import importlib.util
 import json
 import os
 import re
 from pathlib import Path
 import selectors
+import shlex
 import shutil
 import subprocess
 import sys
@@ -73,11 +75,11 @@ class HostTests(unittest.TestCase):
                                      apiProvider="firstParty", subscriptionType="max")),
         )
 
-    def run_cli(self, script="ask-reviewer.sh", *args, **env):
+    def run_cli(self, script="ask-reviewer.sh", *args, stdin="", **env):
         before = self.config.read_bytes()
         result = subprocess.run(
             [str(self.plugin / "bin" / script), *args], cwd=self.workspace,
-            env=self.env | env, input="", text=True, capture_output=True, timeout=20,
+            env=self.env | env, input=stdin, text=True, capture_output=True, timeout=20,
         )
         self.assertEqual(self.config.read_bytes(), before, "wrapper changed role config")
         return result
@@ -164,6 +166,119 @@ class HostTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("context file not found", result.stderr)
         self.assertEqual(self.recorded(), [])
+
+    # --- #118: a stdin context never travels as one argument --------------
+
+    def argv_limited_path(self):
+        """PATH whose jq fails like Linux on any argument of 128 KiB or more.
+
+        macOS caps only the argv total, so without this a 200 KiB value passes
+        locally and fails only on ubuntu CI (MAX_ARG_STRLEN)."""
+        shim = self.root / "argv limited"
+        shim.mkdir(exist_ok=True)
+        jq = shim / "jq"
+        jq.write_text(
+            "#!/bin/bash\n"
+            "LC_ALL=C\n"
+            "for a in \"$@\"; do\n"
+            "  if [ \"${#a}\" -ge 131072 ]; then\n"
+            "    echo \"jq: Argument list too long (${#a} bytes)\" >&2; exit 126\n"
+            "  fi\n"
+            "done\n"
+            f"exec {shlex.quote(shutil.which('jq'))} \"$@\"\n")
+        jq.chmod(0o755)
+        return f"{shim}{os.pathsep}{self.env['PATH']}"
+
+    def runstate_read(self, path):
+        return subprocess.run(
+            ["bash", "-c", '. "$1/lib/runstate.sh" && runstate_read "$2"', "_",
+             str(self.plugin), str(path)],
+            env=self.env, text=True, capture_output=True, timeout=10)
+
+    @staticmethod
+    def digest(text):
+        data = text.encode()
+        return {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+
+    def test_researcher_records_a_context_larger_than_one_argument(self):
+        # 200,002 bytes but 130,002 characters: a character count would be wrong.
+        context = "é" * 70000 + "x" * 60000 + "\n\n"
+        held = context.rstrip("\n")  # what $(cat) keeps
+        result = self.run_cli("ask-researcher.sh", "research question", stdin=context,
+                              PATH=self.argv_limited_path(), DEV_TRIO_RESEARCHER_MODEL="claude")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.fenced(self.sent_prompt(), "user_context"), held)
+        manifest = next(self.logdir().glob("*.manifest.json"))
+        inputs = json.loads(manifest.read_text())["inputs"]
+        self.assertIn({"kind": "context", "value": held}, inputs)
+        # run.json keeps only the digest, so the dashboard's 1 MiB bound is safe.
+        run_json = next(self.logdir().glob("*.run.json"))
+        self.assertLess(run_json.stat().st_size, 64 * 1024)
+        read = self.runstate_read(run_json)
+        self.assertEqual(read.returncode, 0, read.stderr)
+        contexts = [i for i in json.loads(read.stdout)["inputs"] if i["kind"] == "context"]
+        self.assertEqual(contexts, [{"kind": "context", **self.digest(held)}])
+
+    def test_input_helpers_record_exact_text_off_argv(self):
+        big = "é" * 70000 + "y" * 1000  # 141,000 bytes
+        (self.root / "big").write_text(big)
+        script = r"""
+set -eu
+. "$P/lib/runstate.sh"; . "$P/lib/manifest.sh"
+big=$(cat "$R/big")
+manifest_init test "$R/helper.log"
+manifest_add_input kind=a value=$'a\n\n'
+manifest_add_input kind=b value=x
+manifest_add_input kind=big value="$big"
+runstate_begin "$R/helper.log" channel=codex wrapper=w \
+  "input=a:"$'a\n\n' "inputpath=p:/x y" "input=big:$big" "inputdigest=d:"$'é\n'
+runstate_begin "$R/empty.log" channel=codex wrapper=w
+"""
+        result = subprocess.run(
+            ["bash", "-c", script], env=self.env | dict(
+                P=str(self.plugin), R=str(self.root), PATH=self.argv_limited_path()),
+            text=True, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = json.loads((self.root / "helper.manifest.json.tmp").read_text())
+        self.assertEqual(manifest["inputs"], [
+            {"kind": "a", "value": "a\n\n"}, {"kind": "b", "value": "x"},
+            {"kind": "big", "value": big}])
+        run = json.loads((self.root / "helper.run.json").read_text())
+        self.assertEqual(run["inputs"], [
+            {"kind": "a", "value": "a\n\n"}, {"kind": "p", "path": "/x y"},
+            {"kind": "big", "value": big}, {"kind": "d", **self.digest("é\n")}])
+        self.assertEqual(json.loads((self.root / "empty.run.json").read_text())["inputs"], [])
+
+    def test_a_failed_hash_publishes_no_digest(self):
+        broken = self.root / "broken hash"
+        broken.mkdir()
+        for tool in ("sha256sum", "shasum"):
+            (broken / tool).write_text("#!/bin/sh\nexit 7\n")
+            (broken / tool).chmod(0o755)
+        # No pipefail here: the helper itself must notice the failure.
+        result = subprocess.run(
+            ["bash", "-c", 'set -u; . "$P/lib/runstate.sh"; '
+             'runstate_begin "$R/hash.log" channel=codex wrapper=w "inputdigest=d:text"'],
+            env=self.env | dict(P=str(self.plugin), R=str(self.root),
+                                PATH=f"{broken}{os.pathsep}{self.env['PATH']}"),
+            text=True, capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / "hash.run.json").exists())
+
+    def test_reader_checks_digest_fields(self):
+        name = "codex-20260918-090000-22222.log"
+        run_path = self.logdir() / "codex-20260918-090000-22222.run.json"
+        good = "0123456789abcdef" * 4
+        accepted = ({"bytes": 0, "sha256": good}, {"bytes": 5}, {"sha256": good}, {})
+        rejected = ({"bytes": None}, {"bytes": -1}, {"bytes": 1.5}, {"bytes": "5"},
+                    {"sha256": None}, {"sha256": good.upper()}, {"sha256": "g" * 64},
+                    {"sha256": good[:63]}, {"sha256": good + "a"})
+        for fields, rc_ok in [(f, True) for f in accepted] + [(f, False) for f in rejected]:
+            with self.subTest(fields=fields):
+                run_path.write_text(json.dumps(self.run_json(
+                    name, inputs=[dict(kind="context", **fields)])))
+                read = self.runstate_read(run_path)
+                self.assertEqual(read.returncode == 0, rc_ok, read.stderr)
 
     # --- #93: arguments are parsed before anything runs --------------------
 

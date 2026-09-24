@@ -319,7 +319,7 @@ if manifest_is_nested; then
 else
   RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" nested=false)
 fi
-[ -z "$STDIN_CONTEXT" ] || RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" "input=context:$STDIN_CONTEXT")
+[ -z "$STDIN_CONTEXT" ] || RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" "inputdigest=context:$STDIN_CONTEXT")
 # A dashboard sidecar never changes this wrapper's outcome.
 if runstate_begin "$LOG" "${RUNSTATE_ARGS[@]}"; then
   RUNSTATE_LOG="$LOG"
