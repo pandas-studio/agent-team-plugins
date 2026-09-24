@@ -80,6 +80,10 @@ ARGV_MAX_BYTES = 131072
 _REFUSED_PLACEHOLDERS = {
     "args": ("{final}", "{cwd}", "{cli_log}"),
     "final_args": ("{cwd}", "{cli_log}"),
+    # Checked only so a definition gets one verdict everywhere: registry.sh
+    # reads these NUL-delimited, and a NUL would split an element in two.
+    "workspace_args": (),
+    "log_args": (),
 }
 
 
@@ -109,7 +113,7 @@ def definition_problem(definition: Any) -> tuple[str, str] | None:
         return "prompt_via", f"has prompt_via {definition['prompt_via']!r}; use 'argv' or 'stdin'"
     if "args" not in definition:
         return "args", "has no args template; give one, [] for a stdin CLI that takes no arguments"
-    for field in ("args", "final_args"):
+    for field in ("args", "final_args", "workspace_args", "log_args"):
         if field in definition and (why := _template_problem(definition, field)):
             return field, why
     if definition.get("prompt_via") == "stdin":

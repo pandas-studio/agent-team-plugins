@@ -115,11 +115,17 @@ FINAL_ARGS = [ABSENT, None, "x", [], [2], ["{final}"], ["{final}", "{prompt}"], 
               ["{cwd}", "{final}", "{prompt}"], ["a\u0000", "{prompt}"], ["x\n", "{final}", "{prompt}"]]
 
 
+PREFIXES = [None, "x", [], [3], ["--add-dir", "{cwd}"], ["a\nb"], ["--safe\u0000--danger"]]
+
+
 def _generated_shapes() -> list:
     shapes: list = []
     for values in itertools.product(PROMPT_VIA, ARGS, FINAL_ARGS):
         shapes.append({key: value for key, value in zip(("prompt_via", "args", "final_args"), values)
                        if value is not ABSENT})
+    for field, value in itertools.product(("workspace_args", "log_args"), PREFIXES):
+        shapes.append({"args": ["{prompt}"], field: value})
+        shapes.append({"args": ["{prompt}"], "final_args": None, field: value})
     return shapes + ["invalid", [], 1, None, True]
 
 

@@ -298,6 +298,8 @@ registry_prompt_via() {
 #                   final answer), {cwd} or {cli_log} (prefix placeholders).
 #   4. final_args   present, and not an array of strings; an element holds NUL,
 #                   or is {cwd} or {cli_log}.
+#   4b. workspace_args, then log_args: present, and not an array of strings, or
+#                   an element holds NUL (registry_run reads them NUL-delimited).
 #   5. args, then final_args: a stdin model has {prompt} there, so the prompt
 #      would go in argv too.
 #   6. the running template — final_args when non-empty, otherwise args — of an
@@ -308,7 +310,8 @@ registry_prompt_via() {
 _registry_def_problem() {
   printf '%s' "$1" | jq -c '
     def shown: if type == "string" and all(explode[]; . >= 32) then "\u0027\(.)\u0027" else tojson end;
-    def refused($f): if $f == "args" then ["{final}", "{cwd}", "{cli_log}"] else ["{cwd}", "{cli_log}"] end;
+    def refused($f): if $f == "args" then ["{final}", "{cwd}", "{cli_log}"]
+      elif $f == "final_args" then ["{cwd}", "{cli_log}"] else [] end;
     def template_problem($f):
       .[$f] as $t
       | if ($t | type) != "array" or any($t[]; type != "string") then
@@ -332,6 +335,10 @@ _registry_def_problem() {
     elif template_problem("args") != null then problem("args"; template_problem("args"))
     elif has("final_args") and template_problem("final_args") != null then
       problem("final_args"; template_problem("final_args"))
+    elif has("workspace_args") and template_problem("workspace_args") != null then
+      problem("workspace_args"; template_problem("workspace_args"))
+    elif has("log_args") and template_problem("log_args") != null then
+      problem("log_args"; template_problem("log_args"))
     elif .prompt_via == "stdin" then
       ([("args", "final_args") as $f | select(template($f) | has_prompt) | $f] | .[0]) as $f
       | if $f == null then null
