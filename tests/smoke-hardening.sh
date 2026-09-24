@@ -1895,13 +1895,18 @@ REG_CALL="${BIG}registry_run codex-no-memories \"\$big\" /f"
 assert_eq "$(count_argv)" '[exec][--skip-git-repo-check][-c][features.memories=false][--output-last-message][/f][-] stdin=300000'
 REG_CALL="${BIG}registry_run_answer codex \"\$big\"; echo \"rc=\$?\""
 assert_eq "$(count_argv)" "$(printf '[exec][--skip-git-repo-check][-] stdin=300000\nrc=0')"
-# Nothing staged is left behind, and the caller's own stdin never reaches the CLI.
+# The prompt is piped, never written to disk, and the caller's own stdin never
+# reaches the CLI.
 assert_eq "$(ls -A "$REG_TMP/stage")" ''
 REG_CALL='echo CALLER-STDIN | registry_run claude P'
 assert_eq "$(count_argv)" '[-p] stdin=1'
-# A prompt that cannot be staged is rc 6, and nothing starts.
-REG_CALL='registry_run claude P; echo "rc=$?"'
-assert_eq "$(count_argv TMPDIR="$REG_TMP/missing" 2>/dev/null)" 'rc=6'
+# A CLI that exits without reading the prompt kills the writer with SIGPIPE;
+# under the caller's pipefail the status is still the CLI's own.
+printf '#!/bin/sh\nexit "$STUB_RC"\n' > "$REG_TMP/early"
+chmod +x "$REG_TMP/early"
+REG_CALL="set -o pipefail; ${BIG}registry_run claude \"\$big\"; echo \"rc=\$?\""
+assert_eq "$(count_argv CLAUDE_CLI="$REG_TMP/early" STUB_RC=0)" 'rc=0'
+assert_eq "$(count_argv CLAUDE_CLI="$REG_TMP/early" STUB_RC=7)" 'rc=7'
 # agy stays on argv and refuses what one Linux argument cannot hold.
 REG_CALL="${BIG}registry_run agy \"\$big\"; echo \"rc=\$?\""
 assert_eq "$(count_argv 2>"$REG_TMP/agy.err")" 'rc=3'

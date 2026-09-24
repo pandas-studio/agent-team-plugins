@@ -25,12 +25,12 @@
 #                     the CLI starts; macOS only caps the total. So registry_run
 #                     refuses such a prompt itself, on every platform, rc 3.
 #                     REGISTRY_ARGV_MAX_BYTES overrides the 131072 limit.
-#   "stdin"           the templates carry no {prompt}; the prompt is staged in a
-#                     private temp file that becomes the CLI's stdin and is
-#                     unlinked before the CLI starts. The CLI never sees the
-#                     caller's stdin. Built-in claude and codex models use it
-#                     (`claude -p`, `codex exec -`); agy has no documented text
-#                     form and stays on argv.
+#   "stdin"           the templates carry no {prompt}; the prompt is piped to
+#                     the CLI's stdin (printf is a builtin, so no argument
+#                     limit applies, and nothing is written to disk). The CLI
+#                     never sees the caller's stdin. Built-in claude and codex
+#                     models use it (`claude -p`, `codex exec -`); agy has no
+#                     documented text form and stays on argv.
 # A "stdin" template that contains {prompt}, or any other prompt_via value, is
 # a configuration error (rc 3), as `agent-team-models doctor` reports.
 #
@@ -373,9 +373,8 @@ registry_config_role() {
 #   the plain args template runs and the caller may synthesize the final file
 #   from the streamed log (see registry_extract_response).
 #
-#   Returns the CLI's own status, or: 3 for a configuration error or an argv
-#   prompt that one Linux argument cannot hold; 6 when a stdin prompt could not
-#   be staged (nothing was started).
+#   Returns the CLI's own status, or 3 for a configuration error or an argv
+#   prompt that one Linux argument cannot hold (nothing was started).
 registry_run() {
   local id="$1" prompt="$2" final_file="${3:-}"
   local workspace="${REGISTRY_WORKSPACE:-}" cli_log="${REGISTRY_CLI_LOG:-}"
@@ -421,7 +420,7 @@ registry_run() {
     esac
   done
   if [ "$via" = stdin ]; then
-    _registry_exec_stdin "$id" "$prompt" "$bin" "${argv[@]}"
+    _registry_pipe_prompt "$prompt" "$bin" "${argv[@]}"
     return $?
   fi
   local limit bytes=0
@@ -440,37 +439,24 @@ registry_run() {
   fi
 }
 
-# _registry_exec_stdin ID PROMPT BIN [ARGS...] — run BIN with PROMPT as its
-# stdin. One subshell does it all under its own traps: stage the prompt in a
-# private file (created and written in full before anything starts: a failure
-# is rc 6 and nothing runs), open it as stdin, unlink it, exec the CLI. So the
-# CLI's status is the subshell's, and from creation until the exec a signal
-# still removes the file; none outlives the CLI's start. Signals the caller's
-# shell ignored stay ignored.
-_registry_exec_stdin() (
-  id="$1" prompt="$2" staged=""
-  shift 2
-  trap '[ -z "$staged" ] || rm -f -- "$staged"' EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
-  trap 'exit 129' HUP
-  staged="$(umask 077 && mktemp "${TMPDIR:-/tmp}/registry-prompt.XXXXXX")" || {
-    staged=""
-    echo "registry: could not stage the prompt for model '$id' (mktemp failed)" >&2
-    exit 6
-  }
-  if ! printf '%s' "$prompt" > "$staged"; then
-    echo "registry: could not stage the prompt for model '$id' (write failed)" >&2
-    exit 6
-  fi
-  exec < "$staged" || exit 6
-  rm -f -- "$staged"
-  staged=""
+# _registry_pipe_prompt PROMPT BIN [ARGS...] — run BIN with PROMPT piped to its
+# stdin, and return BIN's status. The writer's status is ignored: a CLI that
+# exits without reading all of it kills the writer with SIGPIPE, and under a
+# caller's pipefail that would otherwise replace the CLI's own status (a caller
+# that ignores SIGPIPE sees one "write error: Broken pipe" line instead). The
+# same shape as ralph-solo's `printf | claude -p` since #13.
+_registry_pipe_prompt() (
+  prompt="$1"
+  shift
+  set +e
   if command -v stdbuf >/dev/null 2>&1; then
-    exec stdbuf -oL "$@"
+    printf '%s' "$prompt" | stdbuf -oL "$@"
+    statuses=("${PIPESTATUS[@]}")
   else
-    exec "$@"
+    printf '%s' "$prompt" | "$@"
+    statuses=("${PIPESTATUS[@]}")
   fi
+  exit "${statuses[1]}"
 )
 
 # registry_run_answer ID PROMPT [ANSWER_PATH] — registry_run for a role whose

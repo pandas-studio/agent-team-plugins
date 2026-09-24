@@ -337,12 +337,12 @@ def driver_process(args, *, cwd, env, scale, test_id):
 
 
 STUB = r"""#!/usr/bin/env python3
-import os, stat, sys, signal, subprocess
+import os, sys, signal, subprocess
 from pathlib import Path
 args = sys.argv[1:]
 # claude and codex read the prompt on stdin (#102); the agy researcher still
 # takes it as the last argument, and its stdin is empty.
-prompt = sys.stdin.read() if stat.S_ISREG(os.fstat(0).st_mode) else ''
+prompt = '' if sys.stdin.isatty() else sys.stdin.read()
 prompt = prompt or (args[-1] if args else '')
 state = Path(os.environ['FIXTURE_STATE'])
 role = 'reviewer' if '--output-last-message' in args else 'planner' if '# Role: Spec-driven Planner' in prompt else 'researcher' if Path(sys.argv[0]).name == 'researcher' else 'coder'

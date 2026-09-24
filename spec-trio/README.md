@@ -43,9 +43,7 @@ Planner and coder CLIs are called as `CLI -p` with the prompt on stdin; one
 argument is capped at 128 KiB on Linux, and the spec is inlined into every
 planner, coder and reviewer prompt. A `PLANNER_CLI` / `CODER_CLI` wrapper
 must pass stdin through (`exec claude "$@"` does); see
-[dev-trio's model configuration](../dev-trio/README.md#model-configuration).
-The prompt is kept beside the stage log as `<stage>.prompt.XXXXXX`, mode
-0600, with the rest of the logs. Each
+[dev-trio's model configuration](../dev-trio/README.md#model-configuration). Each
 stage retains its diagnostic `.log` and adds a `.stdout.log` containing only
 stdout. Plans, allowed paths, and planner research requests are read only from
 stdout; stderr guidance is never a plan.

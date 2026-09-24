@@ -31,13 +31,14 @@ class DebateHostTests(unittest.TestCase):
         self.stub = self.root / "record cli"
         self.stub.write_text(
             f"#!{sys.executable}\n"
-            "import json, os, stat, sys\n"
+            "import json, os, sys\n"
             "args = sys.argv[1:]\n"
-            # claude and codex get the prompt on stdin, a staged regular file
-            # (#102); it is recorded after a '<stdin>' marker. Anything else on
-            # stdin (a tty, /dev/null, an inherited pipe) is not read.
-            "if stat.S_ISREG(os.fstat(0).st_mode):\n"
-            "    args = args + ['<stdin>', sys.stdin.read()]\n"
+            # claude and codex get the prompt piped to stdin (#102); it is
+            # recorded after a '<stdin>' marker. run_cli gives the wrappers an
+            # empty, closed stdin, so an argv model reads nothing here.
+            "data = '' if sys.stdin.isatty() else sys.stdin.read()\n"
+            "if data:\n"
+            "    args = args + ['<stdin>', data]\n"
             "with open(os.environ['STUB_CALLS'], 'a') as f:\n"
             "    f.write(json.dumps(args)+'\\n')\n"
             "if args == ['auth','status','--json']:\n"
@@ -572,13 +573,14 @@ class DebateHostTests(unittest.TestCase):
         stub = self.root / f"blocking cli {ready.name}"
         stub.write_text(
             f"#!{sys.executable}\n"
-            "import json, os, stat, sys, time\n"
+            "import json, os, sys, time\n"
             "args = sys.argv[1:]\n"
-            # claude and codex get the prompt on stdin, a staged regular file
-            # (#102); it is recorded after a '<stdin>' marker. Anything else on
-            # stdin (a tty, /dev/null, an inherited pipe) is not read.
-            "if stat.S_ISREG(os.fstat(0).st_mode):\n"
-            "    args = args + ['<stdin>', sys.stdin.read()]\n"
+            # claude and codex get the prompt piped to stdin (#102); it is
+            # recorded after a '<stdin>' marker. run_cli gives the wrappers an
+            # empty, closed stdin, so an argv model reads nothing here.
+            "data = '' if sys.stdin.isatty() else sys.stdin.read()\n"
+            "if data:\n"
+            "    args = args + ['<stdin>', data]\n"
             "with open(os.environ['STUB_CALLS'], 'a') as f:\n"
             "    f.write(json.dumps(args)+'\\n')\n"
             "if args == ['auth','status','--json']:\n"

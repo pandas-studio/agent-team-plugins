@@ -118,24 +118,17 @@ stage_snapshot() (
     end' || return 6
 )
 
-# stage_prompt_file LOG PROMPT — write PROMPT to a new private file beside LOG
-# and print its path (#102): one argument is capped at 128 KiB on Linux, so the
-# CLI reads the prompt as stdin instead. Created exclusively with mode 0600,
-# because the log directory follows the caller's umask and a fixed name could be
-# an older run's file or another run's. It stays with the logs.
-stage_prompt_file() {
-  local log="$1" prompt="$2" file
-  file=$(umask 077 && mktemp "${log%.log}.prompt.XXXXXX") || {
-    echo "stage: cannot create a prompt file beside $log" >&2
-    return 6
-  }
-  printf '%s' "$prompt" > "$file" || {
-    rm -f -- "$file"
-    echo "stage: cannot write the prompt file $file" >&2
-    return 6
-  }
-  printf '%s\n' "$file"
-}
+# stage_pipe_prompt WORK_DIR PROMPT COMMAND [ARGS...] — run COMMAND in WORK_DIR
+# with PROMPT piped to its stdin; the status is COMMAND's, never the writer's.
+stage_pipe_prompt() (
+  cd "$1" || exit
+  prompt="$2"
+  shift 2
+  set +e
+  printf '%s' "$prompt" | "$@"
+  statuses=("${PIPESTATUS[@]}")
+  exit "${statuses[1]}"
+)
 
 stage_reset_result() {
   STAGE_CLI_RC=''
@@ -147,10 +140,11 @@ stage_reset_result() {
 # Sets STAGE_CLI_RC (empty if not invoked), STAGE_EVIDENCE, STAGE_STDOUT.
 # Returns original nonzero CLI rc, 6 for capture/inspection errors, 5 for missing
 # evidence, or 0. The caller records these fields in its open stage manifest.
-# With STAGE_PROMPT set, the CLI reads it on stdin from a stage_prompt_file;
-# otherwise its stdin is /dev/null. Never the caller's stdin.
+# With STAGE_PROMPT set, it is piped to the CLI's stdin (one argument is capped
+# at 128 KiB on Linux, #102); otherwise the CLI's stdin is /dev/null. Never the
+# caller's stdin. The CLI's status is kept even if it leaves the prompt unread.
 stage_run() {
-  local role="$1" work_dir="$2" log="$3" stdin=/dev/null
+  local role="$1" work_dir="$2" log="$3"
   local has_prompt=${STAGE_PROMPT+1} prompt="${STAGE_PROMPT-}"
   unset STAGE_PROMPT
   shift 3
@@ -163,15 +157,7 @@ stage_run() {
   scratch=$(cd -P "$scratch" && pwd) || return 6
   # Always exclude our own scratch even if TMPDIR points inside the repository.
   STAGE_RESOLVED_IGNORES+=("$scratch" "$log" "$STAGE_STDOUT")
-  if [ -n "$has_prompt" ]; then
-    # Before the change snapshot, and excluded from it like the log.
-    if stdin=$(stage_prompt_file "$log" "$prompt"); then
-      STAGE_RESOLVED_IGNORES+=("$(stage_path_absolute "$stdin")")
-    else
-      rc=6
-    fi
-  fi
-  if [ "$rc" -eq 0 ] && [ "$role" = coder ] && git -C "$work_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if [ "$role" = coder ] && git -C "$work_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     root=$(git -C "$work_dir" rev-parse --show-toplevel) || rc=6
     if [ "$rc" -eq 0 ]; then
       before=$(stage_snapshot "$root" "$scratch/before") || rc=6
@@ -181,7 +167,11 @@ stage_run() {
     # Open the transcript first, outside the CLI pipeline. Its stderr never
     # enters tee or the stdout artifact. PIPESTATUS preserves both failures.
     if {
-      ( cd "$work_dir" && "$@" ) <"$stdin" | tee "$STAGE_STDOUT"
+      if [ -n "$has_prompt" ]; then
+        stage_pipe_prompt "$work_dir" "$prompt" "$@" </dev/null | tee "$STAGE_STDOUT"
+      else
+        ( cd "$work_dir" && "$@" ) </dev/null | tee "$STAGE_STDOUT"
+      fi
       statuses=("${PIPESTATUS[@]}")
     } > "$log" 2>&1; then
       STAGE_CLI_RC=${statuses[0]}
