@@ -90,7 +90,7 @@ The wrapper reports exact paths for this invocation in its final stderr line:
 
 - `status: "ok"`, `invocation_rc: 0`, `exit_code: 0`: use `verdict` (`SHIP`, `NEEDS-FIX`, `DISCUSS`) and quote `verdict_line` verbatim. The canonical `TOKEN — reason` and observed `TOKEN. reason` forms share the same normalized token.
 - `findings.blocker`, `.major`, `.minor`: arrays of real finding bullets; count their entries. `null` means that section is missing, so report its count as **unknown**, not zero. `- None.` / `- none` placeholders (case-insensitive, optional final period) and Korean `- 없음` / `- 없음.` placeholders, including those with trailing whitespace, have already been excluded.
-- `status: "parse-failed"`: the reviewer process succeeded but its final response could not be parsed. The wrapper exits **3**. Report `error` and the artifact paths; the manifest verdict remains `null`. With `invocation_rc: 0` the review finished but broke the output format (#125); re-run it once for a structured result rather than reading a verdict or counts out of the final.
+- `status: "parse-failed"`: the reviewer process succeeded but its final response could not be parsed. The wrapper exits **3**. Report `error` and the artifact paths; the manifest verdict remains `null`. With `invocation_rc: 0` the review finished but broke the output format (#125): re-run it once under the **Retry rule** below and report both runs' artifact paths. If the code under review changed in between, that is a new review, not a retry; if the retry fails to parse too, stop and report both. Never read a verdict or counts out of the final.
 - An empty marker mixed with finding bullets in the same severity, including repeated headings, is a parse failure. Resolved explanations belong under `## What I checked`. Report the failure rather than interpreting the bullets or clearing counts because the Markdown says `SHIP`.
 - Findings use `- ` bullets at column 0. List items with text (including empty markers) fail parsing with 1–3-space indentation, `*` / `+` / numbered markers, or a tab separator after `-`. Whitespace-only list items are ignored. Quoted and code examples stay excluded; other prose is not parsed as findings. Report format failures as unknown findings, not zero findings.
 - `status: "permission-denied"`: headless agy auto-denied a tool and produced no review. The wrapper exits **3**. Report each entry of `denied` (a target agy recorded as denied, e.g. `command(git rev-parse --show-toplevel)`; agy 1.2.9 ignores `unsandboxed(...)` rules; empty means agy recorded none) and `conversation_ids`, and point to the README section "Resolve a confirmed agy permission denial". Do not grant anything yourself, and do not re-run with a broader permission.
@@ -143,9 +143,9 @@ A `## NEED CONTEXT` section lists repository facts the reviewer could not fetch,
 3. Append each command and its output (or its failure, labelled as such) to the context file — the existing one if the review had `--with-context`, a new one otherwise.
 4. Re-invoke once under the retry rule below. If the second review still asks for the same context, stop and report it; do not loop.
 
-## Retry rule (NEED RESEARCH and NEED CONTEXT)
+## Retry rule (NEED RESEARCH, NEED CONTEXT, format failure)
 
-A retry re-reviews the **same scope** with more evidence:
+A retry re-reviews the **same scope**, with more evidence when the review asked for it:
 
 - Same focus, and every flag the original call had: `--with-spec`, `--with-research`, `--with-context`, `--no-memories`.
 - Attachments are cumulative. The wrapper takes one file per kind, so a second `--with-research` replaces the first — write the previous content plus the new answers into one file and pass that.

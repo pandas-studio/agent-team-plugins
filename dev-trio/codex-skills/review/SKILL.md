@@ -50,8 +50,11 @@ bullets in Markdown, and do not use `latest` artifacts.
 - `status: "parse-failed"` (exit 3) or `"invocation-failed"`: report the
   failure, its `error`, and the artifact paths. There is no verdict. A
   `parse-failed` result with `invocation_rc: 0` is a finished review that broke
-  the output format (#125); re-run it once for a structured result rather than
-  reading a verdict or counts out of `.final.md`.
+  the output format (#125): repeat it once with the same focus, every original
+  flag and the same attachments, and report both runs' artifact paths. If the
+  reviewed code changed in between, that is a new review, not a retry; if the
+  retry fails to parse too, stop and report both. Never read a verdict or
+  counts out of `.final.md`.
 - An empty marker mixed with finding bullets in the same severity, including
   repeated headings, is a parse failure. Resolved explanations belong under
   `## What I checked`. Report the failure; do not reinterpret its bullets or
