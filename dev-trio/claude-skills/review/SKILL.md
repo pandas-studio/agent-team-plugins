@@ -42,7 +42,7 @@ You have network access; the reviewer may not. Fetch the PR's identity yourself 
 
 ```bash
 CFILE="$PWD/.dev-trio/log/${AGENT_TEAM:-default}/context-$(date +%Y%m%d-%H%M%S).md"
-mkdir -p ".dev-trio/log/${AGENT_TEAM:-default}"
+(umask 077; mkdir -p ".dev-trio/log/${AGENT_TEAM:-default}")
 gh pr view 55 --json number,url,title,baseRefName,baseRefOid,headRefName,headRefOid > "$CFILE"
 git cat-file -e <headRefOid>^{commit} && git cat-file -e <baseRefOid>^{commit}
 git merge-base <baseRefOid> <headRefOid>

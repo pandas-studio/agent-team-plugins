@@ -46,6 +46,76 @@ dev_trio_check_cli() {
   fi
 }
 
+# Keep input-bearing artifacts in a directory another user cannot replace.
+# Existing directories are inspected, never chmodded. A root/current-user-owned
+# sticky ancestor (such as /tmp) is safe for a caller-owned child directory.
+_dev_trio_dir_mode_owner() {
+  if [ "$(uname -s)" = Darwin ]; then
+    stat -L -f '%Mp%Lp %u' "$1"
+  else
+    stat -L -c '%a %u' "$1"
+  fi
+}
+
+_dev_trio_check_log_ancestors() {
+  local path="$1" team_dir="$2" uid="$3" mode owner details
+  while :; do
+    details=$(_dev_trio_dir_mode_owner "$path") || return 1
+    read -r mode owner <<<"$details"
+    mode=$((8#$mode))
+    if [ "$path" = "$team_dir" ]; then
+      if [ "$owner" != "$uid" ] || (( (mode & 0022) != 0 )); then
+        echo "dev-trio: unsafe team log directory: $path (must be caller-owned and not writable by other users)" >&2
+        return 1
+      fi
+    elif (( (mode & 0022) != 0 )); then
+      if (( (mode & 01000) == 0 )) || { [ "$owner" != 0 ] && [ "$owner" != "$uid" ]; }; then
+        echo "dev-trio: unsafe log ancestor: $path (writable by other users without a trusted sticky directory)" >&2
+        return 1
+      fi
+    fi
+    [ "$path" != / ] || break
+    path=$(dirname "$path")
+  done
+}
+
+# Return the caller's absolute spelling after checking both that path and its
+# resolved target. Existing artifact paths remain stable for callers.
+dev_trio_prepare_log_dir() {
+  local requested="$1" physical uid
+  case "$requested" in /*) ;; *) requested="$PWD/$requested" ;; esac
+  (umask 077; mkdir -p "$requested") || return 2
+  physical=$(cd -P "$requested" && pwd -P) || return 2
+  uid=$(id -u) || return 2
+  _dev_trio_check_log_ancestors "$physical" "$physical" "$uid" || return 2
+  # Also inspect the path actually traversed, including symlink parents.
+  _dev_trio_check_log_ancestors "$requested" "$requested" "$uid" || return 2
+  printf '%s\n' "$requested"
+}
+
+dev_trio_fd_size() {
+  if [ "$(uname -s)" = Darwin ]; then
+    stat -L -f '%z' "/dev/fd/$1"
+  else
+    stat -L -c '%s' "/dev/fd/$1"
+  fi
+}
+
+dev_trio_fd_matches_path() {
+  local format path_id fd_id
+  if [ "$(uname -s)" = Darwin ]; then
+    # devfs reports its own device number for /dev/fd, even with stat -L.
+    format='%i %u'
+    path_id=$(stat -L -f "$format" "$1" 2>/dev/null) || return 1
+    fd_id=$(stat -L -f "$format" "/dev/fd/$2" 2>/dev/null) || return 1
+  else
+    format='%d %i %u'
+    path_id=$(stat -L -c "$format" "$1" 2>/dev/null) || return 1
+    fd_id=$(stat -L -c "$format" "/dev/fd/$2" 2>/dev/null) || return 1
+  fi
+  [ "$path_id" = "$fd_id" ]
+}
+
 # ---- agy workspace (#103) ---------------------------------------------------
 # Headless agy does not know which directory it was started for. Left to guess,
 # it builds `cd <repo> && git …` or `lsof -p $$ || pwd`, which no simple

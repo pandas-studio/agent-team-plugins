@@ -442,7 +442,14 @@ debate-conductor's generator and critic use.
 3. tmux session name
 4. `default`
 
-Override the log root with `DEV_TRIO_LOG_DIR=/path/to/logs`.
+Override the log root with `DEV_TRIO_LOG_DIR=/path/to/logs`. The wrappers create
+missing log directories with private permissions. An existing team log directory
+must be owned by the caller and must not be writable by group or others. Every
+ancestor, including a symlink target, must be safe to traverse; a writable
+ancestor is accepted only when it is sticky and owned by root or the caller
+(as with `/tmp`). The wrappers reject unsafe paths before invoking a model and
+never change permissions on an existing directory. Choose a private log root
+or repair its permissions yourself if validation fails.
 
 ## Live dashboard
 

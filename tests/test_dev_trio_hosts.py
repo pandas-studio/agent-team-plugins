@@ -55,6 +55,12 @@ class HostTests(unittest.TestCase):
             "response = os.environ['STUB_RESPONSE']\n"
             "if '--output-last-message' in args and not os.environ.get('STUB_NO_FINAL'):\n"
             "    pathlib.Path(args[args.index('--output-last-message')+1]).write_text(response)\n"
+            "if os.environ.get('STUB_SWAP_LOG_DIR'):\n"
+            "    root = pathlib.Path(os.environ['STUB_SWAP_LOG_DIR'])\n"
+            "    channel = os.environ['STUB_SWAP_CHANNEL']\n"
+            "    target = root / os.readlink(root / ('latest-' + channel + '.log'))\n"
+            "    target.rename(pathlib.Path(str(target) + '.saved'))\n"
+            "    target.write_text('replacement path\\n')\n"
             "print(response)\n"
             "sys.exit(int(os.environ.get('STUB_RC','0')))\n"
         )
@@ -91,6 +97,83 @@ class HostTests(unittest.TestCase):
         manifests = list(self.workspace.glob(".dev-trio/log/host-test/*.manifest.json"))
         self.assertEqual(len(manifests), 1)
         self.assertEqual(json.loads(manifests[0].read_text())["roles"][0]["model"], model)
+
+    def test_raw_logs_and_manifests_are_private_under_permissive_umask(self):
+        for wrapper, stem in (("ask-researcher.sh", "agy"),
+                              ("ask-reviewer.sh", "codex")):
+            with self.subTest(wrapper=wrapper):
+                result = subprocess.run(
+                    ["bash", "-c", 'umask 000; exec "$@"', "_",
+                     str(self.plugin / "bin" / wrapper), "private input"],
+                    cwd=self.workspace, env=self.env, input="", text=True,
+                    capture_output=True, timeout=20)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                logdir = self.workspace / ".dev-trio/log/host-test"
+                self.assertEqual(logdir.stat().st_mode & 0o777, 0o700)
+                for pattern in (f"{stem}-*.log", f"{stem}-*.manifest.json"):
+                    files = list(logdir.glob(pattern))
+                    self.assertEqual(len(files), 1, files)
+                    self.assertEqual(files[0].stat().st_mode & 0o777, 0o600)
+
+    def test_unsafe_existing_team_directory_is_rejected_before_model(self):
+        root = self.root / "custom logs"
+        team = root / "host-test"
+        team.mkdir(parents=True)
+        team.chmod(0o777)
+        for wrapper in ("ask-reviewer.sh", "ask-researcher.sh"):
+            with self.subTest(wrapper=wrapper):
+                result = self.run_cli(wrapper, "private input", DEV_TRIO_LOG_DIR=str(root))
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("unsafe team log directory", result.stderr)
+                self.assertEqual(list(team.iterdir()), [])
+                self.assertEqual(self.recorded(), [])
+                self.assertEqual(team.stat().st_mode & 0o777, 0o777)
+
+    def test_unsafe_custom_ancestor_and_symlink_target_are_rejected(self):
+        root = self.root / "custom logs"
+        root.mkdir(mode=0o700)
+        root.chmod(0o777)
+        alias = self.root / "log alias"
+        alias.symlink_to(root, target_is_directory=True)
+        for chosen in (root, alias):
+            for wrapper in ("ask-reviewer.sh", "ask-researcher.sh"):
+                with self.subTest(root=chosen, wrapper=wrapper):
+                    result = self.run_cli(wrapper, "private input",
+                                          DEV_TRIO_LOG_DIR=str(chosen))
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("unsafe log ancestor", result.stderr)
+                    self.assertEqual(self.recorded(), [])
+        self.assertEqual(root.stat().st_mode & 0o777, 0o777)
+
+    def test_caller_owned_sticky_ancestor_and_safe_symlink_target_work(self):
+        root = self.root / "custom logs"
+        root.mkdir(mode=0o700)
+        root.chmod(0o1777)
+        alias = self.root / "log alias"
+        alias.symlink_to(root, target_is_directory=True)
+        result = self.run_cli("ask-reviewer.sh", "private input",
+                              DEV_TRIO_LOG_DIR=str(alias))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((root / "host-test").stat().st_mode & 0o777, 0o700)
+
+    def test_path_replacement_during_model_keeps_original_log_inode(self):
+        for wrapper, channel in (("ask-reviewer.sh", "codex"),
+                                 ("ask-researcher.sh", "agy")):
+            with self.subTest(wrapper=wrapper):
+                logdir = self.workspace / ".dev-trio/log/host-test"
+                result = self.run_cli(
+                    wrapper, "private input", STUB_SWAP_LOG_DIR=str(logdir),
+                    STUB_SWAP_CHANNEL=channel,
+                    DEV_TRIO_REVIEWER_MODEL="claude" if channel == "codex" else "codex",
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                log = logdir / os.readlink(logdir / f"latest-{channel}.log")
+                self.assertEqual(log.read_text(), "replacement path\n")
+                original = Path(str(log) + ".saved")
+                self.assertIn(REVIEW, original.read_text())
+                self.assertIn("=== END (rc=0) ===", original.read_text())
+                log.unlink()
+                original.rename(log)
 
     def fenced(self, prompt, tag):
         """The exact text a wrapper placed between its own <tag> fences."""
@@ -906,7 +989,7 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.workspace / "late-logs").exists())
 
-        self.pane_wait(pane, "Status:")
+        self.pane_wait(pane, "done")
         frame = self.pane_quit(pane)
         self.assertNotIn("outside the team directory", frame)
         self.assertIn("done", frame)
