@@ -410,10 +410,10 @@ registry_run() {
     done < <(_registry_model_array "$id" log_args)
     [ "${#lg[@]}" -eq 0 ] || tmpl=("${lg[@]}" "${tmpl[@]}")
   fi
-  local argv=()
+  local argv=() in_argv=0
   for a in "${tmpl[@]}"; do
     case "$a" in
-      "{prompt}")  argv+=("$prompt") ;;
+      "{prompt}")  argv+=("$prompt"); in_argv=1 ;;
       "{final}")   argv+=("$final_file") ;;
       "{cwd}")     argv+=("$workspace") ;;
       "{cli_log}") argv+=("$cli_log") ;;
@@ -424,11 +424,12 @@ registry_run() {
     _registry_exec_stdin "$id" "$prompt" "$bin" "${argv[@]}"
     return $?
   fi
-  local limit bytes
+  local limit bytes=0
   limit="${REGISTRY_ARGV_MAX_BYTES:-131072}"
   case "$limit" in ''|*[!0-9]*) limit=131072 ;; esac
-  bytes="$(_registry_prompt_bytes "$prompt")"
-  if [ "$bytes" -ge "$limit" ]; then
+  # Only a template that puts {prompt} in argv can hit the limit.
+  [ "$in_argv" = 0 ] || bytes="$(_registry_prompt_bytes "$prompt")"
+  if [ "$in_argv" = 1 ] && [ "$bytes" -ge "$limit" ]; then
     echo "registry: model '$id' takes its prompt as one argument, and this prompt is $bytes bytes; Linux refuses a single argument of $limit bytes or more. Bind the role to a model with \"prompt_via\": \"stdin\", or pass less context." >&2
     return 3
   fi
@@ -440,38 +441,37 @@ registry_run() {
 }
 
 # _registry_exec_stdin ID PROMPT BIN [ARGS...] — run BIN with PROMPT as its
-# stdin. The prompt is staged in a private file (created and written in full
-# before anything starts: a failure is rc 6 and nothing runs); a subshell opens
-# it as stdin, unlinks it, and execs the CLI, so the CLI's status is the
-# subshell's and no file outlives the start. The subshell's own traps cover a
-# signal between open and unlink; a caller's trap that exits first finds the
-# file already gone. Signals the caller's shell ignored stay ignored.
-_registry_exec_stdin() {
-  local id="$1" prompt="$2" staged
+# stdin. One subshell does it all under its own traps: stage the prompt in a
+# private file (created and written in full before anything starts: a failure
+# is rc 6 and nothing runs), open it as stdin, unlink it, exec the CLI. So the
+# CLI's status is the subshell's, and from creation until the exec a signal
+# still removes the file; none outlives the CLI's start. Signals the caller's
+# shell ignored stay ignored.
+_registry_exec_stdin() (
+  id="$1" prompt="$2" staged=""
   shift 2
+  trap '[ -z "$staged" ] || rm -f -- "$staged"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
   staged="$(umask 077 && mktemp "${TMPDIR:-/tmp}/registry-prompt.XXXXXX")" || {
+    staged=""
     echo "registry: could not stage the prompt for model '$id' (mktemp failed)" >&2
-    return 6
+    exit 6
   }
   if ! printf '%s' "$prompt" > "$staged"; then
-    rm -f -- "$staged"
     echo "registry: could not stage the prompt for model '$id' (write failed)" >&2
-    return 6
+    exit 6
   fi
-  (
-    trap 'rm -f -- "$staged"' EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
-    trap 'exit 129' HUP
-    exec < "$staged" || exit 6
-    rm -f -- "$staged"
-    if command -v stdbuf >/dev/null 2>&1; then
-      exec stdbuf -oL "$@"
-    else
-      exec "$@"
-    fi
-  )
-}
+  exec < "$staged" || exit 6
+  rm -f -- "$staged"
+  staged=""
+  if command -v stdbuf >/dev/null 2>&1; then
+    exec stdbuf -oL "$@"
+  else
+    exec "$@"
+  fi
+)
 
 # registry_run_answer ID PROMPT [ANSWER_PATH] — registry_run for a role whose
 # output is an answer, streamed unchanged as it arrives (stderr stays on stderr).

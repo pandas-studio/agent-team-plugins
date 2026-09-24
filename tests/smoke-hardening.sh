@@ -1912,6 +1912,10 @@ REG_CALL='registry_run agy 0123456789abcdef; echo "rc=$?"'
 assert_eq "$(count_argv REGISTRY_ARGV_MAX_BYTES=16 2>/dev/null)" 'rc=3'
 REG_CALL='registry_run agy 0123456789abcde'
 assert_eq "$(count_argv REGISTRY_ARGV_MAX_BYTES=16)" '[-p][0123456789abcde]'
+# A template with no {prompt} never passes the prompt: size is no reason to refuse.
+printf '%s\n' '{"models":{"bare":{"command":"x","env_command":"AGY_CLI","args":["--ping"]}}}' > "$REG_TMP/bare.json"
+REG_CALL="${BIG}registry_run bare \"\$big\" </dev/null"
+assert_eq "$(count_argv AGENT_TEAM_MODELS_CONFIG="$REG_TMP/bare.json")" '[--ping]'
 REG_CALL='registry_run agy "한글ab"; echo "rc=$?"'
 assert_eq "$(count_argv REGISTRY_ARGV_MAX_BYTES=8 2>/dev/null)" 'rc=3'
 assert_eq "$(count_argv REGISTRY_ARGV_MAX_BYTES=9)" "$(printf '[-p][한글ab]\nrc=0')"

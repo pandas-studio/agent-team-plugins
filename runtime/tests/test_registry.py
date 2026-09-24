@@ -200,3 +200,9 @@ def test_prompt_delivery_misconfiguration_is_refused_before_anything_runs(tmp_pa
         runner.run("langgraph-conductor.planner", "q", tmp_path)
     with pytest.raises(RegistryError, match=message):
         runner.preflight(tmp_path)
+
+
+def test_argv_model_without_a_prompt_argument_ignores_the_limit(tmp_path):
+    """A template with no {prompt} never passes the prompt, so size is no reason to refuse."""
+    runner = _planner_config(tmp_path, {"command": sys.executable, "args": ["-c", "print('ran')"]})
+    assert runner.run("langgraph-conductor.planner", "x" * (2 * ARGV_MAX_BYTES), tmp_path).output == "ran\n"

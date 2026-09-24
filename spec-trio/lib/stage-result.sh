@@ -130,6 +130,7 @@ stage_prompt_file() {
     return 6
   }
   printf '%s' "$prompt" > "$file" || {
+    rm -f -- "$file"
     echo "stage: cannot write the prompt file $file" >&2
     return 6
   }

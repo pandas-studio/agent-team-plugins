@@ -217,6 +217,42 @@ class StageResultTests(unittest.TestCase):
         self.assertEqual(result.returncode, 6)
         self.assertNotIn("unbound", result.stderr)
 
+    def test_stage_prompt_arrives_on_stdin_from_a_private_file(self):
+        """#102: the planner/coder prompt is stdin, not one argv element."""
+        prompt = "# Role: worker\nline two é\n" + "x" * 300_000
+        (Path(self.tmp.name) / "prompt.txt").write_text(prompt)
+        data = self.run_stage('cat > "$PWD/.harness/seen"; echo done', evidence="stdout",
+                              setup=f'STAGE_PROMPT=$(cat {str(Path(self.tmp.name) / "prompt.txt")!r}; printf .)'
+                                    '; STAGE_PROMPT=${STAGE_PROMPT%.}')
+        self.assertEqual(data["evidence"], "stdout")  # the prompt file is not a change
+        self.assertEqual((self.repo / ".harness/seen").read_text(), prompt)
+        files = list((self.repo / ".harness").glob("stage.prompt.*"))
+        self.assertEqual(len(files), 1, files)
+        self.assertEqual(files[0].read_text(), prompt)
+        self.assertEqual(files[0].stat().st_mode & 0o777, 0o600)
+
+    def test_stage_prompt_is_consumed_and_never_reaches_a_later_call(self):
+        script = RUN.replace("rc=0\n", "STAGE_PROMPT=first\nrc=0\n", 1) + \
+            'echo "left=${STAGE_PROMPT+set}"\n' \
+            'stage_run "$3" "$2" "$2/.harness/second.log" bash -c "cat > .harness/second-seen; echo ok"\n'
+        result = subprocess.run(["bash", "-c", script, "test", str(LIB), str(self.repo), "planner",
+                                 "cat > .harness/first-seen; echo ok"],
+                                env=self.env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("left=\n", result.stdout)
+        self.assertEqual((self.repo / ".harness/first-seen").read_text(), "first")
+        self.assertEqual((self.repo / ".harness/second-seen").read_text(), "")
+
+    def test_unstageable_prompt_fails_the_stage_without_running_the_cli(self):
+        harness = self.repo / ".harness"
+        harness.chmod(0o555)
+        self.addCleanup(harness.chmod, 0o755)
+        if os.access(harness, os.W_OK):
+            self.skipTest("running as a user that ignores directory permissions")
+        self.run_stage("touch ran; echo ran", expected=6, cli="", setup="STAGE_PROMPT=p")
+        self.assertFalse((self.repo / "ran").exists())
+        self.assertEqual(list(harness.glob("stage.prompt.*")), [])
+
     def test_vendored_copy_matches(self):
         self.assertEqual(LIB.read_bytes(), (ROOT / "spec-trio/lib/stage-result.sh").read_bytes())
 

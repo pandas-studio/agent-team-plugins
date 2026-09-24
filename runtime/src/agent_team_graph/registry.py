@@ -243,7 +243,10 @@ class RoleRunner:
         # The bytes the OS would see: os.fsencode's encoding for argv, and the
         # same bytes on stdin, so neither path rejects what the other accepts.
         encoded = prompt.encode("utf-8", errors="surrogateescape")
-        if via == "argv" and len(encoded) >= ARGV_MAX_BYTES:
+        # Only a template that puts {prompt} in argv can hit the limit.
+        field = "final_args" if definition.get("final_args") else "args"
+        in_argv = via == "argv" and "{prompt}" in (definition.get(field) or [])
+        if in_argv and len(encoded) >= ARGV_MAX_BYTES:
             raise RegistryError(
                 f"model {model_id!r} takes its prompt as one argument, and this prompt is "
                 f"{len(encoded)} bytes; Linux refuses a single argument of {ARGV_MAX_BYTES} bytes "
