@@ -620,7 +620,9 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
                 P=str(self.plugin), R=str(self.root), PATH=self.argv_limited_path()),
             text=True, capture_output=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
-        manifest = json.loads((self.root / "helper.manifest.json.tmp").read_text())
+        manifests = list(self.root.glob("helper.manifest.json.tmp*"))
+        self.assertEqual(len(manifests), 1, manifests)
+        manifest = json.loads(manifests[0].read_text())
         self.assertEqual(manifest["inputs"], [
             {"kind": "a", "value": "a\n\n"}, {"kind": "b", "value": "x"},
             {"kind": "big", "value": big}])
