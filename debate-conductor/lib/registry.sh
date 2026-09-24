@@ -33,8 +33,12 @@
 #                     claude and codex models use it (`claude -p`,
 #                     `codex exec -`); agy has no documented text form and
 #                     stays on argv.
-# A "stdin" template that contains {prompt}, or any other prompt_via value, is
-# a configuration error (rc 3), as `agent-team-models doctor` reports.
+# A "stdin" template that contains {prompt}, an "argv" model whose template
+# has no {prompt} (the CLI would run without ever seeing the prompt, #119), or
+# any other prompt_via value is a configuration error (rc 3), as
+# `agent-team-models doctor` reports. For an argv model the template checked is
+# the one that runs: final_args when non-empty (registry_run uses a caller's
+# final file only then, and every wrapper passes one), otherwise args.
 #
 # Two optional, caller-gated prefixes (built-in agy defines both):
 #   "workspace_args": ["--add-dir", "{cwd}"]      # {cwd} = $REGISTRY_WORKSPACE
@@ -277,19 +281,52 @@ registry_prompt_via() {
   esac
 }
 
-# registry_check_model <model-id> — rc 0 when the model's templates agree with
-# its prompt_via; otherwise rc 3 with the reason on stderr. A stdin model whose
-# args or final_args still contains {prompt} would put the prompt in argv too.
-registry_check_model() {
-  local id="$1" via n
-  via="$(registry_prompt_via "$id")" || return 3
-  [ "$via" = stdin ] || return 0
-  n="$(_registry_model_def "$id" \
-    | jq -r '[((.args // []) + (.final_args // []))[] | select(. == "{prompt}")] | length')"
-  if [ "$n" != 0 ]; then
-    echo "registry: model '$id' takes its prompt on stdin (prompt_via \"stdin\") but a template still contains {prompt}; remove it" >&2
+# registry_check_def <model-id> <definition-json> — rc 0 when the definition's
+# templates agree with its prompt_via; otherwise rc 3 with the reason on stderr.
+# The one copy of the rule: registry_check_model applies it to a configured
+# model, agent-team-models to a definition before saving it.
+#   - prompt_via is "argv" (the default) or "stdin".
+#   - A stdin model has no {prompt} in args or final_args: it would put the
+#     prompt in argv too.
+#   - An argv model has {prompt} in the template that runs — final_args when
+#     non-empty, otherwise args — or the CLI never sees the prompt (#119). An
+#     unused args beside a non-empty final_args is not checked here;
+#     registry_run refuses it if a caller selects it without a final file.
+registry_check_def() {
+  local id="$1" why
+  why="$(printf '%s' "$2" | jq -r '
+    def template($f): (.[$f] // []) | if type == "array" then . else [] end;
+    def has_prompt: any(.[]; . == "{prompt}");
+    (.prompt_via // "argv") as $via
+    | if ($via != "argv" and $via != "stdin") then
+        "has prompt_via \u0027\($via)\u0027; use \"argv\" or \"stdin\""
+      elif $via == "stdin" and ((template("args") + template("final_args")) | has_prompt) then
+        "takes its prompt on stdin (prompt_via \"stdin\") but a template still contains {prompt}; remove it"
+      elif $via == "argv" then
+        (if (template("final_args") | length) > 0 then "final_args" else "args" end) as $f
+        | if (template($f) | has_prompt) then ""
+          else "takes its prompt as an argument (prompt_via \"argv\") but its \($f) template has no {prompt}, so the CLI would never see the prompt; add {prompt} where the prompt belongs, or use prompt_via \"stdin\""
+          end
+      else "" end')" || {
+    echo "registry: model '$id' has a definition that is not valid JSON" >&2
+    return 3
+  }
+  if [ -n "$why" ]; then
+    echo "registry: model '$id' $why" >&2
     return 3
   fi
+}
+
+# registry_check_model <model-id> — registry_check_def for a configured model;
+# rc 3 for an unknown one.
+registry_check_model() {
+  local id="$1" def
+  def="$(_registry_model_def "$id")"
+  if [ -z "$def" ] || [ "$def" = "null" ]; then
+    echo "registry: unknown model '$id'" >&2
+    return 3
+  fi
+  registry_check_def "$id" "$def"
 }
 
 # _registry_prompt_bytes <string> — its length in bytes, not characters.
@@ -396,6 +433,20 @@ registry_run() {
     echo "registry: model '$id' has no '$field' template" >&2
     return 3
   fi
+  # registry_check_model checked the template that normally runs. A caller that
+  # gives no final file to a model with final_args selects args instead, and an
+  # argv model must carry the prompt there too (#119). Checked before the
+  # prefixes are added: {prompt} in workspace_args or log_args is not delivery.
+  if [ "$via" = argv ]; then
+    local has_prompt=0
+    for a in "${tmpl[@]}"; do
+      [ "$a" != "{prompt}" ] || has_prompt=1
+    done
+    if [ "$has_prompt" = 0 ]; then
+      echo "registry: model '$id' takes its prompt as an argument (prompt_via \"argv\") but its $field template has no {prompt}, so the CLI would never see the prompt; nothing was started" >&2
+      return 3
+    fi
+  fi
   # Caller-gated prefixes: log_args, then workspace_args, then the template.
   if [ -n "$workspace" ]; then
     local ws=()
@@ -411,10 +462,10 @@ registry_run() {
     done < <(_registry_model_array "$id" log_args)
     [ "${#lg[@]}" -eq 0 ] || tmpl=("${lg[@]}" "${tmpl[@]}")
   fi
-  local argv=() in_argv=0
+  local argv=()
   for a in "${tmpl[@]}"; do
     case "$a" in
-      "{prompt}")  argv+=("$prompt"); in_argv=1 ;;
+      "{prompt}")  argv+=("$prompt") ;;
       "{final}")   argv+=("$final_file") ;;
       "{cwd}")     argv+=("$workspace") ;;
       "{cli_log}") argv+=("$cli_log") ;;
@@ -431,12 +482,12 @@ registry_run() {
     fi
     return
   fi
-  local limit bytes=0
+  local limit bytes
   limit="${REGISTRY_ARGV_MAX_BYTES:-131072}"
   case "$limit" in ''|*[!0-9]*) limit=131072 ;; esac
-  # Only a template that puts {prompt} in argv can hit the limit.
-  [ "$in_argv" = 0 ] || bytes="$(_registry_prompt_bytes "$prompt")"
-  if [ "$in_argv" = 1 ] && [ "$bytes" -ge "$limit" ]; then
+  # An argv template that runs always carries {prompt} (checked above).
+  bytes="$(_registry_prompt_bytes "$prompt")"
+  if [ "$bytes" -ge "$limit" ]; then
     echo "registry: model '$id' takes its prompt as one argument, and this prompt is $bytes bytes; Linux refuses a single argument of $limit bytes or more. Bind the role to a model with \"prompt_via\": \"stdin\", or pass less context." >&2
     return 3
   fi
