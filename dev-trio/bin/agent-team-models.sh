@@ -215,6 +215,10 @@ cmd_preset() {
       [ -n "$name" ] || die "usage: $PROG preset add <name>  (available: $(registry_preset_names | tr '\n' ' '))"
       local preset
       preset="$(_registry_preset_json "$name")" || die "unknown preset '$name' (available: $(registry_preset_names | tr '\n' ' '))"
+      local pid
+      while IFS= read -r pid; do
+        _check_def "$pid" "$(printf '%s' "$preset" | jq -c --arg id "$pid" '.[$id]')"
+      done < <(printf '%s' "$preset" | jq -r 'keys[]')
       _registry_config_json | jq --argjson p "$preset" '.models = (.models + $p)' | _cfg_save
       echo "preset '$name' added -> models: $(printf '%s' "$preset" | jq -r 'keys | join(", ")')"
       echo "config: $CONFIG"

@@ -1945,8 +1945,22 @@ assert_eq "$(count_argv AGENT_TEAM_MODELS_CONFIG="$REG_TMP/bare.json" 2>&1)" \
 REG_CALL='registry_run finalonly P /f; echo "rc=$?"; registry_run finalonly P; echo "rc=$?"'
 assert_eq "$(count_argv AGENT_TEAM_MODELS_CONFIG="$REG_TMP/bare.json" 2>&1)" \
   "$(printf "[--final][/f][P]\nrc=0\nregistry: model 'finalonly'%s; nothing was started\nrc=3" "$NO_PROMPT")"
+# registry_check_def is the whole rule. Shapes the runtime's preflight refuses
+# are refused here too, and an empty final_args is never the running template.
+check_def_rc() { bash -c '. "$1/dev-trio/lib/registry.sh"; registry_check_def m "$2" 2>/dev/null; echo $?' _ "$ROOT" "$1"; }
+for def in '{"args":["{prompt}"]}' '{"prompt_via":"argv","args":["-p","{prompt}"]}' \
+           '{"args":["{prompt}"],"final_args":[]}' '{"args":["-p"],"final_args":["{final}","{prompt}"]}' \
+           '{"prompt_via":"stdin","args":["-p"]}'; do
+  assert_eq "$(check_def_rc "$def")" 0
+done
+for def in '{"prompt_via":null,"args":["{prompt}"]}' '{"prompt_via":false,"args":["{prompt}"]}' \
+           '{"args":["{prompt}"],"final_args":"x"}' '{"args":["{prompt}"],"final_args":null}' \
+           '{"args":"-p {prompt}"}' '{"args":[1,"{prompt}"]}' '"invalid"' 'not json' \
+           '{"args":["-p"],"final_args":[]}' '{"args":["{prompt}"],"final_args":["{final}"]}'; do
+  assert_eq "$(check_def_rc "$def")" 3
+done
 # agent-team-models applies the same rule: add/edit refuse to save such a model,
-# and doctor fails one written by hand.
+# preset add checks what it saves, and doctor fails one written by hand.
 for plugin in dev-trio debate-conductor; do
   printf '%s\n' '{"version":1,"models":{"mine":{"command":"x","args":["{prompt}"]}}}' > "$REG_TMP/atm.json"
   for cmd in "add z --command z --arg -p" "add z --command z --arg -p --final-arg {final}" \
@@ -1961,10 +1975,14 @@ for plugin in dev-trio debate-conductor; do
   done
   AGENT_TEAM_MODELS_CONFIG="$REG_TMP/atm.json" "$ROOT/$plugin/bin/agent-team-models.sh" \
     add f --command f --arg -p --final-arg {final} --final-arg {prompt} >/dev/null 2>&1
+  AGENT_TEAM_MODELS_CONFIG="$REG_TMP/atm.json" "$ROOT/$plugin/bin/agent-team-models.sh" \
+    preset add kimi-code >/dev/null 2>&1
+  assert_eq "$(jq -c '.models["kimi-code"].args' "$REG_TMP/atm.json")" '["-p","{prompt}"]'
   assert_eq "$(jq -c .models.f "$REG_TMP/atm.json")" '{"command":"f","args":["-p"],"final_args":["{final}","{prompt}"]}'
   rc=0
   AGENT_TEAM_MODELS_CONFIG="$REG_TMP/bare.json" "$ROOT/$plugin/bin/agent-team-models.sh" doctor \
     >"$REG_TMP/doctor.out" 2>&1 || rc=$?
+  assert_eq "$rc" 1
   assert_eq "$(grep -c "^  \[FAIL\] bare: model 'bare'$NO_PROMPT;" "$REG_TMP/doctor.out")" 1
   assert_eq "$(grep -c '^  \[FAIL\] finalonly' "$REG_TMP/doctor.out")" 0
 done

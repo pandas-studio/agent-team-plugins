@@ -285,7 +285,10 @@ registry_prompt_via() {
 # templates agree with its prompt_via; otherwise rc 3 with the reason on stderr.
 # The one copy of the rule: registry_check_model applies it to a configured
 # model, agent-team-models to a definition before saving it.
-#   - prompt_via is "argv" (the default) or "stdin".
+#   - A prompt_via that is present is "argv" or "stdin" (absent means argv).
+#   - An args or final_args that is present is an array of strings, as the
+#     runtime's preflight requires; registry_run would select a non-empty
+#     final_args of any other type and could not run it.
 #   - A stdin model has no {prompt} in args or final_args: it would put the
 #     prompt in argv too.
 #   - An argv model has {prompt} in the template that runs — final_args when
@@ -295,19 +298,26 @@ registry_prompt_via() {
 registry_check_def() {
   local id="$1" why
   why="$(printf '%s' "$2" | jq -r '
-    def template($f): (.[$f] // []) | if type == "array" then . else [] end;
+    def shown: if type == "string" then "\u0027\(.)\u0027" else tojson end;
+    def template_ok($f): (has($f) | not)
+      or ((.[$f] | type) == "array" and all(.[$f][]; type == "string"));
+    def template($f): .[$f] // [];
     def has_prompt: any(.[]; . == "{prompt}");
-    (.prompt_via // "argv") as $via
-    | if ($via != "argv" and $via != "stdin") then
-        "has prompt_via \u0027\($via)\u0027; use \"argv\" or \"stdin\""
-      elif $via == "stdin" and ((template("args") + template("final_args")) | has_prompt) then
+    if type != "object" then "is not a JSON object"
+    elif has("prompt_via") and .prompt_via != "argv" and .prompt_via != "stdin" then
+      "has prompt_via \(.prompt_via | shown); use \"argv\" or \"stdin\""
+    elif (template_ok("args") | not) then "has an args template that is not an array of strings"
+    elif (template_ok("final_args") | not) then "has a final_args template that is not an array of strings"
+    elif .prompt_via == "stdin" then
+      if (template("args") + template("final_args")) | has_prompt then
         "takes its prompt on stdin (prompt_via \"stdin\") but a template still contains {prompt}; remove it"
-      elif $via == "argv" then
-        (if (template("final_args") | length) > 0 then "final_args" else "args" end) as $f
-        | if (template($f) | has_prompt) then ""
-          else "takes its prompt as an argument (prompt_via \"argv\") but its \($f) template has no {prompt}, so the CLI would never see the prompt; add {prompt} where the prompt belongs, or use prompt_via \"stdin\""
-          end
-      else "" end')" || {
+      else "" end
+    else
+      (if (template("final_args") | length) > 0 then "final_args" else "args" end) as $f
+      | if (template($f) | has_prompt) then ""
+        else "takes its prompt as an argument (prompt_via \"argv\") but its \($f) template has no {prompt}, so the CLI would never see the prompt; add {prompt} where the prompt belongs, or use prompt_via \"stdin\""
+        end
+    end')" || {
     echo "registry: model '$id' has a definition that is not valid JSON" >&2
     return 3
   }
