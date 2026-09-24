@@ -39,7 +39,11 @@ Under cron or launchd, either set `DEV_TRIO_BIN` to the installed plugin's real 
 
 ### Planner and coder success
 
-Planner and coder CLI overrides keep the same `-p PROMPT` interface. Each
+Planner and coder CLIs are called as `CLI -p` with the prompt on stdin; one
+argument is capped at 128 KiB on Linux, and the spec is inlined into every
+planner, coder and reviewer prompt. A `PLANNER_CLI` / `CODER_CLI` wrapper
+must pass stdin through (`exec claude "$@"` does); see
+[dev-trio's model configuration](../dev-trio/README.md#model-configuration). Each
 stage retains its diagnostic `.log` and adds a `.stdout.log` containing only
 stdout. Plans, allowed paths, and planner research requests are read only from
 stdout; stderr guidance is never a plan.

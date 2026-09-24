@@ -217,6 +217,45 @@ class StageResultTests(unittest.TestCase):
         self.assertEqual(result.returncode, 6)
         self.assertNotIn("unbound", result.stderr)
 
+    def test_stage_prompt_arrives_whole_on_stdin(self):
+        """#102: the planner/coder prompt is stdin (plus a newline), not one argv element."""
+        prompt = "# Role: worker\nline two é\n" + "x" * 300_000
+        (Path(self.tmp.name) / "prompt.txt").write_text(prompt)
+        self.run_stage('cat > "$PWD/.harness/seen"; echo done', evidence="stdout",
+                       setup=f'STAGE_PROMPT=$(cat {str(Path(self.tmp.name) / "prompt.txt")!r}; printf .)'
+                             '; STAGE_PROMPT=${STAGE_PROMPT%.}')
+        self.assertEqual((self.repo / ".harness/seen").read_text(), prompt + "\n")
+        self.assertEqual(sorted(p.name for p in (self.repo / ".harness").iterdir()),
+                         ["seen", "stage.log", "stage.stdout.log"])
+
+    def test_unread_prompt_keeps_the_cli_status(self):
+        """A CLI that ignores its stdin keeps its own status under the caller's pipefail."""
+        setup = 'STAGE_PROMPT=$(printf "%300000s" "")'
+        self.run_stage("echo answered", role="planner", evidence="stdout", setup=setup)
+        self.run_stage("echo failed; exit 7", role="planner", expected=7, cli="7", setup=setup)
+
+    def test_child_holding_stdin_does_not_hold_up_the_stage(self):
+        """A `printf | cli` writer would block on a 300 KB prompt held by a leaked reader."""
+        release = Path(self.tmp.name) / "release"
+        self.addCleanup(release.touch)
+        command = (f'( i=0; while [ ! -e {str(release)!r} ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i+1)); done; '
+                   f'[ -e {str(release)!r} ] || : > {str(release)!r}.gave-up ) <&0 >/dev/null 2>&1 & echo answered')
+        self.run_stage(command, role="planner", evidence="stdout", setup='STAGE_PROMPT=$(printf "%300000s" "")')
+        self.assertFalse(Path(f"{release}.gave-up").exists(), "stage_run waited for the leaked reader")
+        release.touch()
+
+    def test_stage_prompt_is_consumed_and_never_reaches_a_later_call(self):
+        script = RUN.replace("rc=0\n", "STAGE_PROMPT=first\nrc=0\n", 1) + \
+            'echo "left=${STAGE_PROMPT+set}"\n' \
+            'stage_run "$3" "$2" "$2/.harness/second.log" bash -c "cat > .harness/second-seen; echo ok"\n'
+        result = subprocess.run(["bash", "-c", script, "test", str(LIB), str(self.repo), "planner",
+                                 "cat > .harness/first-seen; echo ok"],
+                                env=self.env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("left=\n", result.stdout)
+        self.assertEqual((self.repo / ".harness/first-seen").read_text(), "first\n")
+        self.assertEqual((self.repo / ".harness/second-seen").read_text(), "")
+
     def test_vendored_copy_matches(self):
         self.assertEqual(LIB.read_bytes(), (ROOT / "spec-trio/lib/stage-result.sh").read_bytes())
 

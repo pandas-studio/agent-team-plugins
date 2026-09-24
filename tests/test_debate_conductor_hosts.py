@@ -33,6 +33,12 @@ class DebateHostTests(unittest.TestCase):
             f"#!{sys.executable}\n"
             "import json, os, sys\n"
             "args = sys.argv[1:]\n"
+            # claude and codex read the prompt from stdin (#102); it is
+            # recorded after a '<stdin>' marker. run_cli gives the wrappers an
+            # empty, closed stdin, so an argv model reads nothing here.
+            "data = '' if sys.stdin.isatty() else sys.stdin.read()\n"
+            "if data:\n"
+            "    args = args + ['<stdin>', data]\n"
             "with open(os.environ['STUB_CALLS'], 'a') as f:\n"
             "    f.write(json.dumps(args)+'\\n')\n"
             "if args == ['auth','status','--json']:\n"
@@ -569,6 +575,12 @@ class DebateHostTests(unittest.TestCase):
             f"#!{sys.executable}\n"
             "import json, os, sys, time\n"
             "args = sys.argv[1:]\n"
+            # claude and codex read the prompt from stdin (#102); it is
+            # recorded after a '<stdin>' marker. run_cli gives the wrappers an
+            # empty, closed stdin, so an argv model reads nothing here.
+            "data = '' if sys.stdin.isatty() else sys.stdin.read()\n"
+            "if data:\n"
+            "    args = args + ['<stdin>', data]\n"
             "with open(os.environ['STUB_CALLS'], 'a') as f:\n"
             "    f.write(json.dumps(args)+'\\n')\n"
             "if args == ['auth','status','--json']:\n"

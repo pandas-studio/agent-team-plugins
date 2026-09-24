@@ -42,7 +42,11 @@ Under cron or launchd, either set `DEV_TRIO_BIN` / `DEBATE_CONDUCTOR_BIN` to the
 
 ### Planner and coder success
 
-Planner and coder CLI overrides keep the same `-p PROMPT` interface. Each
+Planner and coder CLIs are called as `CLI -p` with the prompt on stdin, the
+shape `ralph-solo.sh` has always used; one argument is capped at 128 KiB on
+Linux, and the plan and research context reach that. A `PLANNER_CLI` /
+`CODER_CLI` wrapper must pass stdin through (`exec claude "$@"` does); see
+[dev-trio's model configuration](../dev-trio/README.md#model-configuration). Each
 stage retains its diagnostic `.log` and adds a `.stdout.log` containing only
 stdout. Plans, allowed paths, and planner research requests are read only from
 stdout; stderr guidance is never a plan.

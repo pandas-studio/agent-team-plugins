@@ -408,8 +408,8 @@ echo "DOCTOR-RESEARCH-ANSWER: helper(x) -> y (agy stub)"
 STUB
   cat > "$S7/stub-coder.sh" <<'STUB'
 #!/usr/bin/env bash
-# Capture the coder prompt (arg after -p) so the harness can assert the graft.
-printf '%s' "$2" > "$CODER_CAPTURE"
+# Capture the coder prompt (stdin after -p, #102) so the harness can assert the graft.
+cat > "$CODER_CAPTURE"
 echo "coder ran (stub)"
 STUB
   chmod +x "$S7"/*.sh

@@ -10,8 +10,11 @@
 #   show <model-id>               show one model definition (+ resolved binary)
 #   doctor                        validate config; report unresolved roles/binaries
 #   preset add <name>             install a named preset (e.g. kimi-code)
-#   add  <id> --command <cmd> [--env-command VAR] [--arg A ...] [--final-arg A ...]
-#   edit <id> [--command ...] [--env-command ...] [--arg ...] [--final-arg ...]
+#   add  <id> --command <cmd> [--env-command VAR] [--stdin] [--arg A ...] [--final-arg A ...]
+#   edit <id> [--command ...] [--env-command ...] [--stdin|--argv] [--arg ...] [--final-arg ...]
+#
+# --stdin: the CLI reads its prompt on stdin, so no template holds {prompt}
+# (prompt_via "stdin"; see lib/registry.sh). --argv switches back.
 #   remove <id> [--force --fallback <model-id>]
 #   set-role <plugin.role> <model-id>
 #
@@ -39,8 +42,10 @@ Usage: $PROG <command> [args]
   show <model-id>              show one model definition + resolved binary
   doctor                       validate the config and report problems
   preset add <name>            install a preset ($(registry_preset_names | tr '\n' ' '))
-  add <id> --command <cmd> [--env-command VAR] [--arg A ...] [--final-arg A ...]
-  edit <id> [--command ...] [--env-command ...] [--arg ...] [--final-arg ...]
+  add <id> --command <cmd> [--env-command VAR] [--stdin] [--arg A ...] [--final-arg A ...]
+  edit <id> [--command ...] [--env-command ...] [--stdin|--argv] [--arg ...] [--final-arg ...]
+
+  --stdin  the CLI reads its prompt on stdin; templates carry no {prompt}
   remove <id> [--force --fallback <model-id>]
   set-role <plugin.role> <model-id>
 
@@ -81,6 +86,19 @@ _args_to_json() {
     out="$(jq -nc --argjson acc "$out" --arg x "$a" '$acc + [$x]')"
   done
   printf '%s' "$out"
+}
+
+# Refuse to save a definition the registry would refuse to run.
+_check_def() {
+  local id="$1" def="$2" why
+  why="$(printf '%s' "$def" | jq -r '
+    if (.prompt_via // "argv") as $v | ["argv","stdin"] | index($v) | not then
+      "prompt_via must be \"argv\" or \"stdin\""
+    elif (.prompt_via // "argv") == "stdin"
+         and ([((.args // []) + (.final_args // []))[] | select(. == "{prompt}")] | length) > 0 then
+      "a stdin model cannot keep {prompt} in a template; pass the templates without it"
+    else "" end')"
+  [ -z "$why" ] || die "$id: $why"
 }
 
 _role_source() {
@@ -153,11 +171,14 @@ cmd_doctor() {
 
   echo
   echo "2. Models"
-  local id cmd
+  local id cmd why
   for id in $(registry_list_model_ids); do
     cmd="$(registry_resolve_command "$id" 2>/dev/null || echo '')"
     if [ -z "$cmd" ]; then
       echo "  [FAIL] $id has no resolvable command"; failed=1; continue
+    fi
+    if ! why="$(registry_check_model "$id" 2>&1)"; then
+      echo "  [FAIL] $id: ${why#registry: }"; failed=1; continue
     fi
     if command -v "$cmd" >/dev/null 2>&1; then
       echo "  [ok]   $id -> $cmd ($(command -v "$cmd"))"
@@ -210,13 +231,14 @@ cmd_preset() {
 
 cmd_add() {
   local id="${1:-}"; shift || true
-  [ -n "$id" ] || die "usage: $PROG add <id> --command <cmd> [--env-command VAR] [--arg A ...] [--final-arg A ...]"
+  [ -n "$id" ] || die "usage: $PROG add <id> --command <cmd> [--env-command VAR] [--stdin] [--arg A ...] [--final-arg A ...]"
   if registry_model_is_builtin "$id"; then
     die "'$id' is a built-in model; pick a different id (built-ins cannot be redefined via add)"
   fi
-  local command="" envcmd="" args=() finals=()
+  local command="" envcmd="" via="" args=() finals=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      --stdin)        via=stdin; shift ;;
       --command)      command="${2?--command requires a value}"; shift 2 ;;
       --command=*)    command="${1#--command=}"; shift ;;
       --env-command)  envcmd="${2?--env-command requires a value}"; shift 2 ;;
@@ -228,8 +250,13 @@ cmd_add() {
   done
   [ -n "$command" ] || die "add: --command is required"
   if [ "${#args[@]}" -eq 0 ]; then
-    args=(-p "{prompt}")
-    echo "$PROG: note: no --arg given; defaulting args to: -p {prompt}" >&2
+    if [ "$via" = stdin ]; then
+      args=(-p)
+      echo "$PROG: note: no --arg given; defaulting args to: -p (prompt on stdin)" >&2
+    else
+      args=(-p "{prompt}")
+      echo "$PROG: note: no --arg given; defaulting args to: -p {prompt}" >&2
+    fi
   fi
   local args_json finals_json def
   args_json="$(_args_to_json "${args[@]}")"
@@ -237,12 +264,15 @@ cmd_add() {
   def="$(jq -n \
     --arg cmd "$command" \
     --arg env "$envcmd" \
+    --arg via "$via" \
     --argjson args "$args_json" \
     --argjson finals "$finals_json" \
     '{ command: $cmd }
      + ( if $env != "" then { env_command: $env } else {} end )
+     + ( if $via != "" then { prompt_via: $via } else {} end )
      + { args: $args }
      + ( if ($finals | length) > 0 then { final_args: $finals } else {} end )')"
+  _check_def "$id" "$def"
   _registry_config_json | jq --arg id "$id" --argjson def "$def" '.models[$id] = $def' | _cfg_save
   echo "model '$id' added"
   echo "config: $CONFIG"
@@ -250,13 +280,15 @@ cmd_add() {
 
 cmd_edit() {
   local id="${1:-}"; shift || true
-  [ -n "$id" ] || die "usage: $PROG edit <id> [--command ...] [--env-command ...] [--arg ...] [--final-arg ...]"
+  [ -n "$id" ] || die "usage: $PROG edit <id> [--command ...] [--env-command ...] [--stdin|--argv] [--arg ...] [--final-arg ...]"
   local existing
   existing="$(_registry_config_json | jq -c --arg id "$id" '.models[$id] // null')"
   [ "$existing" != "null" ] || die "'$id' is not a user-defined model (use '$PROG add' to create it; built-ins cannot be edited)"
-  local set_command=0 set_env=0 command="" envcmd="" args=() finals=()
+  local set_command=0 set_env=0 command="" envcmd="" via="" args=() finals=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      --stdin)         via=stdin; shift ;;
+      --argv)          via=argv; shift ;;
       --command)       command="${2?--command requires a value}"; set_command=1; shift 2 ;;
       --command=*)     command="${1#--command=}"; set_command=1; shift ;;
       --env-command)   envcmd="${2?--env-command requires a value}"; set_env=1; shift 2 ;;
@@ -266,7 +298,18 @@ cmd_edit() {
       *) die "edit: unexpected argument: $1" ;;
     esac
   done
+  # Switching delivery changes what the templates must hold, so the new args
+  # come with it; keeping the old ones would leave {prompt} in a stdin model
+  # or drop it from an argv one.
+  if [ -n "$via" ] && [ "${#args[@]}" -eq 0 ]; then
+    die "edit: --$via changes where the prompt goes; give the new template with --arg in the same call"
+  fi
   local def="$existing"
+  if [ "$via" = stdin ]; then
+    def="$(printf '%s' "$def" | jq '.prompt_via = "stdin"')"
+  elif [ "$via" = argv ]; then
+    def="$(printf '%s' "$def" | jq 'del(.prompt_via)')"
+  fi
   if [ "$set_command" = "1" ]; then
     def="$(printf '%s' "$def" | jq --arg c "$command" '.command = $c')"
   fi
@@ -283,6 +326,7 @@ cmd_edit() {
   if [ "${#finals[@]}" -gt 0 ]; then
     def="$(printf '%s' "$def" | jq --argjson f "$(_args_to_json "${finals[@]}")" '.final_args = $f')"
   fi
+  _check_def "$id" "$def"
   _registry_config_json | jq --arg id "$id" --argjson def "$def" '.models[$id] = $def' | _cfg_save
   echo "model '$id' updated"
   echo "config: $CONFIG"

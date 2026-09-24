@@ -25,16 +25,19 @@ BUILTIN_MODELS: dict[str, dict[str, Any]] = {
         "workspace_args": ["--add-dir", "{cwd}"],
         "log_args": ["--log-file", "{cli_log}"],
     },
+    # claude and codex read the prompt on stdin (#102): one argv element is
+    # capped at 128 KiB on Linux, and specs plus research reach that.
     "codex": {
         "command": "codex",
         "env_command": "CODEX_CLI",
-        "args": ["exec", "--skip-git-repo-check", "{prompt}"],
+        "prompt_via": "stdin",
+        "args": ["exec", "--skip-git-repo-check", "-"],
         "final_args": [
             "exec",
             "--skip-git-repo-check",
             "--output-last-message",
             "{final}",
-            "{prompt}",
+            "-",
         ],
     },
     # Codex injects its memory summary into every `exec` prompt while the
@@ -42,7 +45,8 @@ BUILTIN_MODELS: dict[str, dict[str, Any]] = {
     "codex-no-memories": {
         "command": "codex",
         "env_command": "CODEX_CLI",
-        "args": ["exec", "--skip-git-repo-check", "-c", "features.memories=false", "{prompt}"],
+        "prompt_via": "stdin",
+        "args": ["exec", "--skip-git-repo-check", "-c", "features.memories=false", "-"],
         "final_args": [
             "exec",
             "--skip-git-repo-check",
@@ -50,19 +54,38 @@ BUILTIN_MODELS: dict[str, dict[str, Any]] = {
             "features.memories=false",
             "--output-last-message",
             "{final}",
-            "{prompt}",
+            "-",
         ],
     },
-    "claude": {"command": "claude", "env_command": "CLAUDE_CLI", "args": ["-p", "{prompt}"]},
+    "claude": {"command": "claude", "env_command": "CLAUDE_CLI", "prompt_via": "stdin", "args": ["-p"]},
     # Headless `claude -p` cannot write files without an explicit permission
     # mode, so a coder bound to plain "claude" is a silent no-op. Kept as a
     # separate model so read-only roles never inherit edit rights.
     "claude-write": {
         "command": "claude",
         "env_command": "CLAUDE_CLI",
-        "args": ["-p", "--permission-mode", "acceptEdits", "{prompt}"],
+        "prompt_via": "stdin",
+        "args": ["-p", "--permission-mode", "acceptEdits"],
     },
 }
+
+# Linux refuses one argv element of this many bytes or more (MAX_ARG_STRLEN,
+# NUL included); registry.sh refuses the same prompts, on every platform.
+ARGV_MAX_BYTES = 131072
+
+
+def check_prompt_delivery(model_id: str, definition: dict[str, Any]) -> str:
+    """Return the model's prompt_via, or raise what registry.sh rejects with rc 3."""
+    via = definition.get("prompt_via", "argv")
+    if via not in ("argv", "stdin"):
+        raise RegistryError(f"model {model_id!r} has prompt_via {via!r}; use 'argv' or 'stdin'")
+    if via == "stdin":
+        for field in ("args", "final_args"):
+            template = definition.get(field) or []
+            if isinstance(template, list) and "{prompt}" in template:
+                raise RegistryError(
+                    f"model {model_id!r} takes its prompt on stdin but its {field} template contains {{prompt}}")
+    return via
 
 BUILTIN_ROLES = {
     "langgraph-conductor.planner": "claude",
@@ -174,7 +197,8 @@ class RoleRunner:
 
     def preflight(self, workspace: Path) -> None:
         for role in BUILTIN_ROLES:
-            _, definition, _ = self.resolve_adapter(role, workspace)
+            model_id, definition, _ = self.resolve_adapter(role, workspace)
+            check_prompt_delivery(model_id, definition)
             for field in ("args", "final_args"):
                 if field == "final_args" and field not in definition:
                     continue
@@ -215,6 +239,18 @@ class RoleRunner:
     ) -> RoleResult:
         timeout = self.timeout_seconds if timeout is None else timeout
         model_id, definition, command = self.resolve_adapter(role, workspace)
+        via = check_prompt_delivery(model_id, definition)
+        # The bytes the OS would see: os.fsencode's encoding for argv, and the
+        # same bytes on stdin, so neither path rejects what the other accepts.
+        encoded = prompt.encode("utf-8", errors="surrogateescape")
+        # Only a template that puts {prompt} in argv can hit the limit.
+        field = "final_args" if definition.get("final_args") else "args"
+        in_argv = via == "argv" and "{prompt}" in (definition.get(field) or [])
+        if in_argv and len(encoded) >= ARGV_MAX_BYTES:
+            raise RegistryError(
+                f"model {model_id!r} takes its prompt as one argument, and this prompt is "
+                f"{len(encoded)} bytes; Linux refuses a single argument of {ARGV_MAX_BYTES} bytes "
+                "or more. Bind the role to a model with prompt_via 'stdin', or pass less context.")
         with tempfile.TemporaryDirectory(prefix="agent-team-answer-") as temporary:
             native = bool(definition.get("final_args"))
             capture = (final_path or Path(temporary) / "answer.md") if native else None
@@ -224,10 +260,13 @@ class RoleRunner:
             template = definition.get(field)
             if not isinstance(template, list) or not all(isinstance(item, str) for item in template):
                 raise RegistryError(f"model {model_id!r} has an invalid {field} template")
-            replacements = {"{prompt}": prompt, "{final}": str(capture or "")}
+            replacements = {"{final}": str(capture or "")}
+            if via == "argv":
+                replacements["{prompt}"] = prompt
             argv = [command, *(replacements.get(item, item) for item in template)]
             completed = run_process(argv, cwd=workspace, timeout=timeout,
-                                    cancellation=self.cancellation)
+                                    cancellation=self.cancellation,
+                                    input_bytes=encoded if via == "stdin" else None)
             returncode = completed.returncode
             output = completed.stdout if not native else ""
             diagnostic = completed.stderr

@@ -2,7 +2,9 @@ import json
 import sys
 from pathlib import Path
 
-from agent_team_graph.registry import ModelRegistry, RoleRunner
+import pytest
+
+from agent_team_graph.registry import ARGV_MAX_BYTES, ModelRegistry, RegistryError, RoleRunner
 
 
 def test_config_role_overrides_builtin_and_prompt_is_one_argv(tmp_path: Path):
@@ -152,3 +154,55 @@ def test_relative_path_entries_are_resolved_in_workspace(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", "bin")
     result = RoleRunner(ModelRegistry(config)).run("langgraph-conductor.planner", "q", tmp_path)
     assert result.returncode == 0 and result.output == "workspace model\n"
+
+
+def _planner_config(tmp_path, definition):
+    config = tmp_path / "models.json"
+    config.write_text(json.dumps({"models": {"fake": definition},
+                                  "roles": {"langgraph-conductor.planner": "fake"}}))
+    return RoleRunner(ModelRegistry(config))
+
+
+READ_STDIN = ("import sys; data = sys.stdin.buffer.read(); "
+              "print(len(data), sys.argv[1:], data[:9].decode())")
+
+
+def test_stdin_model_gets_the_whole_prompt_on_stdin_and_none_in_argv(tmp_path):
+    """#102: a prompt past Linux's 128 KiB single-argument cap still arrives."""
+    runner = _planner_config(tmp_path, {"command": sys.executable, "prompt_via": "stdin",
+                                        "args": ["-c", READ_STDIN, "-p"]})
+    prompt = "BIG-PROMPT" + "x" * 300_000
+    result = runner.run("langgraph-conductor.planner", prompt, tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert result.output == f"{len(prompt)} ['-p'] BIG-PROMP\n"
+
+
+def test_argv_model_refuses_a_prompt_one_argument_cannot_hold(tmp_path):
+    runner = _planner_config(tmp_path, {"command": sys.executable,
+                                        "args": ["-c", "print('ran')", "{prompt}"]})
+    # Multibyte text: the limit is in bytes, not characters.
+    prompt = "é" * (ARGV_MAX_BYTES // 2)
+    with pytest.raises(RegistryError, match=f"{ARGV_MAX_BYTES} bytes; Linux refuses"):
+        runner.run("langgraph-conductor.planner", prompt, tmp_path)
+    assert runner.run("langgraph-conductor.planner", "é" * (ARGV_MAX_BYTES // 2 - 1),
+                      tmp_path).output == "ran\n"
+
+
+@pytest.mark.parametrize("definition, message", [
+    ({"prompt_via": "file", "args": ["-c", "pass"]}, "prompt_via 'file'"),
+    ({"prompt_via": "stdin", "args": ["-c", "pass", "{prompt}"]}, "args template contains"),
+    ({"prompt_via": "stdin", "args": ["-c", "pass"],
+      "final_args": ["-c", "pass", "{final}", "{prompt}"]}, "final_args template contains"),
+])
+def test_prompt_delivery_misconfiguration_is_refused_before_anything_runs(tmp_path, definition, message):
+    runner = _planner_config(tmp_path, {"command": sys.executable, **definition})
+    with pytest.raises(RegistryError, match=message):
+        runner.run("langgraph-conductor.planner", "q", tmp_path)
+    with pytest.raises(RegistryError, match=message):
+        runner.preflight(tmp_path)
+
+
+def test_argv_model_without_a_prompt_argument_ignores_the_limit(tmp_path):
+    """A template with no {prompt} never passes the prompt, so size is no reason to refuse."""
+    runner = _planner_config(tmp_path, {"command": sys.executable, "args": ["-c", "print('ran')"]})
+    assert runner.run("langgraph-conductor.planner", "x" * (2 * ARGV_MAX_BYTES), tmp_path).output == "ran\n"

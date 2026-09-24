@@ -39,6 +39,12 @@ class HostTests(unittest.TestCase):
             f"#!{sys.executable}\n"
             "import json, os, pathlib, sys\n"
             "args = sys.argv[1:]\n"
+            # claude and codex read the prompt from stdin (#102); it is
+            # recorded after a '<stdin>' marker. run_cli gives the wrappers an
+            # empty, closed stdin, so an argv model reads nothing here.
+            "data = '' if sys.stdin.isatty() else sys.stdin.read()\n"
+            "if data:\n"
+            "    args = args + ['<stdin>', data]\n"
             "with open(os.environ['STUB_CALLS'], 'a') as f:\n"
             "    f.write(json.dumps(args)+'\\n')\n"
             "if args == ['auth','status','--json']:\n"
@@ -124,11 +130,12 @@ class HostTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         auth, review = self.recorded()
         self.assertEqual(auth, ["auth", "status", "--json"])
-        self.assertEqual(review[0], "-p")
-        self.assertEqual(len(review), 2)
-        self.assertEqual(self.fenced(review[1], "review_target"), focus)
-        self.assertEqual(self.fenced(review[1], "research_context"), "source-backed finding")
-        self.assertEqual(self.fenced(review[1], "spec"), "retain §1")
+        # claude -p gets no prompt argument; the prompt arrives on stdin (#102).
+        self.assertEqual(review[:2], ["-p", "<stdin>"])
+        self.assertEqual(len(review), 3)
+        self.assertEqual(self.fenced(review[2], "review_target"), focus)
+        self.assertEqual(self.fenced(review[2], "research_context"), "source-backed finding")
+        self.assertEqual(self.fenced(review[2], "spec"), "retain §1")
         self.assertFalse((self.workspace / "BAD").exists())
         self.assertFalse((self.workspace / "BAD2").exists())
         self.assert_model("claude")

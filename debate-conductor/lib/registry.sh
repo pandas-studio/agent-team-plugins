@@ -19,6 +19,23 @@
 # should write its final/last message to. Templates are expanded into an argv
 # ARRAY (no eval, no word-splitting) so a multi-line {prompt} stays one argv.
 #
+# How the prompt reaches the CLI — "prompt_via" (#102):
+#   "argv" (default)  {prompt} is one argument. Linux refuses a single argument
+#                     of 128 KiB or more (MAX_ARG_STRLEN, NUL included) before
+#                     the CLI starts; macOS only caps the total. So registry_run
+#                     refuses such a prompt itself, on every platform, rc 3.
+#                     REGISTRY_ARGV_MAX_BYTES overrides the 131072 limit.
+#   "stdin"           the templates carry no {prompt}; the prompt, followed by
+#                     a newline, is the CLI's stdin through a bash here-string
+#                     (bash writes it in full before the CLI starts and removes
+#                     any temp file itself; no writer process outlives the
+#                     start). The CLI never sees the caller's stdin. Built-in
+#                     claude and codex models use it (`claude -p`,
+#                     `codex exec -`); agy has no documented text form and
+#                     stays on argv.
+# A "stdin" template that contains {prompt}, or any other prompt_via value, is
+# a configuration error (rc 3), as `agent-team-models doctor` reports.
+#
 # Two optional, caller-gated prefixes (built-in agy defines both):
 #   "workspace_args": ["--add-dir", "{cwd}"]      # {cwd} = $REGISTRY_WORKSPACE
 #   "log_args":       ["--log-file", "{cli_log}"] # {cli_log} = $REGISTRY_CLI_LOG
@@ -66,24 +83,28 @@ _registry_builtin_models() {
   "codex": {
     "command": "codex",
     "env_command": "CODEX_CLI",
-    "args": ["exec", "--skip-git-repo-check", "{prompt}"],
-    "final_args": ["exec", "--skip-git-repo-check", "--output-last-message", "{final}", "{prompt}"]
+    "prompt_via": "stdin",
+    "args": ["exec", "--skip-git-repo-check", "-"],
+    "final_args": ["exec", "--skip-git-repo-check", "--output-last-message", "{final}", "-"]
   },
   "codex-no-memories": {
     "command": "codex",
     "env_command": "CODEX_CLI",
-    "args": ["exec", "--skip-git-repo-check", "-c", "features.memories=false", "{prompt}"],
-    "final_args": ["exec", "--skip-git-repo-check", "-c", "features.memories=false", "--output-last-message", "{final}", "{prompt}"]
+    "prompt_via": "stdin",
+    "args": ["exec", "--skip-git-repo-check", "-c", "features.memories=false", "-"],
+    "final_args": ["exec", "--skip-git-repo-check", "-c", "features.memories=false", "--output-last-message", "{final}", "-"]
   },
   "claude": {
     "command": "claude",
     "env_command": "CLAUDE_CLI",
-    "args": ["-p", "{prompt}"]
+    "prompt_via": "stdin",
+    "args": ["-p"]
   },
   "claude-write": {
     "command": "claude",
     "env_command": "CLAUDE_CLI",
-    "args": ["-p", "--permission-mode", "acceptEdits", "{prompt}"]
+    "prompt_via": "stdin",
+    "args": ["-p", "--permission-mode", "acceptEdits"]
   }
 }
 JSON
@@ -237,6 +258,46 @@ registry_has_final() {
   [ "$(printf '%s' "$def" | jq -r '((.final_args // []) | length) > 0')" = "true" ]
 }
 
+# registry_prompt_via <model-id> — echo "argv" or "stdin" (#102). rc 3, with the
+# reason on stderr, for an unknown model or any other prompt_via value.
+registry_prompt_via() {
+  local def via
+  def="$(_registry_model_def "$1")"
+  if [ -z "$def" ] || [ "$def" = "null" ]; then
+    echo "registry: unknown model '$1'" >&2
+    return 3
+  fi
+  via="$(printf '%s' "$def" | jq -r '.prompt_via // "argv"')"
+  case "$via" in
+    argv|stdin) printf '%s\n' "$via" ;;
+    *)
+      echo "registry: model '$1' has prompt_via '$via'; use \"argv\" or \"stdin\"" >&2
+      return 3
+      ;;
+  esac
+}
+
+# registry_check_model <model-id> — rc 0 when the model's templates agree with
+# its prompt_via; otherwise rc 3 with the reason on stderr. A stdin model whose
+# args or final_args still contains {prompt} would put the prompt in argv too.
+registry_check_model() {
+  local id="$1" via n
+  via="$(registry_prompt_via "$id")" || return 3
+  [ "$via" = stdin ] || return 0
+  n="$(_registry_model_def "$id" \
+    | jq -r '[((.args // []) + (.final_args // []))[] | select(. == "{prompt}")] | length')"
+  if [ "$n" != 0 ]; then
+    echo "registry: model '$id' takes its prompt on stdin (prompt_via \"stdin\") but a template still contains {prompt}; remove it" >&2
+    return 3
+  fi
+}
+
+# _registry_prompt_bytes <string> — its length in bytes, not characters.
+_registry_prompt_bytes() {
+  local LC_ALL=C
+  printf '%s\n' "${#1}"
+}
+
 registry_list_model_ids() {
   _registry_models_merged | jq -r 'keys[]'
 }
@@ -313,11 +374,16 @@ registry_config_role() {
 #   template is used (the CLI writes its last message to that path); otherwise
 #   the plain args template runs and the caller may synthesize the final file
 #   from the streamed log (see registry_extract_response).
+#
+#   Returns the CLI's own status, or 3 for a configuration error or an argv
+#   prompt that one Linux argument cannot hold (nothing was started).
 registry_run() {
   local id="$1" prompt="$2" final_file="${3:-}"
   local workspace="${REGISTRY_WORKSPACE:-}" cli_log="${REGISTRY_CLI_LOG:-}"
-  local bin field a line
+  local bin field a line via
   bin="$(registry_resolve_command "$id")" || return $?
+  via="$(registry_prompt_via "$id")" || return 3
+  registry_check_model "$id" || return 3
   field="args"
   if [ -n "$final_file" ] && registry_has_final "$id"; then
     field="final_args"
@@ -345,16 +411,35 @@ registry_run() {
     done < <(_registry_model_array "$id" log_args)
     [ "${#lg[@]}" -eq 0 ] || tmpl=("${lg[@]}" "${tmpl[@]}")
   fi
-  local argv=()
+  local argv=() in_argv=0
   for a in "${tmpl[@]}"; do
     case "$a" in
-      "{prompt}")  argv+=("$prompt") ;;
+      "{prompt}")  argv+=("$prompt"); in_argv=1 ;;
       "{final}")   argv+=("$final_file") ;;
       "{cwd}")     argv+=("$workspace") ;;
       "{cli_log}") argv+=("$cli_log") ;;
       *)           argv+=("$a") ;;
     esac
   done
+  if [ "$via" = stdin ]; then
+    # A here-string, not `printf | cli`: a pipeline writer would wait on a
+    # child the CLI leaves holding stdin, and its SIGPIPE would need handling.
+    if command -v stdbuf >/dev/null 2>&1; then
+      stdbuf -oL "$bin" "${argv[@]}" <<< "$prompt"
+    else
+      "$bin" "${argv[@]}" <<< "$prompt"
+    fi
+    return
+  fi
+  local limit bytes=0
+  limit="${REGISTRY_ARGV_MAX_BYTES:-131072}"
+  case "$limit" in ''|*[!0-9]*) limit=131072 ;; esac
+  # Only a template that puts {prompt} in argv can hit the limit.
+  [ "$in_argv" = 0 ] || bytes="$(_registry_prompt_bytes "$prompt")"
+  if [ "$in_argv" = 1 ] && [ "$bytes" -ge "$limit" ]; then
+    echo "registry: model '$id' takes its prompt as one argument, and this prompt is $bytes bytes; Linux refuses a single argument of $limit bytes or more. Bind the role to a model with \"prompt_via\": \"stdin\", or pass less context." >&2
+    return 3
+  fi
   if command -v stdbuf >/dev/null 2>&1; then
     stdbuf -oL "$bin" "${argv[@]}"
   else

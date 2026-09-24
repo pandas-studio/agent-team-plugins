@@ -29,6 +29,11 @@ class DebateAnswerTests(unittest.TestCase):
             f"#!{sys.executable}\n"
             "import json, os, pathlib, sys, time\n"
             "args = sys.argv[1:]\n"
+            # The built-in codex model reads the prompt from stdin (#102);
+            # it is recorded after a '<stdin>' marker.
+            "data = '' if sys.stdin.isatty() else sys.stdin.read()\n"
+            "if data:\n"
+            "    args = args + ['<stdin>', data]\n"
             "with open(os.environ['STUB_CALLS'], 'a') as f:\n"
             "    f.write(json.dumps(args) + '\\n')\n"
             "native = '--output-last-message' in args\n"

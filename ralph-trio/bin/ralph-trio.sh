@@ -382,7 +382,8 @@ while :; do
     fi
     PLAN_PROMPT=$(build_planner_prompt "$TASK" "$PROMPT_CONTEXT" "$FP_EXCERPT")
     PLAN_RC=0
-    stage_run planner "$WORK_DIR" "$PLAN_LOG" "${PLANNER_CLI:-${CLAUDE_CLI:-claude}}" -p "$PLAN_PROMPT" || PLAN_RC=$?
+    STAGE_PROMPT=$PLAN_PROMPT
+    stage_run planner "$WORK_DIR" "$PLAN_LOG" "${PLANNER_CLI:-${CLAUDE_CLI:-claude}}" -p || PLAN_RC=$?
     stage_record_result "$PLAN_RC" || exit 1
     PLAN="$(cat "$PLAN_STDOUT" 2>/dev/null)"
     if [ "$PLAN_RC" != "0" ]; then
@@ -483,7 +484,8 @@ while :; do
         manifest_add_input kind=fix-plan-tail value="$FIX_PLAN_TAIL"
       fi
       CODE_PROMPT=$(build_coder_prompt "$TASK" "$PLAN" "$PROMPT_CONTEXT" "$PRE_RESEARCH" "$FP_EXCERPT")
-      stage_run coder "$WORK_DIR" "$CODE_LOG" "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p "$CODE_PROMPT" || CODE_RC=$?
+      STAGE_PROMPT=$CODE_PROMPT
+      stage_run coder "$WORK_DIR" "$CODE_LOG" "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p || CODE_RC=$?
       stage_record_result "$CODE_RC" || exit 1
     fi
     manifest_finalize
@@ -648,7 +650,8 @@ $RESEARCH"
         [ "$RESEARCH_RC" -eq 0 ] && manifest_add_input kind=research path="$RESEARCH_LOG"
         CODE_PROMPT2=$(build_coder_prompt "$TASK" "$PLAN" "$PROMPT_CONTEXT" "$RETRY_RESEARCH" "$FP_EXCERPT")
         CODE_RC=0
-        stage_run coder "$WORK_DIR" "$CODE2_LOG" "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p "$CODE_PROMPT2" || CODE_RC=$?
+        STAGE_PROMPT=$CODE_PROMPT2
+        stage_run coder "$WORK_DIR" "$CODE2_LOG" "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p || CODE_RC=$?
         stage_record_result "$CODE_RC" || exit 1
         manifest_finalize
         # Stage 6: Review2 (parent = code2)

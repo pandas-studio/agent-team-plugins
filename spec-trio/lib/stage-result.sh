@@ -7,6 +7,9 @@
 STAGE_CLI_RC=''
 STAGE_EVIDENCE=none
 STAGE_STDOUT=''
+# The next stage_run's prompt, for a CLI that reads it on stdin (`claude -p`).
+# stage_run consumes and unsets it on entry, so it never reaches a later call.
+unset STAGE_PROMPT
 
 stage_path_absolute() {
   local path="$1" parent
@@ -125,8 +128,15 @@ stage_reset_result() {
 # Sets STAGE_CLI_RC (empty if not invoked), STAGE_EVIDENCE, STAGE_STDOUT.
 # Returns original nonzero CLI rc, 6 for capture/inspection errors, 5 for missing
 # evidence, or 0. The caller records these fields in its open stage manifest.
+# With STAGE_PROMPT set, it is the CLI's stdin, followed by a newline, through a
+# bash here-string (one argument is capped at 128 KiB on Linux, #102; bash
+# writes it in full before the CLI starts, so no writer process can outlive or
+# hold up the stage); otherwise the CLI's stdin is /dev/null. Never the
+# caller's stdin.
 stage_run() {
   local role="$1" work_dir="$2" log="$3"
+  local has_prompt=${STAGE_PROMPT+1} prompt="${STAGE_PROMPT-}"
+  unset STAGE_PROMPT
   shift 3
   local scratch root='' before='' after='' rc=0 capture_rc=0 inspect_rc=0
   local has_stdout=0 changed=0 statuses
@@ -147,7 +157,11 @@ stage_run() {
     # Open the transcript first, outside the CLI pipeline. Its stderr never
     # enters tee or the stdout artifact. PIPESTATUS preserves both failures.
     if {
-      ( cd "$work_dir" && "$@" ) </dev/null | tee "$STAGE_STDOUT"
+      if [ -n "$has_prompt" ]; then
+        ( cd "$work_dir" && "$@" ) <<< "$prompt" | tee "$STAGE_STDOUT"
+      else
+        ( cd "$work_dir" && "$@" ) </dev/null | tee "$STAGE_STDOUT"
+      fi
       statuses=("${PIPESTATUS[@]}")
     } > "$log" 2>&1; then
       STAGE_CLI_RC=${statuses[0]}

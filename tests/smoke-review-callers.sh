@@ -24,13 +24,17 @@ check() {
 json_is() { jq -e "$2" "$1" >/dev/null; }
 cat > "$TMP/worker" <<'STUB'
 #!/usr/bin/env bash
-[ -t 0 ] || cat >> "${REVIEW_TEST_STDIN_SEEN:-/dev/null}"
-case "$2" in
+# Planner and coder get `-p` and the prompt on stdin (#102). Whatever arrives
+# there is also kept, so a caller's own stdin leaking in would show.
+prompt=""
+[ -t 0 ] || prompt=$(cat)
+printf '%s\n' "$prompt" >> "${REVIEW_TEST_STDIN_SEEN:-/dev/null}"
+case "$prompt" in
   '# Role: Ralph Planner'*|'# Role: Spec-driven Planner'*)
     echo '<allowed-paths>file.txt</allowed-paths>'
     [ "${REVIEW_TEST_CASE:-}" != plan-research ] || printf '## NEED RESEARCH\n- planner question\n' ;;
   *)
-    [ -z "${REVIEW_TEST_PROMPTS:-}" ] || printf '%s\n' "$2" >> "$REVIEW_TEST_PROMPTS"
+    [ -z "${REVIEW_TEST_PROMPTS:-}" ] || printf '%s\n' "$prompt" >> "$REVIEW_TEST_PROMPTS"
     printf 'implemented\n' > file.txt
     git add file.txt
     git -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm 'implement fixture' || true
@@ -53,8 +57,11 @@ STUB
 cat > "$TMP/reviewer" <<'STUB'
 #!/usr/bin/env bash
 set -eu
-[ -t 0 ] || cat >> "${REVIEW_TEST_STDIN_SEEN:-/dev/null}"
-[ -z "${REVIEW_TEST_REVIEW_PROMPTS:-}" ] || printf '%s\n' "$*" >> "$REVIEW_TEST_REVIEW_PROMPTS"
+# The codex reviewer gets `-` last and the prompt on stdin (#102).
+prompt=""
+[ -t 0 ] || prompt=$(cat)
+printf '%s\n' "$prompt" >> "${REVIEW_TEST_STDIN_SEEN:-/dev/null}"
+[ -z "${REVIEW_TEST_REVIEW_PROMPTS:-}" ] || printf '%s\n%s\n' "$*" "$prompt" >> "$REVIEW_TEST_REVIEW_PROMPTS"
 count=0
 [ ! -f "$REVIEW_TEST_COUNTER" ] || count=$(cat "$REVIEW_TEST_COUNTER")
 count=$((count + 1))
@@ -246,7 +253,9 @@ done
 cat > "$TMP/stage-worker" <<'STUB'
 #!/usr/bin/env bash
 set -eu
-case "$2" in
+prompt=""
+[ -t 0 ] || prompt=$(cat)
+case "$prompt" in
   '# Role: Ralph Planner'*|'# Role: Spec-driven Planner'*)
     case "$STAGE_CASE" in
       planner-stderr) printf '<allowed-paths>file.txt</allowed-paths>\n## NEED RESEARCH\n- stderr-decoy\n' >&2 ;;
@@ -264,7 +273,7 @@ n=0
 [ ! -f "$STAGE_CODER_COUNT" ] || n=$(cat "$STAGE_CODER_COUNT")
 n=$((n + 1))
 echo "$n" > "$STAGE_CODER_COUNT"
-printf '%s\n' "$2" >> "$STAGE_CODER_PROMPTS"
+printf '%s\n' "$prompt" >> "$STAGE_CODER_PROMPTS"
 if [ "$STAGE_MODE" = retry ] && [ "$n" -eq 1 ]; then
   echo first-attempt > file.txt
   echo first-attempt-summary

@@ -72,7 +72,9 @@ debate_run_answer() (
   fi
 
   if [ "$rc" -ne 0 ]; then
-    echo "debate-answer: model '$model' failed (rc=$rc; 5=no answer, 6=capture failure)" >&2
+    # The registry's own reason goes to the raw diagnostics, so name rc 3 here:
+    # an argv model given a prompt one Linux argument cannot hold is one (#102).
+    echo "debate-answer: model '$model' failed (rc=$rc; 3=not started: unknown model, bad template, or a prompt too large for one argument; 5=no answer; 6=capture failure)" >&2
     if [ -n "$raw_log" ]; then
       echo "debate-answer: raw diagnostics: $raw_log" >&2
     else

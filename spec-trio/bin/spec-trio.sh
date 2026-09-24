@@ -551,7 +551,8 @@ while :; do
     fi
     PLAN_PROMPT=$(build_planner_prompt "$TASK" "$SPEC_BODY" "$PROMPT_CONTEXT" "$FP_EXCERPT")
     PLAN_RC=0
-    spec_capture_stage planner "$PLAN_LOG" "${PLANNER_CLI:-${CLAUDE_CLI:-claude}}" -p "$PLAN_PROMPT" || PLAN_RC=$?
+    STAGE_PROMPT=$PLAN_PROMPT
+    spec_capture_stage planner "$PLAN_LOG" "${PLANNER_CLI:-${CLAUDE_CLI:-claude}}" -p || PLAN_RC=$?
     spec_check_or_stop
     PLAN="$(cat "$PLAN_STDOUT" 2>/dev/null)"
     if [ "$PLAN_RC" != "0" ]; then
@@ -702,7 +703,8 @@ while :; do
         manifest_add_input kind=fix-plan-tail value="$FIX_PLAN_TAIL" || exit 1
       fi
       CODE_PROMPT=$(build_coder_prompt "$TASK" "$SPEC_BODY" "$PLAN" "$PROMPT_CONTEXT" "$PRE_RESEARCH" "$FP_EXCERPT")
-      spec_capture_stage coder "$CODE_LOG" "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p "$CODE_PROMPT" || CODE_RC=$?
+      STAGE_PROMPT=$CODE_PROMPT
+      spec_capture_stage coder "$CODE_LOG" "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p || CODE_RC=$?
       spec_test_code "$CODE_RC" "$CODE_LOG"
     fi
     manifest_finalize || exit 1
@@ -889,7 +891,8 @@ $RESEARCH"
         CODE_RC=0
         if [ "$RESEARCH_RC" -eq 0 ]; then
           manifest_add_role worker claude "$ROLES_DIR/worker.md" || exit 1
-          spec_capture_stage coder "$CODE2_LOG" "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p "$CODE_PROMPT2" || CODE_RC=$?
+          STAGE_PROMPT=$CODE_PROMPT2
+          spec_capture_stage coder "$CODE2_LOG" "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p || CODE_RC=$?
           spec_test_code "$CODE_RC" "$CODE2_LOG"
         else
           TEST_RC=0
