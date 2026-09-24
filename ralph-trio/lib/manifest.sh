@@ -41,7 +41,7 @@
 #
 # Nesting contract (RFC 0004 PR 6, env var MANIFEST_PARENT_TMP):
 #   When a parent variant (ralph-trio, spec-trio, …) invokes a child
-#   dispatcher script (dev/ask-reviewer.sh, dev/ask-gemini.sh, …) that has
+#   dispatcher script (dev-trio's ask-reviewer.sh, ask-researcher.sh) that has
 #   also adopted manifests, the child must NOT emit its own manifest:
 #   a duplicate child manifest would force every consumer into
 #   parent/child join logic for one logical action.
@@ -64,10 +64,11 @@
 #   the no-op semantics: parent owns the input + verdict framing.
 #
 #   The env var name is part of the public surface. Renaming it without
-#   updating all current adopters (ralph-trio, spec-trio, dev/ask-reviewer,
-#   dev/ask-gemini, watch/ask-bug-reviewer, watch/ask-design-reviewer)
-#   silently breaks nesting suppression — every nested call would emit a
-#   duplicate child manifest.
+#   updating all current adopters (the parents ralph-trio.sh and spec-trio.sh,
+#   the children dev-trio/bin/ask-reviewer.sh and ask-researcher.sh, and
+#   dev-trio/lib/runstate.sh, which records it as `nested`) silently breaks
+#   nesting suppression — every nested call would emit a duplicate child
+#   manifest.
 #
 # Dependency: jq (1.6+). manifest_init aborts the calling script if missing.
 
@@ -87,9 +88,10 @@ _manifest_now_iso() {
 }
 
 # manifest_is_nested — rc=0 iff MANIFEST_PARENT_TMP is set (non-empty).
-# When nested, every public helper short-circuits to a silent no-op so
-# child dispatchers can be called from a parent variant without duplicate
-# manifests landing on disk. See the "Nesting contract" header note.
+# When nested, the public helpers short-circuit to a silent no-op so child
+# dispatchers can be called from a parent variant without duplicate
+# manifests landing on disk. manifest_add_role is the exception: it writes
+# to the parent's tmp. See the "Nesting contract" header note.
 manifest_is_nested() {
   [ -n "${MANIFEST_PARENT_TMP:-}" ]
 }
@@ -224,7 +226,7 @@ manifest_set_parent() {
 #
 #   Nested-write carve-out (PR 9): when MANIFEST_PARENT_TMP is set, this
 #   helper writes to the parent's tmp instead of no-op'ing. Rationale: only
-#   the child dispatcher (ask-reviewer / ask-gemini / …) knows the resolved
+#   the child dispatcher (ask-reviewer / ask-researcher) knows the resolved
 #   role-file path — REVIEWER_ROLE_FILE override, etc. — so the role entry
 #   belongs to its call site. Parents must NOT pre-fill an empty-prompt_path
 #   role entry before invoking the child; the child's own call records it.
@@ -303,8 +305,13 @@ manifest_add_input() {
   if [ -n "$path" ] && [ -f "$path" ]; then
     file_hash=$(_manifest_sha256 "$path")
   fi
+  # The value reaches jq on stdin, never as an argument: a value can exceed
+  # Linux's 128 KiB per-argument limit (#118, #121). The here-string appends
+  # exactly one newline, which the filter drops. Invalid UTF-8 becomes U+FFFD,
+  # as it did through --arg.
   _manifest_jq_inplace \
-    '.inputs += [
+    '($raw[:-1]) as $value
+     | .inputs += [
        (
          { kind: $kind }
          + ( if $ref     != "" then { ref:     $ref     } else {} end )
@@ -317,11 +324,11 @@ manifest_add_input() {
      ]' \
     --arg kind "$kind" \
     --arg ref "$ref" \
-    --arg value "$value" \
+    --rawfile raw /dev/stdin \
     --arg path "$path" \
     --arg h "$file_hash" \
     --arg verdict "$verdict" \
-    --arg action "$action"
+    --arg action "$action" <<<"$value"
 }
 
 # manifest_set_verdict <verdict>

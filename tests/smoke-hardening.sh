@@ -1953,4 +1953,12 @@ for plugin in debate-conductor ralph-trio spec-trio; do
   PASS=$((PASS + 1))
 done
 
+# manifest.sh is vendored the same way. ralph-trio's copy is the source (itself
+# vendored from agent-team-harness core/lib/manifest.sh); each plugin carries its
+# own copy so none sources another plugin at run time (#121).
+for plugin in dev-trio spec-trio; do
+  cmp "$ROOT/ralph-trio/lib/manifest.sh" "$ROOT/$plugin/lib/manifest.sh"
+  PASS=$((PASS + 1))
+done
+
 printf 'hardening smoke: %d assertions passed\n' "$PASS"
