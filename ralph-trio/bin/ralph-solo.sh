@@ -234,7 +234,7 @@ $FP_EXCERPT
     ( cd "$WORK_DIR" && printf '%s' "$PROMPT_BODY" | "${WORKER_CLI:-${CLAUDE_CLI:-claude}}" -p 2>&1 ) | tee -a "$ITER_LOG" || RC=$?
     printf '\n=== END iter %d (rc=%d) ===\n' "$ITER" "$RC" >> "$ITER_LOG"
   fi
-  manifest_finalize
+  manifest_finalize || { manifest_cleanup; exit 1; }
   printf '  claude rc: %d\n' "$RC" >> "$SUMMARY_LOG"
 
   # Worktree merge/discard

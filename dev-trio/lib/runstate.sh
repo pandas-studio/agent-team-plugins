@@ -94,7 +94,9 @@ _runstate_publish() {
     echo "runstate: cannot write $tmp" >&2
     return 1
   fi
-  if ! mv "$tmp" "$dst"; then
+  # Reject directories (including symlinks to them); the check is best-effort
+  # against a concurrent replacement before mv.
+  if [ -d "$dst" ] || ! mv "$tmp" "$dst"; then
     rm -f "$tmp"
     echo "runstate: cannot publish $dst" >&2
     return 1

@@ -396,7 +396,7 @@ while :; do
       ralph_log "  [stage 1/3] planner failed stage rc=$PLAN_RC — marking iter PLAN-FAILED (re-queue task, skip Stage 2+3)"
     fi
   fi
-  manifest_finalize
+  manifest_finalize || { manifest_cleanup; exit 1; }
   PARENT_RUN_ID="$PLAN_RUN_ID"
 
   # ---- Stage 1.5: pre-coding research (planner-requested) ----
@@ -422,7 +422,7 @@ while :; do
       ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$LOG_DIR/agy" \
           MANIFEST_PARENT_TMP="$MANIFEST_TMP" "$ASK_RESEARCHER" "$PLAN_RESEARCH_QS" </dev/null 2>&1 ) | tee "$PLAN_RESEARCH_LOG" >/dev/null || RESEARCH_RC=$?
       [ "$RESEARCH_RC" -ne 0 ] && manifest_add_input kind=research-rc value="$RESEARCH_RC"
-      manifest_finalize
+      manifest_finalize || { manifest_cleanup; exit 1; }
       PARENT_RUN_ID="$PLAN_RESEARCH_RUN_ID"  # coder's parent becomes research
       if [ "$RESEARCH_RC" -ne 0 ]; then
         # ask-researcher.sh failed (auth, rate-limit, missing binary, …). $PLAN_RESEARCH_LOG
@@ -463,7 +463,7 @@ while :; do
     manifest_add_input kind=task value="$TASK"
     manifest_add_input kind=plan path="$PLAN_STDOUT"
     manifest_add_input kind=skip-reason value=plan-failed
-    manifest_finalize
+    manifest_finalize || { manifest_cleanup; exit 1; }
     PARENT_RUN_ID="$CODE_RUN_ID"
   else
     ralph_log "  [stage 2/3] coder  → $CODE_LOG"
@@ -488,7 +488,7 @@ while :; do
       stage_run coder "$WORK_DIR" "$CODE_LOG" "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p || CODE_RC=$?
       stage_record_result "$CODE_RC" || exit 1
     fi
-    manifest_finalize
+    manifest_finalize || { manifest_cleanup; exit 1; }
     PARENT_RUN_ID="$CODE_RUN_ID"
   fi
   printf '  code rc:  %d\n' "$CODE_RC" >> "$SUMMARY_LOG"
@@ -509,7 +509,7 @@ while :; do
     manifest_add_input kind=skip-reason value=plan-failed
     manifest_add_input kind=plan-rc value="$PLAN_RC"
     manifest_set_verdict NEEDS-FIX
-    manifest_finalize
+    manifest_finalize || { manifest_cleanup; exit 1; }
   elif [ "$CODE_RC" != "0" ]; then
     # A reviewer cannot override a failed coder invocation, even if an older
     # diff looks shippable. Keep the task pending through the retry path.
@@ -521,7 +521,7 @@ while :; do
     manifest_add_input kind=skip-reason value="$FAIL_REASON"
     manifest_add_input kind=coder-rc value="$CODE_RC"
     manifest_set_verdict NEEDS-FIX
-    manifest_finalize
+    manifest_finalize || { manifest_cleanup; exit 1; }
   elif [ "$AUTOSHIP" = "1" ] && [ "$RESEARCH_FAILED" = "1" ]; then
     # --autoship has no reviewer to catch uninformed code. The planner declared
     # this task depends on pre-coding research, but ask-researcher.sh failed — refuse to
@@ -531,21 +531,21 @@ while :; do
     echo "AUTOSHIP=1 + planner research failed — refusing to ship research-dependent work" > "$REVIEW_LOG"
     manifest_add_input kind=skip-reason value=autoship-research-failed
     manifest_set_verdict NEEDS-FIX
-    manifest_finalize
+    manifest_finalize || { manifest_cleanup; exit 1; }
   elif [ "$AUTOSHIP" = "1" ]; then
     VERDICT="SHIP"
     ralph_log "  [stage 3/3] reviewer SKIPPED (--autoship)"
     echo "AUTOSHIP=1 — skipping codex review" > "$REVIEW_LOG"
     manifest_add_input kind=skip-reason value=autoship
     manifest_set_verdict SHIP
-    manifest_finalize
+    manifest_finalize || { manifest_cleanup; exit 1; }
   elif [ "$DRY_RUN" = "1" ]; then
     VERDICT="SHIP"
     ralph_log "  [stage 3/3] reviewer SKIPPED (--dry-run)"
     echo "DRY_RUN=1 — skipping codex review" > "$REVIEW_LOG"
     manifest_add_input kind=skip-reason value=dry-run
     manifest_set_verdict SHIP
-    manifest_finalize
+    manifest_finalize || { manifest_cleanup; exit 1; }
   else
     ralph_log "  [stage 3/3] reviewer → $REVIEW_LOG"
     # Reviewer role recorded by ask-reviewer.sh into the parent manifest via
@@ -595,7 +595,7 @@ while :; do
       manifest_add_input kind=raw-verdict value="$VERDICT"
     fi
     manifest_set_verdict "$MV"
-    manifest_finalize
+    manifest_finalize || { manifest_cleanup; exit 1; }
 
     # NEED RESEARCH branch — runs once
     if [ "$NO_RESEARCH" = "0" ]; then
@@ -615,7 +615,7 @@ while :; do
         ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$LOG_DIR/agy" \
             MANIFEST_PARENT_TMP="$MANIFEST_TMP" "$ASK_RESEARCHER" "$RESEARCH_QS" </dev/null 2>&1 ) | tee "$RESEARCH_LOG" >/dev/null || RESEARCH_RC=$?
         [ "$RESEARCH_RC" -ne 0 ] && manifest_add_input kind=research-rc value="$RESEARCH_RC"
-        manifest_finalize
+        manifest_finalize || { manifest_cleanup; exit 1; }
         # Stage 5: Code2 (parent = research)
         RESEARCH=""
         if [ "$RESEARCH_RC" -eq 0 ]; then
@@ -653,7 +653,7 @@ $RESEARCH"
         STAGE_PROMPT=$CODE_PROMPT2
         stage_run coder "$WORK_DIR" "$CODE2_LOG" "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p || CODE_RC=$?
         stage_record_result "$CODE_RC" || exit 1
-        manifest_finalize
+        manifest_finalize || { manifest_cleanup; exit 1; }
         # Stage 6: Review2 (parent = code2)
         REVIEW2_LOG="$LOG_DIR/ralph-trio-$TS-iter-$ITER-review2.log"
         manifest_init ralph-review "$REVIEW2_LOG"
@@ -668,7 +668,7 @@ $RESEARCH"
           manifest_add_input kind=skip-reason value=coder-failed
           manifest_add_input kind=coder-rc value="$CODE_RC"
           manifest_set_verdict NEEDS-FIX
-          manifest_finalize
+          manifest_finalize || { manifest_cleanup; exit 1; }
         else
           RANGE_HINT2=$(build_range_hint "$PRE_CODE2_REF" "$WORK_DIR")
           # No verdict-format instruction — see the Stage-3 review note above.
@@ -702,7 +702,7 @@ $RESEARCH"
             manifest_add_input kind=raw-verdict value="$VERDICT"
           fi
           manifest_set_verdict "$MV"
-          manifest_finalize
+          manifest_finalize || { manifest_cleanup; exit 1; }
         fi
         REVIEW_LOG="$REVIEW2_LOG"
       fi

@@ -358,6 +358,11 @@ $PWD/.dev-trio/log/<team>/
 └── <name>-<TS>.manifest.json   # RFC 0004 typed run manifest
 ```
 
+New raw researcher and reviewer logs, and new RFC 0004 manifests in dev-trio,
+ralph-trio, and spec-trio, are created with mode `0600`. Existing artifacts are
+not changed. Manifest updates use private temporary files in the same directory
+and are published only after the complete JSON has been written.
+
 **Run metadata.** Every invocation publishes `<stem>.run.json` (`lib/runstate.sh`)
 atomically beside its log: `channel` (`agy`/`codex` — the log stream, never a
 model), `role`, the resolved `model`, `team`, `started_at`, `pid`, `pm_host`,

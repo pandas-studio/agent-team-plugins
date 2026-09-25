@@ -194,6 +194,52 @@ for plugin in ralph-trio spec-trio; do
     fi
   done
 done
+# A failed manifest publication must stop both Ralph drivers and discard the
+# unpublished tmp. The trio must not start coding after its planner manifest
+# fails to publish.
+mkdir -p "$TMP/failing-bin"
+cat > "$TMP/failing-bin/mv" <<'STUB'
+#!/usr/bin/env bash
+case "${!#}" in
+  *.manifest.json) exit 1 ;;
+esac
+exec /bin/mv "$@"
+STUB
+chmod +x "$TMP/failing-bin/mv"
+for driver in ralph-trio ralph-solo; do
+  case_root="$TMP/$driver-publish-failed"
+  repo="$case_root/repo"
+  state="$case_root/state"
+  mkdir -p "$repo"
+  printf 'task\n' > "$repo/PROMPT.md"
+  if [ "$driver" = ralph-trio ]; then
+    git init -q "$repo"
+    git -C "$repo" config user.email fixture@example.com
+    git -C "$repo" config user.name Fixture
+    printf -- '- [ ] implement file\n' > "$repo/BACKLOG.md"
+    git -C "$repo" add PROMPT.md BACKLOG.md
+    git -C "$repo" -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm baseline
+    args=(--backlog "$repo/BACKLOG.md" --max-iter 1 --no-research)
+  else
+    args=(--prompt "$repo/PROMPT.md" --max-iter 1 --dry-run)
+  fi
+  driver_rc=0
+  (
+    cd "$repo"
+    env -u MANIFEST_PARENT_TMP \
+      PATH="$TMP/failing-bin:$ROOT/dev-trio/bin:$PATH" AGENT_TEAM=caller TMUX='' \
+      AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" \
+      CLAUDE_CLI="$TMP/worker" RALPH_TRIO_WORKSPACE="$state" \
+      "$ROOT/ralph-trio/bin/$driver.sh" "${args[@]}"
+  ) < /dev/null > "$TMP/driver.out" 2>&1 || driver_rc=$?
+  check "$driver stops on failed manifest publication" test "$driver_rc" -eq 1
+  check "$driver reports publication failure" grep -q 'manifest_finalize: cannot publish' "$TMP/driver.out"
+  check "$driver removes unpublished manifest tmp" \
+    test -z "$(find "$state" -name '*.manifest.json.tmp*' -print -quit)"
+  if [ "$driver" = ralph-trio ]; then
+    check "$driver skips coding after failed planner manifest" test ! -e "$repo/file.txt"
+  fi
+done
 # ralph-trio in a repository with no commits yet. The reviewer's range hint must
 # cover the coder's first commit (base = empty tree), never `HEAD..HEAD`, and
 # must not cite a literal `HEAD` ref when the coder leaves HEAD unborn.
