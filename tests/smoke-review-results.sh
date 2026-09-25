@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../dev-trio/lib/review-result.sh
 . "$ROOT/dev-trio/lib/review-result.sh"
 TMP=$(mktemp -d)
+TMP=$(cd "$TMP" && pwd -P)
 # agy's home is pinned to a directory that does not exist, so agy roles get
 # --add-dir but never --log-file, whatever this machine has installed (#103).
 export DEV_TRIO_AGY_HOME=/nonexistent/dev-trio-test-agy-home
@@ -15,6 +16,7 @@ check() {
   local label="$1"; shift
   if ! "$@"; then
     echo "FAIL: $label" >&2
+    [ ! -f "$TMP/wrapper.err" ] || cat "$TMP/wrapper.err" >&2
     for diagnostic in "$TMP"/parallel-*.err; do
       [ ! -f "$diagnostic" ] || cat "$diagnostic" >&2
     done
@@ -583,10 +585,7 @@ for invocation_rc in 0 7; do
     ".completion.exit_code==$expected_rc and .completion.verdict==null and .completion.reason==\"result-write-failed\""
 done
 
-# An actual failed open is distinct from printf failing on an open descriptor.
-# Swap the log for a directory after the final has been captured and the result
-# renamed, so both capture paths reach the same failing END redirection. This
-# also works when tests run as root, unlike making the file read-only.
+# Swapping the pathname after capture must not retarget the held END descriptor.
 mkdir "$TMP/end-open-shim"
 cat > "$TMP/end-open-shim/mv" <<'SHIM'
 #!/bin/sh
@@ -601,18 +600,18 @@ case "$target" in
 esac
 SHIM
 chmod +x "$TMP/end-open-shim/mv"
-fixture 'SHIP — log cannot reopen'
+fixture 'SHIP — log pathname replaced'
 for model in codex claude; do
   run_review 0 PATH="$TMP/end-open-shim:$PATH" DEV_TRIO_REVIEWER_MODEL="$model"
-  check 'END open fault was exercised' test -d "$LOG"
-  check 'failed END open is reported' grep -q 'final log append failed' "$TMP/wrapper.err"
-  check 'failed END open retains completion' json_is "${LOG%.log}.run.json" \
+  check 'log pathname replacement was exercised' test -d "$LOG"
+  check 'END did not open the replacement' no_match 'final log append failed' "$TMP/wrapper.err"
+  check 'pathname replacement retains completion' json_is "${LOG%.log}.run.json" \
     '.completion.exit_code==0 and .completion.verdict=="SHIP" and .completion.reason=="ok"'
   rmdir "$LOG"
   mv "$LOG.saved" "$LOG"
-  check 'restored transcript has no END marker' no_match '^=== END (rc=' "$LOG"
+  check 'held descriptor completed the original log' grep -q '^=== END (rc=0) ===' "$LOG"
   dashboard
-  check 'dashboard retains the verdict after an open failure' grep -q 'SHIP — log cannot reopen' "$TMP/dashboard.out"
+  check 'dashboard retains the verdict after replacement' grep -q 'SHIP — log pathname replaced' "$TMP/dashboard.out"
 done
 
 # #71: a pipeline ends when every process holding its write end closes it, not
@@ -780,47 +779,45 @@ check 'a short capture publishes no verdict' \
 check 'a short capture leaves no partial final' test ! -s "${short_log%.log}.final.md"
 fixture 'SHIP — leaked descendant'
 
-# A log that becomes unopenable between the header and the run falls back to an
-# out-of-band transcript rather than /dev/null, because the pipeline it replaces
-# still delivered the review on stdout in that case (`tee -a` reports the open
-# failure, then keeps copying and draining). Injected through a `wc` shim: the
-# wrapper's first count is where it takes the transcript offset, so the log is
-# swapped for a directory right after it and restored at the second count, in
-# time for the END append.
-mkdir -p "$TMP/wcshim"
-cat > "$TMP/wcshim/wc" <<'SHIM'
+# A log that becomes unopenable between its header and the descriptor check
+# falls back to an out-of-band transcript. Swap it as the latest final link is
+# published, immediately before the wrapper opens its held read descriptor.
+mkdir -p "$TMP/swapshim"
+cat > "$TMP/swapshim/mv" <<'SHIM'
 #!/bin/sh
-count=$(/usr/bin/wc "$@")
-if [ -n "${WC_SHIM_DIR:-}" ]; then
-  target="$WC_SHIM_DIR/$(readlink "$WC_SHIM_DIR/latest-codex.log")"
-  if [ ! -e "$WC_SHIM_FIRED" ]; then
-    : > "$WC_SHIM_FIRED"
-    rm -f "$target" && mkdir "$target"
-  elif [ -d "$target" ]; then
-    rmdir "$target" && : > "$target"
+/bin/mv "$@" || exit $?
+for destination do :; done
+if [ "$destination" = "$SWAP_SHIM_DIR/latest-codex.final.md" ]; then
+  target="$SWAP_SHIM_DIR/$(readlink "$SWAP_SHIM_DIR/latest-codex.log")"
+  if [ ! -e "$SWAP_SHIM_FIRED" ]; then
+    : > "$SWAP_SHIM_FIRED"
+    /bin/mv "$target" "$target.saved" && mkdir "$target"
   fi
 fi
-printf '%s\n' "$count"
 SHIM
-chmod +x "$TMP/wcshim/wc"
-rm -f "$TMP/wc-fired"
+chmod +x "$TMP/swapshim/mv"
+rm -f "$TMP/swap-fired"
 fixture 'SHIP — out of band'
 oob_rc=0
 invoke CODEX_CLI="$TMP/leaky-reviewer" CLAUDE_CLI="$TMP/leaky-reviewer" \
   LEAK_RELEASE="$TMP/oob-release" LEAK_DONE="$TMP/oob-done" LEAK_STREAM=stderr \
-  DEV_TRIO_REVIEWER_MODEL=claude PATH="$TMP/wcshim:$PATH" \
-  WC_SHIM_DIR="$TMP/log/review-test" WC_SHIM_FIRED="$TMP/wc-fired" \
+  DEV_TRIO_REVIEWER_MODEL=claude PATH="$TMP/swapshim:$PATH" \
+  SWAP_SHIM_DIR="$TMP/log/review-test" SWAP_SHIM_FIRED="$TMP/swap-fired" \
   > "$TMP/oob.out" 2> "$TMP/oob.err" || oob_rc=$?
 : > "$TMP/oob-release"
+oob_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-codex.log")"
+check 'out-of-band swap was exercised' test -d "$oob_log"
+rmdir "$oob_log"
+mv "$oob_log.saved" "$oob_log"
 check 'an unopenable log does not fail the review' test "$oob_rc" -eq 0
 check 'an unopenable log falls back out of band' grep -q 'keeping it out of band' "$TMP/oob.err"
 check 'the out-of-band transcript still reaches stdout' \
   grep -q 'SHIP — out of band' "$TMP/oob.out"
-oob_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-codex.log")"
 check 'the out-of-band run still publishes a verdict' \
   json_is "${oob_log%.log}.review.json" '.verdict=="SHIP" and .exit_code==0'
 check 'the out-of-band transcript is not left beside the logs' \
   test -z "$(find "$TMP/log/review-test" -name '*.transcript.*' -print -quit)"
+check 'out-of-band END reaches the original log inode' grep -q '^=== END (rc=0) ===' "$oob_log"
 fixture 'SHIP — leaked descendant'
 
 # An interrupted run owes the caller no review and no transcript on stdout — it
@@ -908,12 +905,12 @@ done
 # the out-of-band transcript and says where it is — retention cannot depend on
 # the replay having worked.
 fixture 'SHIP — nowhere else to go'
-rm -f "$TMP/wc-fired-oob" "$TMP/oob2-ready" "$TMP/oob2-release"
+rm -f "$TMP/swap-fired-oob" "$TMP/oob2-ready" "$TMP/oob2-release"
 set -m
 env "${INVOKE_ENV[@]}" CODEX_CLI="$TMP/slow-reviewer" CLAUDE_CLI="$TMP/slow-reviewer" \
   SLOW_READY="$TMP/oob2-ready" SLOW_RELEASE="$TMP/oob2-release" \
-  DEV_TRIO_REVIEWER_MODEL=claude PATH="$TMP/wcshim:$PATH" \
-  WC_SHIM_DIR="$TMP/log/review-test" WC_SHIM_FIRED="$TMP/wc-fired-oob" \
+  DEV_TRIO_REVIEWER_MODEL=claude PATH="$TMP/swapshim:$PATH" \
+  SWAP_SHIM_DIR="$TMP/log/review-test" SWAP_SHIM_FIRED="$TMP/swap-fired-oob" \
   "$ROOT/dev-trio/bin/ask-reviewer.sh" 'fixture review' \
   >&- 2> "$TMP/oob2.err" &
 oob2_pid=$!
@@ -937,6 +934,10 @@ check 'the retained transcript exists' test -s "$OOB2_KEPT"
 check 'the retained transcript holds what the CLI produced' \
   grep -q 'SHIP — nowhere else to go' "$OOB2_KEPT"
 rm -f "$OOB2_KEPT"
+oob2_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-codex.log")"
+check 'interrupted swap was exercised' test -d "$oob2_log"
+rmdir "$oob2_log"
+mv "$oob2_log.saved" "$oob2_log"
 fixture 'SHIP — leaked descendant'
 
 # An ordinary run pays nothing for the bound — the failure mode the first

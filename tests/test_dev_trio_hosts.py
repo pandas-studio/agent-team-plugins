@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import re
+import signal
 from pathlib import Path
 import selectors
 import shlex
@@ -28,7 +29,7 @@ class HostTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="dev trio ")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.plugin = self.root / "installed plugin"
         shutil.copytree(PLUGIN, self.plugin)
         self.workspace = self.root / "workspace"
@@ -55,6 +56,18 @@ class HostTests(unittest.TestCase):
             "response = os.environ['STUB_RESPONSE']\n"
             "if '--output-last-message' in args and not os.environ.get('STUB_NO_FINAL'):\n"
             "    pathlib.Path(args[args.index('--output-last-message')+1]).write_text(response)\n"
+            "if os.environ.get('STUB_SWAP_LOG_DIR'):\n"
+            "    root = pathlib.Path(os.environ['STUB_SWAP_LOG_DIR'])\n"
+            "    channel = os.environ['STUB_SWAP_CHANNEL']\n"
+            "    target = root / os.readlink(root / ('latest-' + channel + '.log'))\n"
+            "    target.rename(pathlib.Path(str(target) + '.saved'))\n"
+            "    target.write_text('replacement path\\n')\n"
+            "if os.environ.get('STUB_SWAP_LOG_ALIAS'):\n"
+            "    alias = pathlib.Path(os.environ['STUB_SWAP_LOG_ALIAS'])\n"
+            "    alias.unlink()\n"
+            "    alias.symlink_to(os.environ['STUB_SWAP_LOG_TARGET'], target_is_directory=True)\n"
+            "if os.environ.get('STUB_STDERR'):\n"
+            "    print(os.environ['STUB_STDERR'], file=sys.stderr)\n"
             "print(response)\n"
             "sys.exit(int(os.environ.get('STUB_RC','0')))\n"
         )
@@ -91,6 +104,606 @@ class HostTests(unittest.TestCase):
         manifests = list(self.workspace.glob(".dev-trio/log/host-test/*.manifest.json"))
         self.assertEqual(len(manifests), 1)
         self.assertEqual(json.loads(manifests[0].read_text())["roles"][0]["model"], model)
+
+    def test_raw_logs_and_manifests_are_private_under_permissive_umask(self):
+        for wrapper, stem in (("ask-researcher.sh", "agy"),
+                              ("ask-reviewer.sh", "codex")):
+            with self.subTest(wrapper=wrapper):
+                result = subprocess.run(
+                    ["bash", "-c", 'umask 000; exec "$@"', "_",
+                     str(self.plugin / "bin" / wrapper), "private input"],
+                    cwd=self.workspace, env=self.env, input="", text=True,
+                    capture_output=True, timeout=20)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                logdir = self.workspace / ".dev-trio/log/host-test"
+                self.assertEqual(logdir.stat().st_mode & 0o777, 0o700)
+                for pattern in (f"{stem}-*.log", f"{stem}-*.manifest.json"):
+                    files = list(logdir.glob(pattern))
+                    self.assertEqual(len(files), 1, files)
+                    self.assertEqual(files[0].stat().st_mode & 0o777, 0o600)
+
+    def test_preexisting_nonregular_raw_log_path_is_refused_without_opening(self):
+        shim_dir = self.root / "fixed date shim"
+        shim_dir.mkdir()
+        shim = shim_dir / "date"
+        shim.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = +%Y%m%d-%H%M%S ]; then\n"
+            "  : > \"$DATE_READY\"\n"
+            "  while [ ! -e \"$DATE_RELEASE\" ]; do sleep 0.02; done\n"
+            "  echo 20260925-010101\n"
+            "else exec /bin/date \"$@\"; fi\n"
+        )
+        shim.chmod(0o755)
+        for wrapper, stem in (("ask-reviewer.sh", "codex"),
+                              ("ask-researcher.sh", "agy")):
+            for kind in ("symlink", "fifo"):
+                with self.subTest(wrapper=wrapper, kind=kind):
+                    ready = self.root / "date ready"
+                    release = self.root / "date release"
+                    ready.unlink(missing_ok=True)
+                    release.unlink(missing_ok=True)
+                    process = subprocess.Popen(
+                        [str(self.plugin / "bin" / wrapper), "private input"],
+                        cwd=self.workspace,
+                        env=self.env | dict(PATH=f"{shim_dir}:{self.env['PATH']}",
+                                            DATE_READY=str(ready),
+                                            DATE_RELEASE=str(release)),
+                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, text=True)
+                    try:
+                        deadline = time.monotonic() + 10
+                        while not ready.exists() and process.poll() is None \
+                                and time.monotonic() < deadline:
+                            time.sleep(0.02)
+                        self.assertTrue(ready.exists(), "wrapper did not reach log naming")
+                        log = (self.workspace / ".dev-trio/log/host-test" /
+                               f"{stem}-20260925-010101-{process.pid}.log")
+                        if kind == "symlink":
+                            log.symlink_to("/dev/null")
+                        else:
+                            os.mkfifo(log)
+                        release.touch()
+                        _, stderr = process.communicate(timeout=10)
+                        self.assertEqual(process.returncode, 2, stderr)
+                        self.assertIn("raw log path already exists", stderr)
+                    finally:
+                        release.touch()
+                        if process.poll() is None:
+                            process.kill()
+                            process.communicate(timeout=5)
+
+    def test_raw_log_fd_validation_rejects_nonregular_or_exposed_files(self):
+        target = self.root / "opened log"
+        script = r'''
+. "$1"
+uid=$(id -u)
+exec 8>/dev/null
+! dev_trio_new_log_fd_is_private /dev/null 8 "$uid" || exit 10
+exec 8>&-
+(umask 077; : > "$2")
+exec 8>"$2"
+dev_trio_new_log_fd_is_private "$2" 8 "$uid" || exit 11
+chmod 644 "$2"
+! dev_trio_new_log_fd_is_private "$2" 8 "$uid" || exit 12
+chmod 600 "$2"
+printf x >&8
+! dev_trio_new_log_fd_is_private "$2" 8 "$uid" || exit 13
+'''
+        result = subprocess.run(
+            ["bash", "-c", script, "_", str(self.plugin / "lib/host.sh"),
+             str(target)], text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_unsafe_existing_team_directory_is_rejected_before_model(self):
+        root = self.root / "custom logs"
+        team = root / "host-test"
+        team.mkdir(parents=True)
+        for mode in (0o775, 0o777):
+            team.chmod(mode)
+            for wrapper in ("ask-reviewer.sh", "ask-researcher.sh"):
+                with self.subTest(wrapper=wrapper, mode=oct(mode)):
+                    result = self.run_cli(wrapper, "private input",
+                                          DEV_TRIO_LOG_DIR=str(root))
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("unsafe team log directory", result.stderr)
+                    self.assertIn("chmod go-w", result.stderr)
+                    self.assertEqual(list(team.iterdir()), [])
+                    self.assertEqual(self.recorded(), [])
+                    self.assertEqual(team.stat().st_mode & 0o777, mode)
+
+    def test_unsafe_custom_ancestor_and_symlink_target_are_rejected(self):
+        root = self.root / "custom logs"
+        root.mkdir(mode=0o700)
+        root.chmod(0o777)
+        alias = self.root / "log alias"
+        alias.symlink_to(root, target_is_directory=True)
+        for chosen in (root, alias):
+            for wrapper in ("ask-reviewer.sh", "ask-researcher.sh"):
+                with self.subTest(root=chosen, wrapper=wrapper):
+                    result = self.run_cli(wrapper, "private input",
+                                          DEV_TRIO_LOG_DIR=str(chosen))
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("unsafe log ancestor", result.stderr)
+                    self.assertIn("chmod go-w", result.stderr)
+                    self.assertEqual(self.recorded(), [])
+                    self.assertFalse((root / "host-test").exists())
+        self.assertEqual(root.stat().st_mode & 0o777, 0o777)
+
+    def test_linux_group_writable_ancestor_is_rejected_before_model(self):
+        root = self.root / "linux 775 ancestor"
+        root.mkdir()
+        root.chmod(0o775)
+        shim_dir = self.root / "linux path shims"
+        shim_dir.mkdir()
+        uname = shim_dir / "uname"
+        uname.write_text("#!/bin/sh\nprintf 'Linux\\n'\n")
+        uname.chmod(0o755)
+        if sys.platform == "darwin":
+            stat = shim_dir / "stat"
+            stat.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = -L ] && [ \"$2\" = -c ] && "
+                "[ \"$3\" = '%a %u %g' ]; then\n"
+                "  exec /usr/bin/stat -L -f '%Mp%Lp %u %g' \"$4\"\n"
+                "fi\n"
+                "exec /usr/bin/stat \"$@\"\n"
+            )
+            stat.chmod(0o755)
+        for wrapper in ("ask-reviewer.sh", "ask-researcher.sh"):
+            with self.subTest(wrapper=wrapper):
+                result = self.run_cli(
+                    wrapper, "private input", DEV_TRIO_LOG_DIR=str(root),
+                    PATH=f"{shim_dir}:{self.env['PATH']}")
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(f"unsafe log ancestor: {root}", result.stderr)
+                self.assertIn("chmod g-w", result.stderr)
+                self.assertEqual(self.recorded(), [])
+                self.assertFalse((root / "host-test").exists())
+
+    def test_caller_owned_sticky_ancestor_and_safe_symlink_target_work(self):
+        root = self.root / "custom logs"
+        root.mkdir(mode=0o700)
+        root.chmod(0o1777)
+        alias = self.root / "log alias"
+        alias.symlink_to(root, target_is_directory=True)
+        result = self.run_cli("ask-reviewer.sh", "private input",
+                              DEV_TRIO_LOG_DIR=str(alias))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((root / "host-test").stat().st_mode & 0o777, 0o700)
+        self.assertIn(str(root / "host-test"), result.stderr)
+        self.assertNotIn(str(alias / "host-test"), result.stderr)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS ACL syntax")
+    def test_macos_acl_allow_rejects_ancestor_and_team_before_model(self):
+        for location in ("ancestor", "team"):
+            with self.subTest(location=location):
+                root = self.root / f"acl {location}"
+                team = root / "host-test"
+                team.mkdir(parents=True)
+                target = root if location == "ancestor" else team
+                subprocess.run(
+                    ["chmod", "+a",
+                     "group:everyone allow add_file,add_subdirectory,delete_child",
+                     str(target)], check=True, capture_output=True)
+                for wrapper in ("ask-reviewer.sh", "ask-researcher.sh"):
+                    result = self.run_cli(wrapper, "private input",
+                                          DEV_TRIO_LOG_DIR=str(root))
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("unsafe log ACL", result.stderr)
+                self.assertEqual(list(team.iterdir()), [])
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS ACL syntax")
+    def test_macos_acl_deny_does_not_block_private_log(self):
+        root = self.root / "deny ACL root"
+        root.mkdir()
+        subprocess.run(["chmod", "+a", "group:everyone deny delete", str(root)],
+                       check=True, capture_output=True)
+        try:
+            result = self.run_cli("ask-reviewer.sh", "private input",
+                                  DEV_TRIO_LOG_DIR=str(root))
+            self.assertEqual(result.returncode, 0, result.stderr)
+        finally:
+            subprocess.run(["chmod", "-N", str(root)], check=True, capture_output=True)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS ACL syntax")
+    def test_macos_inherited_caller_allow_does_not_block_private_log(self):
+        root = self.root / "caller ACL root"
+        root.mkdir()
+        caller = subprocess.check_output(["id", "-un"], text=True).strip()
+        subprocess.run(
+            ["chmod", "+a", f"user:{caller} allow add_file,add_subdirectory,"
+             "delete_child,directory_inherit", str(root)],
+            check=True, capture_output=True)
+        team = root / "host-test"
+        team.mkdir()
+        try:
+            listing = subprocess.check_output(["ls", "-lde", str(team)], text=True)
+            self.assertIn(" inherited allow ", listing)
+            result = self.run_cli("ask-reviewer.sh", "private input",
+                                  DEV_TRIO_LOG_DIR=str(root))
+            self.assertEqual(result.returncode, 0, result.stderr)
+        finally:
+            subprocess.run(["chmod", "-N", str(team)], check=True, capture_output=True)
+            subprocess.run(["chmod", "-N", str(root)], check=True, capture_output=True)
+
+    def test_darwin_acl_listing_uuid_matches_only_caller(self):
+        # Synthetic ls output exercises the POSIX awk parser on macOS and Linux CI.
+        # Both environments provide the /usr/bin/awk path used by host.sh.
+        caller_uuid = "FFFFEEEE-DDDD-CCCC-BBBB-AAAA000001F5"
+        other_uuid = "FFFFEEEE-DDDD-CCCC-BBBB-AAAA000001F6"
+        cases = ((caller_uuid, caller_uuid, True),
+                 (f"{caller_uuid} inherited", caller_uuid, True),
+                 (other_uuid, caller_uuid, False),
+                 (caller_uuid, "", False),
+                 ("user:caller", "", True),
+                 ("user:other", caller_uuid, False))
+        for principal, resolved_uuid, allowed in cases:
+            with self.subTest(principal=principal, resolved_uuid=resolved_uuid):
+                listing = ("drwx------ 2 caller staff 64 Sep 25 10:00 /safe\n"
+                           f" 0: {principal} allow add_file\n")
+                result = subprocess.run(
+                    ["bash", "-c",
+                     '. "$1"; _dev_trio_darwin_acl_listing_safe "$2" "$3"',
+                     "_", str(self.plugin / "lib/host.sh"), "caller", resolved_uuid],
+                    input=listing, text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode == 0, allowed, result.stderr)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS ACL syntax")
+    def test_macos_acl_allow_uses_resolved_principal_and_fails_closed(self):
+        root = self.root / "UUID ACL root"
+        root.mkdir()
+        caller = subprocess.check_output(["id", "-un"], text=True).strip()
+        subprocess.run(["chmod", "+a", f"user:{caller} allow add_file", str(root)],
+                       check=True, capture_output=True)
+
+        def check_acl(name):
+            return subprocess.run(
+                ["bash", "-c", '. "$1"; _dev_trio_darwin_acl_safe "$2" "$3"',
+                 "_", str(self.plugin / "lib/host.sh"), str(root), name],
+                text=True, capture_output=True, timeout=10)
+
+        try:
+            listing = subprocess.check_output(["ls", "-lde", str(root)], text=True)
+            self.assertIn(" allow ", listing)
+            self.assertEqual(check_acl(caller).returncode, 0)
+            # An unknown caller makes dsmemberutil fail and must never accept
+            # the caller's allow entry, whether ls prints a name or UUID.
+            self.assertNotEqual(check_acl("__dev_trio_missing_user__").returncode, 0)
+            subprocess.run(["chmod", "+a", "user:root allow add_file", str(root)],
+                           check=True, capture_output=True)
+            listing = subprocess.check_output(["ls", "-lde", str(root)], text=True)
+            self.assertGreaterEqual(listing.count(" allow "), 2)
+            self.assertNotEqual(check_acl(caller).returncode, 0)
+        finally:
+            subprocess.run(["chmod", "-N", str(root)], check=True, capture_output=True)
+
+    def test_log_ancestor_owner_and_private_group_rules(self):
+        script = r'''
+. "$1"
+_dev_trio_dir_mode_owner() {
+  if [ "$1" = "$CHECK_PATH" ]; then
+    printf '%s %s %s\n' "$CHECK_MODE" "$CHECK_OWNER" "$CHECK_GID"
+  else
+    printf '755 0 0\n'
+  fi
+}
+_dev_trio_darwin_acl_safe() { return 0; }
+_DEV_TRIO_OS="$TEST_PLATFORM"
+_dev_trio_check_log_ancestors "$CHECK_PATH" "$CHECK_TEAM" "$CHECK_UID" "$PRIVATE_GID"
+'''
+        uid, gid = os.getuid(), os.getgid()
+        cases = (("Darwin", "775", uid, gid, gid, False, True),
+                 ("Linux", "775", uid, gid, gid, False, False),
+                 ("Linux", "775", 0, gid, gid, False, False),
+                 ("Darwin", "775", uid, gid, gid, True, False),
+                 ("Darwin", "775", uid, gid, -1, False, False),
+                 ("Darwin", "777", uid, gid, gid, False, False),
+                 ("Linux", "755", uid + 100000, gid, gid, False, False))
+        for platform, mode, owner, owner_gid, private_gid, team, allowed in cases:
+            with self.subTest(platform=platform, mode=mode, owner=owner, private_gid=private_gid,
+                              team=team):
+                path = str(self.root / "ancestor")
+                result = subprocess.run(
+                    ["bash", "-c", script, "_", str(self.plugin / "lib/host.sh")],
+                    env=self.env | dict(CHECK_PATH=path,
+                                        CHECK_MODE=mode, CHECK_OWNER=str(owner),
+                                        CHECK_GID=str(owner_gid), CHECK_UID=str(uid),
+                                        PRIVATE_GID=str(private_gid),
+                                        TEST_PLATFORM=platform,
+                                        CHECK_TEAM=path if team else ""),
+                    text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode == 0, allowed, result.stderr)
+                if platform == "Linux" and owner == 0 and mode == "775":
+                    self.assertIn("owned by root", result.stderr)
+                    self.assertIn("ask an administrator", result.stderr)
+
+    def test_failed_group_name_lookup_never_enables_private_group(self):
+        root = self.root / "shared group root"
+        root.mkdir()
+        root.chmod(0o775)
+        shim_dir = self.root / "id shim"
+        shim_dir.mkdir()
+        shim = shim_dir / "id"
+        shim.write_text("#!/bin/sh\n"
+                        "case \"$1\" in -un|-gn) exit 1 ;; esac\n"
+                        "exec /usr/bin/id \"$@\"\n")
+        shim.chmod(0o755)
+        result = subprocess.run(
+            ["bash", "-c", '. "$1"; dev_trio_prepare_log_dir "$2"', "_",
+             str(self.plugin / "lib/host.sh"), str(root / "host-test")],
+            env=self.env | dict(PATH=f"{shim_dir}:{self.env['PATH']}"),
+            text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("cannot identify caller", result.stderr)
+        self.assertFalse((root / "host-test").exists())
+
+    def test_macos_private_group_requires_exclusive_enumerated_membership(self):
+        shim_dir = self.root / "account shims"
+        shim_dir.mkdir()
+        group_fixture = self.root / "group fixture"
+        users_fixture = self.root / "users fixture"
+        identifier = shim_dir / "id"
+        identifier.write_text("#!/bin/sh\n"
+                              "case \"$1\" in\n"
+                              "  -un|-gn) echo isolated ;;\n"
+                              "  -g) echo 60606 ;;\n"
+                              "  *) exit 1 ;;\n"
+                              "esac\n")
+        identifier.chmod(0o755)
+        (shim_dir / "dscacheutil").write_text(
+            "#!/bin/sh\n"
+            "case \"$2\" in\n"
+            "  group) cat \"$GROUP_FIXTURE\" ;;\n"
+            "  user) cat \"$USERS_FIXTURE\" ;;\n"
+            "  *) exit 1 ;;\n"
+            "esac\n")
+        (shim_dir / "dscacheutil").chmod(0o755)
+        for members, peer, enumerable, allowed in (("", False, True, True),
+                                                   ("peer", False, True, False),
+                                                   ("", True, True, False),
+                                                   ("", False, False, False)):
+            with self.subTest(members=members, primary_peer=peer,
+                              enumerable=enumerable):
+                group_fixture.write_text("name: isolated\ngid: 60606\n"
+                                         f"users: {members}\n")
+                users = ("name: isolated\ngid: 60606\n\n"
+                         + ("name: peer\ngid: 60606\n" if peer else ""))
+                users_fixture.write_text(users if enumerable else "")
+                result = subprocess.run(
+                    ["bash", "-c", '. "$1"; _DEV_TRIO_OS=Darwin; _dev_trio_private_group_gid',
+                     "_", str(self.plugin / "lib/host.sh")],
+                    env=self.env | dict(PATH=f"{shim_dir}:{self.env['PATH']}",
+                                        GROUP_FIXTURE=str(group_fixture),
+                                        USERS_FIXTURE=str(users_fixture)),
+                    text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode == 0, allowed, result.stderr)
+                if allowed:
+                    self.assertEqual(result.stdout.strip(), "60606")
+
+    def test_untrusted_symlink_owner_is_rejected(self):
+        target = self.root / "trusted target"
+        target.mkdir()
+        alias = self.root / "simulated other-owned link"
+        alias.symlink_to(target, target_is_directory=True)
+        script = r'''
+. "$1"
+_dev_trio_symlink_owner() { printf '99999\n'; }
+_dev_trio_dir_mode_owner() { printf '755 0 0\n'; }
+_dev_trio_darwin_acl_safe() { return 0; }
+_dev_trio_check_log_ancestors "$CHECK_PATH" '' "$CHECK_UID" -1
+'''
+        result = subprocess.run(
+            ["bash", "-c", script, "_", str(self.plugin / "lib/host.sh")],
+            env=self.env | dict(CHECK_PATH=str(alias), CHECK_UID=str(os.getuid())),
+            text=True, capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsafe log symlink", result.stderr)
+
+    def test_gnu_stat_earlier_in_path_does_not_break_darwin_wrappers(self):
+        shim_dir = self.root / "gnubin"
+        shim_dir.mkdir()
+        shim = shim_dir / "stat"
+        shim.write_text("#!/bin/sh\n"
+                        "if [ \"${2:-}\" = -f ]; then exit 77; fi\n"
+                        "exec /usr/bin/stat \"$@\"\n")
+        shim.chmod(0o755)
+        for wrapper in ("ask-reviewer.sh", "ask-researcher.sh"):
+            with self.subTest(wrapper=wrapper):
+                result = self.run_cli(wrapper, "private input",
+                                      PATH=f"{shim_dir}:{self.env['PATH']}")
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_nested_caller_log_directories_stay_private_with_umask_002(self):
+        for plugin_name, function in (("ralph-trio", "init_log_dir"),
+                                      ("spec-trio", "spec_init_log_dir")):
+            with self.subTest(plugin=plugin_name):
+                plugin = Path(__file__).resolve().parents[1] / plugin_name
+                workspace = self.root / plugin_name
+                script = (f'PLUGIN_ROOT="$1"; TEAM=host-test; '
+                          f'RALPH_TRIO_WORKSPACE="$2"; SPEC_TRIO_WORKSPACE="$2"; '
+                          f'. "$PLUGIN_ROOT/lib/common.sh"; umask 002; {function}')
+                result = subprocess.run(["bash", "-c", script, "_", str(plugin),
+                                         str(workspace)], text=True,
+                                        capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                logdir = workspace / "log/host-test"
+                self.assertEqual(logdir.stat().st_mode & 0o777, 0o700)
+                prepared = subprocess.run(
+                    ["bash", "-c", '. "$1"; dev_trio_prepare_log_dir "$2"',
+                     "_", str(self.plugin / "lib/host.sh"),
+                     str(logdir / "agy/default")],
+                    text=True, capture_output=True, timeout=10)
+                self.assertEqual(prepared.returncode, 0, prepared.stderr)
+
+    def test_path_replacement_during_model_keeps_original_log_inode(self):
+        for wrapper, channel in (("ask-reviewer.sh", "codex"),
+                                 ("ask-researcher.sh", "agy")):
+            with self.subTest(wrapper=wrapper):
+                logdir = self.workspace / ".dev-trio/log/host-test"
+                result = self.run_cli(
+                    wrapper, "private input", STUB_SWAP_LOG_DIR=str(logdir),
+                    STUB_SWAP_CHANNEL=channel,
+                    DEV_TRIO_REVIEWER_MODEL="claude" if channel == "codex" else "codex",
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                log = logdir / os.readlink(logdir / f"latest-{channel}.log")
+                self.assertEqual(log.read_text(), "replacement path\n")
+                original = Path(str(log) + ".saved")
+                self.assertIn(REVIEW, original.read_text())
+                self.assertIn("=== END (rc=0) ===", original.read_text())
+                log.unlink()
+                original.rename(log)
+
+    def test_research_fallback_ends_original_log_inode(self):
+        shim_dir = self.root / "research mv shim"
+        shim_dir.mkdir()
+        shim = shim_dir / "mv"
+        shim.write_text(
+            "#!/bin/sh\n"
+            "/bin/mv \"$@\" || exit $?\n"
+            "for destination do :; done\n"
+            "if [ \"$destination\" = \"$SWAP_ROOT/latest-agy.final.md\" ]; then\n"
+            "  target=\"$SWAP_ROOT/$(readlink \"$SWAP_ROOT/latest-agy.log\")\"\n"
+            "  /bin/mv \"$target\" \"$target.saved\" && mkdir \"$target\"\n"
+            "fi\n"
+        )
+        shim.chmod(0o755)
+        logdir = self.workspace / ".dev-trio/log/host-test"
+        result = self.run_cli(
+            "ask-researcher.sh", "private input", SWAP_ROOT=str(logdir),
+            PATH=f"{shim_dir}:{self.env['PATH']}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = logdir / os.readlink(logdir / "latest-agy.log")
+        original = Path(str(log) + ".saved")
+        try:
+            self.assertTrue(log.is_dir())
+            self.assertIn("=== END (rc=0) ===", original.read_text())
+            self.assertNotIn(REVIEW, original.read_text())
+        finally:
+            if log.is_dir():
+                log.rmdir()
+            if original.exists():
+                original.rename(log)
+
+    def test_log_root_symlink_replacement_cannot_redirect_artifacts(self):
+        for wrapper in ("ask-reviewer.sh", "ask-researcher.sh"):
+            with self.subTest(wrapper=wrapper):
+                name = wrapper.removesuffix(".sh")
+                trusted = self.root / f"trusted {name}"
+                attacker = self.root / f"other {name}"
+                trusted.mkdir()
+                attacker.mkdir()
+                alias = self.root / f"alias {name}"
+                alias.symlink_to(trusted, target_is_directory=True)
+                result = self.run_cli(
+                    wrapper, "private input", DEV_TRIO_LOG_DIR=str(alias),
+                    DEV_TRIO_REVIEWER_MODEL="claude",
+                    STUB_SWAP_LOG_ALIAS=str(alias),
+                    STUB_SWAP_LOG_TARGET=str(attacker),
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse((attacker / "host-test").exists())
+                self.assertTrue(list((trusted / "host-test").glob("*.run.json")))
+
+    def test_model_cannot_inherit_transcript_read_descriptor(self):
+        probe = self.root / "probe fd7"
+        wrapper_cli = self.root / "probe cli"
+        wrapper_cli.write_text(
+            "#!/bin/bash\n"
+            "if [ -e /dev/fd/7 ]; then echo open > \"$FD_PROBE\"; "
+            "else echo closed > \"$FD_PROBE\"; fi\n"
+            "exec \"$STUB_REAL\" \"$@\"\n"
+        )
+        wrapper_cli.chmod(0o755)
+        for wrapper in ("ask-reviewer.sh", "ask-researcher.sh"):
+            with self.subTest(wrapper=wrapper):
+                result = self.run_cli(
+                    wrapper, "private input", CODEX_CLI=str(wrapper_cli),
+                    CLAUDE_CLI=str(wrapper_cli), AGY_CLI=str(wrapper_cli),
+                    FD_PROBE=str(probe), STUB_REAL=str(self.stub),
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(probe.read_text().strip(), "closed")
+
+    def test_reviewer_snapshots_use_private_log_directory(self):
+        shim_dir = self.root / "mktemp shim"
+        shim_dir.mkdir()
+        record = self.root / "mktemp templates"
+        shim = shim_dir / "mktemp"
+        shim.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$@\" >> \"$MKTEMP_RECORD\"\n"
+            "exec /usr/bin/mktemp \"$@\"\n"
+        )
+        shim.chmod(0o755)
+        result = self.run_cli(
+            "ask-reviewer.sh", "private input", DEV_TRIO_REVIEWER_MODEL="agy",
+            PATH=f"{shim_dir}:{self.env['PATH']}", MKTEMP_RECORD=str(record))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        logdir = self.workspace / ".dev-trio/log/host-test"
+        templates = record.read_text().splitlines()
+        self.assertIn(str(logdir / "ask-reviewer-frozen.XXXXXX"), templates)
+        self.assertIn(str(logdir / "ask-reviewer-transcript.XXXXXX"), templates)
+        self.assertEqual(list(logdir.glob("ask-reviewer-frozen.*")), [])
+        self.assertEqual(list(logdir.glob("ask-reviewer-transcript.*")), [])
+
+    def test_research_denial_snapshot_is_removed(self):
+        temporary = self.root / "snapshot tmp"
+        temporary.mkdir()
+        result = self.run_cli("ask-researcher.sh", "private input",
+                              TMPDIR=str(temporary), STUB_RESPONSE="")
+        self.assertEqual(result.returncode, 5, result.stderr)
+        self.assertEqual(list(temporary.glob("ask-researcher-frozen.*")), [])
+        self.assertEqual(list((self.workspace / ".dev-trio/log/host-test").glob(
+            "ask-researcher-frozen.*")), [])
+
+    def test_research_denial_snapshot_is_removed_on_term(self):
+        temporary = self.root / "interrupted snapshot tmp"
+        temporary.mkdir()
+        shim_dir = self.root / "tail shim"
+        shim_dir.mkdir()
+        ready = self.root / "snapshot ready"
+        release = self.root / "snapshot release"
+        shim = shim_dir / "tail"
+        shim.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = -c ]; then\n"
+            "  : > \"$TAIL_READY\"\n"
+            "  while [ ! -e \"$TAIL_RELEASE\" ]; do sleep 0.05; done\n"
+            "fi\n"
+            "exec /usr/bin/tail \"$@\"\n"
+        )
+        shim.chmod(0o755)
+        process = subprocess.Popen(
+            [str(self.plugin / "bin/ask-researcher.sh"), "private input"],
+            cwd=self.workspace,
+            env=self.env | dict(TMPDIR=str(temporary),
+                                PATH=f"{shim_dir}:{self.env['PATH']}",
+                                TAIL_READY=str(ready), TAIL_RELEASE=str(release),
+                                STUB_RESPONSE="", STUB_STDERR="diagnostic"),
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, start_new_session=True)
+        try:
+            deadline = time.monotonic() + 20
+            while not ready.exists() and process.poll() is None \
+                    and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(ready.exists(), "research denial snapshot did not start")
+            logdir = self.workspace / ".dev-trio/log/host-test"
+            snapshots = list(logdir.glob("ask-researcher-frozen.*"))
+            self.assertEqual(len(snapshots), 1)
+            self.assertEqual(snapshots[0].stat().st_mode & 0o777, 0o600)
+            self.assertEqual(list(temporary.glob("ask-researcher-frozen.*")), [])
+            os.killpg(process.pid, signal.SIGTERM)
+            _, stderr = process.communicate(timeout=15)
+            self.assertEqual(process.returncode, 143, stderr)
+            self.assertEqual(list(temporary.glob("ask-researcher-frozen.*")), [])
+            self.assertEqual(list(logdir.glob("ask-researcher-frozen.*")), [])
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate(timeout=5)
 
     def fenced(self, prompt, tag):
         """The exact text a wrapper placed between its own <tag> fences."""
@@ -239,7 +852,9 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
                 P=str(self.plugin), R=str(self.root), PATH=self.argv_limited_path()),
             text=True, capture_output=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
-        manifest = json.loads((self.root / "helper.manifest.json.tmp").read_text())
+        manifests = list(self.root.glob("helper.manifest.json.tmp*"))
+        self.assertEqual(len(manifests), 1, manifests)
+        manifest = json.loads(manifests[0].read_text())
         self.assertEqual(manifest["inputs"], [
             {"kind": "a", "value": "a\n\n"}, {"kind": "b", "value": "x"},
             {"kind": "big", "value": big}])
@@ -906,7 +1521,7 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.workspace / "late-logs").exists())
 
-        self.pane_wait(pane, "Status:")
+        self.pane_wait(pane, "done")
         frame = self.pane_quit(pane)
         self.assertNotIn("outside the team directory", frame)
         self.assertIn("done", frame)

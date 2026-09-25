@@ -136,14 +136,27 @@ LOG=""
 AGY_WORKSPACE=""
 AGY_CLI_LOG=""
 LOG_OFFSET=""
+LOG_END=""
 AGY_DENIED=""
 
 # The denied targets agy recorded for this run, one per line — only when this
 # run's own transcript (after the header, which quotes the question and
 # context) carries agy's no-output permission notice. Empty otherwise.
 research_agy_denials() {
-  [ -n "$AGY_WORKSPACE" ] && [ -n "$AGY_CLI_LOG" ] && [ -n "$LOG" ] && [ -n "$LOG_OFFSET" ] || return 0
-  agy_denial_notice_in "$LOG" "$LOG_OFFSET" "$(wc -c < "$LOG" 2>/dev/null || echo 0)" || return 0
+  local snapshot
+  [ -n "$AGY_WORKSPACE" ] && [ -n "$AGY_CLI_LOG" ] && [ -n "$LOG_OFFSET" ] && [ -n "$LOG_END" ] || return 0
+  RESEARCH_SNAPSHOT_PATH=""
+  trap '[ -z "$RESEARCH_SNAPSHOT_PATH" ] || rm -f "$RESEARCH_SNAPSHOT_PATH"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  snapshot=$(mktemp "$LOG_DIR/ask-researcher-frozen.XXXXXX") || return 0
+  RESEARCH_SNAPSHOT_PATH="$snapshot"
+  tail -c "+$((LOG_OFFSET + 1))" <&7 \
+    | head -c "$((LOG_END - LOG_OFFSET))" > "$snapshot" || true
+  if [ "$(wc -c < "$snapshot")" -ne "$((LOG_END - LOG_OFFSET))" ] \
+     || ! agy_denial_notice_in "$snapshot" 0 "$((LOG_END - LOG_OFFSET))"; then
+    return 0
+  fi
   agy_denial_targets "$(dev_trio_agy_home)" "$AGY_CLI_LOG"
 }
 
@@ -236,8 +249,7 @@ if [ "$CHECK_RC" -ne 0 ]; then
   exit "$CHECK_RC"
 fi
 
-mkdir -p "$LOG_DIR"
-case "$LOG_DIR" in /*) ;; *) LOG_DIR="$PWD/$LOG_DIR" ;; esac
+LOG_DIR=$(dev_trio_prepare_log_dir "$LOG_DIR") || exit 2
 # PID suffix avoids log and manifest collisions when two researchers start
 # within the same second (BSD `date` has no sub-second precision).
 TS="$(date +%Y%m%d-%H%M%S)-$$"
@@ -273,6 +285,28 @@ manifest_add_role researcher "$RESEARCHER_MODEL" "$ROLE_FILE" "$(manifest_sha256
 manifest_add_input kind=question value="$QUERY"
 [ -n "$STDIN_CONTEXT" ] && manifest_add_input kind=context value="$STDIN_CONTEXT"
 
+# Refuse an existing path before opening (including nonregular files that Bash
+# noclobber permits), then verify the descriptor before writing the header.
+if [ -e "$LOG" ] || [ -L "$LOG" ]; then
+  echo "[ask-researcher] raw log path already exists: $LOG" >&2
+  exit 2
+fi
+LOG_UID=$(id -u) || exit 2
+LOG_UMASK=$(umask)
+umask 077
+set -C
+if ! exec 8>"$LOG"; then
+  set +C
+  umask "$LOG_UMASK"
+  exit 2
+fi
+set +C
+umask "$LOG_UMASK"
+if ! dev_trio_new_log_fd_is_private "$LOG" 8 "$LOG_UID"; then
+  echo "[ask-researcher] raw log is not a new private regular file: $LOG" >&2
+  exec 8>&-
+  exit 2
+fi
 {
   echo "=== ask-researcher.sh @ $TS ==="
   echo "=== QUERY ==="
@@ -284,7 +318,7 @@ manifest_add_input kind=question value="$QUERY"
   echo "=== PM HOST: $PM_HOST ==="
   echo "=== MODEL: $RESEARCHER_MODEL ==="
   echo "=== RESPONSE ==="
-} > "$LOG"
+} >&8
 
 # How the answer artifact gets filled. A model that can write its own last
 # message (final_args) is authoritative; otherwise the answer is this run's
@@ -338,6 +372,7 @@ LATEST_TMP=""
 
 echo "[ask-researcher] running ($RESEARCHER_MODEL) — monitor: dashboard.sh agy  (raw: tail -F $LOG_DIR/latest-agy.log)" >&2
 RC=0
+ORIGINAL_LOG_FD=8
 # Legacy RESEARCHER_CLI still wins as a per-role binary override; otherwise the
 # registry resolves the binary from the model's env_command/command.
 #
@@ -377,18 +412,25 @@ RC=0
 # after the run, which costs the live transcript a `tail -F` reader follows. Recorded on #71 instead.
 #
 # errexit is lifted around the call so the 5/6 answer codes survive as $RC.
-if ! exec 8>>"$LOG"; then
+if exec 7<"$LOG" \
+   && dev_trio_fd_matches_path "$LOG" 8 \
+   && dev_trio_fd_matches_path "$LOG" 7; then
+  LOG_OFFSET="$(dev_trio_fd_size 8)" || LOG_OFFSET=""
+else
   echo "[ask-researcher] the transcript could not be logged; $LOG may be incomplete" >&2
+  # Preserve the original inode for END even when the model uses /dev/null.
+  if exec 9>&8; then ORIGINAL_LOG_FD=9; fi
+  exec 8>&- 7<&- || true
   exec 8>/dev/null
 fi
 # Where this run's own output starts: a notice quoted in the question or the
 # context above it is not evidence of a denial.
-LOG_OFFSET="$(wc -c < "$LOG" 2>/dev/null)" || LOG_OFFSET=""
 set +e
 REGISTRY_WORKSPACE="$AGY_WORKSPACE" REGISTRY_CLI_LOG="$AGY_CLI_LOG" \
-  REGISTRY_CMD_OVERRIDE="${RESEARCHER_CLI:-}" registry_run_answer "$RESEARCHER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8
+  REGISTRY_CMD_OVERRIDE="${RESEARCHER_CLI:-}" registry_run_answer "$RESEARCHER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8 7<&- 9>&-
 RC=$?
 set -e
+[ -z "$LOG_OFFSET" ] || LOG_END="$(dev_trio_fd_size 8)" || LOG_END=""
 # Only an empty answer (5) is looked into: a run that answered is not a denial.
 if [ "$RC" -eq 5 ]; then
   AGY_DENIED="$(research_agy_denials 2>/dev/null)" || AGY_DENIED=""
@@ -409,10 +451,14 @@ fi
 manifest_finalize
 # As in ask-reviewer, END is best-effort framing; the answer and run metadata
 # determine the outcome even when this final log write fails.
-if ! printf '\n=== END (rc=%d) ===\n' "$RC" >&8; then
+if [ "$ORIGINAL_LOG_FD" -eq 9 ]; then
+  printf '\n=== END (rc=%d) ===\n' "$RC" >&9 || \
+    echo "[ask-researcher] final log append failed; $LOG may be incomplete" >&2 || true
+elif ! printf '\n=== END (rc=%d) ===\n' "$RC" >&8; then
   echo "[ask-researcher] final log append failed; $LOG may be incomplete" >&2 || true
 fi
-exec 8>&-
+exec 8>&- 9>&- || true
+exec 7<&- || true
 echo || true
 echo "(log: $LOG, final: $FINAL, rc=$RC)" >&2 || true
 REASON=ok

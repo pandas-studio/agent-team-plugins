@@ -53,7 +53,7 @@ ask-reviewer.sh "review HEAD~2..HEAD"              # review last 2 commits
 
 **Reviewing a PR:** don't pass `"pr 55"` — the reviewer may run without network access and cannot see which commits the PR holds. Resolve it yourself and hand over a range:
 ```bash
-mkdir -p .dev-trio/log/${AGENT_TEAM:-default}
+(umask 077; mkdir -p ".dev-trio/log/${AGENT_TEAM:-default}")
 CFILE=.dev-trio/log/${AGENT_TEAM:-default}/context-$(date +%Y%m%d-%H%M%S).md
 gh pr view 55 --json number,url,title,baseRefName,baseRefOid,headRefName,headRefOid > "$CFILE"
 git merge-base <baseRefOid> <headRefOid>        # both commits must exist locally; ask before fetching

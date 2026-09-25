@@ -58,7 +58,9 @@ manifest_add_input kind=big value="$big"
                     env=env | dict(P=str(ROOT / copy), R=str(self.root), C=copy, PATH=self.path),
                     text=True, capture_output=True, timeout=20)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                manifest = json.loads((self.root / f"{copy}.manifest.json.tmp").read_text())
+                paths = list(self.root.glob(f"{copy}.manifest.json.tmp*"))
+                self.assertEqual(len(paths), 1, paths)
+                manifest = json.loads(paths[0].read_text())
                 self.assertEqual(manifest["inputs"], [
                     {"kind": "a", "value": "a\n\n"}, {"kind": "empty"},
                     {"kind": "p", "path": "/x y"}, {"kind": "big", "value": big}])

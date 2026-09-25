@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Host defaults are local to dev-trio; the shared registry remains unchanged.
 # Source registry.sh before calling these functions.
+_DEV_TRIO_OS=$(uname -s) || _DEV_TRIO_OS=unknown
 
 dev_trio_host() {
   case "${DEV_TRIO_PM_HOST:-claude}" in
@@ -44,6 +45,213 @@ dev_trio_check_cli() {
     echo 'dev-trio: Claude login not confirmed; check claude auth status in a terminal (sandbox keychain access may be restricted)' >&2
     return 2
   fi
+}
+
+# Keep input-bearing artifacts in a directory another user cannot replace.
+# Existing directories are inspected, never chmodded. A root/current-user-owned
+# sticky ancestor (such as /tmp) is safe for a caller-owned child directory.
+_dev_trio_dir_mode_owner() {
+  if [ "$_DEV_TRIO_OS" = Darwin ]; then
+    /usr/bin/stat -L -f '%Mp%Lp %u %g' "$1"
+  else
+    stat -L -c '%a %u %g' "$1"
+  fi
+}
+
+_dev_trio_symlink_owner() {
+  if [ "$_DEV_TRIO_OS" = Darwin ]; then
+    /usr/bin/stat -f '%u' "$1"
+  else
+    stat -c '%u' "$1"
+  fi
+}
+
+# macOS ACL allow entries can grant writes independently of mode bits. ls may
+# print a UUID instead of a username. Parse either representation and reject a
+# UUID allow entry if directory services cannot resolve the caller's UUID.
+_dev_trio_darwin_acl_listing_safe() {
+  /usr/bin/awk -v caller="$1" -v caller_uuid="$2" '
+    BEGIN { caller_uuid = toupper(caller_uuid) }
+    NR == 1 { next }
+    /^[[:space:]]*[0-9]+:/ {
+      ace = $0
+      sub(/^[[:space:]]*[0-9]+:[[:space:]]*/, "", ace)
+      if (ace ~ /[[:space:]]allow[[:space:]]/) {
+        sub(/[[:space:]]allow[[:space:]].*$/, "", ace)
+        sub(/[[:space:]]inherited$/, "", ace)
+        if (ace != "user:" caller && toupper(ace) != caller_uuid) bad = 1
+      } else if (ace !~ /[[:space:]]deny[[:space:]]/) bad = 1
+      next
+    }
+    NF { bad = 1 }
+    END { exit bad }
+  '
+}
+
+_dev_trio_darwin_acl_safe() {
+  local listing caller_uuid=""
+  listing=$(LC_ALL=C /bin/ls -lde "$1" 2>/dev/null) || return 1
+  case "$listing" in
+    *" allow "*) caller_uuid=$(/usr/bin/dsmemberutil getuuid -U "$2" 2>/dev/null) || caller_uuid="" ;;
+  esac
+  printf '%s\n' "$listing" | _dev_trio_darwin_acl_listing_safe "$2" "$caller_uuid"
+}
+
+# A matching user/group name alone does not establish that a group is private.
+# Only macOS uses this exception. Linux account enumeration cannot establish
+# exclusive access to a group-writable ancestor across all local NSS sources.
+_dev_trio_private_group_gid() {
+  local user_name group_name gid group_record user_records
+  [ "$_DEV_TRIO_OS" = Darwin ] || return 1
+  user_name=$(id -un) && group_name=$(id -gn) && gid=$(id -g) || return 1
+  [ -n "$user_name" ] && [ "$user_name" = "$group_name" ] || return 1
+  group_record=$(dscacheutil -q group -a gid "$gid") || return 1
+  user_records=$(dscacheutil -q user) || return 1
+  printf '%s\n' "$group_record" | awk -v user="$user_name" -v gid="$gid" '
+    $1 == "name:" { names++; if ($2 != user) bad = 1 }
+    $1 == "gid:" { gids++; if ($2 != gid) bad = 1 }
+    $1 == "users:" { for (i = 2; i <= NF; i++) if ($i != user) bad = 1 }
+    END { exit (bad || names != 1 || gids != 1) }
+  ' || return 1
+  printf '%s\n' "$user_records" | awk -v user="$user_name" -v gid="$gid" '
+    $1 == "name:" { name = $2 }
+    $1 == "gid:" && $2 == gid { if (name == user) own = 1; else bad = 1 }
+    END { exit (bad || !own) }
+  ' || return 1
+  printf '%s\n' "$gid"
+}
+
+_dev_trio_check_log_ancestors() {
+  local path="$1" team_dir="$2" uid="$3" private_gid="$4" caller="${5:-}" mode owner gid details link_owner repair
+  if [ "$_DEV_TRIO_OS" = Darwin ] && [ -z "$caller" ]; then
+    caller=$(id -un) || return 1
+  fi
+  while :; do
+    if [ -L "$path" ]; then
+      link_owner=$(_dev_trio_symlink_owner "$path") || return 1
+      if [ "$link_owner" != 0 ] && [ "$link_owner" != "$uid" ]; then
+        echo "dev-trio: unsafe log symlink: $path (must be owned by root or the caller)" >&2
+        return 1
+      fi
+    fi
+    if [ "$_DEV_TRIO_OS" = Darwin ] && ! _dev_trio_darwin_acl_safe "$path" "$caller"; then
+      echo "dev-trio: unsafe log ACL: $path (allow entry for another principal or ACL unreadable)" >&2
+      return 1
+    fi
+    details=$(_dev_trio_dir_mode_owner "$path") || return 1
+    read -r mode owner gid <<<"$details"
+    mode=$((8#$mode))
+    if [ "$path" = "$team_dir" ]; then
+      if [ "$owner" != "$uid" ]; then
+        echo "dev-trio: unsafe team log directory: $path (must be caller-owned)" >&2
+        return 1
+      elif (( (mode & 0022) != 0 )); then
+        printf 'dev-trio: unsafe team log directory: %s (remove group/other write: chmod go-w %q)\n' "$path" "$path" >&2
+        return 1
+      fi
+    elif [ "$owner" != 0 ] && [ "$owner" != "$uid" ]; then
+      echo "dev-trio: unsafe log ancestor: $path (must be owned by root or the caller)" >&2
+      return 1
+    elif (( (mode & 0022) != 0 )); then
+      if (( (mode & 01000) != 0 )); then
+        : # Trusted sticky directory such as /tmp.
+      elif [ "$_DEV_TRIO_OS" = Darwin ] && (( (mode & 0002) == 0 )) && [ "$owner" = "$uid" ] \
+           && [ "$gid" = "$private_gid" ]; then
+        : # Caller-owned ancestor in the caller's user-private group.
+      else
+        if (( (mode & 0022) == 0022 )); then
+          repair='chmod go-w'
+        elif (( (mode & 0020) != 0 )); then
+          repair='chmod g-w'
+        else
+          repair='chmod o-w'
+        fi
+        if [ "$owner" = 0 ]; then
+          printf 'dev-trio: unsafe log ancestor: %s (owned by root; choose a private log root or ask an administrator to run %s %q)\n' \
+            "$path" "$repair" "$path" >&2
+        else
+          printf 'dev-trio: unsafe log ancestor: %s (remove group/other write: %s %q)\n' \
+            "$path" "$repair" "$path" >&2
+        fi
+        return 1
+      fi
+    fi
+    [ "$path" != / ] || break
+    path=$(dirname "$path")
+  done
+}
+
+# Check the existing path before creating anything, then return the physical
+# team directory so artifact paths cannot re-traverse a validated symlink.
+dev_trio_prepare_log_dir() {
+  local requested="$1" physical uid caller private_gid existing existing_physical team_arg
+  case "$requested" in /*) ;; *) requested="$PWD/$requested" ;; esac
+  case "$_DEV_TRIO_OS" in Darwin|Linux) ;; *) echo 'dev-trio: unsupported OS for log validation' >&2; return 2 ;; esac
+  uid=$(id -u) || return 2
+  caller=$(id -un) || caller=""
+  if [ -z "$caller" ]; then
+    echo 'dev-trio: cannot identify caller for log ACL validation' >&2
+    return 2
+  fi
+  private_gid=-1
+  if [ "$_DEV_TRIO_OS" = Darwin ]; then
+    private_gid=$(_dev_trio_private_group_gid) || private_gid=-1
+  fi
+  existing="$requested"
+  while [ ! -e "$existing" ] && [ ! -L "$existing" ]; do
+    existing=$(dirname "$existing")
+  done
+  existing_physical=$(cd -P "$existing" && pwd -P) || return 2
+  team_arg=""
+  [ "$existing" != "$requested" ] || team_arg="$existing"
+  _dev_trio_check_log_ancestors "$existing" "$team_arg" "$uid" "$private_gid" "$caller" || return 2
+  team_arg=""
+  [ "$existing" != "$requested" ] || team_arg="$existing_physical"
+  _dev_trio_check_log_ancestors "$existing_physical" "$team_arg" "$uid" "$private_gid" "$caller" || return 2
+  (umask 077; mkdir -p "$requested") || return 2
+  physical=$(cd -P "$requested" && pwd -P) || return 2
+  _dev_trio_check_log_ancestors "$physical" "$physical" "$uid" "$private_gid" "$caller" || return 2
+  _dev_trio_check_log_ancestors "$requested" "$requested" "$uid" "$private_gid" "$caller" || return 2
+  printf '%s\n' "$physical"
+}
+
+dev_trio_fd_size() {
+  if [ "$_DEV_TRIO_OS" = Darwin ]; then
+    /usr/bin/stat -L -f '%z' "/dev/fd/$1"
+  else
+    stat -L -c '%s' "/dev/fd/$1"
+  fi
+}
+
+dev_trio_fd_matches_path() {
+  local format path_id fd_id
+  if [ "$_DEV_TRIO_OS" = Darwin ]; then
+    # devfs reports its own device number for /dev/fd, even with stat -L.
+    # The validated team directory keeps this regular path on one filesystem;
+    # another user cannot replace it with a path on a different device.
+    format='%i %u'
+    path_id=$(/usr/bin/stat -L -f "$format" "$1" 2>/dev/null) || return 1
+    fd_id=$(/usr/bin/stat -L -f "$format" "/dev/fd/$2" 2>/dev/null) || return 1
+  else
+    format='%d %i %u'
+    path_id=$(stat -L -c "$format" "$1" 2>/dev/null) || return 1
+    fd_id=$(stat -L -c "$format" "/dev/fd/$2" 2>/dev/null) || return 1
+  fi
+  [ "$path_id" = "$fd_id" ]
+}
+
+# Check the descriptor before writing even the first input-bearing header.
+dev_trio_new_log_fd_is_private() {
+  local path="$1" fd="$2" uid="$3" details mode owner gid size
+  [ ! -L "$path" ] && [ -f "$path" ] && [ -f "/dev/fd/$fd" ] || return 1
+  # Darwin's /dev/fd mode describes the devfs node, not the opened file.
+  # Read metadata through the path, then confirm it still names this fd.
+  details=$(_dev_trio_dir_mode_owner "$path") || return 1
+  read -r mode owner gid <<<"$details"
+  size=$(dev_trio_fd_size "$fd") || return 1
+  mode=$((8#$mode))
+  [ "$owner" = "$uid" ] && [ "$size" = 0 ] && (( (mode & 0077) == 0 )) \
+    && dev_trio_fd_matches_path "$path" "$fd"
 }
 
 # ---- agy workspace (#103) ---------------------------------------------------

@@ -283,8 +283,7 @@ fi
 
 REGISTRY_CMD_OVERRIDE="${REVIEWER_CLI:-}" dev_trio_check_cli "$REVIEWER_MODEL" || exit $?
 
-mkdir -p "$LOG_DIR"
-case "$LOG_DIR" in /*) ;; *) LOG_DIR="$PWD/$LOG_DIR" ;; esac
+LOG_DIR=$(dev_trio_prepare_log_dir "$LOG_DIR") || exit 2
 # An optional caller-owned, fresh receipt binds the exact output paths.
 RECEIPT="${DEV_TRIO_REVIEW_RECEIPT:-}"
 case "$RECEIPT" in
@@ -327,6 +326,7 @@ cleanup_review() {
   [ -z "${RESULT_TMP:-}" ] || rm -f "$RESULT_TMP" "$RESULT_TMP.denied" || true
   [ -z "${LATEST_TMP:-}" ] || rm -f "$LATEST_TMP" || true
   [ -z "${TRANSCRIPT_TMP:-}" ] || rm -f "$TRANSCRIPT_TMP" || true
+  [ -z "${FROZEN_TRANSCRIPT:-}" ] || rm -f "$FROZEN_TRANSCRIPT" || true
   [ -z "${TRANSCRIPT_SNAP:-}" ] || rm -f "$TRANSCRIPT_SNAP" || true
   manifest_cleanup || true
 }
@@ -343,6 +343,28 @@ manifest_add_input kind=focus value="$FOCUS"
 [ -n "$SPEC_FILE" ]     && manifest_add_input kind=spec     path="$SPEC_FILE"
 [ -n "$CONTEXT_FILE" ]  && manifest_add_input kind=context  path="$CONTEXT_FILE"
 
+# Refuse an existing path before opening (including nonregular files that Bash
+# noclobber permits), then verify the descriptor before writing the header.
+if [ -e "$LOG" ] || [ -L "$LOG" ]; then
+  echo "[ask-reviewer] raw log path already exists: $LOG" >&2
+  exit 2
+fi
+LOG_UID=$(id -u) || exit 2
+LOG_UMASK=$(umask)
+umask 077
+set -C
+if ! exec 8>"$LOG"; then
+  set +C
+  umask "$LOG_UMASK"
+  exit 2
+fi
+set +C
+umask "$LOG_UMASK"
+if ! dev_trio_new_log_fd_is_private "$LOG" 8 "$LOG_UID"; then
+  echo "[ask-reviewer] raw log is not a new private regular file: $LOG" >&2
+  exec 8>&-
+  exit 2
+fi
 {
   echo "=== ask-reviewer.sh @ $TS ==="
   echo "=== FOCUS ==="
@@ -359,7 +381,7 @@ manifest_add_input kind=focus value="$FOCUS"
   echo "=== PM HOST: $PM_HOST ==="
   echo "=== MODEL: $REVIEWER_MODEL ==="
   echo "=== RESPONSE ==="
-} > "$LOG"
+} >&8
 
 # Structured run metadata for the dashboard — published before the latest-*
 # links, so a reader that follows a link always finds a described run rather
@@ -451,8 +473,9 @@ RC=0
 # itself: anything written in the moment between the two is inside it.
 #
 # errexit is lifted around the call so the CLI's own status survives as $RC.
-TRANSCRIPT_PATH="$LOG"
-TRANSCRIPT_OFFSET="$(wc -c < "$LOG")" || TRANSCRIPT_OFFSET=""
+TRANSCRIPT_PATH=""
+TRANSCRIPT_OFFSET=""
+ORIGINAL_LOG_FD=8
 # Declared before the call so the range is always a defined pair: a run that
 # ends before the freeze below skips the replay on an empty bound rather than
 # reading an unset variable under `set -u`.
@@ -483,9 +506,16 @@ emit_transcript() {
   transcript_range 2>/dev/null || true
   return 0
 }
-if ! exec 8>>"$LOG"; then
+if exec 7<"$LOG" \
+   && dev_trio_fd_matches_path "$LOG" 8 \
+   && dev_trio_fd_matches_path "$LOG" 7; then
+  TRANSCRIPT_OFFSET="$(dev_trio_fd_size 8)" || TRANSCRIPT_OFFSET=""
+else
+  # Keep the original inode for END while fd 8 captures the out-of-band run.
+  if exec 9>&8; then ORIGINAL_LOG_FD=9; fi
+  exec 8>&- 7<&- || true
   TRANSCRIPT_TMP="$(mktemp "$LOG.transcript.XXXXXX")" || TRANSCRIPT_TMP=""
-  if [ -n "$TRANSCRIPT_TMP" ] && exec 8>>"$TRANSCRIPT_TMP"; then
+  if [ -n "$TRANSCRIPT_TMP" ] && exec 8>>"$TRANSCRIPT_TMP" && exec 7<"$TRANSCRIPT_TMP"; then
     echo "[ask-reviewer] the transcript could not be logged to $LOG; keeping it out of band" >&2
     TRANSCRIPT_PATH="$TRANSCRIPT_TMP"
     TRANSCRIPT_OFFSET=0
@@ -509,12 +539,12 @@ trap 'SIGNAL_RC=130' INT
 trap 'SIGNAL_RC=143' TERM
 set +e
 REGISTRY_WORKSPACE="$AGY_WORKSPACE" REGISTRY_CLI_LOG="$AGY_CLI_LOG" \
-  REGISTRY_CMD_OVERRIDE="${REVIEWER_CLI:-}" registry_run "$REVIEWER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8
+  REGISTRY_CMD_OVERRIDE="${REVIEWER_CLI:-}" registry_run "$REVIEWER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8 7<&- 9>&-
 RC=$?
 set -e
 trap 'exit 130' INT
 trap 'exit 143' TERM
-[ -z "$TRANSCRIPT_OFFSET" ] || TRANSCRIPT_END="$(wc -c < "$TRANSCRIPT_PATH")" || TRANSCRIPT_END=""
+[ -z "$TRANSCRIPT_OFFSET" ] || TRANSCRIPT_END="$(dev_trio_fd_size 8)" || TRANSCRIPT_END=""
 # An interrupted run owes the caller no review — a result parsed from a partial
 # transcript would be worse than none — and it does not put the partial
 # transcript on stdout either. It names its artifacts instead, in the same
@@ -530,6 +560,25 @@ if [ "$SIGNAL_RC" -ne 0 ]; then
   echo "(log: $LOG, final: $FINAL, rc=$SIGNAL_RC)" >&2 || true
   exit "$SIGNAL_RC"
 fi
+# Read the exact bytes present at the post-call boundary through the held
+# descriptor. Path replacement after creation cannot alter replay or parsing.
+if [ -n "$TRANSCRIPT_OFFSET" ] && [ -n "$TRANSCRIPT_END" ]; then
+  FROZEN_TRANSCRIPT="$(mktemp "$LOG_DIR/ask-reviewer-frozen.XXXXXX")" || FROZEN_TRANSCRIPT=""
+  if [ -n "$FROZEN_TRANSCRIPT" ]; then
+    tail -c "+$((TRANSCRIPT_OFFSET + 1))" <&7 \
+      | head -c "$((TRANSCRIPT_END - TRANSCRIPT_OFFSET))" > "$FROZEN_TRANSCRIPT" || true
+    if [ "$(wc -c < "$FROZEN_TRANSCRIPT")" -eq "$((TRANSCRIPT_END - TRANSCRIPT_OFFSET))" ]; then
+      TRANSCRIPT_PATH="$FROZEN_TRANSCRIPT"
+      TRANSCRIPT_END=$((TRANSCRIPT_END - TRANSCRIPT_OFFSET))
+      TRANSCRIPT_OFFSET=0
+    else
+      echo "[ask-reviewer] the transcript could not be captured in full" >&2
+      TRANSCRIPT_OFFSET=""
+    fi
+  else
+    TRANSCRIPT_OFFSET=""
+  fi
+fi
 # Only adapters without native final capture synthesize a final. A missing
 # native final is an error, even if stdout contains a plausible verdict.
 #
@@ -542,7 +591,7 @@ fi
 if ! registry_has_final "$REVIEWER_MODEL" && [ ! -s "$FINAL" ] \
    && [ -n "$TRANSCRIPT_OFFSET" ] && [ -n "$TRANSCRIPT_END" ]; then
   TRANSCRIPT_MARKER='=== RESPONSE ==='
-  if TRANSCRIPT_SNAP="$(mktemp "${TMPDIR:-/tmp}/ask-reviewer-transcript.XXXXXX")"; then
+  if TRANSCRIPT_SNAP="$(mktemp "$LOG_DIR/ask-reviewer-transcript.XXXXXX")"; then
     { printf '%s\n' "$TRANSCRIPT_MARKER"; transcript_range; } > "$TRANSCRIPT_SNAP" 2>/dev/null || true
     # A snapshot that came up short — a full temp filesystem — would otherwise
     # be extracted into a review that parses: a valid verdict line followed by
@@ -562,7 +611,10 @@ INVOCATION_RC="$RC"
 finish_review_log() {
   # The result and run metadata carry the outcome. A missing END marker must
   # not replace it with a logging error or prevent completion publication.
-  if ! printf '\n=== END (rc=%d) ===\n' "$RC" >> "$LOG"; then
+  if [ "$ORIGINAL_LOG_FD" -eq 9 ]; then
+    printf '\n=== END (rc=%d) ===\n' "$RC" >&9 || \
+      echo "[ask-reviewer] final log append failed; $LOG may be incomplete" >&2 || true
+  elif ! printf '\n=== END (rc=%d) ===\n' "$RC" >&8; then
     echo "[ask-reviewer] final log append failed; $LOG may be incomplete" >&2 || true
   fi
 }
@@ -578,8 +630,8 @@ result_output_failed() {
   # The transcript is still this wrapper's stdout on the failure path, and this
   # exits — without the replay here, a result-write failure would lose it.
   emit_transcript
-  exec 8>&- || true
   finish_review_log
+  exec 8>&- 7<&- 9>&- || true
   echo "[ask-reviewer] result write failed: $1 (log: $LOG, final: $FINAL, rc=$RC)" >&2
   # Last, so nothing fallible can change the code after it is recorded.
   [ -z "$RUNSTATE_LOG" ] || runstate_complete "$RUNSTATE_LOG" exit_code="$RC" reason=result-write-failed || true
@@ -639,8 +691,8 @@ fi
 manifest_finalize || result_output_failed 'finalize manifest'
 # Completion is published only after the final, result and manifest are ready.
 emit_transcript
-exec 8>&- || true
 finish_review_log
+exec 8>&- 7<&- 9>&- || true
 echo || true
 if [ "$RC" -ne 0 ]; then
   ERROR=$(printf '%s\n' "$RESULT_JSON" | jq -r '.error')
