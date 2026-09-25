@@ -133,12 +133,27 @@ _manifest_jq_inplace_to() {
   local target="$1"
   local filter="$2"
   shift 2
-  local out
+  local out tmp
   if ! out=$(jq "$@" "$filter" "$target" 2>&1); then
     echo "manifest.sh: jq edit failed: $out" >&2
     return 1
   fi
-  printf '%s\n' "$out" > "$target"
+  tmp=$(mktemp "$target.tmp.XXXXXX") || {
+    echo "manifest.sh: cannot create a temporary file next to $target" >&2
+    return 1
+  }
+  if ! printf '%s\n' "$out" > "$tmp"; then
+    rm -f "$tmp"
+    echo "manifest.sh: cannot write $tmp" >&2
+    return 1
+  fi
+  # Reject directories (including symlinks to them); concurrent replacement
+  # between this check and mv remains possible without a no-target-dir mv.
+  if [ -d "$target" ] || ! mv "$tmp" "$target"; then
+    rm -f "$tmp"
+    echo "manifest.sh: cannot publish $target" >&2
+    return 1
+  fi
 }
 
 # Apply a jq filter to MANIFEST_TMP atomically. Extra args (e.g. --arg name value)
@@ -171,7 +186,7 @@ manifest_init() {
   # PR 3 added this when ralph-trio's six-stage chain made missed-finalize
   # bugs much easier to introduce.
   if [ -n "${MANIFEST_TMP:-}" ] && [ -f "$MANIFEST_TMP" ]; then
-    echo "manifest_init: prior manifest still open ($MANIFEST_TMP) — caller forgot finalize/cleanup" >&2
+    echo "manifest_init: prior manifest still open ($MANIFEST_TMP) — finalize failed or was skipped; run cleanup before starting another" >&2
     exit 1
   fi
   local variant="$1"
@@ -377,7 +392,11 @@ manifest_finalize() {
     return 0
   fi
   _manifest_jq_inplace '.ended_at = $ea' --arg ea "$(_manifest_now_iso)" || return 1
-  mv "$MANIFEST_TMP" "$MANIFEST_PATH"
+  # This directory check is best-effort against concurrent replacement.
+  if [ -d "$MANIFEST_PATH" ] || ! mv "$MANIFEST_TMP" "$MANIFEST_PATH"; then
+    echo "manifest_finalize: cannot publish $MANIFEST_PATH; temporary manifest still open at $MANIFEST_TMP until caller cleanup" >&2
+    return 1
+  fi
   MANIFEST_TMP=""
   MANIFEST_RUN_ID=""
 }
