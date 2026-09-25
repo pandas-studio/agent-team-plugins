@@ -1290,6 +1290,30 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         self.assertIn("-v1", snapshot)
         self.assertIn("+v2", snapshot)
 
+    def test_agy_reviewer_range_keeps_ordinary_deletion_in_both_range_forms(self):
+        self._init_git_workspace()
+        (self.workspace / "obsolete.txt").write_text("old content\n")
+        (self.workspace / "kept.txt").write_text("before\n")
+        subprocess.run(["git", "add", "obsolete.txt", "kept.txt"],
+                       cwd=self.workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "base"], cwd=self.workspace,
+                       check=True, stdout=subprocess.DEVNULL)
+        (self.workspace / "obsolete.txt").unlink()
+        (self.workspace / "kept.txt").write_text("after\n")
+        subprocess.run(["git", "add", "--all"], cwd=self.workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "update"], cwd=self.workspace,
+                       check=True, stdout=subprocess.DEVNULL)
+        for revision_range in ("HEAD~1..HEAD", "HEAD~1...HEAD"):
+            with self.subTest(revision_range=revision_range):
+                result = self.run_cli("ask-reviewer.sh", f"review {revision_range}",
+                                      DEV_TRIO_REVIEWER_MODEL="agy")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                snapshot = self.fenced(self.recorded()[-1][-1], "workspace_snapshot")
+                self.assertIn(f"### git diff {revision_range}", snapshot)
+                self.assertIn("-old content", snapshot)
+                self.assertIn("+after", snapshot)
+                self.assertNotIn("range diff content omitted", snapshot)
+
     def test_agy_reviewer_multiple_ranges_focus_skips_snapshot(self):
         self._init_git_workspace()
         (self.workspace / "f.txt").write_text("v1\n")

@@ -256,12 +256,7 @@ def parse_status_z(data: bytes) -> list[tuple[str, str, str | None]]:
 def diff_requires_omission(
     repo_root: str, diff_args: list[str], extra_log_rels: list[str]
 ) -> bool | None:
-    """Fail closed before reading diff content when names imply a risky move.
-
-    Git cannot identify every move into or out of an ignored sensitive path.
-    Any tracked deletion can be one side of such a move, so omit the complete
-    diff instead of trying to exclude individual paths.
-    """
+    """Omit a committed range when a sensitive path changed or the probe failed."""
     max_names = 65536
     rc, data = run_bounded(
         [
@@ -282,7 +277,7 @@ def diff_requires_omission(
             return None
         path = os.fsdecode(fields[i])
         i += 1
-        if status[:1] == b"D" or is_sensitive_path(path, custom_log_rels=extra_log_rels):
+        if is_sensitive_path(path, custom_log_rels=extra_log_rels):
             return True
     return False
 
@@ -354,7 +349,7 @@ def main() -> None:
         omission = diff_requires_omission(repo_root, [target], extra_log_rels)
         if omission is not False:
             reason = (
-                b"a sensitive path or tracked deletion is present"
+                b"a sensitive path is present"
                 if omission else b"the change-name probe was incomplete"
             )
             out.write(b"[... range diff content omitted because " + reason + b"; inspect directly with 'git diff " + target.encode("utf-8", errors="backslashreplace") + b" --' ...]\n")
