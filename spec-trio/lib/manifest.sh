@@ -80,6 +80,7 @@ fi
 MANIFEST_PATH=""
 MANIFEST_TMP=""
 MANIFEST_RUN_ID=""
+MANIFEST_EDIT_TMP=""
 
 _manifest_now_iso() {
   # ISO-8601 with timezone, portable across BSD (macOS) and GNU date.
@@ -138,12 +139,14 @@ _manifest_jq_inplace_to() {
     echo "manifest.sh: jq edit failed: $out" >&2
     return 1
   fi
-  tmp=$(mktemp "$target.tmp.XXXXXX") || {
+  MANIFEST_EDIT_TMP=$(mktemp "$target.tmp.XXXXXX") || {
     echo "manifest.sh: cannot create a temporary file next to $target" >&2
     return 1
   }
+  tmp="$MANIFEST_EDIT_TMP"
   if ! printf '%s\n' "$out" > "$tmp"; then
     rm -f "$tmp"
+    MANIFEST_EDIT_TMP=""
     echo "manifest.sh: cannot write $tmp" >&2
     return 1
   fi
@@ -151,9 +154,11 @@ _manifest_jq_inplace_to() {
   # between this check and mv remains possible without a no-target-dir mv.
   if [ -d "$target" ] || ! mv "$tmp" "$target"; then
     rm -f "$tmp"
+    MANIFEST_EDIT_TMP=""
     echo "manifest.sh: cannot publish $target" >&2
     return 1
   fi
+  MANIFEST_EDIT_TMP=""
 }
 
 # Apply a jq filter to MANIFEST_TMP atomically. Extra args (e.g. --arg name value)
@@ -406,6 +411,12 @@ manifest_finalize() {
 # to call when nothing is initialized. Nested-tolerant: trap handlers in
 # child dispatchers can call this unconditionally.
 manifest_cleanup() {
+  # A nested child can be interrupted while rewriting its parent's manifest.
+  # Discard only the child's staging file before preserving the parent tmp.
+  if [ -n "${MANIFEST_EDIT_TMP:-}" ] && [ -f "$MANIFEST_EDIT_TMP" ]; then
+    rm -f "$MANIFEST_EDIT_TMP"
+  fi
+  MANIFEST_EDIT_TMP=""
   if manifest_is_nested; then return 0; fi
   if [ -n "${MANIFEST_TMP:-}" ] && [ -f "$MANIFEST_TMP" ]; then
     rm -f "$MANIFEST_TMP"

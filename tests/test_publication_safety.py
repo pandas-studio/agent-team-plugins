@@ -18,10 +18,10 @@ class PublicationSafetyTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.env = {k: v for k, v in os.environ.items() if not k.startswith("MANIFEST_")}
 
-    def shell(self, plugin, script):
+    def shell(self, plugin, script, **extra_env):
         return subprocess.run(
             ["bash", "-c", script],
-            env=self.env | dict(P=str(ROOT / plugin), R=str(self.root), C=plugin),
+            env=self.env | dict(P=str(ROOT / plugin), R=str(self.root), C=plugin) | extra_env,
             text=True, capture_output=True, timeout=20,
         )
 
@@ -70,6 +70,34 @@ printf '%s\n' "$parent"
                 current = Path(result.stdout.strip())
                 self.assertEqual(current.read_bytes(), (self.root / f"{plugin}.before").read_bytes())
                 self.assertEqual(list(self.root.glob(current.name + ".tmp.*")), [])
+
+    def test_interrupted_rewrite_discards_staging_file(self):
+        for plugin in COPIES:
+            for nested in (False, True):
+                with self.subTest(plugin=plugin, nested=nested):
+                    result = self.shell(plugin, '''
+set -eu
+. "$P/lib/manifest.sh"
+manifest_init test "$R/$C-$NESTED.log"
+if [ "$NESTED" = nested ]; then
+  export MANIFEST_PARENT_TMP="$MANIFEST_TMP"
+fi
+trap 'manifest_cleanup' EXIT
+trap 'exit 143' TERM
+mv() { kill -TERM "$$"; sleep 1; }
+if [ "$NESTED" = nested ]; then
+  manifest_add_role child model ""
+else
+  manifest_add_input kind=interrupted value=yes
+fi
+exit 95
+''', NESTED="nested" if nested else "standalone")
+                    self.assertEqual(result.returncode, 143, result.stderr)
+                    primary = list(self.root.glob(
+                        f"{plugin}-{'nested' if nested else 'standalone'}.manifest.json.tmp.*"))
+                    self.assertEqual(len(primary), 1 if nested else 0)
+                    if nested:
+                        self.assertEqual(list(self.root.glob(primary[0].name + ".tmp.*")), [])
 
     def test_manifest_directory_destination_is_not_published(self):
         for plugin in COPIES:
