@@ -66,19 +66,25 @@ _dev_trio_symlink_owner() {
   fi
 }
 
-# macOS ACL allow entries can grant writes independently of mode bits. Accept
-# caller-only allows and denies; refuse any allow for another principal.
+# macOS ACL allow entries can grant writes independently of mode bits. ls may
+# print a UUID instead of a username; resolve the caller's UUID through the
+# directory service rather than assuming its form from the numeric UID.
 _dev_trio_darwin_acl_safe() {
-  local listing
+  local listing caller_uuid=""
   listing=$(LC_ALL=C /bin/ls -lde "$1" 2>/dev/null) || return 1
-  printf '%s\n' "$listing" | /usr/bin/awk -v caller="$2" '
+  case "$listing" in
+    *" allow "*) caller_uuid=$(/usr/bin/dsmemberutil getuuid -U "$2" 2>/dev/null) || caller_uuid="" ;;
+  esac
+  printf '%s\n' "$listing" | /usr/bin/awk -v caller="$2" -v caller_uuid="$caller_uuid" '
+    BEGIN { caller_uuid = toupper(caller_uuid) }
     NR == 1 { next }
     /^[[:space:]]*[0-9]+:/ {
       ace = $0
       sub(/^[[:space:]]*[0-9]+:[[:space:]]*/, "", ace)
       if (ace ~ /[[:space:]]allow[[:space:]]/) {
         sub(/[[:space:]]allow[[:space:]].*$/, "", ace)
-        if (ace != "user:" caller) bad = 1
+        sub(/[[:space:]]inherited$/, "", ace)
+        if (ace != "user:" caller && toupper(ace) != caller_uuid) bad = 1
       } else if (ace !~ /[[:space:]]deny[[:space:]]/) bad = 1
       next
     }
@@ -87,65 +93,32 @@ _dev_trio_darwin_acl_safe() {
   '
 }
 
-# NSS may suppress LDAP/SSSD enumeration while returning success. Only use
-# enumerated group membership as a UPG proof with local-only account sources.
-_dev_trio_linux_local_accounts() {
-  local config="${1:-/etc/nsswitch.conf}"
-  [ -r "$config" ] || return 1
-  awk '
-    { sub(/[[:space:]]*#.*/, "", $0) }
-    $1 == "passwd:" || $1 == "group:" {
-      seen[$1]++
-      if (NF != 2 || $2 != "files") bad = 1
-    }
-    END { exit (bad || seen["passwd:"] != 1 || seen["group:"] != 1) }
-  ' "$config"
-}
-
 # A matching user/group name alone does not establish that a group is private.
-# Refuse the UPG exception when the account database cannot enumerate members.
+# Only macOS uses this exception. Linux account enumeration cannot establish
+# exclusive access to a group-writable ancestor across all local NSS sources.
 _dev_trio_private_group_gid() {
   local user_name group_name gid group_record user_records
+  [ "$_DEV_TRIO_OS" = Darwin ] || return 1
   user_name=$(id -un) && group_name=$(id -gn) && gid=$(id -g) || return 1
   [ -n "$user_name" ] && [ "$user_name" = "$group_name" ] || return 1
-  if [ "$_DEV_TRIO_OS" = Darwin ]; then
-    group_record=$(dscacheutil -q group -a gid "$gid") || return 1
-    user_records=$(dscacheutil -q user) || return 1
-    printf '%s\n' "$group_record" | awk -v user="$user_name" -v gid="$gid" '
-      $1 == "name:" { names++; if ($2 != user) bad = 1 }
-      $1 == "gid:" { gids++; if ($2 != gid) bad = 1 }
-      $1 == "users:" { for (i = 2; i <= NF; i++) if ($i != user) bad = 1 }
-      END { exit (bad || names != 1 || gids != 1) }
-    ' || return 1
-    printf '%s\n' "$user_records" | awk -v user="$user_name" -v gid="$gid" '
-      $1 == "name:" { name = $2 }
-      $1 == "gid:" && $2 == gid { if (name == user) own = 1; else bad = 1 }
-      END { exit (bad || !own) }
-    ' || return 1
-  else
-    _dev_trio_linux_local_accounts || return 1
-    group_record=$(getent group "$gid") || return 1
-    user_records=$(getent passwd) || return 1
-    printf '%s\n' "$group_record" | awk -F: -v user="$user_name" -v gid="$gid" '
-      NR == 1 && $1 == user && $3 == gid {
-        if ($4 != "") {
-          n = split($4, members, ",")
-          for (i = 1; i <= n; i++) if (members[i] != user) bad = 1
-        }
-        found = 1
-      }
-      END { exit (!found || bad || NR != 1) }
-    ' || return 1
-    printf '%s\n' "$user_records" | awk -F: -v user="$user_name" -v gid="$gid" '
-      $4 == gid { if ($1 == user) own = 1; else bad = 1 }
-      END { exit (bad || !own) }
-    ' || return 1
-  fi
+  group_record=$(dscacheutil -q group -a gid "$gid") || return 1
+  user_records=$(dscacheutil -q user) || return 1
+  printf '%s\n' "$group_record" | awk -v user="$user_name" -v gid="$gid" '
+    $1 == "name:" { names++; if ($2 != user) bad = 1 }
+    $1 == "gid:" { gids++; if ($2 != gid) bad = 1 }
+    $1 == "users:" { for (i = 2; i <= NF; i++) if ($i != user) bad = 1 }
+    END { exit (bad || names != 1 || gids != 1) }
+  ' || return 1
+  printf '%s\n' "$user_records" | awk -v user="$user_name" -v gid="$gid" '
+    $1 == "name:" { name = $2 }
+    $1 == "gid:" && $2 == gid { if (name == user) own = 1; else bad = 1 }
+    END { exit (bad || !own) }
+  ' || return 1
   printf '%s\n' "$gid"
 }
 
 _dev_trio_check_log_ancestors() {
-  local path="$1" team_dir="$2" uid="$3" private_gid="$4" caller="${5:-}" mode owner gid details link_owner
+  local path="$1" team_dir="$2" uid="$3" private_gid="$4" caller="${5:-}" mode owner gid details link_owner repair
   if [ "$_DEV_TRIO_OS" = Darwin ] && [ -z "$caller" ]; then
     caller=$(id -un) || return 1
   fi
@@ -178,11 +151,24 @@ _dev_trio_check_log_ancestors() {
     elif (( (mode & 0022) != 0 )); then
       if (( (mode & 01000) != 0 )); then
         : # Trusted sticky directory such as /tmp.
-      elif (( (mode & 0002) == 0 )) && [ "$owner" = "$uid" ] \
+      elif [ "$_DEV_TRIO_OS" = Darwin ] && (( (mode & 0002) == 0 )) && [ "$owner" = "$uid" ] \
            && [ "$gid" = "$private_gid" ]; then
         : # Caller-owned ancestor in the caller's user-private group.
       else
-        echo "dev-trio: unsafe log ancestor: $path (writable by other users without a trusted sticky directory or private group)" >&2
+        if (( (mode & 0022) == 0022 )); then
+          repair='chmod go-w'
+        elif (( (mode & 0020) != 0 )); then
+          repair='chmod g-w'
+        else
+          repair='chmod o-w'
+        fi
+        if [ "$owner" = 0 ]; then
+          printf 'dev-trio: unsafe log ancestor: %s (owned by root; choose a private log root or ask an administrator to run %s %q)\n' \
+            "$path" "$repair" "$path" >&2
+        else
+          printf 'dev-trio: unsafe log ancestor: %s (remove group/other write: %s %q)\n' \
+            "$path" "$repair" "$path" >&2
+        fi
         return 1
       fi
     fi
@@ -203,7 +189,10 @@ dev_trio_prepare_log_dir() {
     echo 'dev-trio: cannot identify caller for log ACL validation' >&2
     return 2
   fi
-  private_gid=$(_dev_trio_private_group_gid) || private_gid=-1
+  private_gid=-1
+  if [ "$_DEV_TRIO_OS" = Darwin ]; then
+    private_gid=$(_dev_trio_private_group_gid) || private_gid=-1
+  fi
   existing="$requested"
   while [ ! -e "$existing" ] && [ ! -L "$existing" ]; do
     existing=$(dirname "$existing")
@@ -234,6 +223,8 @@ dev_trio_fd_matches_path() {
   local format path_id fd_id
   if [ "$_DEV_TRIO_OS" = Darwin ]; then
     # devfs reports its own device number for /dev/fd, even with stat -L.
+    # The validated team directory keeps this regular path on one filesystem;
+    # another user cannot replace it with a path on a different device.
     format='%i %u'
     path_id=$(/usr/bin/stat -L -f "$format" "$1" 2>/dev/null) || return 1
     fd_id=$(/usr/bin/stat -L -f "$format" "/dev/fd/$2" 2>/dev/null) || return 1

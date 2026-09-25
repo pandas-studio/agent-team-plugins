@@ -446,26 +446,27 @@ Override the log root with `DEV_TRIO_LOG_DIR=/path/to/logs`. The wrappers create
 missing log directories with private permissions. An existing team log directory
 must be owned by the caller and must not be writable by group or others. Every
 ancestor, including a symlink target, must be owned by root or the caller. A
-writable ancestor is accepted only when it is sticky (as with `/tmp`) or is
-caller-owned in a verified user-private primary group. That check requires the
-group name to match the username and account enumeration to find no other
-supplementary or primary members. On Linux the UPG exception also requires
-local-only `passwd` and `group` NSS sources; LDAP, SSSD, other sources, or
-unavailable enumeration disable the exception because a successful partial
-listing cannot prove exclusivity. On macOS, every path component is checked
-for ACLs: deny entries are accepted, while an allow entry for anyone other
-than the caller is rejected even when mode bits appear safe.
-This is a snapshot of account membership, so remove group write from ancestors
-if group membership can change independently of the caller. The wrappers reject
-unsafe paths before invoking a model and never change permissions on an existing
-directory. Choose a private log root or repair its permissions yourself if
-validation fails. Existing team directories created as `0775` under `umask 002`
-must have group write removed before reuse (for example,
+writable ancestor is accepted when it is sticky (as with `/tmp`). On macOS, a
+caller-owned ancestor can also use a verified user-private primary group: the
+group name must match the username, and account enumeration must find no other
+supplementary or primary members. That membership check is a snapshot. On Linux,
+group-writable ancestors are rejected even when the group name matches the
+caller; account enumeration cannot establish exclusive access across all local
+sources. On macOS, every path component is checked for ACLs: deny entries and
+caller-only allow entries (including inherited entries) are accepted, while an
+allow entry for anyone else is rejected even when mode bits appear safe.
+The wrappers reject unsafe paths before invoking a model and never change
+permissions on an existing directory. Choose a private log root or run the
+repair command printed for each named ancestor. For a root-owned ancestor,
+choose another log root or ask an administrator to repair it. A `umask 002`
+can create new `0775` ancestors on Linux; `umask 022` affects future
+directories, while existing ones still need repair. Existing team directories
+created as `0775` must have group write removed before reuse (for example,
 `chmod g-w .dev-trio/log/<team>`). The same applies to existing
 `<ralph-or-spec-root>/log/<team>/{agy,codex}/<team>` directories. The wrappers
 do not change their modes. The team-directory rule is deliberately stricter
-than the UPG ancestor exception as a conservative policy; it does not by itself
-remove the risk from a group-writable ancestor.
+than the macOS user-private-group ancestor exception as a conservative policy;
+it does not by itself remove the risk from a group-writable ancestor.
 
 ## Live dashboard
 

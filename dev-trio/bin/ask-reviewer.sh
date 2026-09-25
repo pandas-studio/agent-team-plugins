@@ -563,7 +563,7 @@ fi
 # Read the exact bytes present at the post-call boundary through the held
 # descriptor. Path replacement after creation cannot alter replay or parsing.
 if [ -n "$TRANSCRIPT_OFFSET" ] && [ -n "$TRANSCRIPT_END" ]; then
-  FROZEN_TRANSCRIPT="$(mktemp "${TMPDIR:-/tmp}/ask-reviewer-frozen.XXXXXX")" || FROZEN_TRANSCRIPT=""
+  FROZEN_TRANSCRIPT="$(mktemp "$LOG_DIR/ask-reviewer-frozen.XXXXXX")" || FROZEN_TRANSCRIPT=""
   if [ -n "$FROZEN_TRANSCRIPT" ]; then
     tail -c "+$((TRANSCRIPT_OFFSET + 1))" <&7 \
       | head -c "$((TRANSCRIPT_END - TRANSCRIPT_OFFSET))" > "$FROZEN_TRANSCRIPT" || true
@@ -591,7 +591,7 @@ fi
 if ! registry_has_final "$REVIEWER_MODEL" && [ ! -s "$FINAL" ] \
    && [ -n "$TRANSCRIPT_OFFSET" ] && [ -n "$TRANSCRIPT_END" ]; then
   TRANSCRIPT_MARKER='=== RESPONSE ==='
-  if TRANSCRIPT_SNAP="$(mktemp "${TMPDIR:-/tmp}/ask-reviewer-transcript.XXXXXX")"; then
+  if TRANSCRIPT_SNAP="$(mktemp "$LOG_DIR/ask-reviewer-transcript.XXXXXX")"; then
     { printf '%s\n' "$TRANSCRIPT_MARKER"; transcript_range; } > "$TRANSCRIPT_SNAP" 2>/dev/null || true
     # A snapshot that came up short — a full temp filesystem — would otherwise
     # be extracted into a review that parses: a valid verdict line followed by

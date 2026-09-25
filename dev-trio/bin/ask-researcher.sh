@@ -149,7 +149,7 @@ research_agy_denials() {
   trap '[ -z "$RESEARCH_SNAPSHOT_PATH" ] || rm -f "$RESEARCH_SNAPSHOT_PATH"' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  snapshot=$(mktemp "${TMPDIR:-/tmp}/ask-researcher-frozen.XXXXXX") || return 0
+  snapshot=$(mktemp "$LOG_DIR/ask-researcher-frozen.XXXXXX") || return 0
   RESEARCH_SNAPSHOT_PATH="$snapshot"
   tail -c "+$((LOG_OFFSET + 1))" <&7 \
     | head -c "$((LOG_END - LOG_OFFSET))" > "$snapshot" || true

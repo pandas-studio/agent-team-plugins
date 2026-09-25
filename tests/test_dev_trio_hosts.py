@@ -225,9 +225,41 @@ printf x >&8
                                           DEV_TRIO_LOG_DIR=str(chosen))
                     self.assertEqual(result.returncode, 2, result.stderr)
                     self.assertIn("unsafe log ancestor", result.stderr)
+                    self.assertIn("chmod go-w", result.stderr)
                     self.assertEqual(self.recorded(), [])
                     self.assertFalse((root / "host-test").exists())
         self.assertEqual(root.stat().st_mode & 0o777, 0o777)
+
+    def test_linux_group_writable_ancestor_is_rejected_before_model(self):
+        root = self.root / "linux 775 ancestor"
+        root.mkdir()
+        root.chmod(0o775)
+        shim_dir = self.root / "linux path shims"
+        shim_dir.mkdir()
+        uname = shim_dir / "uname"
+        uname.write_text("#!/bin/sh\nprintf 'Linux\\n'\n")
+        uname.chmod(0o755)
+        if sys.platform == "darwin":
+            stat = shim_dir / "stat"
+            stat.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = -L ] && [ \"$2\" = -c ] && "
+                "[ \"$3\" = '%a %u %g' ]; then\n"
+                "  exec /usr/bin/stat -L -f '%Mp%Lp %u %g' \"$4\"\n"
+                "fi\n"
+                "exec /usr/bin/stat \"$@\"\n"
+            )
+            stat.chmod(0o755)
+        for wrapper in ("ask-reviewer.sh", "ask-researcher.sh"):
+            with self.subTest(wrapper=wrapper):
+                result = self.run_cli(
+                    wrapper, "private input", DEV_TRIO_LOG_DIR=str(root),
+                    PATH=f"{shim_dir}:{self.env['PATH']}")
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(f"unsafe log ancestor: {root}", result.stderr)
+                self.assertIn("chmod g-w", result.stderr)
+                self.assertEqual(self.recorded(), [])
+                self.assertFalse((root / "host-test").exists())
 
     def test_caller_owned_sticky_ancestor_and_safe_symlink_target_work(self):
         root = self.root / "custom logs"
@@ -274,6 +306,60 @@ printf x >&8
         finally:
             subprocess.run(["chmod", "-N", str(root)], check=True, capture_output=True)
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS ACL syntax")
+    def test_macos_inherited_caller_allow_does_not_block_private_log(self):
+        root = self.root / "caller ACL root"
+        root.mkdir()
+        caller = subprocess.check_output(["id", "-un"], text=True).strip()
+        subprocess.run(
+            ["chmod", "+a", f"user:{caller} allow add_file,add_subdirectory,"
+             "delete_child,directory_inherit", str(root)],
+            check=True, capture_output=True)
+        team = root / "host-test"
+        team.mkdir()
+        try:
+            listing = subprocess.check_output(["ls", "-lde", str(team)], text=True)
+            self.assertIn(" inherited allow ", listing)
+            result = self.run_cli("ask-reviewer.sh", "private input",
+                                  DEV_TRIO_LOG_DIR=str(root))
+            self.assertEqual(result.returncode, 0, result.stderr)
+        finally:
+            subprocess.run(["chmod", "-N", str(team)], check=True, capture_output=True)
+            subprocess.run(["chmod", "-N", str(root)], check=True, capture_output=True)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS ACL syntax")
+    def test_macos_acl_uuid_matches_only_the_caller_and_fails_closed(self):
+        root = self.root / "UUID ACL root"
+        root.mkdir()
+        caller = subprocess.check_output(["id", "-un"], text=True).strip()
+        caller_uuid = subprocess.check_output(
+            ["dsmemberutil", "getuuid", "-U", caller], text=True).strip()
+        subprocess.run(["chmod", "+a", f"user:{caller} allow add_file", str(root)],
+                       check=True, capture_output=True)
+
+        def check_acl(name):
+            return subprocess.run(
+                ["bash", "-c", '. "$1"; _dev_trio_darwin_acl_safe "$2" "$3"',
+                 "_", str(self.plugin / "lib/host.sh"), str(root), name],
+                text=True, capture_output=True, timeout=10)
+
+        try:
+            listing = subprocess.check_output(["ls", "-lde", str(root)], text=True)
+            self.assertIn(f"{caller_uuid} allow ", listing)
+            self.assertEqual(check_acl(caller).returncode, 0)
+            # An unknown caller makes dsmemberutil fail and must never accept
+            # the otherwise valid UUID allow entry.
+            self.assertNotEqual(check_acl("__dev_trio_missing_user__").returncode, 0)
+            other_uuid = subprocess.check_output(
+                ["dsmemberutil", "getuuid", "-U", "root"], text=True).strip()
+            subprocess.run(["chmod", "+a", "user:root allow add_file", str(root)],
+                           check=True, capture_output=True)
+            listing = subprocess.check_output(["ls", "-lde", str(root)], text=True)
+            self.assertIn(f"{other_uuid} allow ", listing)
+            self.assertNotEqual(check_acl(caller).returncode, 0)
+        finally:
+            subprocess.run(["chmod", "-N", str(root)], check=True, capture_output=True)
+
     def test_log_ancestor_owner_and_private_group_rules(self):
         script = r'''
 . "$1"
@@ -285,16 +371,19 @@ _dev_trio_dir_mode_owner() {
   fi
 }
 _dev_trio_darwin_acl_safe() { return 0; }
+_DEV_TRIO_OS="$TEST_PLATFORM"
 _dev_trio_check_log_ancestors "$CHECK_PATH" "$CHECK_TEAM" "$CHECK_UID" "$PRIVATE_GID"
 '''
         uid, gid = os.getuid(), os.getgid()
-        cases = (("775", uid, gid, gid, False, True),
-                 ("775", uid, gid, gid, True, False),
-                 ("775", uid, gid, -1, False, False),
-                 ("777", uid, gid, gid, False, False),
-                 ("755", uid + 100000, gid, gid, False, False))
-        for mode, owner, owner_gid, private_gid, team, allowed in cases:
-            with self.subTest(mode=mode, owner=owner, private_gid=private_gid,
+        cases = (("Darwin", "775", uid, gid, gid, False, True),
+                 ("Linux", "775", uid, gid, gid, False, False),
+                 ("Linux", "775", 0, gid, gid, False, False),
+                 ("Darwin", "775", uid, gid, gid, True, False),
+                 ("Darwin", "775", uid, gid, -1, False, False),
+                 ("Darwin", "777", uid, gid, gid, False, False),
+                 ("Linux", "755", uid + 100000, gid, gid, False, False))
+        for platform, mode, owner, owner_gid, private_gid, team, allowed in cases:
+            with self.subTest(platform=platform, mode=mode, owner=owner, private_gid=private_gid,
                               team=team):
                 path = str(self.root / "ancestor")
                 result = subprocess.run(
@@ -303,9 +392,13 @@ _dev_trio_check_log_ancestors "$CHECK_PATH" "$CHECK_TEAM" "$CHECK_UID" "$PRIVATE
                                         CHECK_MODE=mode, CHECK_OWNER=str(owner),
                                         CHECK_GID=str(owner_gid), CHECK_UID=str(uid),
                                         PRIVATE_GID=str(private_gid),
+                                        TEST_PLATFORM=platform,
                                         CHECK_TEAM=path if team else ""),
                     text=True, capture_output=True, timeout=10)
                 self.assertEqual(result.returncode == 0, allowed, result.stderr)
+                if platform == "Linux" and owner == 0 and mode == "775":
+                    self.assertIn("owned by root", result.stderr)
+                    self.assertIn("ask an administrator", result.stderr)
 
     def test_failed_group_name_lookup_never_enables_private_group(self):
         root = self.root / "shared group root"
@@ -327,7 +420,7 @@ _dev_trio_check_log_ancestors "$CHECK_PATH" "$CHECK_TEAM" "$CHECK_UID" "$PRIVATE
         self.assertIn("cannot identify caller", result.stderr)
         self.assertFalse((root / "host-test").exists())
 
-    def test_private_group_requires_exclusive_enumerated_membership(self):
+    def test_macos_private_group_requires_exclusive_enumerated_membership(self):
         shim_dir = self.root / "account shims"
         shim_dir.mkdir()
         group_fixture = self.root / "group fixture"
@@ -340,7 +433,6 @@ _dev_trio_check_log_ancestors "$CHECK_PATH" "$CHECK_TEAM" "$CHECK_UID" "$PRIVATE
                               "  *) exit 1 ;;\n"
                               "esac\n")
         identifier.chmod(0o755)
-        (shim_dir / "uname").write_text("#!/bin/sh\necho \"$TEST_PLATFORM\"\n")
         (shim_dir / "dscacheutil").write_text(
             "#!/bin/sh\n"
             "case \"$2\" in\n"
@@ -348,57 +440,28 @@ _dev_trio_check_log_ancestors "$CHECK_PATH" "$CHECK_TEAM" "$CHECK_UID" "$PRIVATE
             "  user) cat \"$USERS_FIXTURE\" ;;\n"
             "  *) exit 1 ;;\n"
             "esac\n")
-        (shim_dir / "getent").write_text(
-            "#!/bin/sh\n"
-            "case \"$1\" in\n"
-            "  group) cat \"$GROUP_FIXTURE\" ;;\n"
-            "  passwd) cat \"$USERS_FIXTURE\" ;;\n"
-            "  *) exit 1 ;;\n"
-            "esac\n")
-        for name in ("uname", "dscacheutil", "getent"):
-            (shim_dir / name).chmod(0o755)
-        for platform in ("Darwin", "Linux"):
-            for members, peer, enumerable, allowed in (("", False, True, True),
-                                                       ("peer", False, True, False),
-                                                       ("", True, True, False),
-                                                       ("", False, False, False)):
-                with self.subTest(platform=platform, members=members,
-                                  primary_peer=peer, enumerable=enumerable):
-                    if platform == "Darwin":
-                        group_fixture.write_text("name: isolated\ngid: 60606\n"
-                                                 f"users: {members}\n")
-                        users = ("name: isolated\ngid: 60606\n\n"
-                                 + ("name: peer\ngid: 60606\n" if peer else ""))
-                    else:
-                        group_fixture.write_text(f"isolated:x:60606:{members}\n")
-                        users = ("isolated:x:60606:60606::/tmp:/bin/sh\n"
-                                 + ("peer:x:60607:60606::/tmp:/bin/sh\n" if peer else ""))
-                    users_fixture.write_text(users if enumerable else "")
-                    result = subprocess.run(
-                        ["bash", "-c", '. "$1"; _dev_trio_linux_local_accounts() { return 0; }; _dev_trio_private_group_gid', "_",
-                         str(self.plugin / "lib/host.sh")],
-                        env=self.env | dict(PATH=f"{shim_dir}:{self.env['PATH']}",
-                                            TEST_PLATFORM=platform,
-                                            GROUP_FIXTURE=str(group_fixture),
-                                            USERS_FIXTURE=str(users_fixture)),
-                        text=True, capture_output=True, timeout=10)
-                    self.assertEqual(result.returncode == 0, allowed, result.stderr)
-                    if allowed:
-                        self.assertEqual(result.stdout.strip(), "60606")
-
-    def test_linux_upg_requires_local_only_account_sources(self):
-        config = self.root / "nsswitch.conf"
-        for lines, allowed in (("passwd: files\ngroup: files\n", True),
-                               ("passwd: files sss\ngroup: files\n", False),
-                               ("passwd: files\ngroup: files ldap\n", False),
-                               ("passwd: files\n", False)):
-            with self.subTest(config=lines):
-                config.write_text(lines)
+        (shim_dir / "dscacheutil").chmod(0o755)
+        for members, peer, enumerable, allowed in (("", False, True, True),
+                                                   ("peer", False, True, False),
+                                                   ("", True, True, False),
+                                                   ("", False, False, False)):
+            with self.subTest(members=members, primary_peer=peer,
+                              enumerable=enumerable):
+                group_fixture.write_text("name: isolated\ngid: 60606\n"
+                                         f"users: {members}\n")
+                users = ("name: isolated\ngid: 60606\n\n"
+                         + ("name: peer\ngid: 60606\n" if peer else ""))
+                users_fixture.write_text(users if enumerable else "")
                 result = subprocess.run(
-                    ["bash", "-c", '. "$1"; _dev_trio_linux_local_accounts "$2"',
-                     "_", str(self.plugin / "lib/host.sh"), str(config)],
+                    ["bash", "-c", '. "$1"; _DEV_TRIO_OS=Darwin; _dev_trio_private_group_gid',
+                     "_", str(self.plugin / "lib/host.sh")],
+                    env=self.env | dict(PATH=f"{shim_dir}:{self.env['PATH']}",
+                                        GROUP_FIXTURE=str(group_fixture),
+                                        USERS_FIXTURE=str(users_fixture)),
                     text=True, capture_output=True, timeout=10)
                 self.assertEqual(result.returncode == 0, allowed, result.stderr)
+                if allowed:
+                    self.assertEqual(result.stdout.strip(), "60606")
 
     def test_untrusted_symlink_owner_is_rejected(self):
         target = self.root / "trusted target"
@@ -545,6 +608,28 @@ _dev_trio_check_log_ancestors "$CHECK_PATH" '' "$CHECK_UID" -1
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(probe.read_text().strip(), "closed")
 
+    def test_reviewer_snapshots_use_private_log_directory(self):
+        shim_dir = self.root / "mktemp shim"
+        shim_dir.mkdir()
+        record = self.root / "mktemp templates"
+        shim = shim_dir / "mktemp"
+        shim.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$@\" >> \"$MKTEMP_RECORD\"\n"
+            "exec /usr/bin/mktemp \"$@\"\n"
+        )
+        shim.chmod(0o755)
+        result = self.run_cli(
+            "ask-reviewer.sh", "private input", DEV_TRIO_REVIEWER_MODEL="agy",
+            PATH=f"{shim_dir}:{self.env['PATH']}", MKTEMP_RECORD=str(record))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        logdir = self.workspace / ".dev-trio/log/host-test"
+        templates = record.read_text().splitlines()
+        self.assertIn(str(logdir / "ask-reviewer-frozen.XXXXXX"), templates)
+        self.assertIn(str(logdir / "ask-reviewer-transcript.XXXXXX"), templates)
+        self.assertEqual(list(logdir.glob("ask-reviewer-frozen.*")), [])
+        self.assertEqual(list(logdir.glob("ask-reviewer-transcript.*")), [])
+
     def test_research_denial_snapshot_is_removed(self):
         temporary = self.root / "snapshot tmp"
         temporary.mkdir()
@@ -552,6 +637,8 @@ _dev_trio_check_log_ancestors "$CHECK_PATH" '' "$CHECK_UID" -1
                               TMPDIR=str(temporary), STUB_RESPONSE="")
         self.assertEqual(result.returncode, 5, result.stderr)
         self.assertEqual(list(temporary.glob("ask-researcher-frozen.*")), [])
+        self.assertEqual(list((self.workspace / ".dev-trio/log/host-test").glob(
+            "ask-researcher-frozen.*")), [])
 
     def test_research_denial_snapshot_is_removed_on_term(self):
         temporary = self.root / "interrupted snapshot tmp"
@@ -585,10 +672,16 @@ _dev_trio_check_log_ancestors "$CHECK_PATH" '' "$CHECK_UID" -1
                     and time.monotonic() < deadline:
                 time.sleep(0.05)
             self.assertTrue(ready.exists(), "research denial snapshot did not start")
+            logdir = self.workspace / ".dev-trio/log/host-test"
+            snapshots = list(logdir.glob("ask-researcher-frozen.*"))
+            self.assertEqual(len(snapshots), 1)
+            self.assertEqual(snapshots[0].stat().st_mode & 0o777, 0o600)
+            self.assertEqual(list(temporary.glob("ask-researcher-frozen.*")), [])
             os.killpg(process.pid, signal.SIGTERM)
             _, stderr = process.communicate(timeout=15)
             self.assertEqual(process.returncode, 143, stderr)
             self.assertEqual(list(temporary.glob("ask-researcher-frozen.*")), [])
+            self.assertEqual(list(logdir.glob("ask-researcher-frozen.*")), [])
         finally:
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGKILL)
