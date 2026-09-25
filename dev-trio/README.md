@@ -467,6 +467,11 @@ created as `0775` must have group write removed before reuse (for example,
 do not change their modes. The team-directory rule is deliberately stricter
 than the macOS user-private-group ancestor exception as a conservative policy;
 it does not by itself remove the risk from a group-writable ancestor.
+Artifact and receipt paths use the resolved physical log directory (for
+example, `/private/tmp` when the requested path uses macOS `/tmp`). An unclean
+termination can leave private `*.manifest.json.tmp.*`, `*.run.json.tmp.*`, or
+`review-receipt.*.tmp.*` staging files there; remove them after confirming that
+the run is no longer active.
 
 ## Live dashboard
 

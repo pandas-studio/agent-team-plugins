@@ -327,13 +327,33 @@ printf x >&8
             subprocess.run(["chmod", "-N", str(team)], check=True, capture_output=True)
             subprocess.run(["chmod", "-N", str(root)], check=True, capture_output=True)
 
+    def test_darwin_acl_listing_uuid_matches_only_caller(self):
+        # Synthetic ls output exercises the POSIX awk parser on macOS and Linux CI.
+        # Both environments provide the /usr/bin/awk path used by host.sh.
+        caller_uuid = "FFFFEEEE-DDDD-CCCC-BBBB-AAAA000001F5"
+        other_uuid = "FFFFEEEE-DDDD-CCCC-BBBB-AAAA000001F6"
+        cases = ((caller_uuid, caller_uuid, True),
+                 (f"{caller_uuid} inherited", caller_uuid, True),
+                 (other_uuid, caller_uuid, False),
+                 (caller_uuid, "", False),
+                 ("user:caller", "", True),
+                 ("user:other", caller_uuid, False))
+        for principal, resolved_uuid, allowed in cases:
+            with self.subTest(principal=principal, resolved_uuid=resolved_uuid):
+                listing = ("drwx------ 2 caller staff 64 Sep 25 10:00 /safe\n"
+                           f" 0: {principal} allow add_file\n")
+                result = subprocess.run(
+                    ["bash", "-c",
+                     '. "$1"; _dev_trio_darwin_acl_listing_safe "$2" "$3"',
+                     "_", str(self.plugin / "lib/host.sh"), "caller", resolved_uuid],
+                    input=listing, text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode == 0, allowed, result.stderr)
+
     @unittest.skipUnless(sys.platform == "darwin", "macOS ACL syntax")
-    def test_macos_acl_uuid_matches_only_the_caller_and_fails_closed(self):
+    def test_macos_acl_allow_uses_resolved_principal_and_fails_closed(self):
         root = self.root / "UUID ACL root"
         root.mkdir()
         caller = subprocess.check_output(["id", "-un"], text=True).strip()
-        caller_uuid = subprocess.check_output(
-            ["dsmemberutil", "getuuid", "-U", caller], text=True).strip()
         subprocess.run(["chmod", "+a", f"user:{caller} allow add_file", str(root)],
                        check=True, capture_output=True)
 
@@ -345,17 +365,15 @@ printf x >&8
 
         try:
             listing = subprocess.check_output(["ls", "-lde", str(root)], text=True)
-            self.assertIn(f"{caller_uuid} allow ", listing)
+            self.assertIn(" allow ", listing)
             self.assertEqual(check_acl(caller).returncode, 0)
             # An unknown caller makes dsmemberutil fail and must never accept
-            # the otherwise valid UUID allow entry.
+            # the caller's allow entry, whether ls prints a name or UUID.
             self.assertNotEqual(check_acl("__dev_trio_missing_user__").returncode, 0)
-            other_uuid = subprocess.check_output(
-                ["dsmemberutil", "getuuid", "-U", "root"], text=True).strip()
             subprocess.run(["chmod", "+a", "user:root allow add_file", str(root)],
                            check=True, capture_output=True)
             listing = subprocess.check_output(["ls", "-lde", str(root)], text=True)
-            self.assertIn(f"{other_uuid} allow ", listing)
+            self.assertGreaterEqual(listing.count(" allow "), 2)
             self.assertNotEqual(check_acl(caller).returncode, 0)
         finally:
             subprocess.run(["chmod", "-N", str(root)], check=True, capture_output=True)

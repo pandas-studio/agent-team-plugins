@@ -18,6 +18,10 @@
 # {prompt} expands to the full prompt string; {final} expands to a path the CLI
 # should write its final/last message to. Templates are expanded into an argv
 # ARRAY (no eval, no word-splitting) so a multi-line {prompt} stays one argv.
+# "args" is required and may be empty (a stdin CLI that takes no arguments);
+# "final_args" is optional. Every element is passed exactly as written, newlines
+# included; an element holding NUL cannot be an argument and is refused. {final}
+# belongs in final_args only, {cwd} and {cli_log} in the prefixes below only.
 #
 # How the prompt reaches the CLI — "prompt_via" (#102):
 #   "argv" (default)  {prompt} is one argument. Linux refuses a single argument
@@ -33,8 +37,12 @@
 #                     claude and codex models use it (`claude -p`,
 #                     `codex exec -`); agy has no documented text form and
 #                     stays on argv.
-# A "stdin" template that contains {prompt}, or any other prompt_via value, is
-# a configuration error (rc 3), as `agent-team-models doctor` reports.
+# A "stdin" template that contains {prompt}, an "argv" model whose template
+# has no {prompt} (the CLI would run without ever seeing the prompt, #119), or
+# any other prompt_via value is a configuration error (rc 3), as
+# `agent-team-models doctor` reports. For an argv model the template checked is
+# the one that runs: final_args when non-empty (registry_run uses a caller's
+# final file only then, and every wrapper passes one), otherwise args.
 #
 # Two optional, caller-gated prefixes (built-in agy defines both):
 #   "workspace_args": ["--add-dir", "{cwd}"]      # {cwd} = $REGISTRY_WORKSPACE
@@ -227,10 +235,11 @@ _registry_model_def() {
 }
 
 # Echo each element of a model's array field (args|final_args|workspace_args|
-# log_args) on its own line.
+# log_args), each followed by a NUL, for `while IFS= read -r -d ''`. An element
+# may hold newlines (#130); registry_check_def refuses a template holding NUL.
 _registry_model_array() {
   local id="$1" field="$2"
-  _registry_model_def "$id" | jq -r --arg f "$field" '(.[$f] // [])[]'
+  _registry_model_def "$id" | jq -j --arg f "$field" '(.[$f] // [])[] | (., "\u0000")'
 }
 
 # ---- queries ----------------------------------------------------------------
@@ -277,19 +286,98 @@ registry_prompt_via() {
   esac
 }
 
-# registry_check_model <model-id> — rc 0 when the model's templates agree with
-# its prompt_via; otherwise rc 3 with the reason on stderr. A stdin model whose
-# args or final_args still contains {prompt} would put the prompt in argv too.
-registry_check_model() {
-  local id="$1" via n
-  via="$(registry_prompt_via "$id")" || return 3
-  [ "$via" = stdin ] || return 0
-  n="$(_registry_model_def "$id" \
-    | jq -r '[((.args // []) + (.final_args // []))[] | select(. == "{prompt}")] | length')"
-  if [ "$n" != 0 ]; then
-    echo "registry: model '$id' takes its prompt on stdin (prompt_via \"stdin\") but a template still contains {prompt}; remove it" >&2
+# _registry_def_problem <definition-json> — the model-definition rule, shared
+# with the runtime's definition_problem (registry.py) and held to it by
+# runtime/tests/test_registry_differential.py (#130). Prints one compact JSON
+# line: null when the definition is valid, otherwise {"field", "reason"} for the
+# first rule it breaks, in this order:
+#   1. definition   it is not an object.
+#   2. prompt_via   present, and not "argv" or "stdin" (absent means argv).
+#   3. args         missing, or not an array of strings; an element holds NUL,
+#                   or is {final} (args runs exactly when nothing captures a
+#                   final answer), {cwd} or {cli_log} (prefix placeholders).
+#   4. final_args   present, and not an array of strings; an element holds NUL,
+#                   or is {cwd} or {cli_log}.
+#   4b. workspace_args, then log_args: present, and not an array of strings, or
+#                   an element holds NUL (registry_run reads them NUL-delimited).
+#   5. args, then final_args: a stdin model has {prompt} there, so the prompt
+#      would go in argv too.
+#   6. the running template — final_args when non-empty, otherwise args — of an
+#      argv model has no {prompt}, so the CLI never sees the prompt (#119). An
+#      unused args beside a non-empty final_args is not checked here;
+#      registry_run refuses it if a caller selects it without a final file.
+# Returns nonzero, printing nothing, when the text is not JSON.
+_registry_def_problem() {
+  printf '%s' "$1" | jq -c '
+    def shown: if type == "string" and all(explode[]; . >= 32) then "\u0027\(.)\u0027" else tojson end;
+    def refused($f): if $f == "args" then ["{final}", "{cwd}", "{cli_log}"]
+      elif $f == "final_args" then ["{cwd}", "{cli_log}"] else [] end;
+    def template_problem($f):
+      .[$f] as $t
+      | if ($t | type) != "array" or any($t[]; type != "string") then
+          "has \(if $f == "args" then "an" else "a" end) \($f) template that is not an array of strings"
+        elif any($t[]; any(explode[]; . == 0)) then
+          "has a NUL byte in its \($f) template, which no argument can carry"
+        else
+          ([$t[] | select(. as $e | any(refused($f)[]; . == $e))] | .[0]) as $p
+          | if $p == null then null
+            else "has \($p) in its \($f) template; {final} belongs in final_args, {cwd} and {cli_log} in workspace_args and log_args"
+            end
+        end;
+    def template($f): .[$f] // [];
+    def has_prompt: any(.[]; . == "{prompt}");
+    def problem($f; $why): {field: $f, reason: $why};
+    if type != "object" then problem("definition"; "is not a JSON object")
+    elif has("prompt_via") and .prompt_via != "argv" and .prompt_via != "stdin" then
+      problem("prompt_via"; "has prompt_via \(.prompt_via | shown); use \"argv\" or \"stdin\"")
+    elif has("args") | not then
+      problem("args"; "has no args template; give one, [] for a stdin CLI that takes no arguments")
+    elif template_problem("args") != null then problem("args"; template_problem("args"))
+    elif has("final_args") and template_problem("final_args") != null then
+      problem("final_args"; template_problem("final_args"))
+    elif has("workspace_args") and template_problem("workspace_args") != null then
+      problem("workspace_args"; template_problem("workspace_args"))
+    elif has("log_args") and template_problem("log_args") != null then
+      problem("log_args"; template_problem("log_args"))
+    elif .prompt_via == "stdin" then
+      ([("args", "final_args") as $f | select(template($f) | has_prompt) | $f] | .[0]) as $f
+      | if $f == null then null
+        else problem($f; "takes its prompt on stdin (prompt_via \"stdin\") but its \($f) template contains {prompt}; remove it")
+        end
+    else
+      (if (template("final_args") | length) > 0 then "final_args" else "args" end) as $f
+      | if template($f) | has_prompt then null
+        else problem($f; "takes its prompt as an argument (prompt_via \"argv\") but its \($f) template has no {prompt}, so the CLI would never see the prompt; add {prompt} where the prompt belongs, or use prompt_via \"stdin\"")
+        end
+    end' 2>/dev/null
+}
+
+# registry_check_def <model-id> <definition-json> — rc 0 when the definition
+# keeps the rule above; otherwise rc 3 with the reason on stderr. The one bash
+# copy of the rule: registry_check_model applies it to a configured model,
+# agent-team-models to a definition before saving it.
+registry_check_def() {
+  local id="$1" problem
+  if ! problem="$(_registry_def_problem "$2")" || [ -z "$problem" ]; then
+    echo "registry: model '$id' has a definition that is not valid JSON" >&2
     return 3
   fi
+  if [ "$problem" != null ]; then
+    echo "registry: model '$id' $(printf '%s' "$problem" | jq -r .reason)" >&2
+    return 3
+  fi
+}
+
+# registry_check_model <model-id> — registry_check_def for a configured model;
+# rc 3 for an unknown one.
+registry_check_model() {
+  local id="$1" def
+  def="$(_registry_model_def "$id")"
+  if [ -z "$def" ] || [ "$def" = "null" ]; then
+    echo "registry: unknown model '$id'" >&2
+    return 3
+  fi
+  registry_check_def "$id" "$def"
 }
 
 # _registry_prompt_bytes <string> — its length in bytes, not characters.
@@ -388,33 +476,47 @@ registry_run() {
   if [ -n "$final_file" ] && registry_has_final "$id"; then
     field="final_args"
   fi
+  # Elements arrive NUL-delimited, so one holding a newline stays one (#130).
+  # A template may be empty (a stdin CLI with no arguments): every expansion
+  # below is ${a[@]+"${a[@]}"}, since bash 3.2 under set -u calls an empty
+  # "${a[@]}" unbound.
   local tmpl=()
-  while IFS= read -r line; do
+  while IFS= read -r -d '' line; do
     tmpl+=("$line")
   done < <(_registry_model_array "$id" "$field")
-  if [ "${#tmpl[@]}" -eq 0 ]; then
-    echo "registry: model '$id' has no '$field' template" >&2
-    return 3
+  # registry_check_model checked the template that normally runs. A caller that
+  # gives no final file to a model with final_args selects args instead, and an
+  # argv model must carry the prompt there too (#119). Checked before the
+  # prefixes are added: {prompt} in workspace_args or log_args is not delivery.
+  if [ "$via" = argv ]; then
+    local has_prompt=0
+    for a in ${tmpl[@]+"${tmpl[@]}"}; do
+      [ "$a" != "{prompt}" ] || has_prompt=1
+    done
+    if [ "$has_prompt" = 0 ]; then
+      echo "registry: model '$id' takes its prompt as an argument (prompt_via \"argv\") but its $field template has no {prompt}, so the CLI would never see the prompt; nothing was started" >&2
+      return 3
+    fi
   fi
   # Caller-gated prefixes: log_args, then workspace_args, then the template.
   if [ -n "$workspace" ]; then
     local ws=()
-    while IFS= read -r line; do
+    while IFS= read -r -d '' line; do
       ws+=("$line")
     done < <(_registry_model_array "$id" workspace_args)
-    [ "${#ws[@]}" -eq 0 ] || tmpl=("${ws[@]}" "${tmpl[@]}")
+    [ "${#ws[@]}" -eq 0 ] || tmpl=("${ws[@]}" ${tmpl[@]+"${tmpl[@]}"})
   fi
   if [ -n "$cli_log" ]; then
     local lg=()
-    while IFS= read -r line; do
+    while IFS= read -r -d '' line; do
       lg+=("$line")
     done < <(_registry_model_array "$id" log_args)
-    [ "${#lg[@]}" -eq 0 ] || tmpl=("${lg[@]}" "${tmpl[@]}")
+    [ "${#lg[@]}" -eq 0 ] || tmpl=("${lg[@]}" ${tmpl[@]+"${tmpl[@]}"})
   fi
-  local argv=() in_argv=0
-  for a in "${tmpl[@]}"; do
+  local argv=()
+  for a in ${tmpl[@]+"${tmpl[@]}"}; do
     case "$a" in
-      "{prompt}")  argv+=("$prompt"); in_argv=1 ;;
+      "{prompt}")  argv+=("$prompt") ;;
       "{final}")   argv+=("$final_file") ;;
       "{cwd}")     argv+=("$workspace") ;;
       "{cli_log}") argv+=("$cli_log") ;;
@@ -425,25 +527,25 @@ registry_run() {
     # A here-string, not `printf | cli`: a pipeline writer would wait on a
     # child the CLI leaves holding stdin, and its SIGPIPE would need handling.
     if command -v stdbuf >/dev/null 2>&1; then
-      stdbuf -oL "$bin" "${argv[@]}" <<< "$prompt"
+      stdbuf -oL "$bin" ${argv[@]+"${argv[@]}"} <<< "$prompt"
     else
-      "$bin" "${argv[@]}" <<< "$prompt"
+      "$bin" ${argv[@]+"${argv[@]}"} <<< "$prompt"
     fi
     return
   fi
-  local limit bytes=0
+  local limit bytes
   limit="${REGISTRY_ARGV_MAX_BYTES:-131072}"
   case "$limit" in ''|*[!0-9]*) limit=131072 ;; esac
-  # Only a template that puts {prompt} in argv can hit the limit.
-  [ "$in_argv" = 0 ] || bytes="$(_registry_prompt_bytes "$prompt")"
-  if [ "$in_argv" = 1 ] && [ "$bytes" -ge "$limit" ]; then
+  # An argv template that runs always carries {prompt} (checked above).
+  bytes="$(_registry_prompt_bytes "$prompt")"
+  if [ "$bytes" -ge "$limit" ]; then
     echo "registry: model '$id' takes its prompt as one argument, and this prompt is $bytes bytes; Linux refuses a single argument of $limit bytes or more. Bind the role to a model with \"prompt_via\": \"stdin\", or pass less context." >&2
     return 3
   fi
   if command -v stdbuf >/dev/null 2>&1; then
-    stdbuf -oL "$bin" "${argv[@]}"
+    stdbuf -oL "$bin" ${argv[@]+"${argv[@]}"}
   else
-    "$bin" "${argv[@]}"
+    "$bin" ${argv[@]+"${argv[@]}"}
   fi
 }
 

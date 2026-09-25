@@ -88,17 +88,11 @@ _args_to_json() {
   printf '%s' "$out"
 }
 
-# Refuse to save a definition the registry would refuse to run.
+# Refuse to save a definition the registry would refuse to run: the same
+# registry_check_def that registry_run and doctor apply.
 _check_def() {
-  local id="$1" def="$2" why
-  why="$(printf '%s' "$def" | jq -r '
-    if (.prompt_via // "argv") as $v | ["argv","stdin"] | index($v) | not then
-      "prompt_via must be \"argv\" or \"stdin\""
-    elif (.prompt_via // "argv") == "stdin"
-         and ([((.args // []) + (.final_args // []))[] | select(. == "{prompt}")] | length) > 0 then
-      "a stdin model cannot keep {prompt} in a template; pass the templates without it"
-    else "" end')"
-  [ -z "$why" ] || die "$id: $why"
+  local why
+  why="$(registry_check_def "$1" "$2" 2>&1)" || die "${why#registry: }"
 }
 
 _role_source() {
@@ -221,6 +215,10 @@ cmd_preset() {
       [ -n "$name" ] || die "usage: $PROG preset add <name>  (available: $(registry_preset_names | tr '\n' ' '))"
       local preset
       preset="$(_registry_preset_json "$name")" || die "unknown preset '$name' (available: $(registry_preset_names | tr '\n' ' '))"
+      local pid
+      while IFS= read -r pid; do
+        _check_def "$pid" "$(printf '%s' "$preset" | jq -c --arg id "$pid" '.[$id]')"
+      done < <(printf '%s' "$preset" | jq -r 'keys[]')
       _registry_config_json | jq --argjson p "$preset" '.models = (.models + $p)' | _cfg_save
       echo "preset '$name' added -> models: $(printf '%s' "$preset" | jq -r 'keys | join(", ")')"
       echo "config: $CONFIG"

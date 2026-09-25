@@ -123,7 +123,7 @@ def test_cli_signal_cleans_child_and_preserves_nonapproval_status(tmp_path, sign
             f"tmp = pathlib.Path({str(marker)!r} + '.tmp'); tmp.write_text(str(os.getpid())); "
             f"os.replace(tmp, {str(marker)!r}); time.sleep(30)")
     config.write_text(json.dumps({
-        "models": {"fake": {"command": sys.executable, "args": ["-c", code]}},
+        "models": {"fake": {"command": sys.executable, "args": ["-c", code, "{prompt}"]}},
         "roles": {f"langgraph-conductor.{role}": "fake"
                   for role in ("planner", "researcher", "coder", "reviewer")},
     }))

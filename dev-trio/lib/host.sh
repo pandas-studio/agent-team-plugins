@@ -67,15 +67,10 @@ _dev_trio_symlink_owner() {
 }
 
 # macOS ACL allow entries can grant writes independently of mode bits. ls may
-# print a UUID instead of a username; resolve the caller's UUID through the
-# directory service rather than assuming its form from the numeric UID.
-_dev_trio_darwin_acl_safe() {
-  local listing caller_uuid=""
-  listing=$(LC_ALL=C /bin/ls -lde "$1" 2>/dev/null) || return 1
-  case "$listing" in
-    *" allow "*) caller_uuid=$(/usr/bin/dsmemberutil getuuid -U "$2" 2>/dev/null) || caller_uuid="" ;;
-  esac
-  printf '%s\n' "$listing" | /usr/bin/awk -v caller="$2" -v caller_uuid="$caller_uuid" '
+# print a UUID instead of a username. Parse either representation and reject a
+# UUID allow entry if directory services cannot resolve the caller's UUID.
+_dev_trio_darwin_acl_listing_safe() {
+  /usr/bin/awk -v caller="$1" -v caller_uuid="$2" '
     BEGIN { caller_uuid = toupper(caller_uuid) }
     NR == 1 { next }
     /^[[:space:]]*[0-9]+:/ {
@@ -91,6 +86,15 @@ _dev_trio_darwin_acl_safe() {
     NF { bad = 1 }
     END { exit bad }
   '
+}
+
+_dev_trio_darwin_acl_safe() {
+  local listing caller_uuid=""
+  listing=$(LC_ALL=C /bin/ls -lde "$1" 2>/dev/null) || return 1
+  case "$listing" in
+    *" allow "*) caller_uuid=$(/usr/bin/dsmemberutil getuuid -U "$2" 2>/dev/null) || caller_uuid="" ;;
+  esac
+  printf '%s\n' "$listing" | _dev_trio_darwin_acl_listing_safe "$2" "$caller_uuid"
 }
 
 # A matching user/group name alone does not establish that a group is private.
