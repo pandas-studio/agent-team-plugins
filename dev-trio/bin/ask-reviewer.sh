@@ -324,6 +324,8 @@ $(dev_trio_agy_exec_note "$AGY_WORKSPACE")"
         AGY_SCOPE="range"
       elif [ "$range_rc" -eq 124 ]; then
         SNAPSHOT_STATUS="skipped:timeout"
+      elif [ "$range_rc" -eq 3 ]; then
+        SNAPSHOT_STATUS="skipped:git-failed"
       else
         SNAPSHOT_STATUS="skipped:focus"
       fi

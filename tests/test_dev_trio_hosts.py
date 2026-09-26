@@ -1809,20 +1809,58 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
              'case "$*" in *--name-status*) sleep 15 ;; esac', 6),
             ("ls-files timeout", dict(scope="working-tree"), 'case "$*" in *ls-files*) sleep 15 ;; esac', 6),
         ]
+        # A timeout must come from the probe the case targets, not an earlier one.
+        targets = {"HEAD probe timeout": "--verify --quiet HEAD", "name-status timeout": "--name-status",
+                   "ls-files timeout": "ls-files"}
         for name, args, shim, rc in cases:
             with self.subTest(name):
                 env = {}
+                log = None
                 if shim:
-                    env["PATH"], _ = self.git_shim(shim)
+                    env["PATH"], log = self.git_shim(shim)
+                    log.unlink(missing_ok=True)
                 if rc == 6:
-                    env["DEV_TRIO_GIT_TIMEOUT"] = "1"
+                    env["DEV_TRIO_GIT_TIMEOUT"] = "2"
                 result = self.run_helper(**args, **env)
                 self.assertEqual(result.returncode, rc, result.stderr)
                 self.assertEqual(result.stdout, b"")
+                if name in targets:
+                    self.assertIn(targets[name], log.read_text().splitlines()[-1])
         with self.subTest("not a work tree"):
             shutil.rmtree(self.workspace / ".git")
             result = self.run_helper("working-tree")
             self.assertEqual((result.returncode, result.stdout), (4, b""))
+
+    def test_snapshot_helper_ls_files_read_error_skips(self):
+        # An error reading the ls-files pipe must not publish a partial list.
+        self._init_git_workspace()
+        (self.workspace / "u.txt").write_text("untracked\n")
+        code = (
+            "import os, runpy, stat, subprocess, sys\n"
+            "state = {'ls': False}\n"
+            "real_popen, real_read = subprocess.Popen, os.read\n"
+            "def popen(cmd, *a, **kw):\n"
+            "    proc = real_popen(cmd, *a, **kw)\n"
+            "    state['ls'] = state['ls'] or 'ls-files' in cmd\n"
+            "    return proc\n"
+            "def read(fd, n):\n"
+            "    if state['ls'] and stat.S_ISFIFO(os.fstat(fd).st_mode):\n"
+            "        raise OSError(5, 'injected')\n"
+            "    return real_read(fd, n)\n"
+            "subprocess.Popen, os.read = popen, read\n"
+            f"sys.argv = ['x', {str(self.workspace)!r}, 'working-tree', '', '65536', '']\n"
+            f"runpy.run_path({str(self.plugin / 'lib' / 'workspace_snapshot.py')!r}, run_name='__main__')\n"
+        )
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, timeout=20)
+        self.assertEqual((result.returncode, result.stdout), (5, b""), result.stderr)
+
+    def test_snapshot_status_range_probe_failure_is_git_failed(self):
+        self._commit_two()
+        path, log = self.git_shim("case \"$*\" in *'^{commit}'*) exit 128 ;; esac")
+        result = self.run_cli("ask-reviewer.sh", "review HEAD~1..HEAD", DEV_TRIO_REVIEWER_MODEL="agy", PATH=path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot_status(result, "skipped:git-failed")
+        self.assertTrue([c for c in log.read_text().splitlines() if "^{commit}" in c])
 
     def test_snapshot_helper_unsupported_platform(self):
         code = (

@@ -344,8 +344,9 @@ EOF_NOTE
 }
 
 # Scan focus string for an explicit revision range A..B or A...B.
-# Verifies both endpoints as commits in git before accepting. Returns 124 when
-# a probe timed out, 1 when there is no single verified range.
+# Verifies both endpoints as commits in git before accepting. Returns 0 with the
+# range, 1 when there is no single verified range, 124 when a probe timed out,
+# and 3 when a probe failed (anything but 0, 1 for "not a commit", or 124).
 dev_trio_extract_git_range() {
   local focus="$1"
   local repo="${2:-.}"
@@ -394,6 +395,10 @@ dev_trio_extract_git_range() {
       # A timed-out probe is not "no range"; the caller records a timeout.
       [ "$restore_f" = 1 ] || set +f
       return 124
+    fi
+    if [ "$left_rc" -gt 1 ] || [ "$right_rc" -gt 1 ]; then
+      [ "$restore_f" = 1 ] || set +f
+      return 3
     fi
     if [ "$left_rc" -eq 0 ] && [ "$right_rc" -eq 0 ]; then
       if [ -n "$matched_range" ]; then

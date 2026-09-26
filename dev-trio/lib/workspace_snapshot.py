@@ -127,11 +127,19 @@ def skip(code: int) -> None:
     sys.exit(code)
 
 
-def run_git(cmd: list[str], max_bytes: int) -> tuple[int, bytes]:
-    """run_bounded for the snapshot: a timed-out Git call drops the whole snapshot."""
+def run_git(
+    cmd: list[str], max_bytes: int, ok: tuple[int, ...] = (0,)
+) -> tuple[int, bytes]:
+    """run_bounded for the snapshot, and the one place Git outcomes are classified.
+
+    A timeout drops the whole snapshot as git-timeout; any exit status outside
+    `ok` (the ones this call site handles itself) drops it as git-failed.
+    """
     result = run_bounded(cmd, max_bytes)
     if result[0] == 124:
         skip(SKIP_GIT_TIMEOUT)
+    if result[0] not in ok:
+        skip(SKIP_GIT_FAILED)
     return result
 
 
@@ -289,8 +297,6 @@ def diff_requires_omission(
         ],
         max_names,
     )
-    if rc != 0:
-        skip(SKIP_GIT_FAILED)
     # Too many names or malformed output: omit content with a notice.
     if len(data) > max_names or (data and not data.endswith(b"\0")):
         return None
@@ -336,6 +342,7 @@ def main() -> None:
             "--is-inside-work-tree",
         ],
         1024,
+        ok=(0, 128),
     )
     if rc != 0 or wt_out.strip() != b"true":
         skip(SKIP_NOT_WORKTREE)
@@ -411,8 +418,6 @@ def main() -> None:
             ],
             remaining,
         )
-        if rc != 0:
-            skip(SKIP_GIT_FAILED)
         data = data.replace(b"\0", b"\\0")
         if len(data) > remaining:
             out.write(truncate_utf8(data, remaining))
@@ -442,8 +447,6 @@ def main() -> None:
             ],
             STATUS_PARSE_MAX_BYTES,
         )
-        if rc != 0:
-            skip(SKIP_GIT_FAILED)
         header = b"### Working tree status\n"
         if len(data) > STATUS_PARSE_MAX_BYTES:
             out.write(header)
@@ -530,11 +533,9 @@ def main() -> None:
                 "HEAD",
             ],
             1024,
+            # rev-parse --verify --quiet exits 1 for an unborn HEAD.
+            ok=(0, 1),
         )
-        # rev-parse --verify --quiet exits 1 for an unborn HEAD; anything
-        # else nonzero is a Git failure, not a repository without commits.
-        if rc_head not in (0, 1):
-            skip(SKIP_GIT_FAILED)
         has_head = rc_head == 0
 
         if has_head:
@@ -563,29 +564,26 @@ def main() -> None:
                 remaining,
             )
             diff_header = b"### Tracked modifications\n"
-            if rc != 0:
-                skip(SKIP_GIT_FAILED)
-            else:
-                out.write(diff_header)
-                remaining = max(0, remaining - len(diff_header))
-                if len(diff_data) > 0:
-                    diff_data = diff_data.replace(b"\0", b"\\0")
-                    if len(diff_data) > remaining:
-                        out.write(truncate_utf8(diff_data, remaining))
-                        out.write(
-                            f"\n[... tracked diff filled snapshot budget ({budget_bytes} bytes); untracked files were omitted. Run 'git diff HEAD --' for remaining changes and use 'git status --short --untracked-files=all' and your file viewer to inspect untracked files ...]\n".encode(
-                                "utf-8"
-                            )
+            out.write(diff_header)
+            remaining = max(0, remaining - len(diff_header))
+            if len(diff_data) > 0:
+                diff_data = diff_data.replace(b"\0", b"\\0")
+                if len(diff_data) > remaining:
+                    out.write(truncate_utf8(diff_data, remaining))
+                    out.write(
+                        f"\n[... tracked diff filled snapshot budget ({budget_bytes} bytes); untracked files were omitted. Run 'git diff HEAD --' for remaining changes and use 'git status --short --untracked-files=all' and your file viewer to inspect untracked files ...]\n".encode(
+                            "utf-8"
                         )
-                        sys.stdout.buffer.write(out.getvalue())
-                        sys.exit(0)
-                    else:
-                        out.write(diff_data)
-                        remaining = max(
-                            0, remaining - len(diff_data)
-                        )
+                    )
+                    sys.stdout.buffer.write(out.getvalue())
+                    sys.exit(0)
                 else:
-                    out.write(b"(no tracked modifications)\n")
+                    out.write(diff_data)
+                    remaining = max(
+                        0, remaining - len(diff_data)
+                    )
+            else:
+                out.write(b"(no tracked modifications)\n")
         else:
             # Initial repo without HEAD
             # Staged diff
@@ -614,9 +612,7 @@ def main() -> None:
                 remaining,
             )
             staged_header = b"### Staged modifications\n"
-            if rc != 0:
-                skip(SKIP_GIT_FAILED)
-            elif len(staged) > 0:
+            if len(staged) > 0:
                 staged = staged.replace(b"\0", b"\\0")
                 if len(staged_header) + len(staged) > remaining:
                     out.write(staged_header)
@@ -657,9 +653,7 @@ def main() -> None:
                 remaining,
             )
             unstaged_header = b"### Unstaged modifications\n"
-            if rc != 0:
-                skip(SKIP_GIT_FAILED)
-            elif len(unstaged) > 0:
+            if len(unstaged) > 0:
                 unstaged = unstaged.replace(b"\0", b"\\0")
                 if len(unstaged_header) + len(unstaged) > remaining:
                     out.write(unstaged_header)
@@ -757,6 +751,7 @@ def main() -> None:
                 paths = []
                 capped = False
                 timed_out = False
+                read_failed = False
                 buf = bytearray()
 
                 def consume_chunk(chunk: bytes) -> bool:
@@ -787,6 +782,7 @@ def main() -> None:
                             try:
                                 chunk = os.read(proc.stdout.fileno(), 65536)
                             except OSError:
+                                read_failed = True
                                 break
                             if not chunk:
                                 break
@@ -797,6 +793,7 @@ def main() -> None:
                                 try:
                                     chunk = os.read(proc.stdout.fileno(), 65536)
                                 except OSError:
+                                    read_failed = True
                                     break
                                 if not chunk:
                                     break
@@ -807,6 +804,7 @@ def main() -> None:
                         paths.append(os.fsdecode(bytes(buf)))
                     proc.wait(timeout=0.5)
                 except Exception:
+                    read_failed = True
                     kill_process_tree(proc)
                     try:
                         proc.wait(timeout=0.5)
@@ -819,9 +817,10 @@ def main() -> None:
                         except OSError:
                             pass
 
+                # The same classification as run_git; a partial list is never used.
                 if timed_out:
                     skip(SKIP_GIT_TIMEOUT)
-                if proc.returncode != 0 and not capped:
+                if read_failed or (proc.returncode != 0 and not capped):
                     skip(SKIP_GIT_FAILED)
                 else:
                     omitted_paths = []
