@@ -1,7 +1,7 @@
 {
   "name": "pandas-studio",
   "owner": { "name": "pandas-studio" },
-  "description": "Multi-CLI agent team patterns from pandas-studio's YouTube series. Each plugin packages a Claude-as-conductor pattern with companion CLIs (Antigravity, Codex) playing specialised roles.",
+  "description": "Multi-CLI agent team patterns from pandas-studio's YouTube series, including development, debate, iteration, specification, and evaluation with specialised CLI roles.",
   "plugins": [
     {
       "name": "dev-trio",
@@ -22,6 +22,11 @@
       "name": "spec-trio",
       "source": "./spec-trio",
       "description": "Spec-anchored ralph-trio: an external spec.md gates planner / coder / reviewer with allowlist scope checks + §-citation coverage. Planner can request pre-coding research (Antigravity). Depends on dev-trio's ask-researcher.sh/ask-reviewer.sh. bootstrap + install-pm skills."
+    },
+    {
+      "name": "eval-trio",
+      "source": "./eval-trio",
+      "description": "Evidence-first evaluator for local submitted results: fixed checks, structured Challenger counterexamples, independent Judge, and a private report."
     },
     {
       "name": "langgraph-conductor",

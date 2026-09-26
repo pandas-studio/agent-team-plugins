@@ -1,6 +1,6 @@
 # pandas-studio agent-team-plugins
 
-Claude Code plugin marketplace from pandas-studio's YouTube series on multi-CLI agent teams. Each plugin packages a *Claude-as-conductor* pattern: Claude orchestrates one or more companion CLIs (Antigravity, Codex) playing specialised roles, with a tmux multi-pane live view.
+Claude Code plugin marketplace from pandas-studio's YouTube series on multi-CLI agent teams. The plugins coordinate specialised CLI roles for development, debate, iteration, specification, and evaluation. Live tmux views are available for the earlier team patterns; Eval Trio produces a private report.
 
 `dev-trio` and `debate-conductor` also support **Codex as PM**. The CLI engine
 is shared; each host loads its own skills and PM policy. See
@@ -21,6 +21,7 @@ Then install the plugins you want:
 /plugin install debate-conductor@pandas-studio
 /plugin install ralph-trio@pandas-studio
 /plugin install spec-trio@pandas-studio
+/plugin install eval-trio@pandas-studio
 /plugin install langgraph-conductor@pandas-studio
 ```
 
@@ -30,6 +31,7 @@ Then install the plugins you want:
 codex plugin marketplace add /absolute/path/to/agent-team-plugins
 codex plugin add dev-trio@pandas-studio
 codex plugin add debate-conductor@pandas-studio
+codex plugin add eval-trio@pandas-studio
 ```
 
 ## Plugins
@@ -40,6 +42,7 @@ codex plugin add debate-conductor@pandas-studio
 | [debate-conductor](./debate-conductor) | Claude or Codex=PM · configurable generator/critic CLIs | EP B | shipped |
 | [ralph-trio](./ralph-trio) | Claude=Planner/Coder · Antigravity=Researcher · Codex=Reviewer | EP C | shipped |
 | [spec-trio](./spec-trio) | Spec-gated planner/coder/reviewer loop | EP D | shipped |
+| [eval-trio](./eval-trio) | Fixed checks · Challenger · Judge | EP E | preview |
 | [langgraph-conductor](./runtime) | Durable planner/researcher/coder/reviewer graph | Guide v1 | preview |
 
 ## Shared model configuration
@@ -139,6 +142,7 @@ claude --plugin-dir ./dev-trio           # load one plugin
 claude --plugin-dir ./debate-conductor
 claude --plugin-dir ./ralph-trio
 claude --plugin-dir ./spec-trio
+claude --plugin-dir ./eval-trio
 
 codex plugin marketplace add "$(pwd)"
 codex plugin add debate-conductor@pandas-studio

@@ -31,6 +31,7 @@ else
 fi
 
 python3 -m unittest discover -s "$ROOT/tests" -p 'test_*.py'
+python3 -m unittest discover -s "$ROOT/eval-trio/tests" -p 'test_*.py'
 
 "$ROOT/tests/smoke-hardening.sh"
 "$ROOT/tests/smoke-review-results.sh"

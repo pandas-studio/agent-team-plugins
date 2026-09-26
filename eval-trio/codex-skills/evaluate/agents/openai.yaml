@@ -1,0 +1,4 @@
+interface:
+  display_name: "Eval Trio"
+  short_description: "Evaluate a local submission"
+  default_prompt: "Use Eval Trio to evaluate this local submission against its task and criteria."

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/pandas-studio/agent-team-plugins/eval-trio/schema/report.schema.json",
+  "title": "Eval Trio report v1",
+  "type": "object",
+  "required": ["schema_version", "complete", "mode", "status", "reason", "exit_code", "inputs", "submission", "checks", "models", "evidence", "output_dir"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "complete": {"const": true},
+    "mode": {"enum": ["full", "checks-only", "review-only", null]},
+    "status": {"enum": ["PASS", "FAIL", "HOLD", "ERROR"]},
+    "reason": {"type": "string"},
+    "exit_code": {"enum": [0, 1, 2, 3]},
+    "inputs": {"type": "object"},
+    "submission": {"type": "object"},
+    "checks": {"type": "array", "items": {"type": "object"}},
+    "models": {"type": "object"},
+    "evidence": {"type": "object"},
+    "output_dir": {"type": "string"}
+  },
+  "allOf": [
+    {"if": {"properties": {"status": {"const": "PASS"}}},
+     "then": {"properties": {"exit_code": {"const": 0}, "mode": {"const": "full"}}}},
+    {"if": {"properties": {"status": {"const": "FAIL"}}},
+     "then": {"properties": {"exit_code": {"const": 1}}}},
+    {"if": {"properties": {"status": {"const": "HOLD"}}},
+     "then": {"properties": {"exit_code": {"const": 2}}}},
+    {"if": {"properties": {"status": {"const": "ERROR"}}},
+     "then": {"properties": {"exit_code": {"const": 3}}}}
+  ],
+  "additionalProperties": false
+}

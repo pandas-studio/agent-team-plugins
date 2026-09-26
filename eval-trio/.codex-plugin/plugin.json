@@ -1,0 +1,19 @@
+{
+  "name": "eval-trio",
+  "version": "0.1.0",
+  "description": "Evidence-first evaluation of a local submission with fixed checks, a Challenger, and an independent Judge.",
+  "author": {"name": "pandas-studio"},
+  "homepage": "https://github.com/pandas-studio/agent-team-plugins/tree/main/eval-trio",
+  "repository": "https://github.com/pandas-studio/agent-team-plugins",
+  "license": "MIT",
+  "skills": "./codex-skills/",
+  "interface": {
+    "displayName": "eval-trio",
+    "shortDescription": "Evaluate local work from frozen evidence",
+    "longDescription": "Run fixed checks, challenge the result, and judge it against task criteria with a structured report.",
+    "developerName": "pandas-studio",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Read"],
+    "defaultPrompt": ["Use eval-trio to evaluate this local submission."]
+  }
+}
