@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -21,7 +22,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 
-from .artifacts import ArtifactStore
+from .artifacts import ArtifactStore, directory_fd
 from .journal import CallJournal, RecoveryError
 from .policy import approval_route, parse_verdict, review_route
 from .process import Cancellation, ProcessResult, run_process
@@ -192,35 +193,83 @@ def _ignored_paths(repo_root: Path, excluded: list[str]) -> list[str]:
     return _keep(listed, excluded)
 
 
-def _file_digest(repo_root: Path, relative: str, *,
-                 real_dirs: dict[str, str] | None = None) -> str:
-    """Hash a path without following a symlink outside the repository.
+def _stat_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (info.st_mode, info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+            info.st_ctime_ns)
 
-    `real_dirs` caches resolved directories for one snapshot (a snapshot hashes
-    every file, and resolving each one dominated its cost). It must not outlive
-    the snapshot: a role could replace a directory with a symlink between two.
+
+def _attestation_changed(relative: str) -> ValueError:
+    return ValueError(
+        f"workspace changed while it was being attested (first: {relative!r}); "
+        "retry once writers have stopped"
+    )
+
+
+def _file_digest(repo_root: Path, relative: str, *,
+                 real_dirs: dict[str, str] | None = None,
+                 expected: os.stat_result | None = None) -> str:
+    """Hash a path through a pinned parent directory and a no-follow file handle.
+
+    `real_dirs` retains resolved directories for the snapshot's final move check.
+    It must not outlive the snapshot: a role could replace a directory between
+    two files. `expected` is the metadata used to derive the manifest mode.
     """
 
+    if not relative or any(part in {"", ".", ".."} for part in relative.split("/")):
+        raise ValueError(f"unsafe attestation path: {relative!r}")
     path = repo_root / relative
-    metadata = path.lstat()
-    if stat.S_ISLNK(metadata.st_mode):
-        kind = b"symlink"
-        content = os.fsencode(os.readlink(path))
-    elif stat.S_ISREG(metadata.st_mode):
+    try:
+        metadata = path.lstat()
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        raise _attestation_changed(relative) from exc
+    if expected is not None and _stat_identity(metadata) != _stat_identity(expected):
+        raise _attestation_changed(relative)
+    if stat.S_ISREG(metadata.st_mode):
         cache = {} if real_dirs is None else real_dirs
-        # The last component is a regular file, not a symlink, so the file's real
-        # path is its real parent directory plus its name.
         for directory in (str(repo_root), str(path.parent)):
             if directory not in cache:
                 cache[directory] = os.path.realpath(directory)
         root, parent = cache[str(repo_root)], cache[str(path.parent)]
         if parent != root and not parent.startswith(root + os.sep):
             raise ValueError(f"path resolves outside repository: {relative}")
-        kind = b"file"
-        content = path.read_bytes()
-    else:
+    elif not stat.S_ISLNK(metadata.st_mode):
         raise ValueError(f"cannot attest non-file untracked path: {relative}")
-    return hashlib.sha256(kind + b"\0" + content).hexdigest()
+
+    try:
+        with directory_fd(path.parent, create=False) as parent_fd:
+            if stat.S_ISLNK(metadata.st_mode):
+                before = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+                if _stat_identity(before) != _stat_identity(metadata):
+                    raise _attestation_changed(relative)
+                content = os.fsencode(os.readlink(path.name, dir_fd=parent_fd))
+                after = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+                if _stat_identity(after) != _stat_identity(before):
+                    raise _attestation_changed(relative)
+                return hashlib.sha256(b"symlink\0" + content).hexdigest()
+
+            # O_NONBLOCK prevents an attacker replacing the file with a FIFO
+            # from blocking before fstat can reject it.
+            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         dir_fd=parent_fd)
+            try:
+                opened = os.fstat(fd)
+                if (not stat.S_ISREG(opened.st_mode)
+                        or _stat_identity(opened) != _stat_identity(metadata)):
+                    raise _attestation_changed(relative)
+                digest = hashlib.sha256(b"file\0")
+                while chunk := os.read(fd, 1024 * 1024):
+                    digest.update(chunk)
+                after = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+                if (_stat_identity(os.fstat(fd)) != _stat_identity(opened)
+                        or _stat_identity(after) != _stat_identity(opened)):
+                    raise _attestation_changed(relative)
+                return digest.hexdigest()
+            finally:
+                os.close(fd)
+    except OSError as exc:
+        if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+            raise _attestation_changed(relative) from exc
+        raise
 
 
 def _refuse_redirected_repository(repo_root: Path) -> None:
@@ -444,7 +493,8 @@ def _manifest_entry(repo_root: Path, relative: str,
         mode = "100755" if metadata.st_mode & stat.S_IXUSR else "100644"
     else:
         raise ValueError(f"cannot attest non-file path: {relative}")
-    return {"mode": mode, "sha256": _file_digest(repo_root, relative, real_dirs=real_dirs)}
+    return {"mode": mode, "sha256": _file_digest(repo_root, relative, real_dirs=real_dirs,
+                                                   expected=metadata)}
 
 
 def _identity(repo_root: Path, relative: str) -> tuple[int, ...] | None:
@@ -452,8 +502,7 @@ def _identity(repo_root: Path, relative: str) -> tuple[int, ...] | None:
         info = (repo_root / relative).lstat()
     except (FileNotFoundError, NotADirectoryError):
         return None
-    return (info.st_mode, info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
-            info.st_ctime_ns)
+    return _stat_identity(info)
 
 
 def _hash_paths(repo_root: Path, paths: list[str]) -> dict[str, dict[str, str] | None]:
@@ -476,10 +525,7 @@ def _hash_paths(repo_root: Path, paths: list[str]) -> dict[str, dict[str, str] |
     moved += [directory for directory, real in real_dirs.items()
               if os.path.realpath(directory) != real]
     if moved:
-        raise ValueError(
-            f"workspace changed while it was being attested (first: {moved[0]!r}); "
-            "retry once writers have stopped"
-        )
+        raise _attestation_changed(moved[0])
     return entries
 
 
