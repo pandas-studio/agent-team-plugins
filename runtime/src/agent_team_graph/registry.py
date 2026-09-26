@@ -40,6 +40,20 @@ BUILTIN_MODELS: dict[str, dict[str, Any]] = {
             "-",
         ],
     },
+    "codex-plan": {
+        "command": "codex",
+        "env_command": "CODEX_CLI",
+        "prompt_via": "stdin",
+        "args": ["exec", "--skip-git-repo-check", "--sandbox", "read-only", "-"],
+        "final_args": ["exec", "--skip-git-repo-check", "--sandbox", "read-only", "--output-last-message", "{final}", "-"],
+    },
+    "codex-write": {
+        "command": "codex",
+        "env_command": "CODEX_CLI",
+        "prompt_via": "stdin",
+        "args": ["exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "-"],
+        "final_args": ["exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "--output-last-message", "{final}", "-"],
+    },
     # Codex injects its memory summary into every `exec` prompt while the
     # memories feature is on, so a review would carry earlier sessions' context.
     "codex-no-memories": {

@@ -48,6 +48,7 @@ export REVIEWER_ROLE_FILE
 . "$PLUGIN_ROOT/lib/manifest.sh" || { echo "spec-trio: failed to load lib/manifest.sh (jq missing?)" >&2; exit 2; }
 # shellcheck source=SCRIPTDIR/../lib/plugin-deps.sh
 . "$PLUGIN_ROOT/lib/plugin-deps.sh" || { echo "spec-trio: failed to load lib/plugin-deps.sh" >&2; exit 2; }
+. "$PLUGIN_ROOT/lib/model-stage.sh" || exit 2
 
 TEST_CMD=""
 MAX_ITER=""
@@ -68,6 +69,10 @@ SPEC_FILE=""
 STRICT_SCOPE=1
 COVERAGE_CHECK=0
 COVERAGE_REQUEUE=0
+PLANNER_MODEL_OPT=""
+CODER_MODEL_OPT=""
+REVIEWER_MODEL_OPT=""
+RESEARCHER_MODEL_OPT=""
 
 usage() { sed -n '2,27p' "$0" >&2; }
 
@@ -93,10 +98,25 @@ while [ "$#" -gt 0 ]; do
     --no-strict-scope) STRICT_SCOPE=0; shift ;;
     --coverage-check)    COVERAGE_CHECK=1; shift ;;
     --coverage-requeue)  COVERAGE_CHECK=1; COVERAGE_REQUEUE=1; shift ;;
+    --planner-model)   [ "$#" -ge 2 ] || exit 2; PLANNER_MODEL_OPT="$2"; shift 2 ;;
+    --coder-model)     [ "$#" -ge 2 ] || exit 2; CODER_MODEL_OPT="$2"; shift 2 ;;
+    --reviewer-model)  [ "$#" -ge 2 ] || exit 2; REVIEWER_MODEL_OPT="$2"; shift 2 ;;
+    --researcher-model) [ "$#" -ge 2 ] || exit 2; RESEARCHER_MODEL_OPT="$2"; shift 2 ;;
     -h|--help)         usage; exit 0 ;;
     *)                 echo "unknown arg: $1" >&2; usage; exit 2 ;;
   esac
 done
+
+TRIO_HOST=$(trio_host spec-trio) || exit 2
+PLANNER_MODEL=$(trio_resolve_model spec-trio planner "$PLANNER_MODEL_OPT") || exit 2
+CODER_MODEL=$(trio_resolve_model spec-trio coder "$CODER_MODEL_OPT") || exit 2
+export DEV_TRIO_PM_HOST="${DEV_TRIO_PM_HOST:-$TRIO_HOST}"
+[ -z "$REVIEWER_MODEL_OPT" ] || export DEV_TRIO_REVIEWER_MODEL="$REVIEWER_MODEL_OPT"
+[ -z "$RESEARCHER_MODEL_OPT" ] || export DEV_TRIO_RESEARCHER_MODEL="$RESEARCHER_MODEL_OPT"
+if [ "$DRY_RUN" != 1 ]; then
+  [ -n "${PLANNER_CLI:-}" ] || trio_check_model "$PLANNER_MODEL" || exit 2
+  [ -n "${CODER_CLI:-}" ] || trio_check_model "$CODER_MODEL" || exit 2
+fi
 
 # Reject missing verification before creating any workspace artifacts.
 if [ "$DRY_RUN" != "1" ] && [[ ! "$TEST_CMD" =~ [^[:space:]] ]]; then
@@ -543,7 +563,7 @@ while :; do
     PLAN="(dry-run plan for $TASK)"
     PLAN_STDOUT="$PLAN_LOG"
   else
-    manifest_add_role planner claude "$ROLES_DIR/planner.md" || exit 1
+    manifest_add_role planner "$PLANNER_MODEL" "$ROLES_DIR/planner.md" || exit 1
     [ -n "$PROMPT_FILE" ] && manifest_add_input kind=prompt-md path="$PROMPT_FILE"
     if [ "$INJECT_FIX_PLAN" = "1" ]; then
       manifest_add_input kind=fix-plan path="$FIX_PLAN_FILE" || exit 1
@@ -552,7 +572,11 @@ while :; do
     PLAN_PROMPT=$(build_planner_prompt "$TASK" "$SPEC_BODY" "$PROMPT_CONTEXT" "$FP_EXCERPT")
     PLAN_RC=0
     STAGE_PROMPT=$PLAN_PROMPT
-    spec_capture_stage planner "$PLAN_LOG" "${PLANNER_CLI:-${CLAUDE_CLI:-claude}}" -p || PLAN_RC=$?
+    if [ -n "${PLANNER_CLI:-}" ]; then
+      spec_capture_stage planner "$PLAN_LOG" "$PLANNER_CLI" -p || PLAN_RC=$?
+    else
+      spec_capture_stage planner "$PLAN_LOG" trio_stage_model "$PLANNER_MODEL" "${PLAN_LOG%.log}.final.md" || PLAN_RC=$?
+    fi
     spec_check_or_stop
     PLAN="$(cat "$PLAN_STDOUT" 2>/dev/null)"
     if [ "$PLAN_RC" != "0" ]; then
@@ -695,7 +719,7 @@ while :; do
       manifest_add_input kind=skip-reason value=dry-run || exit 1
       echo "[dry-run code] would implement plan for: $TASK" | tee "$CODE_LOG" >/dev/null
     else
-      manifest_add_role worker claude "$ROLES_DIR/worker.md" || exit 1
+      manifest_add_role worker "$CODER_MODEL" "$ROLES_DIR/worker.md" || exit 1
       [ -n "$PROMPT_FILE" ] && manifest_add_input kind=prompt-md path="$PROMPT_FILE"
       [ -n "$PRE_RESEARCH" ] && manifest_add_input kind=research path="$PLAN_RESEARCH_LOG"
       if [ "$INJECT_FIX_PLAN" = "1" ]; then
@@ -704,7 +728,11 @@ while :; do
       fi
       CODE_PROMPT=$(build_coder_prompt "$TASK" "$SPEC_BODY" "$PLAN" "$PROMPT_CONTEXT" "$PRE_RESEARCH" "$FP_EXCERPT")
       STAGE_PROMPT=$CODE_PROMPT
-      spec_capture_stage coder "$CODE_LOG" "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p || CODE_RC=$?
+      if [ -n "${CODER_CLI:-}" ]; then
+        spec_capture_stage coder "$CODE_LOG" "$CODER_CLI" -p || CODE_RC=$?
+      else
+        spec_capture_stage coder "$CODE_LOG" trio_stage_model "$CODER_MODEL" "${CODE_LOG%.log}.final.md" || CODE_RC=$?
+      fi
       spec_test_code "$CODE_RC" "$CODE_LOG"
     fi
     manifest_finalize || exit 1
@@ -890,9 +918,13 @@ $RESEARCH"
         CODE_PROMPT2=$(build_coder_prompt "$TASK" "$SPEC_BODY" "$PLAN" "$PROMPT_CONTEXT" "$RETRY_RESEARCH" "$FP_EXCERPT")
         CODE_RC=0
         if [ "$RESEARCH_RC" -eq 0 ]; then
-          manifest_add_role worker claude "$ROLES_DIR/worker.md" || exit 1
+          manifest_add_role worker "$CODER_MODEL" "$ROLES_DIR/worker.md" || exit 1
           STAGE_PROMPT=$CODE_PROMPT2
-          spec_capture_stage coder "$CODE2_LOG" "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p || CODE_RC=$?
+          if [ -n "${CODER_CLI:-}" ]; then
+            spec_capture_stage coder "$CODE2_LOG" "$CODER_CLI" -p || CODE_RC=$?
+          else
+            spec_capture_stage coder "$CODE2_LOG" trio_stage_model "$CODER_MODEL" "${CODE2_LOG%.log}.final.md" || CODE_RC=$?
+          fi
           spec_test_code "$CODE_RC" "$CODE2_LOG"
         else
           TEST_RC=0

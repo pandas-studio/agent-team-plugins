@@ -1,0 +1,19 @@
+{
+  "name": "spec-trio",
+  "version": "0.3.0",
+  "description": "Codex-conducted spec-gated planner, coder, and reviewer loops with selectable models.",
+  "author": {"name": "pandas-studio"},
+  "homepage": "https://github.com/pandas-studio/agent-team-plugins/tree/main/spec-trio",
+  "repository": "https://github.com/pandas-studio/agent-team-plugins",
+  "license": "MIT",
+  "skills": "./codex-skills/",
+  "interface": {
+    "displayName": "spec-trio",
+    "shortDescription": "Codex PM for spec-gated loops",
+    "longDescription": "Run bounded spec-anchored tasks with scope, test, review, and coverage gates.",
+    "developerName": "pandas-studio",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "defaultPrompt": ["Use spec-trio to implement this spec with tests and review gates."]
+  }
+}

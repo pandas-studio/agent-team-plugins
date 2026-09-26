@@ -15,7 +15,7 @@ Iterative LLM-driven coder loops, in four variants. The "Ralph Wiggum" pattern: 
 - `git`
 - `jq` 1.6+ — required for RFC 0004 run manifests
 - `python3` — used by the Stop-hook JSON emitter
-- `claude` (Claude Code CLI) — for `ralph-solo.sh` / `ralph-trio.sh` planner & coder stages
+- `claude` or `codex` for the selected planner and coder models; other CLIs require a registry adapter
 - `dev-trio` plugin for `ralph-trio.sh` / `ralph-meta.sh`, `debate-conductor` plugin for `ralph-debate.sh` (see [Sibling plugins outside a Claude Code session](#sibling-plugins-outside-a-claude-code-session))
 - Optional: `tmux` (only for `dashboard.sh`)
 
@@ -36,15 +36,15 @@ A plugin's `bin/` is on PATH only inside a Claude Code session with that plugin 
 
 1. `DEV_TRIO_BIN` / `DEBATE_CONDUCTOR_BIN` — the plugin's `bin/` directory. When it is set (non-empty) but lacks the script, the driver stops; it never falls back to another copy.
 2. `PATH`, as inside a session.
-3. `claude plugin list --json` (the `claude` on PATH), run in the directory the driver starts in: an enabled `dev-trio@pandas-studio` / `debate-conductor@pandas-studio` install. A project or local install counts only when the driver starts in that project's root. When several apply, local wins over project over user.
+3. The active host's plugin list: `claude plugin list --json` or `codex plugin list --json`. Claude project or local installs count only in the matching project; Codex uses the enabled installed cache version.
 
 Under cron or launchd, either set `DEV_TRIO_BIN` / `DEBATE_CONDUCTOR_BIN` to the installed plugin's real `bin/` (not a directory of symlinks; the scripts find their `lib/` next to it), or put the directory holding `claude` on PATH (e.g. `PATH=/Users/you/.local/bin:/usr/bin:/bin`). Step 3 always runs the `claude` it finds on PATH, never `CLAUDE_CLI`: that is the planner/coder model override, and a wrapper there could take `plugin list --json` as a prompt. Write absolute paths: launchd and crontab do not expand `~` or `$HOME` in these values. The model CLIs those scripts start (`codex`, `agy`, `claude`) still come from PATH or their own `*_CLI` variables. The doctor shows which step found each script.
 
 ### Planner and coder success
 
-Planner and coder CLIs are called as `CLI -p` with the prompt on stdin, the
-shape `ralph-solo.sh` has always used; one argument is capped at 128 KiB on
-Linux, and the plan and research context reach that. A `PLANNER_CLI` /
+The selected registry model receives the prompt on stdin or as one argument,
+according to its adapter. Built-in Codex models use `codex exec -` and capture
+`--output-last-message` as the stage answer. A `PLANNER_CLI` /
 `CODER_CLI` wrapper must pass stdin through (`exec claude "$@"` does); see
 [dev-trio's model configuration](../dev-trio/README.md#model-configuration). Each
 stage retains its diagnostic `.log` and adds a `.stdout.log` containing only
@@ -72,6 +72,27 @@ has stage rc 6. Manifests separately record `cli-rc`, `stage-rc`,
 cumulative review and scope baselines are unchanged.
 
 ## Install
+
+Codex PM installation (solo, trio, debate, and meta use the same drivers):
+
+```bash
+codex plugin marketplace add pandas-studio/agent-team-plugins
+codex plugin add ralph-trio@pandas-studio
+codex plugin add dev-trio@pandas-studio          # trio and meta
+codex plugin add debate-conductor@pandas-studio # debate
+```
+
+In Codex, use `$ralph-trio:bootstrap`, `$ralph-trio:run`, or the opt-in
+`$ralph-trio:install-pm`. Codex uses Bash for solo loops; the Claude Stop hook
+remains Claude-only. Set `RALPH_TRIO_PM_HOST=codex` when running scripts directly.
+Codex defaults are `codex-plan` for the planner, `codex-write` for coder/solo,
+Claude for dev-trio review, and Antigravity for research. Select other models
+with `--worker-model` (solo), `--planner-model` / `--coder-model` (trio), and
+`--reviewer-model` / `--researcher-model` (trio/meta). Debate accepts
+`--generator-model` / `--critic-model`. The shared registry also
+accepts `agent-team-models set-role ralph-trio.planner <model>` and its worker
+or coder equivalents. Run `agent-team-models preset add kimi-code` before
+choosing `kimi-code`; CLI authentication and edit permissions remain required.
 
 ```
 /plugin marketplace add pandas-studio/agent-team-plugins
@@ -251,7 +272,8 @@ ralph-trio/
 │   └── launchd/com.user.ralph.plist.template     # overnight scheduling on macOS
 ├── hooks/
 │   └── settings.snippet.json     # Stop-hook registration (used by install-stop-hook skill)
-├── skills/
+├── claude-skills/
+├── codex-skills/
 │   ├── bootstrap/SKILL.md        # /ralph-trio:bootstrap
 │   └── install-stop-hook/SKILL.md  # /ralph-trio:install-stop-hook
 └── .claude-plugin/plugin.json

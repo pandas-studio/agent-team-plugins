@@ -19,7 +19,7 @@
 # Usage:
 #   ralph-debate.sh --max-iter N --backlog PATH [--rounds N] [--prompt PATH]
 #                   [--fix-plan PATH] [--max-runtime SPEC] [--worktree]
-#                   [--base-branch BR] [--dry-run]
+#                   [--base-branch BR] [--generator-model ID] [--critic-model ID] [--dry-run]
 #
 # Prerequisites: debate-conductor plugin (debate.sh via DEBATE_CONDUCTOR_BIN, PATH or `claude plugin list`).
 #
@@ -48,6 +48,8 @@ BASE_BRANCH=""
 NO_VALIDATE=0
 MAX_DIFF_LINES=10000
 DRY_RUN=0
+GENERATOR_MODEL=""
+CRITIC_MODEL=""
 
 usage() { sed -n '2,29p' "$0" >&2; }
 
@@ -64,10 +66,17 @@ while [ "$#" -gt 0 ]; do
     --no-validate)     NO_VALIDATE=1; shift ;;
     --max-diff-lines)  MAX_DIFF_LINES="$2"; shift 2 ;;
     --dry-run)         DRY_RUN=1; shift ;;
+    --generator-model) [ "$#" -ge 2 ] || exit 2; GENERATOR_MODEL="$2"; shift 2 ;;
+    --critic-model)    [ "$#" -ge 2 ] || exit 2; CRITIC_MODEL="$2"; shift 2 ;;
     -h|--help)         usage; exit 0 ;;
     *)                 echo "unknown arg: $1" >&2; usage; exit 2 ;;
   esac
 done
+
+export DEBATE_CONDUCTOR_PM_HOST="${DEBATE_CONDUCTOR_PM_HOST:-${RALPH_TRIO_PM_HOST:-claude}}"
+DEBATE_MODEL_ARGS=()
+[ -z "$GENERATOR_MODEL" ] || DEBATE_MODEL_ARGS+=("--primary-gen=$GENERATOR_MODEL")
+[ -z "$CRITIC_MODEL" ] || DEBATE_MODEL_ARGS+=("--primary-crit=$CRITIC_MODEL")
 
 [ -z "$MAX_ITER" ]    && { echo "--max-iter is required" >&2; exit 2; }
 [ -z "$BACKLOG_FILE" ] && { echo "--backlog is required" >&2; exit 2; }
@@ -288,9 +297,9 @@ while :; do
     fi
     DEBATE_RC=0
     if [ -n "$PROMPT_FILE" ]; then
-      ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEBATE_LOG_DIR="$DEBATE_LOG_BASE" DEBATE_RECEIPT="$DEBATE_RECEIPT" "$DEBATE_SH" -n "$ROUNDS" "$TASK" "$PROMPT_FILE" >&2 ) || DEBATE_RC=$?
+      ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEBATE_LOG_DIR="$DEBATE_LOG_BASE" DEBATE_RECEIPT="$DEBATE_RECEIPT" "$DEBATE_SH" -n "$ROUNDS" ${DEBATE_MODEL_ARGS[@]+"${DEBATE_MODEL_ARGS[@]}"} "$TASK" "$PROMPT_FILE" >&2 ) || DEBATE_RC=$?
     else
-      ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEBATE_LOG_DIR="$DEBATE_LOG_BASE" DEBATE_RECEIPT="$DEBATE_RECEIPT" "$DEBATE_SH" -n "$ROUNDS" "$TASK" >&2 ) || DEBATE_RC=$?
+      ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEBATE_LOG_DIR="$DEBATE_LOG_BASE" DEBATE_RECEIPT="$DEBATE_RECEIPT" "$DEBATE_SH" -n "$ROUNDS" ${DEBATE_MODEL_ARGS[@]+"${DEBATE_MODEL_ARGS[@]}"} "$TASK" >&2 ) || DEBATE_RC=$?
     fi
     # What this invocation produced comes from its own receipt, never from the
     # team-wide `latest-debate` symlink: any other debate started in the same
