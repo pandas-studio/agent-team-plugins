@@ -289,7 +289,10 @@ def diff_requires_omission(
         ],
         max_names,
     )
-    if rc != 0 or len(data) > max_names or (data and not data.endswith(b"\0")):
+    if rc != 0:
+        skip(SKIP_GIT_FAILED)
+    # Too many names or malformed output: omit content with a notice.
+    if len(data) > max_names or (data and not data.endswith(b"\0")):
         return None
     fields = data.split(b"\0")[:-1] if data else []
     i = 0
@@ -528,6 +531,10 @@ def main() -> None:
             ],
             1024,
         )
+        # rev-parse --verify --quiet exits 1 for an unborn HEAD; anything
+        # else nonzero is a Git failure, not a repository without commits.
+        if rc_head not in (0, 1):
+            skip(SKIP_GIT_FAILED)
         has_head = rc_head == 0
 
         if has_head:

@@ -1723,28 +1723,31 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         self._init_git_workspace()
         path, _ = self.git_shim('case "$*" in *--show-toplevel*) sleep 15 ;; esac')
         t0 = time.time()
-        result = self.run_cli(DEV_TRIO_REVIEWER_MODEL="agy", DEV_TRIO_GIT_TIMEOUT="0.3", PATH=path)
+        result = self.run_cli(DEV_TRIO_REVIEWER_MODEL="agy", DEV_TRIO_GIT_TIMEOUT="2", PATH=path)
         self.assertEqual(result.returncode, 0, result.stderr)
-        # Without the timeout each probe sleeps 15 s; the bound only has to
-        # tell those apart, not measure the 0.3 s timeout itself.
+        # 2 s leaves room for a cold first exec of the shim, so the timeout
+        # comes from the targeted probe; each targeted probe sleeps 15 s.
         self.assertLess(time.time() - t0, 14.0)
         self.assert_snapshot_status(result, "skipped:timeout")
 
     def test_snapshot_status_range_probe_timeout_is_not_focus(self):
         self._commit_two()
-        path, _ = self.git_shim("case \"$*\" in *'^{commit}'*) sleep 15 ;; esac")
+        path, log = self.git_shim("case \"$*\" in *'^{commit}'*) sleep 15 ;; esac")
         result = self.run_cli("ask-reviewer.sh", "review HEAD~1..HEAD", DEV_TRIO_REVIEWER_MODEL="agy",
-                              DEV_TRIO_GIT_TIMEOUT="0.3", PATH=path)
+                              DEV_TRIO_GIT_TIMEOUT="2", PATH=path)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_snapshot_status(result, "skipped:timeout")
+        # The timeout came from the targeted probe, not a slow earlier one.
+        self.assertTrue([c for c in log.read_text().splitlines() if "^{commit}" in c])
 
     def test_snapshot_status_helper_git_timeout(self):
         self._init_git_workspace()
         (self.workspace / "f.txt").write_text("hello\n")
-        path, _ = self.git_shim('case "$*" in *" status "*) sleep 15 ;; esac')
-        result = self.run_cli(DEV_TRIO_REVIEWER_MODEL="agy", DEV_TRIO_GIT_TIMEOUT="0.3", PATH=path)
+        path, log = self.git_shim('case "$*" in *" status "*) sleep 15 ;; esac')
+        result = self.run_cli(DEV_TRIO_REVIEWER_MODEL="agy", DEV_TRIO_GIT_TIMEOUT="2", PATH=path)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_snapshot_status(result, "skipped:timeout")
+        self.assertTrue([c for c in log.read_text().splitlines() if " status " in c])
 
     def test_snapshot_range_prompt_has_range_rule_only(self):
         self._commit_two()
@@ -1794,6 +1797,10 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
             ("status failed", dict(scope="working-tree"), 'case "$*" in *" status "*) exit 1 ;; esac', 5),
             ("tracked diff failed", dict(scope="working-tree"), 'case "$*" in *" diff "*HEAD*) exit 1 ;; esac', 5),
             ("ls-files failed", dict(scope="working-tree"), 'case "$*" in *ls-files*) exit 1 ;; esac', 5),
+            ("HEAD probe failed", dict(scope="working-tree"),
+             'case "$*" in *"--verify --quiet HEAD"*) exit 128 ;; esac', 5),
+            ("name-status failed", dict(scope="range", target="HEAD~1..HEAD"),
+             'case "$*" in *--name-status*) exit 128 ;; esac', 5),
             ("status malformed", dict(scope="working-tree"),
              'case "$*" in *" status "*) printf "garbage\\0"; exit 0 ;; esac', 7),
             ("HEAD probe timeout", dict(scope="working-tree"),
