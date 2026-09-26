@@ -137,7 +137,8 @@ echo
 echo "2. Plugin layout"
 for rel in bin/ask-reviewer.sh bin/ask-researcher.sh bin/agent-team-models.sh \
            bin/dashboard.sh bin/team-layout.sh \
-           lib/manifest.sh lib/registry.sh lib/runstate.sh lib/host.sh lib/research_doctor.py \
+           lib/manifest.sh lib/registry.sh lib/runstate.sh lib/host.sh \
+           lib/research_doctor.py lib/workspace_snapshot.py \
            lib/pm.md lib/pm-codex.md \
            lib/roles/researcher.md lib/roles/reviewer.md; do
   p="$PLUGIN_ROOT/$rel"

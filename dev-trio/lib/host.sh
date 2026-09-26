@@ -261,9 +261,57 @@ dev_trio_new_log_fd_is_private() {
 # the wrappers what to tell it; they apply to any model that defines
 # workspace_args (registry_has_workspace), not to a binary name.
 
+# Execute a git probe command bounded by DEV_TRIO_GIT_TIMEOUT.
+dev_trio_git_bounded() {
+  local repo="$1"; shift
+  python3 -c '
+import math, os, signal, subprocess, sys
+repo = sys.argv[1]
+args = sys.argv[2:]
+try:
+    timeout = float(os.environ.get("DEV_TRIO_GIT_TIMEOUT", "10.0"))
+except ValueError:
+    timeout = 10.0
+if not math.isfinite(timeout) or timeout <= 0:
+    timeout = 10.0
+cmd = ["git", "-c", "core.fsmonitor=false", "-C", repo] + args
+env = os.environ.copy()
+env["GIT_OPTIONAL_LOCKS"] = "0"
+proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, start_new_session=True)
+try:
+    # This helper is for small rev-parse probes; do not use it for diffs.
+    data, _ = proc.communicate(timeout=timeout)
+    if proc.returncode == 0 and data:
+        if len(data) > 8192:
+            sys.exit(125)
+        sys.stdout.buffer.write(data)
+    sys.exit(proc.returncode)
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except OSError:
+        proc.kill()
+    sys.exit(124)
+' "$repo" "$@" 2>/dev/null
+}
+
 # The directory handed to --add-dir and named in the prompt.
 dev_trio_workspace_root() {
-  git rev-parse --show-toplevel 2>/dev/null || pwd
+  local root="" bounded_rc=0
+  root="$(dev_trio_git_bounded . rev-parse --show-toplevel 2>/dev/null)" || bounded_rc=$?
+  # Never repeat a failed bounded probe with an unbounded Git command.
+  # A non-repository has no root; another helper failure is diagnosed so a
+  # subdirectory cannot silently masquerade as a verified repository root.
+  if [ "$bounded_rc" -ne 0 ]; then
+    [ "$bounded_rc" -eq 128 ] || echo "dev-trio: bounded workspace root unavailable (rc=$bounded_rc); using cwd" >&2
+    pwd
+    return 0
+  fi
+  if [ -n "$root" ]; then
+    printf '%s\n' "$root"
+  else
+    pwd
+  fi
 }
 
 dev_trio_agy_home() {
@@ -293,4 +341,72 @@ dev_trio_agy_exec_note() {
 The repository root is \`$1\`; your working directory is \`$PWD\`. The root is also added to your workspace with --add-dir.
 Tool commands run in headless mode, where a command that no allow-rule matches is denied and ends this run with no answer at all. Keep shell commands to these read-only git forms, one simple command per tool call: \`git status\`, \`git diff\`, \`git log\` and \`git show\`, with arguments as needed. For the list of untracked files, use \`git status --short --untracked-files=all\` instead of \`git ls-files\` (plain \`git status --short\` folds an untracked directory into one line), then read every file it lists. No \`cd\`, no \`&&\`, \`||\` or \`;\`, no pipes, and no redirections such as \`2>/dev/null\`. Read and search files with your built-in file viewer and search tools, not with shell commands such as \`cat\`, \`grep\`, \`git grep\` or \`find\`. A test runner, build, interpreter such as \`python3\` or \`node\`, or script counts as a command you cannot run here: if confirming something would need one, name the command and record the gap in your answer instead. If a command is denied, do not retry a variant of it.
 EOF_NOTE
+}
+
+# Scan focus string for an explicit revision range A..B or A...B.
+# Verifies both endpoints as commits in git before accepting.
+dev_trio_extract_git_range() {
+  local focus="$1"
+  local repo="${2:-.}"
+  local token left right op candidate
+  local restore_f=0
+  local matched_range=""
+  local probe_count=0
+  case "$-" in *f*) restore_f=1 ;; esac
+  set -f
+  for token in $focus; do
+    case "$token" in
+      *...*)
+        op="..."
+        left="${token%%...*}"
+        right="${token#*...}"
+        ;;
+      *..*)
+        op=".."
+        left="${token%%..*}"
+        right="${token#*..}"
+        ;;
+      *) continue ;;
+    esac
+    left="${left#[(\"\'\`]}"
+    left="${left#[(\"\'\`]}"
+    right="${right%[.,;:)\"\'\`]}"
+    right="${right%[.,;:)\"\'\`]}"
+    right="${right%[.,;:)\"\'\`]}"
+    case "$left" in -*|""|*[!A-Za-z0-9_.~^/-]*) continue ;; esac
+    case "$right" in -*|""|*[!A-Za-z0-9_.~^/-]*) continue ;; esac
+    candidate="${left}${op}${right}"
+    # Repeated mentions of the accepted range need no new Git probes.
+    [ "$candidate" = "$matched_range" ] && continue
+    probe_count=$((probe_count + 1))
+    if [ "$probe_count" -gt 4 ]; then
+      [ "$restore_f" = 1 ] || set +f
+      return 1
+    fi
+    if dev_trio_git_bounded "$repo" rev-parse --verify --quiet "$left^{commit}" >/dev/null 2>&1 &&
+       dev_trio_git_bounded "$repo" rev-parse --verify --quiet "$right^{commit}" >/dev/null 2>&1; then
+      if [ -n "$matched_range" ]; then
+        if [ "$matched_range" != "$candidate" ]; then
+          # Multiple distinct ranges detected; ambiguous, do not precompute snapshot
+          [ "$restore_f" = 1 ] || set +f
+          return 1
+        fi
+      fi
+      matched_range="$candidate"
+    fi
+  done
+  [ "$restore_f" = 1 ] || set +f
+  if [ -n "$matched_range" ]; then
+    printf '%s\n' "$matched_range"
+    return 0
+  fi
+  return 1
+}
+
+# Invoke python workspace snapshot helper.
+dev_trio_workspace_snapshot() {
+  local repo="$1" scope="$2" target="$3" budget="$4" log_dir="$5"
+  local plugin_root
+  plugin_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+  python3 "$plugin_root/lib/workspace_snapshot.py" "$repo" "$scope" "$target" "$budget" "${log_dir:-}" 2>/dev/null
 }
