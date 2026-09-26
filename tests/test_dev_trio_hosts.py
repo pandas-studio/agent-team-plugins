@@ -1594,6 +1594,245 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         kinds = [inp.get("kind") for inp in data.get("inputs", [])]
         self.assertNotIn("workspace-snapshot", kinds)
 
+    # ---- snapshot status (#137) ----------------------------------------------
+    def snapshot_record(self):
+        """(manifest inputs, run.json inputs) of the newest review in logdir()."""
+        def newest(pattern):
+            paths = list(self.logdir().glob(pattern))
+            self.assertTrue(paths, pattern)
+            return max(paths, key=lambda p: p.stat().st_mtime_ns)
+        manifest = json.loads(newest("*.manifest.json").read_text())["inputs"]
+        run = json.loads(newest("*.run.json").read_text())["inputs"]
+        return manifest, run
+
+    def assert_snapshot_status(self, result, status):
+        manifest, run = self.snapshot_record()
+        run_status = [i["value"] for i in run if i.get("kind") == "workspace-snapshot-status"]
+        self.assertEqual(run_status, [status], run)
+        skipped = [i["value"] for i in manifest if i.get("kind") == "workspace-snapshot-skipped"]
+        injected = [i for i in manifest if i.get("kind") == "workspace-snapshot"]
+        line = "[ask-reviewer] workspace snapshot skipped: "
+        noted = [l[len(line):] for l in result.stderr.splitlines() if l.startswith(line)]
+        if status.startswith("ok:"):
+            self.assertEqual(skipped, [], manifest)
+            self.assertEqual(len(injected), 1, manifest)
+            self.assertTrue(injected[0]["value"].startswith(status[3:] + ":"), injected)
+            self.assertEqual(noted, [], result.stderr)
+        else:
+            reason = status[len("skipped:"):]
+            self.assertEqual(skipped, [reason], manifest)
+            self.assertEqual(injected, [], manifest)
+            self.assertEqual(noted, [] if reason in ("disabled", "focus") else [reason], result.stderr)
+
+    def git_shim(self, script_body):
+        """A git on PATH that logs its argv to git.log, runs script_body, then real git."""
+        bin_dir = self.root / "git_shim"
+        bin_dir.mkdir(exist_ok=True)
+        log = self.root / "git.log"
+        shim = bin_dir / "git"
+        shim.write_text(
+            "#!/bin/sh\n"
+            f'printf "%s\\n" "$*" >> "{log}"\n'
+            f"{script_body}\n"
+            f'exec {shutil.which("git")} "$@"\n'
+        )
+        shim.chmod(0o755)
+        return f"{bin_dir}:{self.env.get('PATH', os.environ.get('PATH', ''))}", log
+
+    def _commit_two(self):
+        self._init_git_workspace()
+        (self.workspace / "f.txt").write_text("v1\n")
+        subprocess.run(["git", "add", "f.txt"], cwd=self.workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "v1"], cwd=self.workspace, check=True, stdout=subprocess.DEVNULL)
+        (self.workspace / "f.txt").write_text("v2\n")
+        subprocess.run(["git", "commit", "-am", "v2"], cwd=self.workspace, check=True, stdout=subprocess.DEVNULL)
+
+    def test_snapshot_status_ok_working_tree(self):
+        self._init_git_workspace()
+        (self.workspace / "f.txt").write_text("hello\n")
+        result = self.run_cli(DEV_TRIO_REVIEWER_MODEL="agy")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot_status(result, "ok:working-tree")
+
+    def test_snapshot_status_disabled_runs_no_snapshot_probe(self):
+        self._init_git_workspace()
+        (self.workspace / "f.txt").write_text("hello\n")
+        path, log = self.git_shim(":")
+        result = self.run_cli(DEV_TRIO_REVIEWER_MODEL="agy", DEV_TRIO_SNAPSHOT_MAX_BYTES="0", PATH=path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot_status(result, "skipped:disabled")
+        calls = log.read_text().splitlines() if log.exists() else []
+        # The root lookup for --add-dir stays; the snapshot's own probes do not run.
+        self.assertFalse([c for c in calls if "--is-inside-work-tree" in c or " status" in c or " diff" in c], calls)
+        self.assertLessEqual(len([c for c in calls if "--show-toplevel" in c]), 1, calls)
+
+    def test_snapshot_status_freeform_focus_is_quiet(self):
+        self._init_git_workspace()
+        result = self.run_cli("ask-reviewer.sh", "review the styling", DEV_TRIO_REVIEWER_MODEL="agy")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot_status(result, "skipped:focus")
+
+    def test_snapshot_status_non_git_workspace_is_root(self):
+        result = self.run_cli(DEV_TRIO_REVIEWER_MODEL="agy")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot_status(result, "skipped:root")
+
+    def test_snapshot_status_budget(self):
+        self._init_git_workspace()
+        ctx = self.workspace / "context.md"
+        ctx.write_text("a" * 120000)
+        result = self.run_cli("ask-reviewer.sh", "--with-context", str(ctx), DEV_TRIO_REVIEWER_MODEL="agy",
+                              REGISTRY_ARGV_MAX_BYTES="131072")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot_status(result, "skipped:budget")
+
+    def test_snapshot_status_maps_each_helper_exit(self):
+        self._init_git_workspace()
+        helper = self.plugin / "lib" / "workspace_snapshot.py"
+        cases = {
+            "0": "skipped:empty", "1": "skipped:helper-failed", "2": "skipped:helper-failed",
+            "3": "skipped:helper-unsupported", "4": "skipped:helper-not-worktree",
+            "5": "skipped:helper-git-failed", "6": "skipped:timeout",
+            "7": "skipped:helper-parse-failed", "8": "skipped:budget",
+        }
+        for code, status in cases.items():
+            with self.subTest(code=code):
+                # Output before a nonzero exit is partial and must never be injected.
+                helper.write_text(f"import sys; sys.stdout.write('PARTIAL-SENTINEL\\n'); sys.exit({code})\n"
+                                  if code != "0" else "import sys; sys.exit(0)\n")
+                result = self.run_cli(DEV_TRIO_REVIEWER_MODEL="agy")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assert_snapshot_status(result, status)
+                self.assertNotIn("\n<workspace_snapshot>\n", self.recorded()[-1][-1])
+                self.assertNotIn("PARTIAL-SENTINEL", self.recorded()[-1][-1])
+
+    def test_snapshot_status_oversize(self):
+        # Range scope, so the working-tree focus substitution (quadratic in
+        # bash for multibyte prompts) does not dominate the test's time.
+        self._commit_two()
+        helper = self.plugin / "lib" / "workspace_snapshot.py"
+        # The margin the wrapper keeps is 8192 bytes; overshoot it.
+        helper.write_text("import sys; sys.stdout.write('x' * (int(sys.argv[4]) + 8192))\n")
+        result = self.run_cli("ask-reviewer.sh", "review HEAD~1..HEAD", DEV_TRIO_REVIEWER_MODEL="agy",
+                              DEV_TRIO_SNAPSHOT_MAX_BYTES="200000")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot_status(result, "skipped:oversize")
+        self.assertNotIn("<workspace_snapshot>", self.sent_prompt())
+
+    def test_snapshot_status_root_probe_timeout(self):
+        self._init_git_workspace()
+        path, _ = self.git_shim('case "$*" in *--show-toplevel*) sleep 15 ;; esac')
+        t0 = time.time()
+        result = self.run_cli(DEV_TRIO_REVIEWER_MODEL="agy", DEV_TRIO_GIT_TIMEOUT="0.3", PATH=path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Without the timeout each probe sleeps 15 s; the bound only has to
+        # tell those apart, not measure the 0.3 s timeout itself.
+        self.assertLess(time.time() - t0, 14.0)
+        self.assert_snapshot_status(result, "skipped:timeout")
+
+    def test_snapshot_status_range_probe_timeout_is_not_focus(self):
+        self._commit_two()
+        path, _ = self.git_shim("case \"$*\" in *'^{commit}'*) sleep 15 ;; esac")
+        result = self.run_cli("ask-reviewer.sh", "review HEAD~1..HEAD", DEV_TRIO_REVIEWER_MODEL="agy",
+                              DEV_TRIO_GIT_TIMEOUT="0.3", PATH=path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot_status(result, "skipped:timeout")
+
+    def test_snapshot_status_helper_git_timeout(self):
+        self._init_git_workspace()
+        (self.workspace / "f.txt").write_text("hello\n")
+        path, _ = self.git_shim('case "$*" in *" status "*) sleep 15 ;; esac')
+        result = self.run_cli(DEV_TRIO_REVIEWER_MODEL="agy", DEV_TRIO_GIT_TIMEOUT="0.3", PATH=path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot_status(result, "skipped:timeout")
+
+    def test_snapshot_range_prompt_has_range_rule_only(self):
+        self._commit_two()
+        result = self.run_cli("ask-reviewer.sh", "review HEAD~1..HEAD", DEV_TRIO_REVIEWER_MODEL="agy")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot_status(result, "ok:range")
+        prompt = self.sent_prompt()
+        self.assertIn("\n# Snapshot inspection rule (range)\nThe <workspace_snapshot> covers only `git diff HEAD~1..HEAD`.", prompt)
+        self.assertNotIn("\n# Snapshot inspection rule\n", prompt)
+
+    def test_snapshot_working_tree_prompt_has_no_range_rule(self):
+        self._init_git_workspace()
+        (self.workspace / "f.txt").write_text("hello\n")
+        result = self.run_cli(DEV_TRIO_REVIEWER_MODEL="agy")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        prompt = self.sent_prompt()
+        self.assertIn("\n# Snapshot inspection rule\n", prompt)
+        self.assertNotIn("Snapshot inspection rule (range)", prompt)
+
+    def test_snapshot_status_absent_for_models_without_workspace(self):
+        self._init_git_workspace()
+        for model in ("codex", "claude"):
+            with self.subTest(model=model):
+                result = self.run_cli(DEV_TRIO_REVIEWER_MODEL=model)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                manifest, run = self.snapshot_record()
+                for inputs in (manifest, run):
+                    self.assertFalse([i for i in inputs if i.get("kind", "").startswith("workspace-snapshot")], inputs)
+                self.assertNotIn("workspace snapshot", result.stderr)
+
+    def run_helper(self, scope, target="", budget="65536", **env):
+        return subprocess.run(
+            [sys.executable, str(self.plugin / "lib" / "workspace_snapshot.py"),
+             str(self.workspace), scope, target, budget, ""],
+            # A cold first exec of a shimmed git can take longer than a tight
+            # timeout; only the cases that expect a timeout shorten it.
+            env=os.environ | {"DEV_TRIO_GIT_TIMEOUT": "5"} | env,
+            capture_output=True, timeout=20,
+        )
+
+    def test_snapshot_helper_exit_codes(self):
+        self._commit_two()
+        (self.workspace / "u.txt").write_text("untracked\n")
+        cases = [
+            ("unknown scope", dict(scope="other"), None, 2),
+            ("budget", dict(scope="range", target="HEAD~1..HEAD", budget="4100"), None, 8),
+            ("status failed", dict(scope="working-tree"), 'case "$*" in *" status "*) exit 1 ;; esac', 5),
+            ("tracked diff failed", dict(scope="working-tree"), 'case "$*" in *" diff "*HEAD*) exit 1 ;; esac', 5),
+            ("ls-files failed", dict(scope="working-tree"), 'case "$*" in *ls-files*) exit 1 ;; esac', 5),
+            ("status malformed", dict(scope="working-tree"),
+             'case "$*" in *" status "*) printf "garbage\\0"; exit 0 ;; esac', 7),
+            ("HEAD probe timeout", dict(scope="working-tree"),
+             'case "$*" in *"--verify --quiet HEAD"*) sleep 15 ;; esac', 6),
+            ("name-status timeout", dict(scope="range", target="HEAD~1..HEAD"),
+             'case "$*" in *--name-status*) sleep 15 ;; esac', 6),
+            ("ls-files timeout", dict(scope="working-tree"), 'case "$*" in *ls-files*) sleep 15 ;; esac', 6),
+        ]
+        for name, args, shim, rc in cases:
+            with self.subTest(name):
+                env = {}
+                if shim:
+                    env["PATH"], _ = self.git_shim(shim)
+                if rc == 6:
+                    env["DEV_TRIO_GIT_TIMEOUT"] = "1"
+                result = self.run_helper(**args, **env)
+                self.assertEqual(result.returncode, rc, result.stderr)
+                self.assertEqual(result.stdout, b"")
+        with self.subTest("not a work tree"):
+            shutil.rmtree(self.workspace / ".git")
+            result = self.run_helper("working-tree")
+            self.assertEqual((result.returncode, result.stdout), (4, b""))
+
+    def test_snapshot_helper_unsupported_platform(self):
+        code = (
+            "import os, runpy, sys; del os.O_NOFOLLOW; "
+            f"sys.argv = ['x', {str(self.workspace)!r}, 'working-tree', '', '65536', '']; "
+            f"runpy.run_path({str(self.plugin / 'lib' / 'workspace_snapshot.py')!r}, run_name='__main__')"
+        )
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, timeout=20)
+        self.assertEqual((result.returncode, result.stdout), (3, b""), result.stderr)
+
+    def test_snapshot_helper_sensitive_omission_is_still_ok(self):
+        self._init_git_workspace()
+        (self.workspace / ".env").write_text("TOKEN=1\n")
+        result = self.run_helper("working-tree")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(b"omitted because a sensitive path", result.stdout)
+
     def test_agy_reviewer_nonfinite_git_timeout_uses_default(self):
         self._init_git_workspace()
         (self.workspace / "notes.txt").write_text("ordinary evidence\n")

@@ -112,6 +112,29 @@ def run_bounded(cmd: list[str], max_bytes: int, timeout: float = 10.0) -> tuple[
     return rc, data
 
 
+# Exit codes for a snapshot that was not produced. Each one prints nothing on
+# stdout, so the wrapper never injects partial output; it maps the code to a
+# fixed reason for the manifest, run.json and stderr (#137).
+SKIP_UNSUPPORTED = 3
+SKIP_NOT_WORKTREE = 4
+SKIP_GIT_FAILED = 5
+SKIP_GIT_TIMEOUT = 6
+SKIP_PARSE_FAILED = 7
+SKIP_BUDGET = 8
+
+
+def skip(code: int) -> None:
+    sys.exit(code)
+
+
+def run_git(cmd: list[str], max_bytes: int) -> tuple[int, bytes]:
+    """run_bounded for the snapshot: a timed-out Git call drops the whole snapshot."""
+    result = run_bounded(cmd, max_bytes)
+    if result[0] == 124:
+        skip(SKIP_GIT_TIMEOUT)
+    return result
+
+
 def truncate_utf8(data: bytes, limit: int) -> bytes:
     if len(data) <= limit:
         return data
@@ -258,7 +281,7 @@ def diff_requires_omission(
 ) -> bool | None:
     """Omit a committed range when a sensitive path changed or the probe failed."""
     max_names = 65536
-    rc, data = run_bounded(
+    rc, data = run_git(
         [
             "git", "-c", "core.fsmonitor=false", "-C", repo_root,
             "diff", "--name-status", "-z", "--no-renames",
@@ -284,7 +307,7 @@ def diff_requires_omission(
 
 def main() -> None:
     if not (hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")):
-        sys.exit(0)
+        skip(SKIP_UNSUPPORTED)
 
     if len(sys.argv) < 5:
         sys.exit(2)
@@ -292,12 +315,14 @@ def main() -> None:
     repo_root = sys.argv[1]
     scope = sys.argv[2]
     target = sys.argv[3]
+    if scope not in ("range", "working-tree"):
+        sys.exit(2)
     try:
         budget_bytes = int(sys.argv[4])
     except ValueError:
         sys.exit(2)
 
-    rc, wt_out = run_bounded(
+    rc, wt_out = run_git(
         [
             "git",
             "-c",
@@ -310,7 +335,7 @@ def main() -> None:
         1024,
     )
     if rc != 0 or wt_out.strip() != b"true":
-        sys.exit(0)
+        skip(SKIP_NOT_WORKTREE)
 
     out = io.BytesIO()
     effective_budget = max(0, budget_bytes - 4096)
@@ -342,7 +367,7 @@ def main() -> None:
     if scope == "range":
         header = f"### git diff {target}\n".encode("utf-8", errors="backslashreplace")
         if len(header) >= remaining:
-            sys.exit(0)
+            skip(SKIP_BUDGET)
         out.write(header)
         remaining -= len(header)
 
@@ -365,7 +390,7 @@ def main() -> None:
             sys.stdout.buffer.write(out.getvalue())
             sys.exit(0)
 
-        rc, data = run_bounded(
+        rc, data = run_git(
             [
                 "git",
                 "-c",
@@ -384,7 +409,7 @@ def main() -> None:
             remaining,
         )
         if rc != 0:
-            sys.exit(0)
+            skip(SKIP_GIT_FAILED)
         data = data.replace(b"\0", b"\\0")
         if len(data) > remaining:
             out.write(truncate_utf8(data, remaining))
@@ -398,7 +423,7 @@ def main() -> None:
 
     elif scope == "working-tree":
         # 1. Working tree status
-        rc, data = run_bounded(
+        rc, data = run_git(
             [
                 "git",
                 "-c",
@@ -415,7 +440,7 @@ def main() -> None:
             STATUS_PARSE_MAX_BYTES,
         )
         if rc != 0:
-            sys.exit(0)
+            skip(SKIP_GIT_FAILED)
         header = b"### Working tree status\n"
         if len(data) > STATUS_PARSE_MAX_BYTES:
             out.write(header)
@@ -427,7 +452,7 @@ def main() -> None:
         try:
             status_entries = parse_status_z(data)
         except ValueError:
-            sys.exit(0)
+            skip(SKIP_PARSE_FAILED)
         # Excluded log directories can still be either side of a move.
         # Preserve deletion and rename signals before hiding log paths.
         has_hidden_move_risk = any(
@@ -489,7 +514,7 @@ def main() -> None:
             sys.exit(0)
 
         # 2. Tracked modifications
-        rc_head, _ = run_bounded(
+        rc_head, _ = run_git(
             [
                 "git",
                 "-c",
@@ -512,7 +537,7 @@ def main() -> None:
                 )
                 sys.stdout.buffer.write(out.getvalue())
                 sys.exit(0)
-            rc, diff_data = run_bounded(
+            rc, diff_data = run_git(
                 [
                     "git",
                     "-c",
@@ -532,9 +557,7 @@ def main() -> None:
             )
             diff_header = b"### Tracked modifications\n"
             if rc != 0:
-                notice = b"[... tracked diff could not be retrieved; run 'git diff HEAD --' directly ...]\n"
-                out.write(diff_header + notice)
-                remaining = max(0, remaining - len(diff_header) - len(notice))
+                skip(SKIP_GIT_FAILED)
             else:
                 out.write(diff_header)
                 remaining = max(0, remaining - len(diff_header))
@@ -565,7 +588,7 @@ def main() -> None:
                 )
                 sys.stdout.buffer.write(out.getvalue())
                 sys.exit(0)
-            rc, staged = run_bounded(
+            rc, staged = run_git(
                 [
                     "git",
                     "-c",
@@ -585,9 +608,7 @@ def main() -> None:
             )
             staged_header = b"### Staged modifications\n"
             if rc != 0:
-                notice = b"[... staged diff could not be retrieved; run 'git diff --cached --' directly ...]\n"
-                out.write(staged_header + notice)
-                remaining = max(0, remaining - len(staged_header) - len(notice))
+                skip(SKIP_GIT_FAILED)
             elif len(staged) > 0:
                 staged = staged.replace(b"\0", b"\\0")
                 if len(staged_header) + len(staged) > remaining:
@@ -611,7 +632,7 @@ def main() -> None:
                 )
                 sys.stdout.buffer.write(out.getvalue())
                 sys.exit(0)
-            rc, unstaged = run_bounded(
+            rc, unstaged = run_git(
                 [
                     "git",
                     "-c",
@@ -630,11 +651,7 @@ def main() -> None:
             )
             unstaged_header = b"### Unstaged modifications\n"
             if rc != 0:
-                notice = b"[... unstaged diff could not be retrieved; run 'git diff --' directly ...]\n"
-                out.write(unstaged_header + notice)
-                remaining = max(
-                    0, remaining - len(unstaged_header) - len(notice)
-                )
+                skip(SKIP_GIT_FAILED)
             elif len(unstaged) > 0:
                 unstaged = unstaged.replace(b"\0", b"\\0")
                 if len(unstaged_header) + len(unstaged) > remaining:
@@ -795,10 +812,10 @@ def main() -> None:
                         except OSError:
                             pass
 
-                if timed_out or (proc.returncode != 0 and not capped):
-                    out.write(
-                        b"\n[... untracked files could not be listed; use 'git status --short --untracked-files=all' ...]\n"
-                    )
+                if timed_out:
+                    skip(SKIP_GIT_TIMEOUT)
+                if proc.returncode != 0 and not capped:
+                    skip(SKIP_GIT_FAILED)
                 else:
                     omitted_paths = []
                     if capped:
