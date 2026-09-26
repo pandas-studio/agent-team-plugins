@@ -17,7 +17,8 @@
 #      directory if relative). Set but lacking the script is an error (rc 2):
 #      an explicit choice is never silently replaced by another copy.
 #   2. PATH (`command -v`) — what a Claude Code session provides.
-#   3. `claude plugin list --json`, with the `claude` found on PATH, run in the
+#   3. The active host's plugin list: Codex's installed version cache, or
+#      `claude plugin list --json`, run in the
 #      current directory. Never CLAUDE_CLI: that is the planner/coder model
 #      override, and a wrapper there may take any argv as a prompt.
 #      Claude Code decides whether the plugin is enabled here; its `enabled`
@@ -66,6 +67,42 @@ resolve_plugin_script() {
     return 0
   fi
   RESOLVED_WHY="$RESOLVED_WHY; not on PATH"
+
+  # Codex does not guarantee plugin bin/ aliases on PATH. Resolve the enabled,
+  # installed exact version; a marketplace snapshot may be newer than the
+  # installed cache and must not be used as a silent substitute.
+  if [ "${RALPH_TRIO_PM_HOST:-${SPEC_TRIO_PM_HOST:-claude}}" = codex ]; then
+    if ! command -v codex >/dev/null 2>&1; then
+      RESOLVED_WHY="$RESOLVED_WHY; no codex on PATH to inspect plugins"
+      return 1
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+      RESOLVED_WHY="$RESOLVED_WHY; jq not found"
+      return 1
+    fi
+    out=$(codex plugin list --json </dev/null 2>/dev/null) || rc=$?
+    if [ "${rc:-0}" -ne 0 ] || ! jq -e '.installed | type == "array"' >/dev/null 2>&1 <<<"$out"; then
+      RESOLVED_WHY="$RESOLVED_WHY; codex plugin list --json failed"
+      return 1
+    fi
+    version=$(jq -r --arg id "$id" '.installed[] | select(.pluginId == $id and .installed == true and .enabled == true) | .version' <<<"$out" | head -1)
+    if [ -z "$version" ]; then
+      RESOLVED_WHY="$RESOLVED_WHY; $id is not enabled in Codex"
+      return 1
+    fi
+    case "$version" in *[!A-Za-z0-9.+_-]*|.|..)
+      RESOLVED_WHY="$RESOLVED_WHY; unsafe plugin version from Codex"; return 1 ;;
+    esac
+    local plugin="${id%@*}" marketplace="${id#*@}" cache_root
+    cache_root="${CODEX_HOME:-$HOME/.codex}/plugins/cache/$marketplace/$plugin/$version"
+    p="$cache_root/bin/$script"
+    if [ -f "$p" ] && [ -x "$p" ] && _plugin_deps_absolute "$p"; then
+      RESOLVED_SOURCE="codex plugin cache: $id $version"
+      return 0
+    fi
+    RESOLVED_WHY="$RESOLVED_WHY; exact Codex cache lacks $p"
+    return 1
+  fi
 
   if ! command -v claude >/dev/null 2>&1; then
     RESOLVED_WHY="$RESOLVED_WHY; no claude on PATH to ask for its plugin list"
@@ -121,6 +158,6 @@ plugin_deps_error() {
   if [ "$5" = "2" ]; then
     echo "ERROR: $1: $RESOLVED_WHY (it must name the $2 plugin's bin/ directory)${6:+  $6}" >&2
   else
-    echo "ERROR: $1 requires $3 from the $2 plugin — $RESOLVED_WHY. Install: /plugin install $2@pandas-studio, or set $4=<$2 plugin>/bin${6:+  $6}" >&2
+    echo "ERROR: $1 requires $3 from the $2 plugin — $RESOLVED_WHY. Install the sibling plugin for this host, or set $4=<$2 plugin>/bin${6:+  $6}" >&2
   fi
 }

@@ -15,7 +15,17 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-NAMES = {"dev-trio:" + name for name in ("bootstrap", "research", "review", "install-pm")}
+CODEX_NAMES = {
+    "dev-trio": {"bootstrap", "research", "review", "install-pm"},
+    "debate-conductor": {"bootstrap", "run", "continue", "install-pm"},
+    "ralph-trio": {"bootstrap", "run", "install-pm"},
+    "spec-trio": {"bootstrap", "run", "install-pm"},
+}
+CLAUDE_NAMES = {
+    **CODEX_NAMES,
+    "ralph-trio": {"bootstrap", "install-pm", "install-stop-hook"},
+    "spec-trio": {"bootstrap", "install-pm"},
+}
 
 
 def send(process, message):
@@ -55,7 +65,7 @@ def check_codex(root):
     Path(env["CODEX_HOME"]).mkdir()
     for command in (
         ["codex", "plugin", "marketplace", "add", str(root), "--json"],
-        ["codex", "plugin", "add", "dev-trio@pandas-studio", "--json"],
+        *(["codex", "plugin", "add", name + "@pandas-studio", "--json"] for name in CODEX_NAMES),
     ):
         subprocess.run(command, cwd=root, env=env, check=True, capture_output=True, timeout=30)
     process = subprocess.Popen(["codex", "app-server", "--stdio"], cwd=root, env=env,
@@ -75,22 +85,23 @@ def check_codex(root):
                 }})
             elif message.get("id") == 2:
                 data = message["result"]["data"][0]
-                skills = [s for s in data["skills"] if s.get("pluginId") == "dev-trio@pandas-studio"]
-                assert len(skills) == 4 and {s["name"] for s in skills} == NAMES, skills
-                assert all(s["enabled"] and "/codex-skills/" in s["path"] for s in skills), skills
+                for plugin, names in CODEX_NAMES.items():
+                    skills = [s for s in data["skills"] if s.get("pluginId") == plugin + "@pandas-studio"]
+                    assert {s["name"] for s in skills} == {plugin + ":" + name for name in names}, skills
+                    assert all(s["enabled"] and "/codex-skills/" in s["path"] for s in skills), skills
                 assert not data.get("errors"), data.get("errors")
-                print("Codex: four enabled skills from codex-skills in isolated installed cache")
+                print("Codex: four plugins loaded only their codex-skills")
                 return
     finally:
         stop(process)
 
 
-def check_claude(root):
+def check_claude(root, plugin):
     env = dict(os.environ, CLAUDE_CONFIG_DIR=str(root / "claude-config"))
     process = subprocess.Popen([
         "claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
         "--verbose", "--no-session-persistence", "--strict-mcp-config", "--setting-sources", "",
-        "--plugin-dir", str(root / "dev-trio"),
+        "--plugin-dir", str(root / plugin),
     ], cwd=root, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     try:
         send(process, {"type": "control_request", "request_id": "discovery",
@@ -100,16 +111,16 @@ def check_claude(root):
                 continue
             response = message["response"]
             assert response["subtype"] == "success", response
-            commands = [c for c in response["response"]["commands"] if c["name"].startswith("dev-trio:")]
-            assert len(commands) == 4 and {c["name"] for c in commands} == NAMES, commands
+            commands = [c for c in response["response"]["commands"] if c["name"].startswith(plugin + ":")]
+            assert {c["name"] for c in commands} == {plugin + ":" + name for name in CLAUDE_NAMES[plugin]}, commands
             # Check which host's variant was loaded, not merely the shared names.
             for command in commands:
                 name = command["name"].split(":", 1)[1]
-                text = (root / "dev-trio/claude-skills" / name / "SKILL.md").read_text()
+                text = (root / plugin / "claude-skills" / name / "SKILL.md").read_text()
                 description = next(line.removeprefix("description: ") for line in text.splitlines()
                                    if line.startswith("description: "))
                 assert description in command["description"], command
-            print("Claude: four commands with Claude skill descriptions, no Codex duplicates")
+            print(f"Claude: {plugin} loaded only its Claude skills")
             return
     finally:
         stop(process)
@@ -121,10 +132,12 @@ def main():
             raise SystemExit(f"{cli} is required for native loader checks")
     with tempfile.TemporaryDirectory(prefix="dev trio loaders ") as temporary:
         root = Path(temporary)
-        shutil.copytree(ROOT / "dev-trio", root / "dev-trio")
+        for plugin in CODEX_NAMES:
+            shutil.copytree(ROOT / plugin, root / plugin)
         shutil.copytree(ROOT / ".agents/plugins", root / ".agents/plugins")
         check_codex(root)
-        check_claude(root)
+        for plugin in CLAUDE_NAMES:
+            check_claude(root, plugin)
 
 
 if __name__ == "__main__":

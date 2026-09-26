@@ -14,7 +14,7 @@ Use spec-trio when you want **user intent to live outside the model** — the sp
 - `bash` (works with macOS 3.2; ≥ 4 recommended)
 - `git`
 - `jq` 1.6+ — required for RFC 0004 run manifests
-- `claude` (Claude Code CLI) — for planner & coder stages
+- `claude` or `codex` for the selected planner and coder models; other CLIs require a registry adapter
 - **`dev-trio` plugin** (provides `ask-reviewer.sh` reviewer + `ask-researcher.sh` Antigravity researcher; see [Sibling plugins outside a Claude Code session](#sibling-plugins-outside-a-claude-code-session))
 
 Override the model CLI per stage:
@@ -33,15 +33,15 @@ A plugin's `bin/` is on PATH only inside a Claude Code session with that plugin 
 
 1. `DEV_TRIO_BIN` — the dev-trio plugin's `bin/` directory. When it is set (non-empty) but lacks the script, the driver stops; it never falls back to another copy.
 2. `PATH`, as inside a session.
-3. `claude plugin list --json` (the `claude` on PATH), run in the directory the driver starts in: an enabled `dev-trio@pandas-studio` install. A project or local install counts only when the driver starts in that project's root. When several apply, local wins over project over user.
+3. The active host's plugin list: `claude plugin list --json` or `codex plugin list --json`. Claude project or local installs count only in the matching project; Codex uses the enabled installed cache version.
 
 Under cron or launchd, either set `DEV_TRIO_BIN` to the installed plugin's real `bin/` (not a directory of symlinks; the scripts find their `lib/` next to it), or put the directory holding `claude` on PATH (e.g. `PATH=/Users/you/.local/bin:/usr/bin:/bin`). Step 3 always runs the `claude` it finds on PATH, never `CLAUDE_CLI`: that is the planner/coder model override, and a wrapper there could take `plugin list --json` as a prompt. Write absolute paths: launchd and crontab do not expand `~` or `$HOME` in these values. The model CLIs those scripts start (`codex`, `agy`) still come from PATH or their own `*_CLI` variables. `spec-trio-doctor.sh` shows which step found each script.
 
 ### Planner and coder success
 
-Planner and coder CLIs are called as `CLI -p` with the prompt on stdin; one
-argument is capped at 128 KiB on Linux, and the spec is inlined into every
-planner, coder and reviewer prompt. A `PLANNER_CLI` / `CODER_CLI` wrapper
+The selected registry model receives the prompt on stdin or as one argument,
+according to its adapter. Built-in Codex models use `codex exec -` and capture
+`--output-last-message` as the stage answer. A `PLANNER_CLI` / `CODER_CLI` wrapper
 must pass stdin through (`exec claude "$@"` does); see
 [dev-trio's model configuration](../dev-trio/README.md#model-configuration). Each
 stage retains its diagnostic `.log` and adds a `.stdout.log` containing only
@@ -77,6 +77,23 @@ cumulative review and scope baselines are unchanged.
 The reviewer (`ask-reviewer.sh`) and researcher (`ask-researcher.sh`) come from the **dev-trio** plugin, which resolves each role through a shared, configurable model registry (`agent-team-models`). spec-trio inherits that resolution unchanged — point the reviewer or researcher at a different CLI globally with `agent-team-models set-role`, or per-run with dev-trio's `*_MODEL` env vars. See dev-trio's README for the registry reference.
 
 ## Install
+
+Codex PM installation:
+
+```bash
+codex plugin marketplace add pandas-studio/agent-team-plugins
+codex plugin add spec-trio@pandas-studio
+codex plugin add dev-trio@pandas-studio
+```
+
+In Codex, use `$spec-trio:bootstrap`, `$spec-trio:run`, or the opt-in
+`$spec-trio:install-pm`. Set `SPEC_TRIO_PM_HOST=codex` for direct script use.
+Planner defaults to read-only `codex-plan`, coder to `codex-write`, reviewer to
+Claude, and researcher to Antigravity. `--planner-model`, `--coder-model`,
+`--reviewer-model`, and `--researcher-model` select alternatives per run;
+`agent-team-models set-role spec-trio.planner <model>` and its coder equivalent
+persist a binding. Run `agent-team-models preset add kimi-code` to select Kimi.
+The selected CLI still needs authentication and appropriate edit permissions.
 
 ```
 /plugin marketplace add pandas-studio/agent-team-plugins
@@ -326,7 +343,8 @@ spec-trio/
 │   └── fix_plan.md.template      # iteration log; driver owns completion
 ├── tests/
 │   └── smoke-pr5.sh              # manifest/scope smoke (manifests + gates + coverage rollup)
-├── skills/
+├── claude-skills/
+├── codex-skills/
 │   └── bootstrap/SKILL.md        # /spec-trio:bootstrap
 └── .claude-plugin/plugin.json
 ```

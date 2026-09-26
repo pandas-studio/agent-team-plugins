@@ -79,12 +79,13 @@ else fail "neither sha256sum nor shasum found — manifest prompt-hashing will f
 
 echo
 echo "2. Optional tools"
-for t in tmux claude; do
+for t in tmux claude codex; do
   if command -v "$t" >/dev/null 2>&1; then ok "$t — $(command -v "$t")"
   else
     case "$t" in
       tmux)   warn "tmux — missing (team-name detection falls back to AGENT_TEAM env / 'default')" ;;
       claude) warn "claude — missing (override via CLAUDE_CLI / PLANNER_CLI / CODER_CLI; doctor's stub smoke uses --dry-run so does not need it)" ;;
+      codex)  warn "codex — missing (Codex host defaults cannot run; dry-run remains available)" ;;
     esac
   fi
 done
@@ -92,12 +93,13 @@ done
 echo
 echo "3. Plugin layout"
 for rel in bin/spec-trio.sh bin/spec-coverage.sh bin/spec-trio-doctor.sh \
-           lib/common.sh lib/manifest.sh lib/plugin-deps.sh lib/spec-helpers.sh lib/verification.sh lib/pm.md \
+           lib/common.sh lib/manifest.sh lib/plugin-deps.sh lib/registry.sh lib/model-stage.sh lib/spec-helpers.sh lib/verification.sh lib/pm.md lib/pm-codex.md \
            lib/roles/planner.md lib/roles/worker.md lib/roles/reviewer.md \
            prompts/spec.md.template prompts/BACKLOG.md.template prompts/fix_plan.md.template \
            tests/smoke-pr5.sh \
-           skills/bootstrap/SKILL.md skills/install-pm/SKILL.md \
-           .claude-plugin/plugin.json; do
+           claude-skills/bootstrap/SKILL.md claude-skills/install-pm/SKILL.md \
+           codex-skills/bootstrap/SKILL.md codex-skills/run/SKILL.md codex-skills/install-pm/SKILL.md \
+           .claude-plugin/plugin.json .codex-plugin/plugin.json; do
   p="$PLUGIN_ROOT/$rel"
   if [ -f "$p" ]; then ok "$rel"
   else fail "$rel — missing at $p"; fi

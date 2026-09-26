@@ -39,6 +39,7 @@ ROLES_DIR="$PLUGIN_ROOT/lib/roles"
 . "$PLUGIN_ROOT/lib/manifest.sh" || { echo "ralph-trio: failed to load lib/manifest.sh (jq missing?)" >&2; exit 2; }
 # shellcheck source=SCRIPTDIR/../lib/plugin-deps.sh
 . "$PLUGIN_ROOT/lib/plugin-deps.sh" || { echo "ralph-trio: failed to load lib/plugin-deps.sh" >&2; exit 2; }
+. "$PLUGIN_ROOT/lib/model-stage.sh" || exit 2
 
 MAX_ITER=""
 MAX_RUNTIME_SPEC="0"
@@ -54,6 +55,10 @@ NO_VALIDATE=0
 MAX_DIFF_LINES=10000
 AUTOSHIP=0
 DRY_RUN=0
+PLANNER_MODEL_OPT=""
+CODER_MODEL_OPT=""
+REVIEWER_MODEL_OPT=""
+RESEARCHER_MODEL_OPT=""
 
 usage() { sed -n '2,25p' "$0" >&2; }
 
@@ -73,10 +78,25 @@ while [ "$#" -gt 0 ]; do
     --max-diff-lines)  MAX_DIFF_LINES="$2"; shift 2 ;;
     --autoship)        AUTOSHIP=1; shift ;;
     --dry-run)         DRY_RUN=1; shift ;;
+    --planner-model)   [ "$#" -ge 2 ] || exit 2; PLANNER_MODEL_OPT="$2"; shift 2 ;;
+    --coder-model)     [ "$#" -ge 2 ] || exit 2; CODER_MODEL_OPT="$2"; shift 2 ;;
+    --reviewer-model)  [ "$#" -ge 2 ] || exit 2; REVIEWER_MODEL_OPT="$2"; shift 2 ;;
+    --researcher-model) [ "$#" -ge 2 ] || exit 2; RESEARCHER_MODEL_OPT="$2"; shift 2 ;;
     -h|--help)         usage; exit 0 ;;
     *)                 echo "unknown arg: $1" >&2; usage; exit 2 ;;
   esac
 done
+
+TRIO_HOST=$(trio_host ralph-trio) || exit 2
+PLANNER_MODEL=$(trio_resolve_model ralph-trio planner "$PLANNER_MODEL_OPT") || exit 2
+CODER_MODEL=$(trio_resolve_model ralph-trio coder "$CODER_MODEL_OPT") || exit 2
+export DEV_TRIO_PM_HOST="${DEV_TRIO_PM_HOST:-$TRIO_HOST}"
+[ -z "$REVIEWER_MODEL_OPT" ] || export DEV_TRIO_REVIEWER_MODEL="$REVIEWER_MODEL_OPT"
+[ -z "$RESEARCHER_MODEL_OPT" ] || export DEV_TRIO_RESEARCHER_MODEL="$RESEARCHER_MODEL_OPT"
+if [ "$DRY_RUN" != 1 ]; then
+  [ -n "${PLANNER_CLI:-}" ] || trio_check_model "$PLANNER_MODEL" || exit 2
+  [ -n "${CODER_CLI:-}" ] || trio_check_model "$CODER_MODEL" || exit 2
+fi
 
 [ -z "$MAX_ITER" ]    && { echo "--max-iter is required" >&2; exit 2; }
 [ -z "$BACKLOG_FILE" ] && { echo "--backlog is required" >&2; exit 2; }
@@ -374,7 +394,7 @@ while :; do
     PLAN="(dry-run plan for $TASK)"
     PLAN_STDOUT="$PLAN_LOG"
   else
-    manifest_add_role planner claude "$ROLES_DIR/planner.md"
+    manifest_add_role planner "$PLANNER_MODEL" "$ROLES_DIR/planner.md"
     [ -n "$PROMPT_FILE" ] && manifest_add_input kind=prompt-md path="$PROMPT_FILE"
     if [ "$INJECT_FIX_PLAN" = "1" ]; then
       manifest_add_input kind=fix-plan path="$FIX_PLAN_FILE"
@@ -383,7 +403,11 @@ while :; do
     PLAN_PROMPT=$(build_planner_prompt "$TASK" "$PROMPT_CONTEXT" "$FP_EXCERPT")
     PLAN_RC=0
     STAGE_PROMPT=$PLAN_PROMPT
-    stage_run planner "$WORK_DIR" "$PLAN_LOG" "${PLANNER_CLI:-${CLAUDE_CLI:-claude}}" -p || PLAN_RC=$?
+    if [ -n "${PLANNER_CLI:-}" ]; then
+      stage_run planner "$WORK_DIR" "$PLAN_LOG" "$PLANNER_CLI" -p || PLAN_RC=$?
+    else
+      stage_run planner "$WORK_DIR" "$PLAN_LOG" trio_stage_model "$PLANNER_MODEL" "${PLAN_LOG%.log}.final.md" || PLAN_RC=$?
+    fi
     stage_record_result "$PLAN_RC" || exit 1
     PLAN="$(cat "$PLAN_STDOUT" 2>/dev/null)"
     if [ "$PLAN_RC" != "0" ]; then
@@ -477,7 +501,7 @@ while :; do
       manifest_add_input kind=skip-reason value=dry-run
       echo "[dry-run code] would implement plan for: $TASK" | tee "$CODE_LOG" >/dev/null
     else
-      manifest_add_role worker claude "$ROLES_DIR/worker.md"
+      manifest_add_role worker "$CODER_MODEL" "$ROLES_DIR/worker.md"
       [ -n "$PROMPT_FILE" ] && manifest_add_input kind=prompt-md path="$PROMPT_FILE"
       if [ "$INJECT_FIX_PLAN" = "1" ]; then
         manifest_add_input kind=fix-plan path="$FIX_PLAN_FILE"
@@ -485,7 +509,11 @@ while :; do
       fi
       CODE_PROMPT=$(build_coder_prompt "$TASK" "$PLAN" "$PROMPT_CONTEXT" "$PRE_RESEARCH" "$FP_EXCERPT")
       STAGE_PROMPT=$CODE_PROMPT
-      stage_run coder "$WORK_DIR" "$CODE_LOG" "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p || CODE_RC=$?
+      if [ -n "${CODER_CLI:-}" ]; then
+        stage_run coder "$WORK_DIR" "$CODE_LOG" "$CODER_CLI" -p || CODE_RC=$?
+      else
+        stage_run coder "$WORK_DIR" "$CODE_LOG" trio_stage_model "$CODER_MODEL" "${CODE_LOG%.log}.final.md" || CODE_RC=$?
+      fi
       stage_record_result "$CODE_RC" || exit 1
     fi
     manifest_finalize || { manifest_cleanup; exit 1; }
@@ -643,7 +671,7 @@ $RESEARCH"
         manifest_init ralph-code "$CODE2_LOG"
         CODE2_RUN_ID="$MANIFEST_RUN_ID"
         manifest_set_parent "$RESEARCH_RUN_ID"
-        manifest_add_role worker claude "$ROLES_DIR/worker.md"
+        manifest_add_role worker "$CODER_MODEL" "$ROLES_DIR/worker.md"
         manifest_add_input kind=task value="$TASK"
         manifest_add_input kind=plan path="$PLAN_STDOUT"
         [ -n "$PRE_RESEARCH" ] && manifest_add_input kind=research path="$PLAN_RESEARCH_LOG"
@@ -651,7 +679,11 @@ $RESEARCH"
         CODE_PROMPT2=$(build_coder_prompt "$TASK" "$PLAN" "$PROMPT_CONTEXT" "$RETRY_RESEARCH" "$FP_EXCERPT")
         CODE_RC=0
         STAGE_PROMPT=$CODE_PROMPT2
-        stage_run coder "$WORK_DIR" "$CODE2_LOG" "${CODER_CLI:-${CLAUDE_CLI:-claude}}" -p || CODE_RC=$?
+        if [ -n "${CODER_CLI:-}" ]; then
+          stage_run coder "$WORK_DIR" "$CODE2_LOG" "$CODER_CLI" -p || CODE_RC=$?
+        else
+          stage_run coder "$WORK_DIR" "$CODE2_LOG" trio_stage_model "$CODER_MODEL" "${CODE2_LOG%.log}.final.md" || CODE_RC=$?
+        fi
         stage_record_result "$CODE_RC" || exit 1
         manifest_finalize || { manifest_cleanup; exit 1; }
         # Stage 6: Review2 (parent = code2)

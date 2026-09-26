@@ -1,8 +1,8 @@
 # pandas-studio agent-team-plugins
 
-Claude Code plugin marketplace from pandas-studio's YouTube series on multi-CLI agent teams. The plugins coordinate specialised CLI roles for development, debate, iteration, specification, and evaluation. Live tmux views are available for the earlier team patterns; Eval Trio produces a private report.
+Claude Code and Codex plugin marketplace from pandas-studio's YouTube series on multi-CLI agent teams. Plugins coordinate companion CLIs (Antigravity, Codex, Claude) for development, debate, iteration, specification, and evaluation. Live tmux views are optional; Eval Trio produces a private report.
 
-`dev-trio` and `debate-conductor` also support **Codex as PM**. The CLI engine
+`dev-trio`, `debate-conductor`, `ralph-trio`, and `spec-trio` support **Codex as PM**. The CLI engine
 is shared; each host loads its own skills and PM policy. See
 [dev-trio Codex usage](./dev-trio/README.md#codex-pm) and
 [debate-conductor Codex usage](./debate-conductor/README.md#codex-pm).
@@ -31,6 +31,8 @@ Then install the plugins you want:
 codex plugin marketplace add /absolute/path/to/agent-team-plugins
 codex plugin add dev-trio@pandas-studio
 codex plugin add debate-conductor@pandas-studio
+codex plugin add ralph-trio@pandas-studio
+codex plugin add spec-trio@pandas-studio
 codex plugin add eval-trio@pandas-studio
 ```
 
@@ -40,14 +42,14 @@ codex plugin add eval-trio@pandas-studio
 | :--- | :--- | :--- | :--- |
 | [dev-trio](./dev-trio) | Claude or Codex=PM/Coder · configurable research/review CLIs | EP A | shipped |
 | [debate-conductor](./debate-conductor) | Claude or Codex=PM · configurable generator/critic CLIs | EP B | shipped |
-| [ralph-trio](./ralph-trio) | Claude=Planner/Coder · Antigravity=Researcher · Codex=Reviewer | EP C | shipped |
-| [spec-trio](./spec-trio) | Spec-gated planner/coder/reviewer loop | EP D | shipped |
+| [ralph-trio](./ralph-trio) | Claude or Codex=Planner/Coder · configurable research/review CLIs | EP C | shipped |
+| [spec-trio](./spec-trio) | Claude or Codex=Planner/Coder · spec-gated review loop | EP D | shipped |
 | [eval-trio](./eval-trio) | Fixed checks · Challenger · Judge | EP E | preview |
 | [langgraph-conductor](./runtime) | Durable planner/researcher/coder/reviewer graph | Guide v1 | preview |
 
 ## Shared model configuration
 
-The role-based plugins resolve their companion CLIs through a **shared model registry**. A *model* is a named CLI adapter (how to spawn a CLI and feed it a prompt); a *role* (e.g. `dev-trio.researcher`) is bound to a model. Five models ship built-in — `agy`, `codex`, `codex-no-memories`, `claude`, `claude-write` — and the default bindings match the role tables, so **zero configuration is required**. `claude-write` is `claude` plus `--permission-mode acceptEdits`: headless `claude -p` cannot edit files without it, so only roles meant to write are bound to it. `codex-no-memories` is `codex` plus `-c features.memories=false`, for reviews that should not receive the memory summary from earlier Codex sessions.
+The role-based plugins resolve their companion CLIs through a **shared model registry**. A *model* is a named CLI adapter (how to spawn a CLI and feed it a prompt); a *role* (e.g. `dev-trio.researcher`) is bound to a model. Seven models ship built-in — `agy`, `codex`, `codex-plan`, `codex-write`, `codex-no-memories`, `claude`, `claude-write` — and the default bindings match the role tables, so **zero configuration is required**. `claude-write` is `claude` plus `--permission-mode acceptEdits`: headless `claude -p` cannot edit files without it, so only roles meant to write are bound to it. `codex-plan` uses a read-only sandbox and `codex-write` uses workspace-write. `codex-no-memories` is `codex` plus `-c features.memories=false`, for reviews that should not receive the memory summary from earlier Codex sessions.
 
 To customise, use the `agent-team-models` CLI. It is on PATH whenever either plugin is active; both plugins ship an identical copy and operate on the **same** config file:
 
@@ -74,6 +76,11 @@ Config lives at `$AGENT_TEAM_MODELS_CONFIG`, else `${XDG_CONFIG_HOME:-~/.config}
 | `langgraph-conductor.coder` | `claude-write` | `LANGGRAPH_CONDUCTOR_CODER_MODEL` |
 | `langgraph-conductor.researcher` | `agy` | `LANGGRAPH_CONDUCTOR_RESEARCHER_MODEL` |
 | `langgraph-conductor.reviewer` | `codex` | `LANGGRAPH_CONDUCTOR_REVIEWER_MODEL` |
+| `ralph-trio.worker` | `claude-write` from Claude, `codex-write` from Codex | `RALPH_TRIO_WORKER_MODEL` |
+| `ralph-trio.planner` | `claude` from Claude, `codex-plan` from Codex | `RALPH_TRIO_PLANNER_MODEL` |
+| `ralph-trio.coder` | `claude-write` from Claude, `codex-write` from Codex | `RALPH_TRIO_CODER_MODEL` |
+| `spec-trio.planner` | `claude` from Claude, `codex-plan` from Codex | `SPEC_TRIO_PLANNER_MODEL` |
+| `spec-trio.coder` | `claude-write` from Claude, `codex-write` from Codex | `SPEC_TRIO_CODER_MODEL` |
 
 ## Team namespaces
 
@@ -127,9 +134,9 @@ Every plugin in this marketplace follows broadly the same layout. Skill set vari
 └── <topics/|tmux/|...>      # plugin-specific assets (canned topics, keybindings)
 ```
 
-`dev-trio` and `debate-conductor` use `claude-skills/` and `codex-skills/`,
-selected by each host manifest, plus a small Python policy installer. Other
-plugins keep `skills/`.
+`dev-trio`, `debate-conductor`, `ralph-trio`, and `spec-trio` use separate
+`claude-skills/` and `codex-skills/` selected by each host manifest. Their Codex
+PM policies install into a workspace's `AGENTS.md` only when requested.
 
 The four legacy plugins remain Bash-first. `langgraph-conductor` adds an optional Python 3.12 runtime pinned with `uv`; it orchestrates the same CLI adapters and does not call model-provider APIs directly. `jq` is required for the Bash [shared model registry](#shared-model-configuration).
 
