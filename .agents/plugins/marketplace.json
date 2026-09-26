@@ -39,6 +39,12 @@
       "source": {"source": "local", "path": "./spec-trio"},
       "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
       "category": "Productivity"
+    },
+    {
+      "name": "eval-trio",
+      "source": {"source": "local", "path": "./eval-trio"},
+      "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+      "category": "Productivity"
     }
   ]
 }
