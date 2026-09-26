@@ -2,9 +2,9 @@
 # registry.sh — model-adapter registry + runner shared by the agent-team plugins.
 #
 # VENDORED COPY. The canonical source lives in dev-trio/lib/registry.sh and is
-# copied byte-for-byte into debate-conductor/lib/registry.sh. The library is
+# copied byte-for-byte into debate-conductor, ralph-trio, and spec-trio. The library is
 # fully plugin-agnostic (it computes the shared config path itself and embeds
-# the built-in model/role defaults below), so the two copies must stay
+# the built-in model/role defaults below), so all four copies must stay
 # identical — edit dev-trio's and re-copy.
 #
 # A "model" is a named CLI adapter: how to spawn a particular agent CLI and
@@ -53,7 +53,8 @@
 # assignments on the call (empty for other models); like REGISTRY_CMD_OVERRIDE,
 # a caller that exports them gets them applied, and the CLI inherits them.
 #
-# Built-in models: agy, codex, codex-no-memories, claude, claude-write ("claude"
+# Built-in models: agy, codex, codex-plan, codex-write,
+# codex-no-memories, claude, claude-write ("claude"
 # is read-only in headless -p mode; "claude-write" adds --permission-mode
 # acceptEdits so a coder role can actually edit files; "codex-no-memories" turns
 # off Codex's memories feature so a review is not primed by earlier Codex
@@ -95,6 +96,20 @@ _registry_builtin_models() {
     "args": ["exec", "--skip-git-repo-check", "-"],
     "final_args": ["exec", "--skip-git-repo-check", "--output-last-message", "{final}", "-"]
   },
+  "codex-plan": {
+    "command": "codex",
+    "env_command": "CODEX_CLI",
+    "prompt_via": "stdin",
+    "args": ["exec", "--skip-git-repo-check", "--sandbox", "read-only", "-"],
+    "final_args": ["exec", "--skip-git-repo-check", "--sandbox", "read-only", "--output-last-message", "{final}", "-"]
+  },
+  "codex-write": {
+    "command": "codex",
+    "env_command": "CODEX_CLI",
+    "prompt_via": "stdin",
+    "args": ["exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "-"],
+    "final_args": ["exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "--output-last-message", "{final}", "-"]
+  },
   "codex-no-memories": {
     "command": "codex",
     "env_command": "CODEX_CLI",
@@ -128,7 +143,12 @@ _registry_builtin_roles() {
   "langgraph-conductor.planner": "claude",
   "langgraph-conductor.coder": "claude-write",
   "langgraph-conductor.researcher": "agy",
-  "langgraph-conductor.reviewer": "codex"
+  "langgraph-conductor.reviewer": "codex",
+  "ralph-trio.worker": "claude-write",
+  "ralph-trio.planner": "claude",
+  "ralph-trio.coder": "claude-write",
+  "spec-trio.planner": "claude",
+  "spec-trio.coder": "claude-write"
 }
 JSON
 }
@@ -166,12 +186,14 @@ registry_known_roles() {
     langgraph-conductor.planner \
     langgraph-conductor.coder \
     langgraph-conductor.researcher \
-    langgraph-conductor.reviewer
+    langgraph-conductor.reviewer \
+    ralph-trio.worker ralph-trio.planner ralph-trio.coder \
+    spec-trio.planner spec-trio.coder
 }
 
 registry_role_is_known() {
   case "$1" in
-    dev-trio.researcher|dev-trio.reviewer|debate-conductor.generator|debate-conductor.critic|langgraph-conductor.planner|langgraph-conductor.coder|langgraph-conductor.researcher|langgraph-conductor.reviewer) return 0 ;;
+    dev-trio.researcher|dev-trio.reviewer|debate-conductor.generator|debate-conductor.critic|langgraph-conductor.planner|langgraph-conductor.coder|langgraph-conductor.researcher|langgraph-conductor.reviewer|ralph-trio.worker|ralph-trio.planner|ralph-trio.coder|spec-trio.planner|spec-trio.coder) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -187,6 +209,11 @@ _registry_role_envname() {
     langgraph-conductor.coder)    printf 'LANGGRAPH_CONDUCTOR_CODER_MODEL' ;;
     langgraph-conductor.researcher) printf 'LANGGRAPH_CONDUCTOR_RESEARCHER_MODEL' ;;
     langgraph-conductor.reviewer) printf 'LANGGRAPH_CONDUCTOR_REVIEWER_MODEL' ;;
+    ralph-trio.worker)           printf 'RALPH_TRIO_WORKER_MODEL' ;;
+    ralph-trio.planner)          printf 'RALPH_TRIO_PLANNER_MODEL' ;;
+    ralph-trio.coder)            printf 'RALPH_TRIO_CODER_MODEL' ;;
+    spec-trio.planner)           printf 'SPEC_TRIO_PLANNER_MODEL' ;;
+    spec-trio.coder)             printf 'SPEC_TRIO_CODER_MODEL' ;;
     *)                            printf '' ;;
   esac
 }

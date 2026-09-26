@@ -41,6 +41,7 @@ PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$PLUGIN_ROOT/lib/common.sh"
 # shellcheck disable=SC1091
 . "$PLUGIN_ROOT/lib/manifest.sh" || { echo "ralph-solo: failed to load lib/manifest.sh (jq missing?)" >&2; exit 2; }
+. "$PLUGIN_ROOT/lib/model-stage.sh" || exit 2
 
 MAX_ITER=""
 MAX_RUNTIME_SPEC="0"
@@ -54,6 +55,7 @@ TEST_CMD=""
 NO_VALIDATE=0
 MAX_DIFF_LINES=10000
 DRY_RUN=0
+WORKER_MODEL_OPT=""
 
 usage() { sed -n '2,40p' "$0" >&2; }
 
@@ -71,10 +73,16 @@ while [ "$#" -gt 0 ]; do
     --no-validate)     NO_VALIDATE=1; shift ;;
     --max-diff-lines)  MAX_DIFF_LINES="$2"; shift 2 ;;
     --dry-run)         DRY_RUN=1; shift ;;
+    --worker-model)    [ "$#" -ge 2 ] || exit 2; WORKER_MODEL_OPT="$2"; shift 2 ;;
     -h|--help)         usage; exit 0 ;;
     *)                 echo "unknown arg: $1" >&2; usage; exit 2 ;;
   esac
 done
+
+WORKER_MODEL=$(trio_resolve_model ralph-trio worker "$WORKER_MODEL_OPT") || exit 2
+if [ "$DRY_RUN" != 1 ]; then
+  [ -n "${WORKER_CLI:-}" ] || trio_check_model "$WORKER_MODEL" || exit 2
+fi
 
 [ -z "$MAX_ITER" ] && { echo "--max-iter is required" >&2; usage; exit 2; }
 [ "$MAX_ITER" -lt 0 ] && { echo "--max-iter must be >= 0" >&2; exit 2; }
@@ -194,9 +202,9 @@ while :; do
   manifest_add_input kind=task value="iter-$ITER"
   if [ "$DRY_RUN" = "1" ]; then
     manifest_add_input kind=skip-reason value=dry-run
-    echo "[dry-run] would invoke: claude -p < $PROMPT_FILE in $WORK_DIR" | tee "$ITER_LOG"
+    echo "[dry-run] would invoke model $WORKER_MODEL < $PROMPT_FILE in $WORK_DIR" | tee "$ITER_LOG"
   else
-    manifest_add_role worker claude "$PROMPT_FILE"
+    manifest_add_role worker "$WORKER_MODEL" "$PROMPT_FILE"
     manifest_add_input kind=prompt-md path="$PROMPT_FILE"
     if [ "$INJECT_FIX_PLAN" = "1" ]; then
       manifest_add_input kind=fix-plan path="$FIX_PLAN_FILE"
@@ -231,11 +239,15 @@ $FP_EXCERPT
       fi
     fi
 
-    ( cd "$WORK_DIR" && printf '%s' "$PROMPT_BODY" | "${WORKER_CLI:-${CLAUDE_CLI:-claude}}" -p 2>&1 ) | tee -a "$ITER_LOG" || RC=$?
+    if [ -n "${WORKER_CLI:-}" ]; then
+      ( cd "$WORK_DIR" && printf '%s' "$PROMPT_BODY" | "$WORKER_CLI" -p 2>&1 ) | tee -a "$ITER_LOG" || RC=$?
+    else
+      ( cd "$WORK_DIR" && registry_run "$WORKER_MODEL" "$PROMPT_BODY" 2>&1 ) | tee -a "$ITER_LOG" || RC=$?
+    fi
     printf '\n=== END iter %d (rc=%d) ===\n' "$ITER" "$RC" >> "$ITER_LOG"
   fi
   manifest_finalize || { manifest_cleanup; exit 1; }
-  printf '  claude rc: %d\n' "$RC" >> "$SUMMARY_LOG"
+  printf '  worker (%s) rc: %d\n' "$WORKER_MODEL" "$RC" >> "$SUMMARY_LOG"
 
   # Worktree merge/discard
   if [ "$USE_WORKTREE" = "1" ]; then

@@ -35,6 +35,7 @@ SINCE_LATEST=0
 VARIANT=""
 REWRITE_BACKLOG=""
 BASE_REF=""
+REVIEWER_MODEL_OPT=""
 
 usage() { sed -n '2,22p' "$0" >&2; }
 
@@ -45,10 +46,14 @@ while [ "$#" -gt 0 ]; do
     --variant)          VARIANT="$2"; shift 2 ;;
     --rewrite-backlog)  REWRITE_BACKLOG="$2"; shift 2 ;;
     --base-ref)         BASE_REF="$2"; shift 2 ;;
+    --reviewer-model)   [ "$#" -ge 2 ] || exit 2; REVIEWER_MODEL_OPT="$2"; shift 2 ;;
     -h|--help)          usage; exit 0 ;;
     *)                  echo "unknown arg: $1" >&2; usage; exit 2 ;;
   esac
 done
+
+export DEV_TRIO_PM_HOST="${DEV_TRIO_PM_HOST:-${RALPH_TRIO_PM_HOST:-claude}}"
+[ -z "$REVIEWER_MODEL_OPT" ] || export DEV_TRIO_REVIEWER_MODEL="$REVIEWER_MODEL_OPT"
 
 # Cross-plugin dependency check: ask-reviewer.sh comes from the dev-trio plugin
 # (lib/plugin-deps.sh finds it without relying on PATH).

@@ -1,0 +1,19 @@
+{
+  "name": "ralph-trio",
+  "version": "0.5.0",
+  "description": "Codex-conducted Ralph loops with selectable planner, coder, reviewer, and researcher models.",
+  "author": {"name": "pandas-studio"},
+  "homepage": "https://github.com/pandas-studio/agent-team-plugins/tree/main/ralph-trio",
+  "repository": "https://github.com/pandas-studio/agent-team-plugins",
+  "license": "MIT",
+  "skills": "./codex-skills/",
+  "interface": {
+    "displayName": "ralph-trio",
+    "shortDescription": "Codex PM for bounded Ralph loops",
+    "longDescription": "Run solo, trio, debate, or audit workflows with explicit model choices and workspace receipts.",
+    "developerName": "pandas-studio",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "defaultPrompt": ["Use ralph-trio to run a bounded loop for this backlog."]
+  }
+}
