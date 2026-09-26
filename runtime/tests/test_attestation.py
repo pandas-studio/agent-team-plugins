@@ -410,6 +410,57 @@ def test_a_write_during_hashing_fails_closed(tmp_path, monkeypatch):
     )
 
 
+def test_regular_file_swapped_for_symlink_between_check_and_read_fails_closed(
+    tmp_path, monkeypatch
+):
+    from agent_team_graph import graph as graph_module
+
+    workspace, _ = make_repo(tmp_path)
+    target = workspace / "README.md"
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside bytes must not be hashed\n", encoding="utf-8")
+    original_lstat = Path.lstat
+    swapped = False
+
+    def swap_after_check(path, *args, **kwargs):
+        nonlocal swapped
+        info = original_lstat(path, *args, **kwargs)
+        if path == target and not swapped:
+            target.unlink()
+            target.symlink_to(outside)
+            swapped = True
+        return info
+
+    monkeypatch.setattr(Path, "lstat", swap_after_check)
+    with pytest.raises(ValueError, match="workspace changed while it was being attested"):
+        graph_module._file_digest(workspace, "README.md")
+    assert swapped
+
+
+def test_regular_file_swapped_for_symlink_after_open_fails_closed(tmp_path, monkeypatch):
+    from agent_team_graph import graph as graph_module
+
+    workspace, _ = make_repo(tmp_path)
+    target = workspace / "README.md"
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside bytes must not be hashed\n", encoding="utf-8")
+    original_read = os.read
+    swapped = False
+
+    def swap_before_read(fd, size):
+        nonlocal swapped
+        if not swapped:
+            target.unlink()
+            target.symlink_to(outside)
+            swapped = True
+        return original_read(fd, size)
+
+    monkeypatch.setattr(os, "read", swap_before_read)
+    with pytest.raises(ValueError, match="workspace changed while it was being attested"):
+        graph_module._file_digest(workspace, "README.md")
+    assert swapped
+
+
 def test_a_directory_swapped_during_hashing_fails_closed(tmp_path, monkeypatch):
     from agent_team_graph import graph as graph_module
 
@@ -433,8 +484,9 @@ def test_a_directory_swapped_during_hashing_fails_closed(tmp_path, monkeypatch):
         return digest
 
     monkeypatch.setattr(graph_module, "_file_digest", swap_after_first)
+    # The next file is rejected as soon as its parent becomes a symlink.
     assert _refused(workspace, base, baseline).startswith(
-        "workspace changed while it was being attested (first: 'src/a.py')")
+        "workspace changed while it was being attested (first: 'src/b.py')")
 
 
 def test_empty_excludes_file_setting_names_no_file(tmp_path):
