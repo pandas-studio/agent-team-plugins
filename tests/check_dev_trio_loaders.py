@@ -16,6 +16,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 CODEX_NAMES = {
+    "eval-trio": {"evaluate"},
     "dev-trio": {"bootstrap", "research", "review", "install-pm"},
     "debate-conductor": {"bootstrap", "run", "continue", "install-pm"},
     "ralph-trio": {"bootstrap", "run", "install-pm"},
@@ -90,7 +91,7 @@ def check_codex(root):
                     assert {s["name"] for s in skills} == {plugin + ":" + name for name in names}, skills
                     assert all(s["enabled"] and "/codex-skills/" in s["path"] for s in skills), skills
                 assert not data.get("errors"), data.get("errors")
-                print("Codex: four plugins loaded only their codex-skills")
+                print("Codex: all plugins loaded only their codex-skills")
                 return
     finally:
         stop(process)

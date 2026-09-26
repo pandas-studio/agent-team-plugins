@@ -9,9 +9,11 @@ neither dev-trio nor a model login.
 
 ## Run
 
+From the repository root:
+
 ```bash
-eval-trio run --case case.json --output-dir /private/tmp/eval-run-001 --allow-execution
-eval-trio run --case case.json --output-dir /private/tmp/eval-checks-001 --checks-only --allow-execution
+./eval-trio/bin/eval-trio run --case case.json --output-dir /private/tmp/eval-run-001 --allow-execution
+./eval-trio/bin/eval-trio run --case case.json --output-dir /private/tmp/eval-checks-001 --checks-only --allow-execution
 ```
 
 `--output-dir` must not exist; a new 0700 directory is created. No run
@@ -26,7 +28,8 @@ process group. For stronger isolation, run Eval Trio in a separate VM/container.
 The `DEV_TRIO_BIN` environment variable can point at dev-trio's `bin/`
 directory. Otherwise the CLI looks for a sibling checkout, PATH, then an
 enabled `dev-trio@pandas-studio` install. `DEV_TRIO_PM_HOST=codex|claude`
-selects the Judge's default model (`claude|codex`); the Challenger defaults to
+selects the Judge's default model (`claude|codex`) and defaults to `claude`;
+the Challenger defaults to
 `agy`. `EVAL_TRIO_CHALLENGER_MODEL` and `EVAL_TRIO_JUDGE_MODEL` can override
 the models, but must name different models. Full runs fail with `ERROR` when
 authentication or a wrapper result is unavailable.
@@ -68,7 +71,9 @@ working-tree files.
 copy and must exit zero. For `bug-fix`, at least one `baseline: true` check
 runs the **same argv and independent check files** on base and head. Base must
 exit with one of the nonzero `expected_base.rc` values and match any optional
-`stdout_regex`/`stderr_regex`; head must exit zero. Check files cannot replace
+`stdout_regex`/`stderr_regex`; head must exit zero. Check IDs must be unique,
+and all check definitions and independent files are validated before any check
+runs. Check files cannot replace
 submission files. A missing test on base therefore cannot count as a valid
 failure. Timeouts, signal deaths, spawn errors and output-limit events are
 `ERROR`, never an expected base failure. Output is capped at 64 KiB combined;
@@ -104,6 +109,12 @@ adversarial role prompt and the `agy` model by default. This gives it the same
 structured `.review.json` contract as the Judge. Both receive task, criteria,
 and frozen check evidence in the run's evidence directory; the Judge also sees
 the Challenger's exact result. These inputs are untrusted prompt data.
+The directory includes `submission/`, `checks/<check-index>/` copies of the
+independent check files, and `base/` for Git cases. `checks.json` names each
+copied file. Scratch HOME and TMPDIR for each check live outside its copied
+submission workspace. Reviewer Git discovery is bounded at the run directory
+parent so an output directory inside a repository does not point the reviewer
+at the live source tree.
 The evidence directory is fixed before review, not protected from a model that
 has host file access. The report records evidence digests for audit, and the
 submission is never intentionally modified.

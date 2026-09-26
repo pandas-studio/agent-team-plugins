@@ -12,12 +12,15 @@ ROOT = Path(__file__).resolve().parents[2]
 CLI = ROOT / "eval-trio/bin/eval-trio"
 
 REVIEWER_STUB = r'''#!/usr/bin/env python3
-import json, os
+import json, os, subprocess
 from pathlib import Path
 import sys
 role = 'challenger' if os.environ.get('REVIEWER_ROLE_FILE') else 'judge'
+git_probe = subprocess.run(['git', 'rev-parse', '--show-toplevel'], capture_output=True, text=True)
 if os.environ.get('TEST_MUTATE_ROLE') == role:
     (Path.cwd() / 'submission/answer.txt').write_text('mutated by model')
+if os.environ.get('TEST_MUTATE_EVIDENCE') and role == 'challenger':
+    (Path.cwd() / os.environ['TEST_MUTATE_EVIDENCE']).write_text('mutated evidence')
 verdict = os.environ.get('TEST_' + role.upper() + '_VERDICT', 'SHIP')
 findings = {'blocker': [], 'major': [], 'minor': []}
 if os.environ.get('TEST_' + role.upper() + '_FINDING'):
@@ -25,6 +28,9 @@ if os.environ.get('TEST_' + role.upper() + '_FINDING'):
 status = os.environ.get('TEST_' + role.upper() + '_STATUS', 'ok')
 rc = 0 if status == 'ok' else 3
 result = {'schema_version': 1, 'profile': 'default', 'status': status,
+          'test_pm_host': os.environ.get('DEV_TRIO_PM_HOST'),
+          'test_git_root': git_probe.stdout.strip() if git_probe.returncode == 0 else None,
+          'test_focus': sys.argv[-1],
           'invocation_rc': 0, 'exit_code': rc, 'error': None if rc == 0 else 'bad review',
           'verdict': verdict if rc == 0 else None,
           'verdict_line': verdict + ' — reason' if rc == 0 else None,
@@ -33,8 +39,12 @@ logdir = Path(os.environ['DEV_TRIO_LOG_DIR']) / 'default'
 logdir.mkdir(parents=True, exist_ok=True)
 path = logdir / (role + '.review.json')
 path.write_text(json.dumps(result))
+if os.environ.get('TEST_RESULT_ARRAY') == role:
+    path.write_text('[]')
 Path(os.environ['DEV_TRIO_REVIEW_RECEIPT']).write_text(json.dumps({
     'schema_version': 1, 'result_path': str(path), 'final_path': str(logdir / (role + '.final.md'))}))
+if os.environ.get('TEST_RECEIPT_ARRAY') == role:
+    Path(os.environ['DEV_TRIO_REVIEW_RECEIPT']).write_text('[]')
 sys.exit(rc)
 '''
 
@@ -85,7 +95,8 @@ class EvalTrioTests(unittest.TestCase):
         report, output = self.assert_status("PASS")
         self.assertEqual(report["mode"], "full")
         self.assertEqual(report["models"]["challenger"]["model"], "agy")
-        self.assertEqual(report["models"]["judge"]["model"], "claude")
+        self.assertEqual(report["models"]["judge"]["model"], "codex")
+        self.assertEqual(report["models"]["judge"]["result"]["test_pm_host"], "claude")
         self.assertEqual((self.submission / "answer.txt").read_bytes(), before)
         self.assertEqual((output / "report.md").stat().st_mode & 0o777, 0o600)
         self.assertEqual(output.stat().st_mode & 0o777, 0o700)
@@ -93,6 +104,11 @@ class EvalTrioTests(unittest.TestCase):
     def test_claude_pm_selects_codex_judge(self):
         report, _ = self.assert_status("PASS", env={"DEV_TRIO_PM_HOST": "claude"})
         self.assertEqual(report["models"]["judge"]["model"], "codex")
+
+    def test_codex_pm_selects_claude_judge(self):
+        report, _ = self.assert_status("PASS", env={"DEV_TRIO_PM_HOST": "codex"})
+        self.assertEqual(report["models"]["judge"]["model"], "claude")
+        self.assertEqual(report["models"]["judge"]["result"]["test_pm_host"], "codex")
 
     def test_real_dev_trio_wrapper_with_stub_model_clis(self):
         model = self.root / "model-stub"
@@ -159,6 +175,17 @@ class EvalTrioTests(unittest.TestCase):
         report, _ = self.assert_status("ERROR", env={"TEST_JUDGE_STATUS": "parse-failed"})
         self.assertIn("judge review unavailable", report["reason"])
 
+    def test_malformed_receipt_and_result_publish_error(self):
+        for variable in ("TEST_RECEIPT_ARRAY", "TEST_RESULT_ARRAY"):
+            report, _ = self.assert_status("ERROR", env={variable: "challenger"})
+            self.assertIn("must be an object", report["reason"])
+
+    def test_malformed_submission_publishes_error(self):
+        self.case["submission"] = "x"
+        report, output = self.assert_status("ERROR")
+        self.assertIn("submission must be an object", report["reason"])
+        self.assertTrue((output / "report.json").is_file())
+
     def test_model_cannot_silently_change_frozen_submission(self):
         report, _ = self.assert_status("ERROR", env={"TEST_MUTATE_ROLE": "challenger"})
         self.assertEqual(report["reason"], "review changed frozen submission")
@@ -194,6 +221,44 @@ class EvalTrioTests(unittest.TestCase):
                                        timeout_seconds=3)
         report, _ = self.assert_status("ERROR")
         self.assertIn("output-limit", report["reason"])
+
+    def test_timeout_after_pipes_close_uses_check_deadline(self):
+        self.case["checks"][0].update(argv=[sys.executable, "-c",
+            "import os,time; os.close(1); os.close(2); time.sleep(2)"], timeout_seconds=0.1)
+        report, _ = self.assert_status("ERROR")
+        self.assertIn("timeout", report["reason"])
+        self.assertLess(report["checks"][0]["runs"]["head"]["duration_seconds"], 1)
+
+    def test_check_scratch_does_not_replace_candidate_files(self):
+        (self.submission / ".eval-home").write_text("candidate home")
+        (self.submission / ".eval-tmp").write_text("candidate tmp")
+        report, output = self.assert_status("PASS")
+        self.assertEqual((self.submission / ".eval-home").read_text(), "candidate home")
+        self.assertTrue((output / "check-work/00-head-scratch/home").is_dir())
+        self.assertEqual(report["status"], "PASS")
+
+    def test_all_checks_are_validated_before_first_executes(self):
+        marker = self.root / "executed"
+        self.case["checks"][0]["argv"] = [sys.executable, "-c",
+            f"from pathlib import Path; Path({str(marker)!r}).write_text('ran')"]
+        self.case["checks"].append({"id": "bad", "argv": [sys.executable],
+                                    "expected_base": {"rc": [1]}})
+        report, _ = self.assert_status("ERROR")
+        self.assertIn("expected_base requires baseline", report["reason"])
+        self.assertFalse(marker.exists())
+
+    def test_duplicate_check_ids_rejected_before_execution(self):
+        self.case["checks"].append(dict(self.case["checks"][0]))
+        report, _ = self.assert_status("ERROR")
+        self.assertIn("duplicate check.id", report["reason"])
+        self.assertEqual(report["checks"], [])
+
+    def test_output_nested_in_git_repo_does_not_expose_live_git_root(self):
+        self.git(self.root, "init", "-q")
+        report, output = self.assert_status("PASS")
+        self.assertIsNone(report["models"]["challenger"]["result"]["test_git_root"])
+        self.assertEqual(report["models"]["challenger"]["result"]["test_pm_host"], "claude")
+        self.assertTrue(str(output).startswith(str(self.root)))
 
     def test_case_path_escape_and_symlink_rejected(self):
         self.case["task"] = "../outside.md"
@@ -247,13 +312,25 @@ class EvalTrioTests(unittest.TestCase):
 
     def test_bug_fix_same_overlay_base_fail_head_pass(self):
         repo = self.setup_git_case()
-        report, _ = self.assert_status("PASS")
+        report, output = self.assert_status("PASS")
         self.assertEqual(report["submission"]["kind"], "git")
         base = report["checks"][0]["runs"]["base"]
         head = report["checks"][0]["runs"]["head"]
         self.assertEqual((base["rc"], head["rc"]), (1, 0))
         self.assertEqual(base["overlay"][0]["sha256"], head["overlay"][0]["sha256"])
         self.assertEqual((repo / "answer.txt").read_text(), "good\n")
+        self.assertEqual((output / "evidence/base/answer.txt").read_text(), "bad\n")
+        self.assertEqual((output / "evidence/checks/00/reproducer.py").read_bytes(),
+                         (self.case_dir / "reproducer.py").read_bytes())
+        self.assertIn("./base/", report["models"]["judge"]["result"]["test_focus"])
+        self.assertIn("./checks/", report["models"]["judge"]["result"]["test_focus"])
+
+    def test_model_tampering_with_check_files_or_base_is_error(self):
+        self.setup_git_case()
+        for target, reason in (("checks/00/reproducer.py", "frozen check files"),
+                               ("base/answer.txt", "frozen base")):
+            report, _ = self.assert_status("ERROR", env={"TEST_MUTATE_EVIDENCE": target})
+            self.assertIn(reason, report["reason"])
 
     def test_git_materialization_does_not_run_local_filter_or_fsmonitor(self):
         repo = self.setup_git_case()

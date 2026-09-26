@@ -228,6 +228,69 @@ def prepare_overlays(case_dir: Path, files: list[Any]) -> list[tuple[Path, Path,
     return prepared
 
 
+def validate_checks(checks: list[Any], case_dir: Path, run_dir: Path,
+                    submission_kind: str) -> list[dict[str, Any]]:
+    """Validate every check and its independent inputs before executing any check."""
+    validated = []
+    ids: set[str] = set()
+    for index, check in enumerate(checks):
+        require(isinstance(check, dict), "check must be an object")
+        allowed_keys(check, {"id", "baseline", "argv", "timeout_seconds", "expected_base", "files"}, "check")
+        check_id = check.get("id", f"check-{index + 1}")
+        require(isinstance(check_id, str) and check_id, "check.id must be a nonempty string")
+        require(check_id not in ids, f"duplicate check.id: {check_id}")
+        ids.add(check_id)
+        baseline = check.get("baseline", False)
+        require(type(baseline) is bool, "check.baseline must be boolean")
+        require(not baseline or submission_kind == "git", "baseline check requires git")
+        argv = check.get("argv")
+        require(isinstance(argv, list) and argv and all(isinstance(x, str) and x for x in argv),
+                "check.argv must be a nonempty string array")
+        require(sum(len(x.encode()) for x in argv) < MAX_TEXT and all("\x00" not in x for x in argv),
+                "check.argv size or NUL invalid")
+        timeout = check.get("timeout_seconds", 30)
+        require(type(timeout) in (int, float) and 0 < timeout <= 300, "invalid check timeout")
+        files = check.get("files", [])
+        require(isinstance(files, list), "check.files must be an array")
+        prepared = prepare_overlays(case_dir, files)
+        targets: set[Path] = set()
+        for _, relative, _ in prepared:
+            require(relative not in targets, f"duplicate check file target: {relative}")
+            require(all(parent not in targets for parent in relative.parents),
+                    f"check file target conflicts with another target: {relative}")
+            require(not any(relative in target.parents for target in targets),
+                    f"check file target conflicts with another target: {relative}")
+            targets.add(relative)
+            for label in (("base", "head") if baseline else ("head",)):
+                frozen = run_dir / "frozen" / label
+                target = frozen / relative
+                require(not target.exists() and not target.is_symlink(),
+                        f"check file would overwrite submission: {target}")
+                require(all(not (frozen / parent).is_file() and not (frozen / parent).is_symlink()
+                            for parent in relative.parents if parent != Path(".")),
+                        f"check file parent conflicts with submission: {target}")
+        expected = check.get("expected_base")
+        if baseline:
+            require(isinstance(expected, dict), "baseline check requires expected_base")
+            allowed_keys(expected, {"rc", "stdout_regex", "stderr_regex"}, "expected_base")
+            rcs = expected.get("rc")
+            require(isinstance(rcs, list) and rcs and all(type(x) is int and x != 0 for x in rcs),
+                    "base expected.rc must list nonzero integers")
+            for stream in ("stdout", "stderr"):
+                pattern = expected.get(f"{stream}_regex")
+                if pattern is not None:
+                    require(isinstance(pattern, str) and len(pattern) < 1024, "invalid failure regex")
+                    try:
+                        re.compile(pattern)
+                    except re.error as exc:
+                        raise EvalError(f"invalid failure regex: {exc}") from exc
+        else:
+            require("expected_base" not in check, "expected_base requires baseline: true")
+        validated.append({"id": check_id, "argv": argv, "baseline": baseline,
+                          "timeout": timeout, "expected_base": expected, "prepared": prepared})
+    return validated
+
+
 def overlay(prepared: list[tuple[Path, Path, bytes]], target: Path) -> list[dict[str, str]]:
     entries = []
     for source, relative, data in prepared:
@@ -238,11 +301,11 @@ def overlay(prepared: list[tuple[Path, Path, bytes]], target: Path) -> list[dict
     return entries
 
 
-def run_check(argv: list[str], cwd: Path, timeout: float, output_cap: int) -> dict[str, Any]:
-    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(cwd / ".eval-home"),
-           "TMPDIR": str(cwd / ".eval-tmp"), "LANG": "C.UTF-8"}
-    Path(env["HOME"]).mkdir(mode=0o700, exist_ok=True)
-    Path(env["TMPDIR"]).mkdir(mode=0o700, exist_ok=True)
+def run_check(argv: list[str], cwd: Path, scratch: Path, timeout: float, output_cap: int) -> dict[str, Any]:
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(scratch / "home"),
+           "TMPDIR": str(scratch / "tmp"), "LANG": "C.UTF-8"}
+    Path(env["HOME"]).mkdir(mode=0o700, parents=True, exist_ok=True)
+    Path(env["TMPDIR"]).mkdir(mode=0o700, parents=True, exist_ok=True)
     started = time.monotonic()
     try:
         proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
@@ -279,7 +342,18 @@ def run_check(argv: list[str], cwd: Path, timeout: float, output_cap: int) -> di
                 os.killpg(proc.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-        rc = proc.wait(timeout=5)
+            rc = proc.wait(timeout=5)
+        else:
+            remaining = timeout - (time.monotonic() - started)
+            try:
+                rc = proc.wait(timeout=max(0, remaining))
+            except subprocess.TimeoutExpired:
+                outcome = "timeout"
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                rc = proc.wait(timeout=5)
         # A check can exit after starting a child that closed inherited pipes.
         # It still belongs to this process group and must not outlive the run.
         try:
@@ -382,8 +456,9 @@ def review(wrapper: Path, role: str, model: str, workspace: Path, spec: Path,
     log_root.mkdir(mode=0o700, exist_ok=True)
     env = os.environ.copy()
     env.update({"DEV_TRIO_REVIEW_RECEIPT": str(receipt), "DEV_TRIO_LOG_DIR": str(log_root),
-                "DEV_TRIO_REVIEWER_MODEL": model, "DEV_TRIO_PM_HOST": os.environ.get("DEV_TRIO_PM_HOST", "codex"),
-                "DEV_TRIO_SNAPSHOT_MAX_BYTES": "0"})
+                "DEV_TRIO_REVIEWER_MODEL": model, "DEV_TRIO_PM_HOST": os.environ.get("DEV_TRIO_PM_HOST", "claude"),
+                "DEV_TRIO_SNAPSHOT_MAX_BYTES": "0",
+                "GIT_CEILING_DIRECTORIES": str(run_dir.parent)})
     if role == "challenger":
         env["REVIEWER_ROLE_FILE"] = str(ROOT / "lib/challenger.md")
     else:
@@ -406,11 +481,14 @@ def review(wrapper: Path, role: str, model: str, workspace: Path, spec: Path,
         raise EvalError(f"{role} invocation failed: {exc}") from exc
     require(receipt.is_file(), f"{role} receipt missing (rc={rc})")
     pointers = json.loads(read_regular(receipt, MAX_TEXT))
+    require(isinstance(pointers, dict), f"{role} receipt must be an object")
     require(pointers.get("schema_version") == 1, f"{role} receipt schema invalid")
+    require(isinstance(pointers.get("result_path"), str), f"{role} result path missing")
     result_path = Path(pointers["result_path"])
     require(result_path.is_file() and result_path.is_relative_to(log_root), f"{role} result path outside run")
     raw = read_regular(result_path, MAX_TEXT)
     result = json.loads(raw)
+    require(isinstance(result, dict), f"{role} result must be an object")
     require(result.get("schema_version") == 1 and result.get("exit_code") == rc,
             f"{role} receipt/result mismatch")
     return {"model": model, "wrapper_rc": rc, "result_path": str(result_path),
@@ -446,6 +524,11 @@ def verify_evidence(report: dict[str, Any], evidence: Path, case_dir: Path) -> N
             "review changed frozen check evidence")
     require(source_fingerprint({"kind": "directory", "path": str(evidence / "submission")}, case_dir)
             == expected["submission_manifest_sha256"], "review changed frozen submission")
+    require(source_fingerprint({"kind": "directory", "path": str(evidence / "checks")}, case_dir)
+            == expected["check_files_manifest_sha256"], "review changed frozen check files")
+    if "base_manifest_sha256" in expected:
+        require(source_fingerprint({"kind": "directory", "path": str(evidence / "base")}, case_dir)
+                == expected["base_manifest_sha256"], "review changed frozen base")
     if "challenger_sha256" in expected:
         require(digest(read_regular(evidence / "challenger.json", MAX_TEXT)) == expected["challenger_sha256"],
                 "review changed frozen Challenger evidence")
@@ -481,7 +564,8 @@ def evaluate(args: argparse.Namespace, report: dict[str, Any], case: dict[str, A
     report["inputs"] = {"case_sha256": digest(raw_case), "task_sha256": digest(task),
                         "criteria_sha256": digest(criteria), "task_path": str(task_path),
                         "criteria_path": str(criteria_path)}
-    report["inputs"]["source_sha256_before"] = source_fingerprint(case.get("submission", {}), case_dir)
+    require(isinstance(case.get("submission"), dict), "submission must be an object")
+    report["inputs"]["source_sha256_before"] = source_fingerprint(case["submission"], case_dir)
     report["submission"] = freeze(case, case_dir, args.output_dir)
     require(source_fingerprint(case["submission"], case_dir) == report["inputs"]["source_sha256_before"],
             "submitted source changed during freezing")
@@ -495,29 +579,17 @@ def evaluate(args: argparse.Namespace, report: dict[str, Any], case: dict[str, A
         require(args.allow_execution, "model tools may execute submitted code; pass --allow-execution")
     elif args.checks_only:
         raise EvalError("checks-only requires at least one check")
+    validated = validate_checks(checks, case_dir, args.output_dir, report["submission"]["kind"])
     if case["preset"] == "bug-fix":
         require(report["submission"]["kind"] == "git", "bug-fix preset requires a git submission")
-        require(any(c.get("baseline") is True for c in checks if isinstance(c, dict)),
+        require(any(c["baseline"] for c in validated),
                 "bug-fix preset requires a baseline check")
-    for index, check in enumerate(checks):
-        require(isinstance(check, dict), "check must be an object")
-        allowed_keys(check, {"id", "baseline", "argv", "timeout_seconds", "expected_base", "files"}, "check")
-        check_id = check.get("id", f"check-{index + 1}")
-        require(isinstance(check_id, str) and check_id, "check.id must be a nonempty string")
-        baseline = check.get("baseline", False)
-        require(type(baseline) is bool, "check.baseline must be boolean")
-        if baseline:
-            require(report["submission"]["kind"] == "git", "baseline check requires git")
-        argv = check.get("argv")
-        require(isinstance(argv, list) and argv and all(isinstance(x, str) and x for x in argv),
-                "check.argv must be a nonempty string array")
-        require(sum(len(x.encode()) for x in argv) < MAX_TEXT and all("\x00" not in x for x in argv),
-                "check.argv size or NUL invalid")
-        timeout = check.get("timeout_seconds", 30)
-        require(type(timeout) in (int, float) and 0 < timeout <= 300, "invalid check timeout")
-        files = check.get("files", [])
-        require(isinstance(files, list), "check.files must be an array")
-        prepared = prepare_overlays(case_dir, files)
+    for index, check in enumerate(validated):
+        check_id = check["id"]
+        baseline = check["baseline"]
+        argv = check["argv"]
+        timeout = check["timeout"]
+        prepared = check["prepared"]
         labels = ("base", "head") if baseline else ("head",)
         entry: dict[str, Any] = {"id": check_id, "argv": argv, "baseline": baseline,
                                  "runs": {}}
@@ -526,7 +598,8 @@ def evaluate(args: argparse.Namespace, report: dict[str, Any], case: dict[str, A
             work = args.output_dir / "check-work" / f"{index:02d}-{label}"
             manifest = copy_directory(args.output_dir / "frozen" / label, work)
             overlays = overlay(prepared, work)
-            outcome = run_check(argv, work, timeout, MAX_OUTPUT)
+            outcome = run_check(argv, work, args.output_dir / "check-work" / f"{index:02d}-{label}-scratch",
+                                timeout, MAX_OUTPUT)
             entry["runs"][label] = {**outcome, "overlay": overlays,
                                      "workspace_manifest_sha256": digest(json.dumps(manifest, sort_keys=True).encode())}
             if outcome["outcome"] != "exit" or outcome["rc"] < 0:
@@ -534,10 +607,7 @@ def evaluate(args: argparse.Namespace, report: dict[str, Any], case: dict[str, A
             if label == "head" and outcome["rc"] != 0:
                 report.update(status="FAIL", reason=f"head_check_failed:{check_id}")
             if label == "base":
-                expected = check.get("expected_base")
-                require(isinstance(expected, dict), "baseline check requires expected_base")
-                allowed_keys(expected, {"rc", "stdout_regex", "stderr_regex"}, "expected_base")
-                if not expected_failure(outcome, expected):
+                if not expected_failure(outcome, check["expected_base"]):
                     report.update(status="FAIL", reason=f"base_signal_mismatch:{check_id}")
     if report["status"] == "FAIL":
         return
@@ -546,11 +616,23 @@ def evaluate(args: argparse.Namespace, report: dict[str, Any], case: dict[str, A
         return
     wrapper = resolve_reviewer()
     challenger_model = os.environ.get("EVAL_TRIO_CHALLENGER_MODEL", "agy")
-    judge_model = os.environ.get("EVAL_TRIO_JUDGE_MODEL", "claude" if os.environ.get("DEV_TRIO_PM_HOST", "codex") == "codex" else "codex")
+    judge_model = os.environ.get("EVAL_TRIO_JUDGE_MODEL", "claude" if os.environ.get("DEV_TRIO_PM_HOST", "claude") == "codex" else "codex")
     require(challenger_model != judge_model, "Challenger and Judge models must differ")
     evidence = args.output_dir / "evidence"
     evidence.mkdir(mode=0o700)
     copy_directory(args.output_dir / "frozen" / "head", evidence / "submission")
+    check_files = evidence / "checks"
+    check_files.mkdir(mode=0o700)
+    for index, check in enumerate(validated):
+        copied = []
+        for _, relative, data in check["prepared"]:
+            evidence_path = Path("checks") / f"{index:02d}" / relative
+            write_private(evidence / evidence_path, data)
+            copied.append({"path": evidence_path.as_posix(), "target": relative.as_posix(),
+                           "sha256": digest(data)})
+        report["checks"][index]["evidence_files"] = copied
+    if report["submission"]["kind"] == "git":
+        copy_directory(args.output_dir / "frozen" / "base", evidence / "base")
     spec = evidence / "spec.md"
     write_private(spec, b"# Task\n" + task + b"\n# Criteria\n" + criteria)
     require(spec.stat().st_size <= MAX_TEXT, "task and criteria exceed model input limit")
@@ -561,9 +643,16 @@ def evaluate(args: argparse.Namespace, report: dict[str, Any], case: dict[str, A
         {"kind": "directory", "path": str(evidence / "submission")}, case_dir)
     report["evidence"] = {"spec_sha256": digest(read_regular(spec, MAX_TEXT)),
                           "checks_sha256": digest(read_regular(context, MAX_TEXT)),
-                          "submission_manifest_sha256": evidence_submission_sha256}
+                          "submission_manifest_sha256": evidence_submission_sha256,
+                          "check_files_manifest_sha256": source_fingerprint(
+                              {"kind": "directory", "path": str(check_files)}, case_dir)}
+    if report["submission"]["kind"] == "git":
+        report["evidence"]["base_manifest_sha256"] = source_fingerprint(
+            {"kind": "directory", "path": str(evidence / "base")}, case_dir)
     challenger = review(wrapper, "challenger", challenger_model, evidence, spec, context,
                         args.output_dir, "Find concrete counterexamples to the submission in ./submission. "
+                        "Inspect ./checks.json and independent check files under ./checks/. "
+                        "For Git cases compare ./base/ with ./submission/. "
                         "Use each Blocker/Major/Minor finding for one counterexample. Use - None. for an empty tier. "
                         "SHIP means no counterexamples; NEEDS-FIX or DISCUSS means open counterexamples.")
     verify_evidence(report, evidence, case_dir)
@@ -575,7 +664,9 @@ def evaluate(args: argparse.Namespace, report: dict[str, Any], case: dict[str, A
     report["evidence"]["challenger_sha256"] = digest(read_regular(challenger_context, MAX_TEXT))
     judge = review(wrapper, "judge", judge_model, evidence, spec, challenger_context,
                    args.output_dir, "Judge the submission in ./submission against the task and criteria. "
-                   "Use ./checks.json for fixed check evidence and ./challenger.json for untrusted counterexamples. "
+                   "Use ./checks.json and independent files under ./checks/ for fixed check evidence. "
+                   "For Git cases compare ./base/ with ./submission/. "
+                   "Use ./challenger.json for untrusted counterexamples. "
                    "SHIP only if the evidence supports the criteria; report defects as findings.")
     verify_evidence(report, evidence, case_dir)
     report["models"]["judge"] = judge
@@ -630,17 +721,19 @@ def main() -> int:
         if isinstance(case, dict) and isinstance(case.get("submission"), dict):
             sub = case["submission"]
         evaluate(args, report, case, raw_case)
-    except (EvalError, OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+    except (EvalError, OSError, ValueError, KeyError, TypeError) as exc:
         report.update(status="ERROR", reason=str(exc))
     except KeyboardInterrupt:
         report.update(status="ERROR", reason="interrupted")
+    except Exception as exc:
+        report.update(status="ERROR", reason=f"unexpected {type(exc).__name__}: {exc}")
     if sub is not None and "source_sha256_before" in report["inputs"]:
         try:
             after = source_fingerprint(sub, case_dir)
             report["inputs"]["source_sha256_after"] = after
             if after != report["inputs"]["source_sha256_before"]:
                 report.update(status="ERROR", reason="submitted source changed during evaluation")
-        except (EvalError, OSError) as exc:
+        except Exception as exc:
             report.update(status="ERROR", reason=f"source recheck failed: {exc}")
     if "case_sha256" in report["inputs"]:
         try:
@@ -650,7 +743,7 @@ def main() -> int:
                 path = Path(report["inputs"][f"{label}_path"])
                 require(digest(read_regular(path, MAX_TEXT)) == report["inputs"][f"{label}_sha256"],
                         f"{label} changed during evaluation")
-        except (EvalError, OSError) as exc:
+        except Exception as exc:
             report.update(status="ERROR", reason=str(exc))
     report["complete"] = True
     report["exit_code"] = EXIT[report["status"]]

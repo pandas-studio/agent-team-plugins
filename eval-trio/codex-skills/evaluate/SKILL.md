@@ -5,9 +5,10 @@ description: Evaluate a submitted local result against a task and criteria with 
 
 # Eval Trio
 
-Create a version 1 case JSON following `eval-trio/README.md`. Put the task,
-criteria, and independent check files beside it. Run
-`eval-trio run --case <case.json> --output-dir <fresh-private-dir> --allow-execution`.
+Create a version 1 case JSON following [README](../../README.md). Put the task,
+criteria, and independent check files beside it. Resolve the plugin root from
+this skill's location, then run
+`DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/eval-trio" run --case <case.json> --output-dir <fresh-private-dir> --allow-execution`.
 Use `--checks-only` to skip model reviews and authentication. Check the
 authoritative `report.json`, its `status`, `mode`, `reason`, and `exit_code`.
 `PASS` requires fixed checks and both model reviews; `HOLD` is never a pass.
