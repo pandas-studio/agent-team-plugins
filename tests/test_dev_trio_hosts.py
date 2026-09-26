@@ -1877,6 +1877,14 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         )
         result = subprocess.run([sys.executable, "-c", code], capture_output=True, timeout=20)
         self.assertEqual((result.returncode, result.stdout), (5, b""), result.stderr)
+        # Git still running after the read error: still git-failed, and no wait.
+        git = shlex.quote(shutil.which("git"))
+        path, _ = self.git_shim(f'case "$*" in *ls-files*) {git} "$@"; sleep 15 ;; esac')
+        t0 = time.time()
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, timeout=20,
+                                env=os.environ | {"PATH": path, "DEV_TRIO_GIT_TIMEOUT": "5"})
+        self.assertEqual((result.returncode, result.stdout), (5, b""), result.stderr)
+        self.assertLess(time.time() - t0, 4.5)
 
     def test_snapshot_status_range_probe_failure_is_git_failed(self):
         self._commit_two()

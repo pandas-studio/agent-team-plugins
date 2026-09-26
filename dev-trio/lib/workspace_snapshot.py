@@ -807,7 +807,10 @@ def main() -> None:
                             break
                     if not capped and not timed_out and buf:
                         paths.append(os.fsdecode(bytes(buf)))
-                    if capped or timed_out:
+                    if capped or timed_out or read_failed:
+                        # A read error is a failure now; do not wait on Git.
+                        if read_failed:
+                            kill_process_tree(proc)
                         proc.wait(timeout=0.5)
                     else:
                         # As in run_bounded: the rest of the deadline, then a timeout.
@@ -832,9 +835,11 @@ def main() -> None:
                             pass
 
                 # The same classification as run_git; a partial list is never used.
+                if read_failed:
+                    skip(SKIP_GIT_FAILED)
                 if timed_out:
                     skip(SKIP_GIT_TIMEOUT)
-                if read_failed or (proc.returncode != 0 and not capped):
+                if proc.returncode != 0 and not capped:
                     skip(SKIP_GIT_FAILED)
                 else:
                     omitted_paths = []
