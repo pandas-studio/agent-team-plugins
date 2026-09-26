@@ -127,6 +127,14 @@ When a `GENERATOR_CLI` or `CRITIC_CLI` wrapper is used with the `claude` model,
 it must handle `auth status --json`; Codex host mode probes that command before
 creating or retargeting a debate log.
 
+Inside Codex's workspace sandbox that probe cannot read Keychain, and a
+logged-in Claude answers exactly like a logged-out one. A failed probe
+therefore stops with `Claude login unverified in this environment (auth
+status: …)` and never claims a logout; no debate directory is created and
+`latest-debate` does not move. The Codex run skill makes one host-approval
+attempt for that exact `debate.sh` command, or you can choose a non-Claude
+model for the role.
+
 New debates honor persistent `agent-team-models set-role` bindings. Continued
 debates reuse the transcript's saved model pair and any saved rotation unless
 this invocation passes `--primary-gen`, `--primary-crit`,

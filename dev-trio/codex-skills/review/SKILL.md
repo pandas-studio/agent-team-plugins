@@ -30,6 +30,37 @@ yourself, save its output as a context file, confirm both commits exist locally
 (ask before fetching; `pull/N/head` works for fork PRs), and dispatch with
 `--with-context <file>` and a `<merge-base>..<headRefOid>` range focus.
 
+## Host permission for a Claude reviewer
+
+A Claude reviewer reads its login from macOS Keychain, both in the wrapper's
+login check and in the review itself. Codex's workspace sandbox can hide
+Keychain, and then a logged-in Claude reports exactly what a logged-out one
+does. The wrapper therefore exits 2 before any invocation with
+`Claude login unverified in this environment (auth status: …)`; it never
+claims a logout. You decide, because only you know whether the host approved
+the run.
+
+- **One approval attempt per review.** Either dispatch the first attempt with
+  the host's approval mechanism (for example `require_escalated`, with a
+  justification naming Keychain access for the Claude reviewer) because this
+  session already saw that line, or, after a sandboxed dispatch printed it,
+  request approval for the same argv once. Never both.
+- Before or between attempts, do not run `claude auth status`, the doctor,
+  `claude auth login`, a raw `claude`, or a different reviewer as a probe or
+  workaround.
+- Approval denied or unavailable: stop and report that the review did not run
+  and there is no verdict.
+- The approved run prints the same line: stop without another prompt. Report
+  that the login check failed even with host access, and ask the user to run
+  `claude auth status` in their own terminal and log in there if it says so.
+  Do not change authentication yourself.
+- A one-time approval covers that one command; a SHA or range focus makes it
+  useless for the next review. If the host lets you suggest a persistent
+  `prefix_rule`, name only the wrapper path (never `claude`, never focus
+  arguments), and tell the user it would allow every future review through
+  that wrapper at that versioned plugin path, and stops matching after a
+  plugin update.
+
 Capture this invocation's exit code and the exact log/final/result paths from
 its last stderr line. Read that exact `.review.json`: it is the parsed result
 the wrapper, manifest and dashboard share. Do not parse verdicts or count

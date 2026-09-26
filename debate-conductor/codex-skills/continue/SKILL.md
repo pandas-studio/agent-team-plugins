@@ -19,6 +19,13 @@ Read `<debate-dir>/topic.txt` and run:
 DEBATE_CONDUCTOR_PM_HOST=codex "<plugin-root>/bin/debate.sh" --continue-from "<debate-dir>" -n <extra-rounds> "<topic>"
 ```
 
+If `debate.sh` prints `Claude login unverified in this environment`, follow
+[the run skill's host permission rules](../run/SKILL.md#host-permission-for-a-claude-role):
+one approval attempt, then stop. The transcript, its ledger and `latest-debate`
+are unchanged. A continued debate keeps its saved model pair, so offering a
+non-Claude model means passing an explicit model flag, which rotated
+transcripts refuse; there, report the block instead.
+
 Default extra rounds to `2` when the user does not specify a number. Rounds
 continue after the last completed one, which `debate.sh` reads from the
 debate's append-only attempt ledger `index.jsonl` (never edit or delete it). If
