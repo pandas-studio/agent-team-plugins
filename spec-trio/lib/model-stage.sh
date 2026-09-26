@@ -34,12 +34,10 @@ trio_resolve_model() {
 }
 
 trio_check_model() {
-  local model="$1" binary
-  registry_check_model "$model" || return 2
-  binary=$(registry_resolve_command "$model") || return 2
-  command -v "$binary" >/dev/null 2>&1 || {
-    echo "model CLI not found: $binary (model=$model)" >&2; return 2;
-  }
+  # Validate the adapter now; resolve the executable only at invocation.
+  # Worktree setup and backlog handling must keep their existing precedence
+  # when a model CLI is unavailable on this host.
+  registry_check_model "$1" || return 2
 }
 
 # Called by stage_run; its stdin is STAGE_PROMPT. Keep a native CLI transcript
