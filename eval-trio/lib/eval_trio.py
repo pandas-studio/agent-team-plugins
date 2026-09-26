@@ -253,14 +253,15 @@ def validate_checks(checks: list[Any], case_dir: Path, run_dir: Path,
         files = check.get("files", [])
         require(isinstance(files, list), "check.files must be an array")
         prepared = prepare_overlays(case_dir, files)
-        targets: set[Path] = set()
+        targets: set[str] = set()
         for _, relative, _ in prepared:
-            require(relative not in targets, f"duplicate check file target: {relative}")
-            require(all(parent not in targets for parent in relative.parents),
+            folded = relative.as_posix().casefold()
+            require(folded not in targets, f"duplicate check file target: {relative}")
+            require(all(parent.as_posix().casefold() not in targets for parent in relative.parents),
                     f"check file target conflicts with another target: {relative}")
-            require(not any(relative in target.parents for target in targets),
+            require(not any(target.startswith(folded + "/") for target in targets),
                     f"check file target conflicts with another target: {relative}")
-            targets.add(relative)
+            targets.add(folded)
             for label in (("base", "head") if baseline else ("head",)):
                 frozen = run_dir / "frozen" / label
                 target = frozen / relative
@@ -301,7 +302,8 @@ def overlay(prepared: list[tuple[Path, Path, bytes]], target: Path) -> list[dict
     return entries
 
 
-def run_check(argv: list[str], cwd: Path, scratch: Path, timeout: float, output_cap: int) -> dict[str, Any]:
+def run_check(argv: list[str], cwd: Path, scratch: Path, timeout: float,
+              output_cap: int) -> tuple[dict[str, Any], bytes, bytes]:
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(scratch / "home"),
            "TMPDIR": str(scratch / "tmp"), "LANG": "C.UTF-8"}
     Path(env["HOME"]).mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -311,7 +313,7 @@ def run_check(argv: list[str], cwd: Path, scratch: Path, timeout: float, output_
         proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     except OSError as exc:
-        return {"outcome": "spawn-error", "error": str(exc), "env_keys": sorted(env)}
+        return {"outcome": "spawn-error", "error": str(exc), "env_keys": sorted(env)}, b"", b""
     sel = selectors.DefaultSelector()
     output = {"stdout": bytearray(), "stderr": bytearray()}
     for name, pipe in (("stdout", proc.stdout), ("stderr", proc.stderr)):
@@ -380,11 +382,12 @@ def run_check(argv: list[str], cwd: Path, scratch: Path, timeout: float, output_
         for pipe in (proc.stdout, proc.stderr):
             if pipe:
                 pipe.close()
-    return {"outcome": outcome, "rc": rc, "duration_seconds": round(time.monotonic() - started, 3),
+    result = {"outcome": outcome, "rc": rc, "duration_seconds": round(time.monotonic() - started, 3),
             "stdout": bytes(output["stdout"][:output_cap]).decode("utf-8", "replace"),
             "stderr": bytes(output["stderr"][:output_cap]).decode("utf-8", "replace"),
             "stdout_sha256": digest(output["stdout"]), "stderr_sha256": digest(output["stderr"]),
             "env_keys": sorted(env)}
+    return result, bytes(output["stdout"]), bytes(output["stderr"])
 
 
 def expected_failure(result: dict[str, Any], expected: dict[str, Any]) -> bool:
@@ -406,6 +409,24 @@ def expected_failure(result: dict[str, Any], expected: dict[str, Any]) -> bool:
     return True
 
 
+def checks_for_review(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the model attachment small while preserving full output in evidence files."""
+    summary = []
+    for check in checks:
+        runs = {}
+        for label, run in check["runs"].items():
+            runs[label] = {key: run[key] for key in (
+                "outcome", "rc", "duration_seconds", "stdout_sha256", "stderr_sha256",
+                "output_files", "workspace_manifest_sha256")}
+            for stream in ("stdout", "stderr"):
+                value = run[stream].encode("utf-8")
+                runs[label][f"{stream}_excerpt"] = value[:256].decode("utf-8", "replace")
+        summary.append({"id": check["id"], "argv": check["argv"],
+                        "baseline": check["baseline"], "evidence_files": check["evidence_files"],
+                        "runs": runs})
+    return summary
+
+
 def resolve_reviewer() -> Path:
     override = os.environ.get("DEV_TRIO_BIN")
     if override:
@@ -418,6 +439,29 @@ def resolve_reviewer() -> Path:
     found = shutil.which("ask-reviewer.sh")
     if found:
         return Path(found)
+    if os.environ.get("DEV_TRIO_PM_HOST", "claude") == "codex":
+        codex = shutil.which("codex")
+        if codex:
+            try:
+                listed = subprocess.run([codex, "plugin", "list", "--json"], capture_output=True,
+                                        timeout=10, check=True, text=True)
+                plugins = json.loads(listed.stdout)
+                require(isinstance(plugins, dict) and isinstance(plugins.get("installed"), list),
+                        "Codex plugin list schema invalid")
+                for item in plugins["installed"]:
+                    if not isinstance(item, dict) or item.get("pluginId") != "dev-trio@pandas-studio":
+                        continue
+                    if item.get("installed") is not True or item.get("enabled") is not True:
+                        continue
+                    version = item.get("version")
+                    require(isinstance(version, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.+_-]*", version),
+                            "unsafe Codex plugin version")
+                    home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+                    candidate = home / "plugins/cache/pandas-studio/dev-trio" / version / "bin/ask-reviewer.sh"
+                    if candidate.is_file() and os.access(candidate, os.X_OK):
+                        return candidate.absolute()
+            except (OSError, ValueError, subprocess.SubprocessError):
+                pass
     claude = shutil.which("claude")
     if claude:
         try:
@@ -455,6 +499,8 @@ def review(wrapper: Path, role: str, model: str, workspace: Path, spec: Path,
     log_root = run_dir / "model-logs"
     log_root.mkdir(mode=0o700, exist_ok=True)
     env = os.environ.copy()
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"):
+        env.pop(key, None)
     env.update({"DEV_TRIO_REVIEW_RECEIPT": str(receipt), "DEV_TRIO_LOG_DIR": str(log_root),
                 "DEV_TRIO_REVIEWER_MODEL": model, "DEV_TRIO_PM_HOST": os.environ.get("DEV_TRIO_PM_HOST", "claude"),
                 "DEV_TRIO_SNAPSHOT_MAX_BYTES": "0",
@@ -526,6 +572,8 @@ def verify_evidence(report: dict[str, Any], evidence: Path, case_dir: Path) -> N
             == expected["submission_manifest_sha256"], "review changed frozen submission")
     require(source_fingerprint({"kind": "directory", "path": str(evidence / "checks")}, case_dir)
             == expected["check_files_manifest_sha256"], "review changed frozen check files")
+    require(source_fingerprint({"kind": "directory", "path": str(evidence / "outputs")}, case_dir)
+            == expected["outputs_manifest_sha256"], "review changed frozen check outputs")
     if "base_manifest_sha256" in expected:
         require(source_fingerprint({"kind": "directory", "path": str(evidence / "base")}, case_dir)
                 == expected["base_manifest_sha256"], "review changed frozen base")
@@ -598,9 +646,16 @@ def evaluate(args: argparse.Namespace, report: dict[str, Any], case: dict[str, A
             work = args.output_dir / "check-work" / f"{index:02d}-{label}"
             manifest = copy_directory(args.output_dir / "frozen" / label, work)
             overlays = overlay(prepared, work)
-            outcome = run_check(argv, work, args.output_dir / "check-work" / f"{index:02d}-{label}-scratch",
-                                timeout, MAX_OUTPUT)
+            outcome, stdout, stderr = run_check(
+                argv, work, args.output_dir / "check-work" / f"{index:02d}-{label}-scratch",
+                timeout, MAX_OUTPUT)
+            output_files = {}
+            for stream, data in (("stdout", stdout), ("stderr", stderr)):
+                relative_output = Path("outputs") / f"{index:02d}-{label}.{stream}"
+                write_private(args.output_dir / "evidence" / relative_output, data)
+                output_files[stream] = relative_output.as_posix()
             entry["runs"][label] = {**outcome, "overlay": overlays,
+                                     "output_files": output_files,
                                      "workspace_manifest_sha256": digest(json.dumps(manifest, sort_keys=True).encode())}
             if outcome["outcome"] != "exit" or outcome["rc"] < 0:
                 raise EvalError(f"check {check_id} {label}: {outcome['outcome']} rc={outcome.get('rc')}")
@@ -619,8 +674,9 @@ def evaluate(args: argparse.Namespace, report: dict[str, Any], case: dict[str, A
     judge_model = os.environ.get("EVAL_TRIO_JUDGE_MODEL", "claude" if os.environ.get("DEV_TRIO_PM_HOST", "claude") == "codex" else "codex")
     require(challenger_model != judge_model, "Challenger and Judge models must differ")
     evidence = args.output_dir / "evidence"
-    evidence.mkdir(mode=0o700)
+    evidence.mkdir(mode=0o700, exist_ok=True)
     copy_directory(args.output_dir / "frozen" / "head", evidence / "submission")
+    (evidence / "outputs").mkdir(mode=0o700, exist_ok=True)
     check_files = evidence / "checks"
     check_files.mkdir(mode=0o700)
     for index, check in enumerate(validated):
@@ -637,7 +693,7 @@ def evaluate(args: argparse.Namespace, report: dict[str, Any], case: dict[str, A
     write_private(spec, b"# Task\n" + task + b"\n# Criteria\n" + criteria)
     require(spec.stat().st_size <= MAX_TEXT, "task and criteria exceed model input limit")
     context = evidence / "checks.json"
-    write_private(context, json.dumps(report["checks"], indent=2, ensure_ascii=False).encode())
+    write_private(context, json.dumps(checks_for_review(report["checks"]), indent=2, ensure_ascii=False).encode())
     require(context.stat().st_size <= MAX_TEXT, "check evidence exceeds model input limit")
     evidence_submission_sha256 = source_fingerprint(
         {"kind": "directory", "path": str(evidence / "submission")}, case_dir)
@@ -645,13 +701,16 @@ def evaluate(args: argparse.Namespace, report: dict[str, Any], case: dict[str, A
                           "checks_sha256": digest(read_regular(context, MAX_TEXT)),
                           "submission_manifest_sha256": evidence_submission_sha256,
                           "check_files_manifest_sha256": source_fingerprint(
-                              {"kind": "directory", "path": str(check_files)}, case_dir)}
+                              {"kind": "directory", "path": str(check_files)}, case_dir),
+                          "outputs_manifest_sha256": source_fingerprint(
+                              {"kind": "directory", "path": str(evidence / "outputs")}, case_dir)}
     if report["submission"]["kind"] == "git":
         report["evidence"]["base_manifest_sha256"] = source_fingerprint(
             {"kind": "directory", "path": str(evidence / "base")}, case_dir)
     challenger = review(wrapper, "challenger", challenger_model, evidence, spec, context,
                         args.output_dir, "Find concrete counterexamples to the submission in ./submission. "
-                        "Inspect ./checks.json and independent check files under ./checks/. "
+                        "Inspect ./checks.json, independent check files under ./checks/, "
+                        "and full check outputs under ./outputs/. "
                         "For Git cases compare ./base/ with ./submission/. "
                         "Use each Blocker/Major/Minor finding for one counterexample. Use - None. for an empty tier. "
                         "SHIP means no counterexamples; NEEDS-FIX or DISCUSS means open counterexamples.")
@@ -664,7 +723,8 @@ def evaluate(args: argparse.Namespace, report: dict[str, Any], case: dict[str, A
     report["evidence"]["challenger_sha256"] = digest(read_regular(challenger_context, MAX_TEXT))
     judge = review(wrapper, "judge", judge_model, evidence, spec, challenger_context,
                    args.output_dir, "Judge the submission in ./submission against the task and criteria. "
-                   "Use ./checks.json and independent files under ./checks/ for fixed check evidence. "
+                   "Use ./checks.json, independent files under ./checks/, "
+                   "and full check outputs under ./outputs/ for fixed check evidence. "
                    "For Git cases compare ./base/ with ./submission/. "
                    "Use ./challenger.json for untrusted counterexamples. "
                    "SHIP only if the evidence supports the criteria; report defects as findings.")

@@ -1,12 +1,14 @@
 """Contract tests use an exact-result reviewer stub, never live model CLIs."""
 
 import json
+import importlib.util
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 CLI = ROOT / "eval-trio/bin/eval-trio"
@@ -30,6 +32,8 @@ rc = 0 if status == 'ok' else 3
 result = {'schema_version': 1, 'profile': 'default', 'status': status,
           'test_pm_host': os.environ.get('DEV_TRIO_PM_HOST'),
           'test_git_root': git_probe.stdout.strip() if git_probe.returncode == 0 else None,
+          'test_git_env': {k: os.environ[k] for k in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR',
+              'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY') if k in os.environ},
           'test_focus': sys.argv[-1],
           'invocation_rc': 0, 'exit_code': rc, 'error': None if rc == 0 else 'bad review',
           'verdict': verdict if rc == 0 else None,
@@ -75,7 +79,11 @@ class EvalTrioTests(unittest.TestCase):
         case_file = self.case_dir / "case.json"
         case_file.write_text(json.dumps(self.case))
         output = self.root / f"run-{len(list(self.root.glob('run-*')))}"
-        child_env = dict(os.environ, DEV_TRIO_BIN=str(self.bin))
+        child_env = dict(os.environ)
+        for key in ("DEV_TRIO_PM_HOST", "EVAL_TRIO_CHALLENGER_MODEL", "EVAL_TRIO_JUDGE_MODEL",
+                    "DEV_TRIO_REVIEWER_MODEL", "REVIEWER_ROLE_FILE"):
+            child_env.pop(key, None)
+        child_env["DEV_TRIO_BIN"] = str(self.bin)
         child_env.update(env or {})
         proc = subprocess.run([str(CLI), "run", "--case", str(case_file), "--output-dir", str(output),
                                "--allow-execution", *flags], capture_output=True, text=True,
@@ -109,6 +117,35 @@ class EvalTrioTests(unittest.TestCase):
         report, _ = self.assert_status("PASS", env={"DEV_TRIO_PM_HOST": "codex"})
         self.assertEqual(report["models"]["judge"]["model"], "claude")
         self.assertEqual(report["models"]["judge"]["result"]["test_pm_host"], "codex")
+
+    def test_reviewer_does_not_inherit_host_git_overrides(self):
+        report, _ = self.assert_status("PASS", env={
+            "GIT_DIR": str(self.root / "host-repo"), "GIT_WORK_TREE": str(self.root),
+            "GIT_COMMON_DIR": str(self.root), "GIT_INDEX_FILE": str(self.root / "host-index"),
+            "GIT_OBJECT_DIRECTORY": str(self.root / "host-objects")})
+        self.assertEqual(report["models"]["challenger"]["result"]["test_git_env"], {})
+
+    def test_codex_only_plugin_cache_resolves_reviewer(self):
+        spec = importlib.util.spec_from_file_location("eval_trio_impl", ROOT / "eval-trio/lib/eval_trio.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.ROOT = self.root / "plugins/cache/pandas-studio/eval-trio/0.1.0"
+        module.ROOT.mkdir(parents=True)
+        codex_home = self.root / "codex-home"
+        reviewer = codex_home / "plugins/cache/pandas-studio/dev-trio/0.8.21/bin/ask-reviewer.sh"
+        reviewer.parent.mkdir(parents=True)
+        reviewer.write_text("#!/bin/sh\n")
+        reviewer.chmod(0o755)
+        cli_dir = self.root / "codex-cli"
+        cli_dir.mkdir()
+        codex = cli_dir / "codex"
+        codex.write_text("#!/bin/sh\nprintf '%s\\n' '" + json.dumps({"installed": [{
+            "pluginId": "dev-trio@pandas-studio", "installed": True, "enabled": True,
+            "version": "0.8.21"}]}) + "'\n")
+        codex.chmod(0o755)
+        with mock.patch.dict(os.environ, {"DEV_TRIO_PM_HOST": "codex", "CODEX_HOME": str(codex_home),
+                                      "PATH": f"{cli_dir}:/usr/bin:/bin", "DEV_TRIO_BIN": ""}):
+            self.assertEqual(module.resolve_reviewer(), reviewer)
 
     def test_real_dev_trio_wrapper_with_stub_model_clis(self):
         model = self.root / "model-stub"
@@ -222,6 +259,20 @@ class EvalTrioTests(unittest.TestCase):
         report, _ = self.assert_status("ERROR")
         self.assertIn("output-limit", report["reason"])
 
+    def test_verbose_passing_checks_keep_full_outputs_as_evidence(self):
+        self.case["checks"] = [{"id": f"verbose-{i}", "argv": [sys.executable, "-c",
+                                "print('x' * 50000)"]} for i in range(3)]
+        report, output = self.assert_status("PASS")
+        self.assertLess((output / "evidence/checks.json").stat().st_size, 128 * 1024)
+        self.assertEqual((output / "evidence/outputs/00-head.stdout").read_text().count("x"), 50000)
+        self.assertEqual(report["checks"][0]["runs"]["head"]["output_files"]["stdout"],
+                         "outputs/00-head.stdout")
+        self.assertIn("outputs_manifest_sha256", report["evidence"])
+
+    def test_model_tampering_with_check_output_is_error(self):
+        report, _ = self.assert_status("ERROR", env={"TEST_MUTATE_EVIDENCE": "outputs/00-head.stdout"})
+        self.assertIn("frozen check outputs", report["reason"])
+
     def test_timeout_after_pipes_close_uses_check_deadline(self):
         self.case["checks"][0].update(argv=[sys.executable, "-c",
             "import os,time; os.close(1); os.close(2); time.sleep(2)"], timeout_seconds=0.1)
@@ -252,6 +303,19 @@ class EvalTrioTests(unittest.TestCase):
         report, _ = self.assert_status("ERROR")
         self.assertIn("duplicate check.id", report["reason"])
         self.assertEqual(report["checks"], [])
+
+    def test_case_only_overlay_collision_rejected_before_execution(self):
+        marker = self.root / "executed"
+        self.case["checks"][0]["argv"] = [sys.executable, "-c",
+            f"from pathlib import Path; Path({str(marker)!r}).write_text('ran')"]
+        (self.case_dir / "lower.py").write_text("pass\n")
+        (self.case_dir / "upper.py").write_text("pass\n")
+        self.case["checks"].append({"id": "collision", "argv": [sys.executable, "-c", "pass"],
+                                    "files": [{"source": "lower.py", "target": "t/a.py"},
+                                              {"source": "upper.py", "target": "t/A.py"}]})
+        report, _ = self.assert_status("ERROR")
+        self.assertIn("duplicate check file target", report["reason"])
+        self.assertFalse(marker.exists())
 
     def test_output_nested_in_git_repo_does_not_expose_live_git_root(self):
         self.git(self.root, "init", "-q")
@@ -284,6 +348,10 @@ class EvalTrioTests(unittest.TestCase):
         env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
                    GIT_AUTHOR_NAME="Fixture", GIT_AUTHOR_EMAIL="fixture@example.com",
                    GIT_COMMITTER_NAME="Fixture", GIT_COMMITTER_EMAIL="fixture@example.com")
+        for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+                    "DEV_TRIO_PM_HOST", "EVAL_TRIO_CHALLENGER_MODEL", "EVAL_TRIO_JUDGE_MODEL",
+                    "DEV_TRIO_REVIEWER_MODEL", "REVIEWER_ROLE_FILE"):
+            env.pop(key, None)
         return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
                               text=True, env=env).stdout.strip()
 

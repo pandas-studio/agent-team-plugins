@@ -33,6 +33,9 @@ the Challenger defaults to
 `agy`. `EVAL_TRIO_CHALLENGER_MODEL` and `EVAL_TRIO_JUDGE_MODEL` can override
 the models, but must name different models. Full runs fail with `ERROR` when
 authentication or a wrapper result is unavailable.
+For a Codex PM, the CLI also resolves the enabled exact dev-trio version in
+Codex's installed plugin cache. Set `DEV_TRIO_BIN` explicitly if automatic
+discovery is unavailable.
 
 ## Case format
 
@@ -77,8 +80,12 @@ runs. Check files cannot replace
 submission files. A missing test on base therefore cannot count as a valid
 failure. Timeouts, signal deaths, spawn errors and output-limit events are
 `ERROR`, never an expected base failure. Output is capped at 64 KiB combined;
-an over-cap result is `ERROR`, so a pattern cannot be silently missed. Checks
-run once; non-determinism is not retried or hidden.
+an over-cap result is `ERROR`, so a pattern cannot be silently missed. Full
+check output bytes are kept in `evidence/outputs/`; `checks.json` contains
+bounded excerpts, hashes, and paths to those files. The combined `checks.json`
+model attachment has a 128 KiB limit, including commands and check-file
+metadata; exceeding it is `ERROR`. Checks run once; non-determinism is not
+retried or hidden.
 
 ## Decision contract
 
@@ -90,7 +97,7 @@ The public schemas are in `schema/case.schema.json` and
 
 | Precedence | Condition | Status | Exit |
 | --- | --- | --- | ---: |
-| 1 | Invalid input, infrastructure/model failure, missing or malformed exact review result, timeout, signal death, or output cap | `ERROR` | 3 |
+| 1 | Invalid input, infrastructure/model failure, missing or malformed exact review result, timeout, signal death, output cap, or model attachment size limit | `ERROR` | 3 |
 | 2 | Head check nonzero, base failure signal mismatch, Judge `NEEDS-FIX`, or Judge Blocker/Major finding | `FAIL` | 1 |
 | 3 | Challenger verdict other than `SHIP` or any finding, Judge `DISCUSS`/Minor finding, checks-only success, or no fixed checks | `HOLD` | 2 |
 | 4 | All fixed checks pass, Challenger `SHIP` with empty findings, Judge `SHIP` with no findings | `PASS` | 0 |
@@ -111,7 +118,8 @@ and frozen check evidence in the run's evidence directory; the Judge also sees
 the Challenger's exact result. These inputs are untrusted prompt data.
 The directory includes `submission/`, `checks/<check-index>/` copies of the
 independent check files, and `base/` for Git cases. `checks.json` names each
-copied file. Scratch HOME and TMPDIR for each check live outside its copied
+copied file. Full check outputs in `outputs/` are covered by evidence hashes.
+Scratch HOME and TMPDIR for each check live outside its copied
 submission workspace. Reviewer Git discovery is bounded at the run directory
 parent so an output directory inside a repository does not point the reviewer
 at the live source tree.
