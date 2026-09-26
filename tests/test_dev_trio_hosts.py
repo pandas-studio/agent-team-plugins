@@ -1831,6 +1831,30 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
             result = self.run_helper("working-tree")
             self.assertEqual((result.returncode, result.stdout), (4, b""))
 
+    def test_snapshot_helper_git_exiting_after_eof_uses_its_deadline(self):
+        # Git may close stdout and keep running briefly; that is success within
+        # DEV_TRIO_GIT_TIMEOUT and a timeout past it, never a failure.
+        self._commit_two()
+        (self.workspace / "u.txt").write_text("untracked\n")
+        git = shlex.quote(shutil.which("git"))
+        def late(pattern, seconds):
+            return (f'case "$*" in {pattern}) {git} "$@"; rc=$?; exec >&-; sleep {seconds}; exit $rc ;; esac')
+        cases = [
+            ("status within deadline", late('*" status "*', 1), "5", 0, b"### Working tree status"),
+            ("ls-files within deadline", late("*ls-files*", 1), "5", 0, b"### Untracked file: u.txt"),
+            ("status past deadline", late('*" status "*', 4), "2", 6, None),
+            ("ls-files past deadline", late("*ls-files*", 4), "2", 6, None),
+        ]
+        for name, shim, timeout, rc, expect in cases:
+            with self.subTest(name):
+                path, _ = self.git_shim(shim)
+                result = self.run_helper("working-tree", PATH=path, DEV_TRIO_GIT_TIMEOUT=timeout)
+                self.assertEqual(result.returncode, rc, result.stderr)
+                if expect is None:
+                    self.assertEqual(result.stdout, b"")
+                else:
+                    self.assertIn(expect, result.stdout)
+
     def test_snapshot_helper_ls_files_read_error_skips(self):
         # An error reading the ls-files pipe must not publish a partial list.
         self._init_git_workspace()

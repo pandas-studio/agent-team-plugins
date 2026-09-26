@@ -89,9 +89,14 @@ def run_bounded(cmd: list[str], max_bytes: int, timeout: float = 10.0) -> tuple[
         # Even after Git exits, its pipe can still contain several chunks.
         # Continue until EOF (or the byte/time cap) so success is complete.
 
+    # A Git that closed stdout may still be finishing; give it the rest of its
+    # deadline, and count running past that as a timeout, not a failure.
+    stopped = timed_out or killed or io_error
     try:
-        proc.wait(timeout=0.5)
+        proc.wait(timeout=0.5 if stopped else max(0.0, deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
+        if not stopped:
+            timed_out = True
         kill_process_tree(proc)
         try:
             proc.wait(timeout=0.5)
@@ -802,7 +807,16 @@ def main() -> None:
                             break
                     if not capped and not timed_out and buf:
                         paths.append(os.fsdecode(bytes(buf)))
-                    proc.wait(timeout=0.5)
+                    if capped or timed_out:
+                        proc.wait(timeout=0.5)
+                    else:
+                        # As in run_bounded: the rest of the deadline, then a timeout.
+                        try:
+                            proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+                        except subprocess.TimeoutExpired:
+                            timed_out = True
+                            kill_process_tree(proc)
+                            proc.wait(timeout=0.5)
                 except Exception:
                     read_failed = True
                     kill_process_tree(proc)
