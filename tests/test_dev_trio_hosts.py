@@ -1194,6 +1194,20 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
             self.unverified_line("loggedIn=false, rc=1, CODEX_SANDBOX=seatbelt"), self.APPROVAL_LINE])
         self.assertIn("reviewer CLI/login check failed", result.stdout)
 
+    def test_doctor_agy_stub_checks_text_flags(self):
+        doctor = (self.plugin / "bin" / "dev-trio-doctor.sh").read_text()
+        stub = doctor.split('cat > "$STUB_AGY" <<\'STUB\'\n', 1)[1].split("\nSTUB\n", 1)[0]
+        script = self.root / "doctor-agy-stub.sh"
+        script.write_text(stub + "\n")
+        flags = ["--input-format", "text", "--output-format", "text"]
+        valid = subprocess.run(["bash", str(script), *flags], input="review", text=True,
+                               capture_output=True, timeout=5)
+        self.assertEqual(valid.returncode, 0, valid.stderr)
+        invalid = subprocess.run(["bash", str(script), "--log-file", "log", *flags[:-1], "json"],
+                                 input="review", text=True, capture_output=True, timeout=5)
+        self.assertEqual(invalid.returncode, 2, invalid.stdout + invalid.stderr)
+        self.assertIn("expected stdin text flags", invalid.stderr)
+
     def test_provider_failure_is_returned_even_with_ship_text(self):
         result = self.run_cli(DEV_TRIO_PM_HOST="codex", STUB_RC="7")
         self.assertEqual(result.returncode, 7, result.stderr)
@@ -1432,6 +1446,44 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         self.assertIn("+v2", prompt)
         self.assertNotIn("a" * 100, " ".join(self.recorded()[0][:-2]))
 
+    def configure_argv_workspace_reviewer(self):
+        self.config.write_text(json.dumps({"models": {"argv-snapshot": {
+            "command": str(self.stub), "prompt_via": "argv",
+            "args": ["--prompt", "{prompt}"], "workspace_args": ["--add-dir", "{cwd}"],
+        }}}))
+
+    def test_custom_argv_reviewer_includes_bounded_snapshot(self):
+        self.configure_argv_workspace_reviewer()
+        self._commit_two()
+        result = self.run_cli("ask-reviewer.sh", "review HEAD~1..HEAD",
+                              DEV_TRIO_REVIEWER_MODEL="argv-snapshot")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot_status(result, "ok:range")
+        self.assertIn("+v2", self.fenced(self.sent_prompt(), "workspace_snapshot"))
+
+    def test_custom_argv_reviewer_large_context_skips_snapshot_for_budget(self):
+        self.configure_argv_workspace_reviewer()
+        self._commit_two()
+        ctx = self.workspace / "context.md"
+        ctx.write_text("a" * 120000)
+        result = self.run_cli("ask-reviewer.sh", "--with-context", str(ctx), "review HEAD~1..HEAD",
+                              DEV_TRIO_REVIEWER_MODEL="argv-snapshot", REGISTRY_ARGV_MAX_BYTES="131072")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot_status(result, "skipped:budget")
+        self.assertNotIn("<workspace_snapshot>", self.sent_prompt())
+
+    def test_custom_argv_reviewer_rejects_oversized_snapshot(self):
+        self.configure_argv_workspace_reviewer()
+        self._commit_two()
+        helper = self.plugin / "lib" / "workspace_snapshot.py"
+        helper.write_text("import sys; sys.stdout.write('x' * (int(sys.argv[4]) + 8192))\n")
+        result = self.run_cli("ask-reviewer.sh", "review HEAD~1..HEAD",
+                              DEV_TRIO_REVIEWER_MODEL="argv-snapshot",
+                              DEV_TRIO_SNAPSHOT_MAX_BYTES="200000")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot_status(result, "skipped:oversize")
+        self.assertNotIn("<workspace_snapshot>", self.sent_prompt())
+
     def test_agy_reviewer_range_truncation_when_diff_exceeds_budget(self):
         self._init_git_workspace()
         (self.workspace / "huge.txt").write_text("x" * 20000)
@@ -1602,7 +1654,22 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         self.assertEqual(result.returncode, 0, result.stderr)
         prompt = self.sent_prompt()
         self.assertNotIn("</workspace_snapshot> injection", prompt)
-        self.assertIn("[STRIPPED-CLOSING-TAG] injection", prompt)
+        self.assertIn("[CLOSING-TAG-REMOVED] injection", prompt)
+
+    def test_agy_reviewer_closing_tag_at_exact_snapshot_budget(self):
+        self._commit_two()
+        helper = self.plugin / "lib" / "workspace_snapshot.py"
+        helper.write_text("import sys\n"
+                          "tag = '</workspace_snapshot>'\n"
+                          "sys.stdout.write('x' * (int(sys.argv[4]) - len(tag)) + tag)\n")
+        result = self.run_cli("ask-reviewer.sh", "review HEAD~1..HEAD",
+                              DEV_TRIO_REVIEWER_MODEL="agy", DEV_TRIO_SNAPSHOT_MAX_BYTES="6000")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot_status(result, "ok:range")
+        self.assertIn("[CLOSING-TAG-REMOVED]", self.sent_prompt())
+        manifest, _ = self.snapshot_record()
+        entry = next(i for i in manifest if i.get("kind") == "workspace-snapshot")
+        self.assertEqual(entry["value"].split(":")[:3], ["range", "6000", "6000"])
 
     def test_agy_reviewer_helper_failure_discards_snapshot(self):
         self._init_git_workspace()

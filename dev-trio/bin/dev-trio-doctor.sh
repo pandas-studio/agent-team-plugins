@@ -160,7 +160,9 @@ else
 # Stub matching `agy [--log-file F] [--add-dir D] --input-format text
 # --output-format text`; the prompt arrives on stdin (#147).
 # Echoes a canonical-shaped lead paragraph so dashboard.sh can parse it.
-if [ "$#" -lt 4 ] || [ "${@: -4:4}" != "--input-format text --output-format text" ]; then
+if [ "$#" -lt 4 ] ||
+   [ "${@: -4:1}" != "--input-format" ] || [ "${@: -3:1}" != "text" ] ||
+   [ "${@: -2:1}" != "--output-format" ] || [ "${@: -1:1}" != "text" ]; then
   echo "stub-agy: expected stdin text flags, got: $*" >&2; exit 2
 fi
 prompt="$(cat)"

@@ -146,6 +146,20 @@ class DebateHostTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Codex PM host", result.stdout)
 
+    def test_doctor_generator_stub_checks_text_flags(self):
+        doctor = (self.plugin / "bin" / "debate-conductor-doctor.sh").read_text()
+        stub = doctor.split('cat > "$STUB_GEN" <<\'STUB\'\n', 1)[1].split("\nSTUB\n", 1)[0]
+        script = self.root / "doctor-generator-stub.sh"
+        script.write_text(stub + "\n")
+        flags = ["--input-format", "text", "--output-format", "text"]
+        valid = subprocess.run(["bash", str(script), *flags], input="draft", text=True,
+                               capture_output=True, timeout=5)
+        self.assertEqual(valid.returncode, 0, valid.stderr)
+        invalid = subprocess.run(["bash", str(script), *flags[:-1], "json"], input="draft",
+                                 text=True, capture_output=True, timeout=5)
+        self.assertEqual(invalid.returncode, 2, invalid.stdout + invalid.stderr)
+        self.assertIn("expected stdin text flags", invalid.stderr)
+
     def test_role_env_overrides_config(self):
         self.config.write_text('{"roles":{"debate-conductor.critic":"codex"}}')
         result = self.run_cli("debate.sh", "-n", "2", "fixture topic",
