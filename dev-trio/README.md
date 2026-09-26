@@ -56,10 +56,21 @@ model. `--no-memories` still requires an explicitly selected Codex reviewer; it
 is rejected for Claude.
 
 Claude's `auth status --json` must report `loggedIn: true` before a Claude
-invocation from the Codex host. In a sandbox that cannot access macOS Keychain,
-this check may require the host's normal permission escalation. Failures are
-reported before inference; the plugin does not modify credentials or retry
-using a different provider. Explicit custom CLI adapters retain their own auth
+invocation from the Codex host. Inside Codex's workspace sandbox Keychain is
+hidden, and a logged-in Claude then answers exactly like a logged-out one
+(measured with codex-cli 0.157.0: `loggedIn: false`, rc 1, `CODEX_SANDBOX=seatbelt`).
+So any failed check exits 2 before inference with what it saw, never a
+"logged out" verdict:
+
+```text
+dev-trio: Claude login unverified in this environment (auth status: loggedIn=false, rc=1, CODEX_SANDBOX=seatbelt); no invocation started
+```
+
+`CODEX_SANDBOX` is printed as a hint, not used as proof. The Codex review skill
+makes one host-approval attempt for that exact wrapper command and stops if it
+is denied or still fails; only then does it ask you to check `claude auth
+status` in your own terminal. The plugin does not modify credentials, widen
+host permissions, or retry using a different provider. Explicit custom CLI adapters retain their own auth
 behavior; a Claude adapter should use the `claude` model ID or `claude` binary
 name if it needs the built-in login probe.
 

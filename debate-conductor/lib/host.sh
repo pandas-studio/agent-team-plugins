@@ -48,7 +48,11 @@ debate_conductor_resolve_role() {
 # Check availability and, for Claude under Codex PM, login. Authentication and
 # billing stay under Claude Code's own configuration.
 debate_conductor_check_cli() {
-  local model="$1" bin auth host
+  local model="$1" bin host out rc=0 seen
+  # Set to "failed" only by a failed login probe; cleared first so an inherited
+  # value never outlives an earlier return. Read in the caller's shell (the
+  # function must not run in a subshell), e.g. by ask-researcher.sh.
+  DEBATE_CONDUCTOR_LOGIN_CHECK=
   host="$(debate_conductor_host)" || return $?
   bin="$(registry_resolve_command "$model")" || return $?
   if ! command -v "$bin" >/dev/null 2>&1; then
@@ -60,12 +64,21 @@ debate_conductor_check_cli() {
     claude:*|claude-write:*|*:claude|*:claude.exe) ;;
     *) return 0 ;;
   esac
-  if ! auth="$("$bin" auth status --json 2>/dev/null)"; then
-    echo 'debate-conductor: could not check Claude login; no invocation started' >&2
-    return 2
+  out="$("$bin" auth status --json 2>/dev/null)" || rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" |
+       jq -se 'length == 1 and (.[0] | type) == "object" and .[0].loggedIn == true' >/dev/null 2>&1; then
+    return 0
   fi
-  if ! printf '%s' "$auth" | jq -e '.loggedIn == true' >/dev/null 2>&1; then
-    echo 'debate-conductor: Claude login not confirmed; check claude auth status in a terminal' >&2
-    return 2
-  fi
+  # A sandbox that hides Keychain makes a logged-in Claude report exactly what a
+  # logged-out one does (loggedIn: false, rc 1), so report what was observed and
+  # leave the verdict to whoever knows whether this ran with host approval (#127).
+  # CODEX_SANDBOX is printed as a fact, never branched on: it is a hint, not proof.
+  seen="$(printf '%s' "$out" | jq -rs 'if length == 1 and (.[0] | type) == "object" and (.[0] | has("loggedIn"))
+    then "loggedIn=\(.[0].loggedIn | tojson)" else "no login status" end' 2>/dev/null)" || seen=""
+  [ -n "$seen" ] || seen="no login status"
+  DEBATE_CONDUCTOR_LOGIN_CHECK=failed
+  printf 'debate-conductor: Claude login unverified in this environment (auth status: %s, rc=%s%s); no invocation started\n' \
+    "$seen" "$rc" "${CODEX_SANDBOX:+, CODEX_SANDBOX=$CODEX_SANDBOX}" >&2
+  echo 'debate-conductor: a sandbox can hide the login (for example macOS Keychain); rerun this same command once with host approval, or choose a non-Claude model for this role. If an approved run still fails, check claude auth status in your own terminal.' >&2
+  return 2
 }

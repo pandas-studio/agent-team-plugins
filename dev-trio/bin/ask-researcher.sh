@@ -131,6 +131,9 @@ unset _REGISTRY_LIB
 
 # shellcheck source=../lib/host.sh
 . "$PLUGIN_ROOT/lib/host.sh"
+# Only dev_trio_check_cli may set this; research_failure_hint reads it on
+# every failure path, including ones before the login check runs (#127).
+DEV_TRIO_LOGIN_CHECK=
 PM_HOST="$(dev_trio_host)" || exit $?
 LOG=""
 AGY_WORKSPACE=""
@@ -169,15 +172,21 @@ research_failure_hint() {
   else
     echo '[ask-researcher] no run log created; inspect the startup diagnostic above.' >&2
   fi
-  echo '[ask-researcher] read-only setup check (keep the same CLI overrides):' >&2
-  printf '  DEV_TRIO_PM_HOST=%q DEV_TRIO_RESEARCHER_MODEL=%q AGENT_TEAM_MODELS_CONFIG=%q' \
-    "$PM_HOST" "$RESEARCHER_MODEL" "$(registry_config_file)" >&2
-  for env_name in RESEARCHER_CLI "$(_registry_model_def "$RESEARCHER_MODEL" | jq -r '.env_command // ""' 2>/dev/null)"; do
-    if [[ "$env_name" =~ ^[a-zA-Z_][a-zA-Z_0-9]*$ ]] && [ -n "${!env_name:-}" ]; then
-      printf ' %s=%q' "$env_name" "${!env_name}" >&2
-    fi
-  done
-  printf ' %q --research\n' "$SCRIPT_DIR/dev-trio-doctor.sh" >&2
+  # The setup check probes the login again from the same environment, so after
+  # a failed login check it can only repeat the diagnostic above (#127).
+  if [ -n "${DEV_TRIO_LOGIN_CHECK:-}" ]; then
+    echo '[ask-researcher] the login check failed before research started; do not re-run it or the setup check from the same sandbox. Rerun this same command once with host approval.' >&2
+  else
+    echo '[ask-researcher] read-only setup check (keep the same CLI overrides):' >&2
+    printf '  DEV_TRIO_PM_HOST=%q DEV_TRIO_RESEARCHER_MODEL=%q AGENT_TEAM_MODELS_CONFIG=%q' \
+      "$PM_HOST" "$RESEARCHER_MODEL" "$(registry_config_file)" >&2
+    for env_name in RESEARCHER_CLI "$(_registry_model_def "$RESEARCHER_MODEL" | jq -r '.env_command // ""' 2>/dev/null)"; do
+      if [[ "$env_name" =~ ^[a-zA-Z_][a-zA-Z_0-9]*$ ]] && [ -n "${!env_name:-}" ]; then
+        printf ' %s=%q' "$env_name" "${!env_name}" >&2
+      fi
+    done
+    printf ' %q --research\n' "$SCRIPT_DIR/dev-trio-doctor.sh" >&2
+  fi
   if [ "$1" -eq 5 ] && [ -n "$AGY_DENIED" ]; then
     local target id
     printf '%s\n' "$AGY_DENIED" | while IFS= read -r target; do

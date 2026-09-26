@@ -1105,6 +1105,95 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
     def test_missing_cli_refused(self):
         self.assert_no_inference(self.run_cli(DEV_TRIO_PM_HOST="codex", CLAUDE_CLI="/absent/claude"))
 
+    # What a logged-in claude answers inside codex-cli 0.157's seatbelt, which hides
+    # Keychain (measured for #127): the same bytes a logged-out install prints.
+    SANDBOX_AUTH = dict(STUB_AUTH='{"loggedIn":false,"authMethod":"none"}', STUB_AUTH_RC="1")
+    APPROVAL_LINE = ("dev-trio: a sandbox can hide the login (for example macOS Keychain); rerun this same "
+                     "command once with host approval. If an approved run still fails, check "
+                     "claude auth status in your own terminal.")
+
+    def login_lines(self, result):
+        return [line for line in result.stderr.splitlines() if line.startswith("dev-trio: ")]
+
+    def unverified_line(self, seen):
+        return (f"dev-trio: Claude login unverified in this environment (auth status: {seen}); "
+                "no invocation started")
+
+    def test_sandboxed_login_is_reported_unverified_with_or_without_marker(self):
+        # CODEX_SANDBOX is printed, never branched on: without it the same probe
+        # result gets the same lines, not a "logged out" verdict.
+        for marker, seen in (("seatbelt", "loggedIn=false, rc=1, CODEX_SANDBOX=seatbelt"),
+                             (None, "loggedIn=false, rc=1")):
+            with self.subTest(marker=marker):
+                self.calls.unlink(missing_ok=True)
+                env = dict(self.SANDBOX_AUTH, DEV_TRIO_PM_HOST="codex")
+                if marker:
+                    env["CODEX_SANDBOX"] = marker
+                result = self.run_cli(**env)
+                self.assert_no_inference(result)
+                self.assertEqual(self.recorded(), [["auth", "status", "--json"]])
+                self.assertEqual(self.login_lines(result),
+                                 [self.unverified_line(seen), self.APPROVAL_LINE])
+
+    def test_sandbox_marker_does_not_block_a_confirmed_login(self):
+        result = self.run_cli(DEV_TRIO_PM_HOST="codex", CODEX_SANDBOX="seatbelt")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_model("claude")
+
+    def test_login_probe_reports_what_it_saw(self):
+        for auth, auth_rc, seen in (('{"loggedIn":false}', "0", "loggedIn=false, rc=0"),
+                                    ('{"loggedIn":true}', "1", "loggedIn=true, rc=1"),
+                                    ('{"loggedIn":"yes"}', "0", 'loggedIn="yes", rc=0'),
+                                    ("not json", "0", "no login status, rc=0"),
+                                    ('{"loggedIn":false}\n{"loggedIn":true}', "0", "no login status, rc=0"),
+                                    ("", "1", "no login status, rc=1")):
+            with self.subTest(auth=auth, rc=auth_rc):
+                self.calls.unlink(missing_ok=True)
+                result = self.run_cli(DEV_TRIO_PM_HOST="codex", STUB_AUTH=auth, STUB_AUTH_RC=auth_rc)
+                self.assert_no_inference(result)
+                self.assertEqual(self.login_lines(result),
+                                 [self.unverified_line(seen), self.APPROVAL_LINE])
+
+    def test_researcher_login_failure_offers_approval_not_the_doctor(self):
+        # The doctor would probe the login again from the same sandbox.
+        result = self.run_cli("ask-researcher.sh", "question", DEV_TRIO_PM_HOST="codex",
+                              DEV_TRIO_RESEARCHER_MODEL="claude", CODEX_SANDBOX="seatbelt",
+                              **self.SANDBOX_AUTH)
+        self.assert_no_inference(result)
+        self.assertEqual(self.login_lines(result), [
+            self.unverified_line("loggedIn=false, rc=1, CODEX_SANDBOX=seatbelt"), self.APPROVAL_LINE])
+        self.assertIn("[ask-researcher] the login check failed before research started; do not "
+                      "re-run it or the setup check from the same sandbox. Rerun this same command "
+                      "once with host approval.", result.stderr.splitlines())
+        self.assertNotIn("dev-trio-doctor.sh", result.stderr)
+
+    def test_inherited_login_flag_does_not_replace_the_setup_check(self):
+        # The flag is cleared on entry, so a caller's value cannot survive the
+        # missing-CLI return and turn it into a login failure.
+        result = self.run_cli("ask-researcher.sh", "question", DEV_TRIO_PM_HOST="codex",
+                              DEV_TRIO_RESEARCHER_MODEL="claude", DEV_TRIO_LOGIN_CHECK="failed",
+                              CLAUDE_CLI="/absent/claude")
+        self.assert_untouched(result, 2)
+        self.assertIn("dev-trio: CLI not found: /absent/claude (model=claude)", result.stderr.splitlines())
+        self.assertIn("[ask-researcher] read-only setup check (keep the same CLI overrides):",
+                      result.stderr.splitlines())
+        self.assertNotIn("login check failed", result.stderr)
+        # Also before the login check exists at all: an unregistered model fails first.
+        result = self.run_cli("ask-researcher.sh", "question", DEV_TRIO_PM_HOST="codex",
+                              DEV_TRIO_RESEARCHER_MODEL="nosuchmodel", DEV_TRIO_LOGIN_CHECK="failed")
+        self.assert_untouched(result, 2)
+        self.assertIn("[ask-researcher] read-only setup check (keep the same CLI overrides):",
+                      result.stderr.splitlines())
+        self.assertNotIn("login check failed", result.stderr)
+
+    def test_doctor_reports_the_unverified_login(self):
+        result = self.run_cli("dev-trio-doctor.sh", DEV_TRIO_PM_HOST="codex",
+                              CODEX_SANDBOX="seatbelt", **self.SANDBOX_AUTH)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.login_lines(result), [
+            self.unverified_line("loggedIn=false, rc=1, CODEX_SANDBOX=seatbelt"), self.APPROVAL_LINE])
+        self.assertIn("reviewer CLI/login check failed", result.stdout)
+
     def test_provider_failure_is_returned_even_with_ship_text(self):
         result = self.run_cli(DEV_TRIO_PM_HOST="codex", STUB_RC="7")
         self.assertEqual(result.returncode, 7, result.stderr)

@@ -25,7 +25,11 @@ dev_trio_resolve_role() {
 # Check availability and, for Claude, login. Authentication and billing stay
 # under Claude Code's own configuration; both subscription and API auth work.
 dev_trio_check_cli() {
-  local model="$1" bin auth host
+  local model="$1" bin host out rc=0 seen
+  # Set to "failed" only by a failed login probe; cleared first so an inherited
+  # value never outlives an earlier return. Read in the caller's shell (the
+  # function must not run in a subshell), e.g. by ask-researcher.sh.
+  DEV_TRIO_LOGIN_CHECK=
   host="$(dev_trio_host)" || return $?
   [ "$host" = codex ] || return 0
   bin="$(registry_resolve_command "$model")" || return $?
@@ -37,14 +41,23 @@ dev_trio_check_cli() {
     claude:*|claude-write:*|*:claude|*:claude.exe) ;;
     *) return 0 ;;
   esac
-  if ! auth="$("$bin" auth status --json 2>/dev/null)"; then
-    echo 'dev-trio: could not check Claude login; no invocation started' >&2
-    return 2
+  out="$("$bin" auth status --json 2>/dev/null)" || rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" |
+       jq -se 'length == 1 and (.[0] | type) == "object" and .[0].loggedIn == true' >/dev/null 2>&1; then
+    return 0
   fi
-  if ! printf '%s' "$auth" | jq -e '.loggedIn == true' >/dev/null 2>&1; then
-    echo 'dev-trio: Claude login not confirmed; check claude auth status in a terminal (sandbox keychain access may be restricted)' >&2
-    return 2
-  fi
+  # A sandbox that hides Keychain makes a logged-in Claude report exactly what a
+  # logged-out one does (loggedIn: false, rc 1), so report what was observed and
+  # leave the verdict to whoever knows whether this ran with host approval (#127).
+  # CODEX_SANDBOX is printed as a fact, never branched on: it is a hint, not proof.
+  seen="$(printf '%s' "$out" | jq -rs 'if length == 1 and (.[0] | type) == "object" and (.[0] | has("loggedIn"))
+    then "loggedIn=\(.[0].loggedIn | tojson)" else "no login status" end' 2>/dev/null)" || seen=""
+  [ -n "$seen" ] || seen="no login status"
+  DEV_TRIO_LOGIN_CHECK=failed
+  printf 'dev-trio: Claude login unverified in this environment (auth status: %s, rc=%s%s); no invocation started\n' \
+    "$seen" "$rc" "${CODEX_SANDBOX:+, CODEX_SANDBOX=$CODEX_SANDBOX}" >&2
+  echo 'dev-trio: a sandbox can hide the login (for example macOS Keychain); rerun this same command once with host approval. If an approved run still fails, check claude auth status in your own terminal.' >&2
+  return 2
 }
 
 # Keep input-bearing artifacts in a directory another user cannot replace.

@@ -1577,6 +1577,54 @@ stream_header() {
         self.assertEqual(self.recorded(), [["auth", "status", "--json"]])
         self.assertFalse((self.workspace / ".debate-conductor").exists())
 
+    # What a logged-in claude answers inside codex-cli 0.157's seatbelt (#127).
+    SANDBOX_AUTH = dict(STUB_AUTH='{"loggedIn":false,"authMethod":"none"}', STUB_AUTH_RC="1",
+                        CODEX_SANDBOX="seatbelt")
+    LOGIN_LINES = [
+        "debate-conductor: Claude login unverified in this environment (auth status: "
+        "loggedIn=false, rc=1, CODEX_SANDBOX=seatbelt); no invocation started",
+        "debate-conductor: a sandbox can hide the login (for example macOS Keychain); rerun this same "
+        "command once with host approval, or choose a non-Claude model for this role. If an "
+        "approved run still fails, check claude auth status in your own terminal.",
+    ]
+
+    def login_lines(self, result):
+        return [line for line in result.stderr.splitlines() if line.startswith("debate-conductor: ")]
+
+    def test_sandboxed_login_stops_each_entry_point_before_any_artifact(self):
+        for script, args, env in (
+                ("debate.sh", ("-n", "2", "fixture topic"), {}),
+                ("ask-critic.sh", ("fixture",), {}),
+                ("ask-generator.sh", ("fixture",), dict(DEBATE_GENERATOR_MODEL="claude"))):
+            with self.subTest(script=script):
+                self.calls.unlink(missing_ok=True)
+                result = self.run_cli(script, *args, DEBATE_CONDUCTOR_PM_HOST="codex",
+                                      **self.SANDBOX_AUTH, **env)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(self.login_lines(result), self.LOGIN_LINES)
+                self.assertEqual(self.recorded(), [["auth", "status", "--json"]])
+                self.assertFalse((self.workspace / ".debate-conductor").exists())
+
+    def test_sandboxed_login_leaves_a_continued_debate_untouched(self):
+        result = self.run_cli("debate.sh", "-n", "2", "fixture topic")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        first_dir = self.latest_debate()
+        link = self.workspace / ".debate-conductor/log/host-test/latest-debate"
+        link_target = os.readlink(link)
+        ledger = (first_dir / "index.jsonl").read_bytes()
+        files = sorted(p.name for p in first_dir.iterdir())
+        self.calls.unlink(missing_ok=True)
+
+        result = self.run_cli("debate.sh", "--continue-from", str(first_dir), "-n", "2",
+                              "fixture topic", DEBATE_CONDUCTOR_PM_HOST="codex",
+                              DEBATE_CRITIC_MODEL="claude", **self.SANDBOX_AUTH)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(self.login_lines(result), self.LOGIN_LINES)
+        self.assertEqual(self.recorded(), [["auth", "status", "--json"]])
+        self.assertEqual(os.readlink(link), link_target)
+        self.assertEqual((first_dir / "index.jsonl").read_bytes(), ledger)
+        self.assertEqual(sorted(p.name for p in first_dir.iterdir()), files)
+
     def test_invalid_host_fails_before_auth(self):
         result = self.run_cli("ask-critic.sh", "fixture", DEBATE_CONDUCTOR_PM_HOST="invalid")
         self.assertEqual(result.returncode, 2, result.stderr)

@@ -61,8 +61,14 @@ file to the reviewer. No tmux session is required.
 
 ## Recover from failed research
 
-Run the read-only setup check from the same workspace, preserving the model,
-registry and CLI overrides used for the failed call:
+Exception: when a Claude researcher's wrapper printed
+`Claude login unverified in this environment`, do not run the setup check (it
+would probe the login again from the same sandbox). Follow the one-attempt
+host approval rule in the [review skill](../review/SKILL.md#host-permission-for-a-claude-reviewer)
+for this wrapper instead.
+
+Otherwise run the read-only setup check from the same workspace, preserving the
+model, registry and CLI overrides used for the failed call:
 
 ```bash
 DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/dev-trio-doctor.sh" --research
