@@ -344,11 +344,13 @@ EOF_NOTE
 }
 
 # Scan focus string for an explicit revision range A..B or A...B.
-# Verifies both endpoints as commits in git before accepting.
+# Verifies both endpoints as commits in git before accepting. Returns 0 with the
+# range, 1 when there is no single verified range, 124 when a probe timed out,
+# and 3 when a probe failed (anything but 0, 1 for "not a commit", or 124).
 dev_trio_extract_git_range() {
   local focus="$1"
   local repo="${2:-.}"
-  local token left right op candidate
+  local token left right op candidate left_rc right_rc
   local restore_f=0
   local matched_range=""
   local probe_count=0
@@ -383,8 +385,22 @@ dev_trio_extract_git_range() {
       [ "$restore_f" = 1 ] || set +f
       return 1
     fi
-    if dev_trio_git_bounded "$repo" rev-parse --verify --quiet "$left^{commit}" >/dev/null 2>&1 &&
-       dev_trio_git_bounded "$repo" rev-parse --verify --quiet "$right^{commit}" >/dev/null 2>&1; then
+    left_rc=0
+    right_rc=0
+    dev_trio_git_bounded "$repo" rev-parse --verify --quiet "$left^{commit}" >/dev/null 2>&1 || left_rc=$?
+    if [ "$left_rc" -eq 0 ]; then
+      dev_trio_git_bounded "$repo" rev-parse --verify --quiet "$right^{commit}" >/dev/null 2>&1 || right_rc=$?
+    fi
+    if [ "$left_rc" -eq 124 ] || [ "$right_rc" -eq 124 ]; then
+      # A timed-out probe is not "no range"; the caller records a timeout.
+      [ "$restore_f" = 1 ] || set +f
+      return 124
+    fi
+    if [ "$left_rc" -gt 1 ] || [ "$right_rc" -gt 1 ]; then
+      [ "$restore_f" = 1 ] || set +f
+      return 3
+    fi
+    if [ "$left_rc" -eq 0 ] && [ "$right_rc" -eq 0 ]; then
       if [ -n "$matched_range" ]; then
         if [ "$matched_range" != "$candidate" ]; then
           # Multiple distinct ranges detected; ambiguous, do not precompute snapshot

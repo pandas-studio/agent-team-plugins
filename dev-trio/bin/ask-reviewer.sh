@@ -281,25 +281,54 @@ fi
 # hashes below.
 AGY_WORKSPACE=""
 AGY_CLI_LOG=""
+SNAPSHOT_STATUS=""
+SNAPSHOT_MANIFEST_ENTRY=""
 if registry_has_workspace "$REVIEWER_MODEL"; then
   AGY_WORKSPACE="$(dev_trio_workspace_root)"
   PROMPT="$PROMPT
 
 $(dev_trio_agy_exec_note "$AGY_WORKSPACE")"
 
-  # A failed root probe can fall back to cwd, which may be a subdirectory.
-  # Never use that fallback as the root for a partial workspace snapshot.
-  AGY_VERIFIED_ROOT="$(dev_trio_git_bounded "$AGY_WORKSPACE" rev-parse --show-toplevel)" || AGY_VERIFIED_ROOT=""
-  if [ -n "$AGY_VERIFIED_ROOT" ] && [ "$AGY_VERIFIED_ROOT" = "$AGY_WORKSPACE" ] &&
-     [ "$(dev_trio_git_bounded "$AGY_WORKSPACE" rev-parse --is-inside-work-tree)" = "true" ]; then
+  ceiling="${DEV_TRIO_SNAPSHOT_MAX_BYTES:-65536}"
+  case "$ceiling" in
+    ''|*[!0-9]*) ceiling=65536 ;;
+    *) ceiling=$(( 10#$ceiling )) ;;
+  esac
+  # Every exit from this block sets SNAPSHOT_STATUS: ok:<scope> or
+  # skipped:<reason> (#137). The opt-out runs no snapshot probe at all.
+  if [ "$ceiling" -eq 0 ]; then
+    SNAPSHOT_STATUS="skipped:disabled"
+  else
+    # A failed root probe can fall back to cwd, which may be a subdirectory.
+    # Never use that fallback as the root for a partial workspace snapshot.
+    root_rc=0
+    inside_rc=0
+    AGY_VERIFIED_ROOT="$(dev_trio_git_bounded "$AGY_WORKSPACE" rev-parse --show-toplevel)" || root_rc=$?
+    AGY_INSIDE=""
+    if [ "$root_rc" -eq 0 ] && [ "$AGY_VERIFIED_ROOT" = "$AGY_WORKSPACE" ]; then
+      AGY_INSIDE="$(dev_trio_git_bounded "$AGY_WORKSPACE" rev-parse --is-inside-work-tree)" || inside_rc=$?
+    fi
     AGY_SCOPE=""
     AGY_RANGE=""
-    if [ "$FOCUS_IS_DEFAULT" -eq 1 ]; then
+    if [ "$root_rc" -eq 124 ] || [ "$inside_rc" -eq 124 ]; then
+      SNAPSHOT_STATUS="skipped:timeout"
+    elif [ "$root_rc" -ne 0 ] || [ -z "$AGY_VERIFIED_ROOT" ] ||
+         [ "$AGY_VERIFIED_ROOT" != "$AGY_WORKSPACE" ] || [ "$AGY_INSIDE" != "true" ]; then
+      SNAPSHOT_STATUS="skipped:root"
+    elif [ "$FOCUS_IS_DEFAULT" -eq 1 ]; then
       AGY_SCOPE="working-tree"
-    elif AGY_RANGE="$(dev_trio_extract_git_range "$FOCUS" "$AGY_WORKSPACE")"; then
-      AGY_SCOPE="range"
     else
-      AGY_SCOPE=""
+      range_rc=0
+      AGY_RANGE="$(dev_trio_extract_git_range "$FOCUS" "$AGY_WORKSPACE")" || range_rc=$?
+      if [ "$range_rc" -eq 0 ]; then
+        AGY_SCOPE="range"
+      elif [ "$range_rc" -eq 124 ]; then
+        SNAPSHOT_STATUS="skipped:timeout"
+      elif [ "$range_rc" -eq 3 ]; then
+        SNAPSHOT_STATUS="skipped:git-failed"
+      else
+        SNAPSHOT_STATUS="skipped:focus"
+      fi
     fi
 
     if [ -n "$AGY_SCOPE" ]; then
@@ -308,27 +337,36 @@ $(dev_trio_agy_exec_note "$AGY_WORKSPACE")"
         ''|*[!0-9]*) limit=131072 ;;
         *) limit=$(( 10#$limit )) ;;
       esac
-      ceiling="${DEV_TRIO_SNAPSHOT_MAX_BYTES:-65536}"
-      case "$ceiling" in
-        ''|*[!0-9]*) ceiling=65536 ;;
-        *) ceiling=$(( 10#$ceiling )) ;;
-      esac
       base_bytes="$(_registry_prompt_bytes "$PROMPT")"
       margin=8192
       avail=$(( limit - base_bytes - margin ))
       budget=$(( avail < ceiling ? avail : ceiling ))
 
-      if [ "$budget" -ge 5120 ]; then
+      if [ "$budget" -lt 5120 ]; then
+        SNAPSHOT_STATUS="skipped:budget"
+      else
         SNAPSHOT=""
         snap_out="$(dev_trio_workspace_snapshot "$AGY_WORKSPACE" "$AGY_SCOPE" "${AGY_RANGE:-$FOCUS}" "$budget" "$LOG_DIR"; printf "RC_%d_END" "$?")"
         snap_rc="${snap_out##*RC_}"
         snap_rc="${snap_rc%_END}"
-        if [ "$snap_rc" = "0" ]; then
-          snap_content="${snap_out%RC_*}"
-          if [ -n "$snap_content" ]; then
-            SNAPSHOT="$snap_content"
-          fi
-        fi
+        # Codes from workspace_snapshot.py; output is used only with rc 0.
+        case "$snap_rc" in
+          0)
+            snap_content="${snap_out%RC_*}"
+            if [ -n "$snap_content" ]; then
+              SNAPSHOT="$snap_content"
+            else
+              SNAPSHOT_STATUS="skipped:empty"
+            fi
+            ;;
+          3) SNAPSHOT_STATUS="skipped:helper-unsupported" ;;
+          4) SNAPSHOT_STATUS="skipped:helper-not-worktree" ;;
+          5) SNAPSHOT_STATUS="skipped:helper-git-failed" ;;
+          6) SNAPSHOT_STATUS="skipped:timeout" ;;
+          7) SNAPSHOT_STATUS="skipped:helper-parse-failed" ;;
+          8) SNAPSHOT_STATUS="skipped:budget" ;;
+          *) SNAPSHOT_STATUS="skipped:helper-failed" ;;
+        esac
 
         if [ -n "$SNAPSHOT" ]; then
           SNAPSHOT="${SNAPSHOT//<\/workspace_snapshot>/[STRIPPED-CLOSING-TAG]}"
@@ -354,17 +392,31 @@ $SNAPSHOT
 
 # Snapshot inspection rule
 The complete <workspace_snapshot> fulfills the role's default git status, git diff, and untracked-file inspection checklist. When it has no omitted or truncated section, use it for those facts without calling CommandLine for git status, git diff, or git ls-files. Other independent checks remain optional."
+          else
+            # The execution note's git status step is for working-tree reviews;
+            # a range snapshot replaces it with the range's own commands (#137).
+            CANDIDATE_PROMPT="$CANDIDATE_PROMPT
+
+# Snapshot inspection rule (range)
+The <workspace_snapshot> covers only \`git diff ${AGY_RANGE}\`. When it has no omitted or truncated section, use it for that diff without calling CommandLine for the same \`git diff\`; use \`git log\` or \`git show\` for the commits inside the range. The execution environment's \`git status\` step and untracked-file reading apply only when the focus also asks about the working tree or untracked files."
           fi
           if [ "$(_registry_prompt_bytes "$CANDIDATE_PROMPT")" -lt "$limit" ]; then
             PROMPT="$CANDIDATE_PROMPT"
             if [ "$AGY_SCOPE" = "working-tree" ]; then FOCUS="$SNAPSHOT_FOCUS"; fi
             SNAPSHOT_BYTES="$(_registry_prompt_bytes "$SNAPSHOT")"
             SNAPSHOT_MANIFEST_ENTRY="$AGY_SCOPE:$budget:$SNAPSHOT_BYTES:$(manifest_sha256_string "$SNAPSHOT")"
+            SNAPSHOT_STATUS="ok:$AGY_SCOPE"
+          else
+            SNAPSHOT_STATUS="skipped:oversize"
           fi
         fi
       fi
     fi
   fi
+  case "$SNAPSHOT_STATUS" in
+    skipped:disabled|skipped:focus|ok:*) ;;
+    *) echo "[ask-reviewer] workspace snapshot skipped: ${SNAPSHOT_STATUS#skipped:}" >&2 ;;
+  esac
 fi
 
 REGISTRY_CMD_OVERRIDE="${REVIEWER_CLI:-}" dev_trio_check_cli "$REVIEWER_MODEL" || exit $?
@@ -426,6 +478,9 @@ manifest_init dev-trio-review "$LOG"
 manifest_add_role reviewer "$REVIEWER_MODEL" "$ROLE_FILE" "$(manifest_sha256_string "$PROMPT")"
 manifest_add_input kind=focus value="$FOCUS"
 [ -z "${SNAPSHOT_MANIFEST_ENTRY:-}" ] || manifest_add_input kind=workspace-snapshot value="$SNAPSHOT_MANIFEST_ENTRY"
+case "$SNAPSHOT_STATUS" in
+  skipped:*) manifest_add_input kind=workspace-snapshot-skipped value="${SNAPSHOT_STATUS#skipped:}" ;;
+esac
 [ -n "$RESEARCH_FILE" ] && manifest_add_input kind=research path="$RESEARCH_FILE"
 [ -n "$SPEC_FILE" ]     && manifest_add_input kind=spec     path="$SPEC_FILE"
 [ -n "$CONTEXT_FILE" ]  && manifest_add_input kind=context  path="$CONTEXT_FILE"
@@ -489,6 +544,7 @@ RUNSTATE_ARGS=(
   final_path="$FINAL"
   "input=focus:$FOCUS"
 )
+[ -z "$SNAPSHOT_STATUS" ] || RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" "input=workspace-snapshot-status:$SNAPSHOT_STATUS")
 if registry_has_final "$REVIEWER_MODEL"; then
   RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" final_source=native)
 else
