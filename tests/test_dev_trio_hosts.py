@@ -1202,14 +1202,15 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
 
     def agy_argv(self, call, log_stem):
         """The argv the built-in agy model gets: its own per-run log in agy's
-        log directory, the workspace root, then the prompt (#103)."""
+        log directory and the workspace root; the prompt is on stdin (#147)."""
         root = os.path.realpath(self.workspace)
         self.assertEqual(call[:4], ["--log-file", str(self.agy_home / "log") + "/" + call[1].rsplit("/", 1)[-1],
                                     "--add-dir", root], call)
         self.assertRegex(call[1].rsplit("/", 1)[-1], rf"^cli-dev-trio-{log_stem}-[0-9]{{8}}-[0-9]{{6}}-[0-9]+\.log$")
-        self.assertEqual(call[4], "-p")
-        self.assertEqual(len(call), 6, call)
-        note = call[5][call[5].index("# Execution environment"):]
+        self.assertEqual(call[4:8], ["--input-format", "text", "--output-format", "text"], call)
+        self.assertEqual(call[8], "<stdin>")
+        self.assertEqual(len(call), 10, call)
+        note = call[9][call[9].index("# Execution environment"):]
         self.assertIn(f"The repository root is `{root}`;", note)
         self.assertIn("no pipes", note)
         # The reviewer role lists untracked files with git ls-files, which has
@@ -1289,8 +1290,10 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         result = self.run_cli("ask-researcher.sh", "research question")
         self.assertEqual(result.returncode, 0, result.stderr)
         call = self.recorded()[0]
-        self.assertEqual(call[:3], ["--add-dir", os.path.realpath(self.workspace), "-p"], call)
-        self.assertEqual(len(call), 4, call)
+        self.assertEqual(call[:6], ["--add-dir", os.path.realpath(self.workspace),
+                                    "--input-format", "text", "--output-format", "text"], call)
+        self.assertEqual(call[6], "<stdin>")
+        self.assertEqual(len(call), 8, call)
 
     def _init_git_workspace(self):
         subprocess.run(["git", "init"], cwd=self.workspace, check=True, stdout=subprocess.DEVNULL)
@@ -1417,15 +1420,17 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         prompt = self.sent_prompt()
         self.assertNotIn("<workspace_snapshot>", prompt)
 
-    def test_agy_reviewer_tight_budget_with_context_skips_snapshot(self):
-        self._init_git_workspace()
-        (self.workspace / "f.txt").write_text("hello\n")
+    def test_agy_reviewer_large_context_still_includes_snapshot_on_stdin(self):
+        self._commit_two()
         ctx = self.workspace / "context.md"
         ctx.write_text("a" * 120000)
-        result = self.run_cli("ask-reviewer.sh", "--with-context", str(ctx), DEV_TRIO_REVIEWER_MODEL="agy", REGISTRY_ARGV_MAX_BYTES="131072")
+        result = self.run_cli("ask-reviewer.sh", "--with-context", str(ctx), "review HEAD~1..HEAD",
+                              DEV_TRIO_REVIEWER_MODEL="agy", REGISTRY_ARGV_MAX_BYTES="131072")
         self.assertEqual(result.returncode, 0, result.stderr)
         prompt = self.sent_prompt()
-        self.assertNotIn("<workspace_snapshot>", prompt)
+        self.assertIn("<workspace_snapshot>", prompt)
+        self.assertIn("+v2", prompt)
+        self.assertNotIn("a" * 100, " ".join(self.recorded()[0][:-2]))
 
     def test_agy_reviewer_range_truncation_when_diff_exceeds_budget(self):
         self._init_git_workspace()
@@ -1768,10 +1773,7 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
 
     def test_snapshot_status_budget(self):
         self._init_git_workspace()
-        ctx = self.workspace / "context.md"
-        ctx.write_text("a" * 120000)
-        result = self.run_cli("ask-reviewer.sh", "--with-context", str(ctx), DEV_TRIO_REVIEWER_MODEL="agy",
-                              REGISTRY_ARGV_MAX_BYTES="131072")
+        result = self.run_cli(DEV_TRIO_REVIEWER_MODEL="agy", DEV_TRIO_SNAPSHOT_MAX_BYTES="5119")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_snapshot_status(result, "skipped:budget")
 

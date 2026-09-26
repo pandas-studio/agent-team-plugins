@@ -43,10 +43,12 @@ esac
 STUB
 cat > "$TMP/researcher" <<'STUB'
 #!/usr/bin/env bash
-[ -t 0 ] || cat >> "${REVIEW_TEST_STDIN_SEEN:-/dev/null}"
+prompt=""
+[ -t 0 ] || prompt=$(cat)
+printf '%s\n' "$prompt" >> "${REVIEW_TEST_STDIN_SEEN:-/dev/null}"
 printf 'research\n' >> "$REVIEW_TEST_RESEARCH"
-# The prompt is the last argument: agy also gets --add-dir/--log-file (#103).
-printf '%s\n' "${!#}" >> "$REVIEW_TEST_RESEARCH.prompts"
+# The built-in agy prompt arrives on stdin (#147).
+printf '%s\n' "$prompt" >> "$REVIEW_TEST_RESEARCH.prompts"
 if [ "$REVIEW_TEST_CASE" = research-denied ]; then
   # agy print mode after a soft-denied tool: guidance on stderr, exit 0.
   echo 'no output produced — tool auto-denied' >&2

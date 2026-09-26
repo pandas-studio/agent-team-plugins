@@ -332,15 +332,21 @@ $(dev_trio_agy_exec_note "$AGY_WORKSPACE")"
     fi
 
     if [ -n "$AGY_SCOPE" ]; then
-      limit="${REGISTRY_ARGV_MAX_BYTES:-131072}"
-      case "$limit" in
-        ''|*[!0-9]*) limit=131072 ;;
-        *) limit=$(( 10#$limit )) ;;
-      esac
-      base_bytes="$(_registry_prompt_bytes "$PROMPT")"
-      margin=8192
-      avail=$(( limit - base_bytes - margin ))
-      budget=$(( avail < ceiling ? avail : ceiling ))
+      # Only an argv model needs room for the rest of its prompt. The built-in
+      # agy model reads stdin, so the snapshot ceiling is the whole budget.
+      snapshot_via="$(registry_prompt_via "$REVIEWER_MODEL")" || exit 3
+      budget="$ceiling"
+      if [ "$snapshot_via" = argv ]; then
+        limit="${REGISTRY_ARGV_MAX_BYTES:-131072}"
+        case "$limit" in
+          ''|*[!0-9]*) limit=131072 ;;
+          *) limit=$(( 10#$limit )) ;;
+        esac
+        base_bytes="$(_registry_prompt_bytes "$PROMPT")"
+        margin=8192
+        avail=$(( limit - base_bytes - margin ))
+        budget=$(( avail < ceiling ? avail : ceiling ))
+      fi
 
       if [ "$budget" -lt 5120 ]; then
         SNAPSHOT_STATUS="skipped:budget"
@@ -400,7 +406,13 @@ The complete <workspace_snapshot> fulfills the role's default git status, git di
 # Snapshot inspection rule (range)
 The <workspace_snapshot> covers only \`git diff ${AGY_RANGE}\`. When it has no omitted or truncated section, use it for that diff without calling CommandLine for the same \`git diff\`; use \`git log\` or \`git show\` for the commits inside the range. The execution environment's \`git status\` step and untracked-file reading apply only when the focus also asks about the working tree or untracked files."
           fi
-          if [ "$(_registry_prompt_bytes "$CANDIDATE_PROMPT")" -lt "$limit" ]; then
+          snapshot_fits=0
+          if [ "$snapshot_via" = stdin ]; then
+            [ "$(_registry_prompt_bytes "$SNAPSHOT")" -le "$budget" ] && snapshot_fits=1
+          else
+            [ "$(_registry_prompt_bytes "$CANDIDATE_PROMPT")" -lt "$limit" ] && snapshot_fits=1
+          fi
+          if [ "$snapshot_fits" -eq 1 ]; then
             PROMPT="$CANDIDATE_PROMPT"
             if [ "$AGY_SCOPE" = "working-tree" ]; then FOCUS="$SNAPSHOT_FOCUS"; fi
             SNAPSHOT_BYTES="$(_registry_prompt_bytes "$SNAPSHOT")"

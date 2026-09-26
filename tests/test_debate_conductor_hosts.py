@@ -33,7 +33,7 @@ class DebateHostTests(unittest.TestCase):
             f"#!{sys.executable}\n"
             "import json, os, sys\n"
             "args = sys.argv[1:]\n"
-            # claude and codex read the prompt from stdin (#102); it is
+            # agy, claude and codex read the prompt from stdin (#102, #147); it is
             # recorded after a '<stdin>' marker. run_cli gives the wrappers an
             # empty, closed stdin, so an argv model reads nothing here.
             "data = '' if sys.stdin.isatty() else sys.stdin.read()\n"
@@ -83,7 +83,8 @@ class DebateHostTests(unittest.TestCase):
         result = self.run_cli("debate.sh", "-n", "2", "fixture topic")
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.recorded()
-        self.assertEqual(calls[0][0], "-p")
+        self.assertEqual(calls[0][:4], ["--input-format", "text", "--output-format", "text"])
+        self.assertEqual(calls[0][-2], "<stdin>")
         self.assertEqual(calls[1][0], "exec")
         critic = self.workspace / ".debate-conductor/log/host-test/latest-debate/round-2-crit.md"
         self.assertIn("crit codex", critic.read_text())
@@ -94,7 +95,8 @@ class DebateHostTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.recorded()
         self.assertEqual(calls[0], ["auth", "status", "--json"])
-        self.assertEqual(calls[1][0], "-p")
+        self.assertEqual(calls[1][:4], ["--input-format", "text", "--output-format", "text"])
+        self.assertEqual(calls[1][-2], "<stdin>")
         self.assertEqual(calls[2], ["auth", "status", "--json"])
         self.assertEqual(calls[3][0], "-p")
         critic = self.workspace / ".debate-conductor/log/host-test/latest-debate/round-2-crit.md"
@@ -232,7 +234,9 @@ class DebateHostTests(unittest.TestCase):
         self.assertEqual(metadata["sources"]["critic"], "invocation")
 
     def generator_prompts(self):
-        return [call[-1] for call in self.recorded() if call and call[0] == "-p"]
+        return [call[-1] for call in self.recorded()
+                if call[:4] == ["--input-format", "text", "--output-format", "text"]
+                and call[-2] == "<stdin>"]
 
     def test_continue_retries_failed_first_round_with_saved_context(self):
         context = self.root / "context.md"
