@@ -444,7 +444,7 @@ def resolve_reviewer() -> Path:
         if codex:
             try:
                 listed = subprocess.run([codex, "plugin", "list", "--json"], capture_output=True,
-                                        timeout=10, check=True, text=True)
+                                        stdin=subprocess.DEVNULL, timeout=10, check=True, text=True)
                 plugins = json.loads(listed.stdout)
                 require(isinstance(plugins, dict) and isinstance(plugins.get("installed"), list),
                         "Codex plugin list schema invalid")
@@ -466,7 +466,7 @@ def resolve_reviewer() -> Path:
     if claude:
         try:
             result = subprocess.run([claude, "plugin", "list", "--json"], capture_output=True,
-                                    timeout=10, check=True, text=True)
+                                    stdin=subprocess.DEVNULL, timeout=10, check=True, text=True)
             entries = json.loads(result.stdout)
             require(isinstance(entries, list), "plugin list is not an array")
             cwd = Path.cwd().resolve()
