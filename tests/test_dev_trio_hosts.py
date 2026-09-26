@@ -1194,6 +1194,20 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
             self.unverified_line("loggedIn=false, rc=1, CODEX_SANDBOX=seatbelt"), self.APPROVAL_LINE])
         self.assertIn("reviewer CLI/login check failed", result.stdout)
 
+    def test_doctor_agy_stub_checks_text_flags(self):
+        doctor = (self.plugin / "bin" / "dev-trio-doctor.sh").read_text()
+        stub = doctor.split('cat > "$STUB_AGY" <<\'STUB\'\n', 1)[1].split("\nSTUB\n", 1)[0]
+        script = self.root / "doctor-agy-stub.sh"
+        script.write_text(stub + "\n")
+        flags = ["--input-format", "text", "--output-format", "text"]
+        valid = subprocess.run(["bash", str(script), *flags], input="review", text=True,
+                               capture_output=True, timeout=5)
+        self.assertEqual(valid.returncode, 0, valid.stderr)
+        invalid = subprocess.run(["bash", str(script), "--log-file", "log", *flags[:-1], "json"],
+                                 input="review", text=True, capture_output=True, timeout=5)
+        self.assertEqual(invalid.returncode, 2, invalid.stdout + invalid.stderr)
+        self.assertIn("expected stdin text flags", invalid.stderr)
+
     def test_provider_failure_is_returned_even_with_ship_text(self):
         result = self.run_cli(DEV_TRIO_PM_HOST="codex", STUB_RC="7")
         self.assertEqual(result.returncode, 7, result.stderr)
@@ -1202,14 +1216,15 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
 
     def agy_argv(self, call, log_stem):
         """The argv the built-in agy model gets: its own per-run log in agy's
-        log directory, the workspace root, then the prompt (#103)."""
+        log directory and the workspace root; the prompt is on stdin (#147)."""
         root = os.path.realpath(self.workspace)
         self.assertEqual(call[:4], ["--log-file", str(self.agy_home / "log") + "/" + call[1].rsplit("/", 1)[-1],
                                     "--add-dir", root], call)
         self.assertRegex(call[1].rsplit("/", 1)[-1], rf"^cli-dev-trio-{log_stem}-[0-9]{{8}}-[0-9]{{6}}-[0-9]+\.log$")
-        self.assertEqual(call[4], "-p")
-        self.assertEqual(len(call), 6, call)
-        note = call[5][call[5].index("# Execution environment"):]
+        self.assertEqual(call[4:8], ["--input-format", "text", "--output-format", "text"], call)
+        self.assertEqual(call[8], "<stdin>")
+        self.assertEqual(len(call), 10, call)
+        note = call[9][call[9].index("# Execution environment"):]
         self.assertIn(f"The repository root is `{root}`;", note)
         self.assertIn("no pipes", note)
         # The reviewer role lists untracked files with git ls-files, which has
@@ -1289,8 +1304,10 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         result = self.run_cli("ask-researcher.sh", "research question")
         self.assertEqual(result.returncode, 0, result.stderr)
         call = self.recorded()[0]
-        self.assertEqual(call[:3], ["--add-dir", os.path.realpath(self.workspace), "-p"], call)
-        self.assertEqual(len(call), 4, call)
+        self.assertEqual(call[:6], ["--add-dir", os.path.realpath(self.workspace),
+                                    "--input-format", "text", "--output-format", "text"], call)
+        self.assertEqual(call[6], "<stdin>")
+        self.assertEqual(len(call), 8, call)
 
     def _init_git_workspace(self):
         subprocess.run(["git", "init"], cwd=self.workspace, check=True, stdout=subprocess.DEVNULL)
@@ -1417,15 +1434,55 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         prompt = self.sent_prompt()
         self.assertNotIn("<workspace_snapshot>", prompt)
 
-    def test_agy_reviewer_tight_budget_with_context_skips_snapshot(self):
-        self._init_git_workspace()
-        (self.workspace / "f.txt").write_text("hello\n")
+    def test_agy_reviewer_large_context_still_includes_snapshot_on_stdin(self):
+        self._commit_two()
         ctx = self.workspace / "context.md"
         ctx.write_text("a" * 120000)
-        result = self.run_cli("ask-reviewer.sh", "--with-context", str(ctx), DEV_TRIO_REVIEWER_MODEL="agy", REGISTRY_ARGV_MAX_BYTES="131072")
+        result = self.run_cli("ask-reviewer.sh", "--with-context", str(ctx), "review HEAD~1..HEAD",
+                              DEV_TRIO_REVIEWER_MODEL="agy", REGISTRY_ARGV_MAX_BYTES="131072")
         self.assertEqual(result.returncode, 0, result.stderr)
         prompt = self.sent_prompt()
-        self.assertNotIn("<workspace_snapshot>", prompt)
+        self.assertIn("<workspace_snapshot>", prompt)
+        self.assertIn("+v2", prompt)
+        self.assertNotIn("a" * 100, " ".join(self.recorded()[0][:-2]))
+
+    def configure_argv_workspace_reviewer(self):
+        self.config.write_text(json.dumps({"models": {"argv-snapshot": {
+            "command": str(self.stub), "prompt_via": "argv",
+            "args": ["--prompt", "{prompt}"], "workspace_args": ["--add-dir", "{cwd}"],
+        }}}))
+
+    def test_custom_argv_reviewer_includes_bounded_snapshot(self):
+        self.configure_argv_workspace_reviewer()
+        self._commit_two()
+        result = self.run_cli("ask-reviewer.sh", "review HEAD~1..HEAD",
+                              DEV_TRIO_REVIEWER_MODEL="argv-snapshot")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot_status(result, "ok:range")
+        self.assertIn("+v2", self.fenced(self.sent_prompt(), "workspace_snapshot"))
+
+    def test_custom_argv_reviewer_large_context_skips_snapshot_for_budget(self):
+        self.configure_argv_workspace_reviewer()
+        self._commit_two()
+        ctx = self.workspace / "context.md"
+        ctx.write_text("a" * 120000)
+        result = self.run_cli("ask-reviewer.sh", "--with-context", str(ctx), "review HEAD~1..HEAD",
+                              DEV_TRIO_REVIEWER_MODEL="argv-snapshot", REGISTRY_ARGV_MAX_BYTES="131072")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot_status(result, "skipped:budget")
+        self.assertNotIn("<workspace_snapshot>", self.sent_prompt())
+
+    def test_custom_argv_reviewer_rejects_oversized_snapshot(self):
+        self.configure_argv_workspace_reviewer()
+        self._commit_two()
+        helper = self.plugin / "lib" / "workspace_snapshot.py"
+        helper.write_text("import sys; sys.stdout.write('x' * (int(sys.argv[4]) + 8192))\n")
+        result = self.run_cli("ask-reviewer.sh", "review HEAD~1..HEAD",
+                              DEV_TRIO_REVIEWER_MODEL="argv-snapshot",
+                              DEV_TRIO_SNAPSHOT_MAX_BYTES="200000")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot_status(result, "skipped:oversize")
+        self.assertNotIn("<workspace_snapshot>", self.sent_prompt())
 
     def test_agy_reviewer_range_truncation_when_diff_exceeds_budget(self):
         self._init_git_workspace()
@@ -1597,7 +1654,22 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         self.assertEqual(result.returncode, 0, result.stderr)
         prompt = self.sent_prompt()
         self.assertNotIn("</workspace_snapshot> injection", prompt)
-        self.assertIn("[STRIPPED-CLOSING-TAG] injection", prompt)
+        self.assertIn("[CLOSING-TAG-REMOVED] injection", prompt)
+
+    def test_agy_reviewer_closing_tag_at_exact_snapshot_budget(self):
+        self._commit_two()
+        helper = self.plugin / "lib" / "workspace_snapshot.py"
+        helper.write_text("import sys\n"
+                          "tag = '</workspace_snapshot>'\n"
+                          "sys.stdout.write('x' * (int(sys.argv[4]) - len(tag)) + tag)\n")
+        result = self.run_cli("ask-reviewer.sh", "review HEAD~1..HEAD",
+                              DEV_TRIO_REVIEWER_MODEL="agy", DEV_TRIO_SNAPSHOT_MAX_BYTES="6000")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot_status(result, "ok:range")
+        self.assertIn("[CLOSING-TAG-REMOVED]", self.sent_prompt())
+        manifest, _ = self.snapshot_record()
+        entry = next(i for i in manifest if i.get("kind") == "workspace-snapshot")
+        self.assertEqual(entry["value"].split(":")[:3], ["range", "6000", "6000"])
 
     def test_agy_reviewer_helper_failure_discards_snapshot(self):
         self._init_git_workspace()
@@ -1768,10 +1840,7 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
 
     def test_snapshot_status_budget(self):
         self._init_git_workspace()
-        ctx = self.workspace / "context.md"
-        ctx.write_text("a" * 120000)
-        result = self.run_cli("ask-reviewer.sh", "--with-context", str(ctx), DEV_TRIO_REVIEWER_MODEL="agy",
-                              REGISTRY_ARGV_MAX_BYTES="131072")
+        result = self.run_cli(DEV_TRIO_REVIEWER_MODEL="agy", DEV_TRIO_SNAPSHOT_MAX_BYTES="5119")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_snapshot_status(result, "skipped:budget")
 

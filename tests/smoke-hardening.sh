@@ -1849,11 +1849,11 @@ cmp "$ROOT/dev-trio/bin/agent-team-models.sh" "$ROOT/debate-conductor/bin/agent-
 PASS=$((PASS + 1))
 
 # #103: agy's workspace_args/log_args are prefixed only when the caller passes
-# REGISTRY_WORKSPACE / REGISTRY_CLI_LOG, each on its own; with neither, argv is
-# what it always was (debate-conductor never sets them).
+# REGISTRY_WORKSPACE / REGISTRY_CLI_LOG, each on its own. agy's prompt uses
+# stdin even when neither prefix is present (debate-conductor sets neither).
 REG_TMP=$(mktemp -d)
 REG_TMP=$(cd "$REG_TMP" && pwd -P)
-printf '#!/bin/sh\nfor a in "$@"; do printf "[%%s]" "$a"; done\necho\n' > "$REG_TMP/rec"
+printf '#!/bin/sh\nfor a in "$@"; do printf "[%%s]" "$a"; done\nprintf " stdin=%%s\\n" "$(wc -c | tr -d " ")"\n' > "$REG_TMP/rec"
 chmod +x "$REG_TMP/rec"
 registry_argv() {
   env -u REGISTRY_WORKSPACE -u REGISTRY_CLI_LOG -u REGISTRY_CMD_OVERRIDE \
@@ -1861,19 +1861,19 @@ registry_argv() {
     "$@" bash -c '. "$1/dev-trio/lib/registry.sh"; shift; eval "$*"' _ "$ROOT" "$REG_CALL"
 }
 REG_CALL='registry_run agy P'
-assert_eq "$(registry_argv)" '[-p][P]'
+assert_eq "$(registry_argv)" '[--input-format][text][--output-format][text] stdin=2'
 REG_CALL='REGISTRY_WORKSPACE=/r registry_run agy P'
-assert_eq "$(registry_argv)" '[--add-dir][/r][-p][P]'
+assert_eq "$(registry_argv)" '[--add-dir][/r][--input-format][text][--output-format][text] stdin=2'
 REG_CALL='REGISTRY_CLI_LOG=/l registry_run agy P'
-assert_eq "$(registry_argv)" '[--log-file][/l][-p][P]'
+assert_eq "$(registry_argv)" '[--log-file][/l][--input-format][text][--output-format][text] stdin=2'
 REG_CALL='REGISTRY_WORKSPACE=/r REGISTRY_CLI_LOG=/l registry_run agy P'
-assert_eq "$(registry_argv)" '[--log-file][/l][--add-dir][/r][-p][P]'
+assert_eq "$(registry_argv)" '[--log-file][/l][--add-dir][/r][--input-format][text][--output-format][text] stdin=2'
 REG_CALL='REGISTRY_WORKSPACE= REGISTRY_CLI_LOG= registry_run agy P'
-assert_eq "$(registry_argv REGISTRY_WORKSPACE=/stale REGISTRY_CLI_LOG=/stale)" '[-p][P]'
+assert_eq "$(registry_argv REGISTRY_WORKSPACE=/stale REGISTRY_CLI_LOG=/stale)" '[--input-format][text][--output-format][text] stdin=2'
 REG_CALL='REGISTRY_WORKSPACE=/r REGISTRY_CLI_LOG=/l registry_run codex P'
-assert_eq "$(registry_argv)" '[exec][--skip-git-repo-check][-]'
+assert_eq "$(registry_argv)" '[exec][--skip-git-repo-check][-] stdin=2'
 REG_CALL='REGISTRY_WORKSPACE=/r REGISTRY_CLI_LOG=/l registry_run_answer agy P; echo "rc=$?"'
-assert_eq "$(registry_argv)" "$(printf '[--log-file][/l][--add-dir][/r][-p][P]\nrc=0')"
+assert_eq "$(registry_argv)" "$(printf '[--log-file][/l][--add-dir][/r][--input-format][text][--output-format][text] stdin=2\nrc=0')"
 REG_CALL='registry_has_workspace agy && ! registry_has_workspace codex && echo yes'
 assert_eq "$(registry_argv)" yes
 
@@ -1885,7 +1885,7 @@ assert_eq "$(registry_argv)" yes
 printf '#!/bin/sh\nfor a in "$@"; do printf "[%%s]" "$a"; done\nprintf " stdin=%%s\\n" "$(wc -c | tr -d " ")"\n' > "$REG_TMP/count"
 chmod +x "$REG_TMP/count"
 mkdir "$REG_TMP/stage"
-count_argv() { registry_argv CLAUDE_CLI="$REG_TMP/count" CODEX_CLI="$REG_TMP/count" TMPDIR="$REG_TMP/stage" "$@"; }
+count_argv() { registry_argv AGY_CLI="$REG_TMP/count" CLAUDE_CLI="$REG_TMP/count" CODEX_CLI="$REG_TMP/count" TMPDIR="$REG_TMP/stage" "$@"; }
 BIG='big=$(printf "%300000s" "" | tr " " x); '
 REG_CALL="${BIG}registry_run claude \"\$big\""
 assert_eq "$(count_argv)" '[-p] stdin=300001'
@@ -1923,16 +1923,16 @@ chmod +x "$REG_TMP/leaky"
 REG_CALL="${BIG}registry_run claude \"\$big\"; echo \"rc=\$?\"; ls \"\$LEAK_RELEASE.gave-up\" 2>/dev/null"
 assert_eq "$(count_argv CLAUDE_CLI="$REG_TMP/leaky" LEAK_RELEASE="$REG_TMP/release")" "$(printf 'answered\nrc=0')"
 : > "$REG_TMP/release"
-# agy stays on argv and refuses what one Linux argument cannot hold.
+# agy also accepts a prompt larger than one Linux argument through stdin.
 REG_CALL="${BIG}registry_run agy \"\$big\"; echo \"rc=\$?\""
-assert_eq "$(count_argv 2>"$REG_TMP/agy.err")" 'rc=3'
-assert_ok grep -q '300000 bytes; Linux refuses a single argument of 131072 bytes or more' "$REG_TMP/agy.err"
-# The limit counts bytes (NUL included, so the limit itself is refused), and
-# REGISTRY_ARGV_MAX_BYTES moves it.
-REG_CALL='registry_run agy 0123456789abcdef; echo "rc=$?"'
-assert_eq "$(count_argv REGISTRY_ARGV_MAX_BYTES=16 2>/dev/null)" 'rc=3'
-REG_CALL='registry_run agy 0123456789abcde'
-assert_eq "$(count_argv REGISTRY_ARGV_MAX_BYTES=16)" '[-p][0123456789abcde]'
+assert_eq "$(count_argv)" "$(printf '[--input-format][text][--output-format][text] stdin=300001\nrc=0')"
+# The argv limit still applies to custom argv models. It counts bytes (NUL
+# included, so the limit itself is refused), and the override moves it.
+printf '%s\n' '{"models":{"argmodel":{"command":"x","env_command":"AGY_CLI","args":["-p","{prompt}"]}}}' > "$REG_TMP/argv.json"
+REG_CALL='registry_run argmodel 0123456789abcdef; echo "rc=$?"'
+assert_eq "$(count_argv AGENT_TEAM_MODELS_CONFIG="$REG_TMP/argv.json" REGISTRY_ARGV_MAX_BYTES=16 2>/dev/null)" 'rc=3'
+REG_CALL='registry_run argmodel 0123456789abcde'
+assert_eq "$(count_argv AGENT_TEAM_MODELS_CONFIG="$REG_TMP/argv.json" REGISTRY_ARGV_MAX_BYTES=16)" '[-p][0123456789abcde] stdin=0'
 # #119: an argv template with no {prompt} would run the CLI without the prompt.
 # It is refused, rc 3, before anything starts, whatever the prompt's size. A
 # final-capable model is checked on the template a call selects: its unused
@@ -1946,7 +1946,7 @@ assert_eq "$(count_argv AGENT_TEAM_MODELS_CONFIG="$REG_TMP/bare.json" 2>&1)" \
   "$(printf "registry: model 'bare'%s; add {prompt} where the prompt belongs, or use prompt_via \"stdin\"\nrc=3" "$NO_PROMPT")"
 REG_CALL='registry_run finalonly P /f; echo "rc=$?"; registry_run finalonly P; echo "rc=$?"'
 assert_eq "$(count_argv AGENT_TEAM_MODELS_CONFIG="$REG_TMP/bare.json" 2>&1)" \
-  "$(printf "[--final][/f][P]\nrc=0\nregistry: model 'finalonly'%s; nothing was started\nrc=3" "$NO_PROMPT")"
+  "$(printf "[--final][/f][P] stdin=0\nrc=0\nregistry: model 'finalonly'%s; nothing was started\nrc=3" "$NO_PROMPT")"
 # registry_check_def is the whole rule. Shapes the runtime's preflight refuses
 # are refused here too, and an empty final_args is never the running template.
 check_def_rc() { bash -c '. "$1/dev-trio/lib/registry.sh"; registry_check_def m "$2" 2>/dev/null; echo $?' _ "$ROOT" "$1"; }
@@ -1988,9 +1988,9 @@ for plugin in dev-trio debate-conductor; do
   assert_eq "$(grep -c "^  \[FAIL\] bare: model 'bare'$NO_PROMPT;" "$REG_TMP/doctor.out")" 1
   assert_eq "$(grep -c '^  \[FAIL\] finalonly' "$REG_TMP/doctor.out")" 0
 done
-REG_CALL='registry_run agy "한글ab"; echo "rc=$?"'
-assert_eq "$(count_argv REGISTRY_ARGV_MAX_BYTES=8 2>/dev/null)" 'rc=3'
-assert_eq "$(count_argv REGISTRY_ARGV_MAX_BYTES=9)" "$(printf '[-p][한글ab]\nrc=0')"
+REG_CALL='registry_run argmodel "한글ab"; echo "rc=$?"'
+assert_eq "$(count_argv AGENT_TEAM_MODELS_CONFIG="$REG_TMP/argv.json" REGISTRY_ARGV_MAX_BYTES=8 2>/dev/null)" 'rc=3'
+assert_eq "$(count_argv AGENT_TEAM_MODELS_CONFIG="$REG_TMP/argv.json" REGISTRY_ARGV_MAX_BYTES=9)" "$(printf '[-p][한글ab] stdin=0\nrc=0')"
 # Configuration errors are refused before anything runs.
 printf '%s\n' '{"models":{
   "leaky":{"command":"x","env_command":"CLAUDE_CLI","prompt_via":"stdin","args":["-p","{prompt}"]},
