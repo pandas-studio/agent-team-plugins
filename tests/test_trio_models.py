@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -67,11 +68,14 @@ class TrioModelsTest(unittest.TestCase):
         listing.write_text(json.dumps({"installed": [{"pluginId": "dev-trio@pandas-studio",
                                                 "installed": True, "enabled": True,
                                                 "version": "9.2"}]}))
+        jq = shutil.which("jq")
+        self.assertIsNotNone(jq)
+        (self.root / "jq").symlink_to(Path(jq).resolve())
         result = self.bash('. "$PLUGIN_ROOT/lib/plugin-deps.sh"; '
                            'resolve_plugin_script DEV_TRIO_BIN dev-trio@pandas-studio ask-reviewer.sh; '
                            'printf "%s\\n" "$RESOLVED_SCRIPT"',
                            RALPH_TRIO_PM_HOST="codex", CODEX_HOME=str(home),
-                           PLUGIN_LIST=str(listing), PATH=str(self.root) + os.pathsep + os.environ["PATH"])
+                           PLUGIN_LIST=str(listing), PATH=f"{self.root}:/usr/bin:/bin")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), str(binary.resolve()))
 
