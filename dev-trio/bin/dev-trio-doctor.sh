@@ -15,7 +15,7 @@
 #      lib/runstate.sh /
 #      lib/roles/*.md / lib/pm.md).
 #   3. Stub-CLI smoke: runs ask-researcher.sh against a tmp stub matching
-#      `agy [flags] -p PROMPT` shape (with an isolated empty models config so the
+#      `agy [flags] --input-format text --output-format text` shape (with an isolated empty models config so the
 #      built-in researcher=agy default applies), then asserts the manifest
 #      JSON is well-formed and contains variant=dev-trio-research with
 #      role[0].model=agy.
@@ -157,10 +157,16 @@ else
   STUB_AGY="$TMPDIR_SMOKE/stub-agy.sh"
   cat > "$STUB_AGY" <<'STUB'
 #!/usr/bin/env bash
-# Stub matching `agy [--log-file F] [--add-dir D] -p PROMPT` per smoke-test
-# stub-wrapper rule: the prompt stays last, flags may precede -p (#103).
+# Stub matching `agy [--log-file F] [--add-dir D] --input-format text
+# --output-format text`; the prompt arrives on stdin (#147).
 # Echoes a canonical-shaped lead paragraph so dashboard.sh can parse it.
-if [ "$#" -lt 2 ] || [ "${@: -2:1}" != "-p" ]; then echo "stub-agy: expected -p PROMPT last, got: $*" >&2; exit 2; fi
+if [ "$#" -lt 4 ] ||
+   [ "${@: -4:1}" != "--input-format" ] || [ "${@: -3:1}" != "text" ] ||
+   [ "${@: -2:1}" != "--output-format" ] || [ "${@: -1:1}" != "text" ]; then
+  echo "stub-agy: expected stdin text flags, got: $*" >&2; exit 2
+fi
+prompt="$(cat)"
+[ -n "$prompt" ] || { echo "stub-agy: empty stdin prompt" >&2; exit 2; }
 cat <<'OUT'
 LangGraph streaming can use the async iterator returned by graph.astream(input).
 

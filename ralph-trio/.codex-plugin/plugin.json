@@ -1,6 +1,6 @@
 {
   "name": "ralph-trio",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Codex-conducted Ralph loops with selectable planner, coder, reviewer, and researcher models.",
   "author": {"name": "pandas-studio"},
   "homepage": "https://github.com/pandas-studio/agent-team-plugins/tree/main/ralph-trio",

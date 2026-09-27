@@ -106,11 +106,18 @@ else
   TMPDIR_SMOKE=$(mktemp -d)
   trap 'rm -rf "$TMPDIR_SMOKE"' EXIT
 
-  # Generator stub: matches `agy -p "$PROMPT"`. Emits a short draft regardless
-  # of args so every gen round produces non-empty content.
+  # Generator stub: agy receives its prompt on stdin (#147). Emits a short
+  # draft for every generation round.
   STUB_GEN="$TMPDIR_SMOKE/stub-gen.sh"
   cat > "$STUB_GEN" <<'STUB'
 #!/usr/bin/env bash
+if [ "$#" -lt 4 ] ||
+   [ "${@: -4:1}" != "--input-format" ] || [ "${@: -3:1}" != "text" ] ||
+   [ "${@: -2:1}" != "--output-format" ] || [ "${@: -1:1}" != "text" ]; then
+  echo "stub-gen: expected stdin text flags, got: $*" >&2; exit 2
+fi
+prompt="$(cat)"
+[ -n "$prompt" ] || { echo "stub-gen: empty stdin prompt" >&2; exit 2; }
 echo "## Position"
 echo "Stub generator draft for the convergence smoke."
 STUB

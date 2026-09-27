@@ -1,6 +1,6 @@
 {
   "name": "spec-trio",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "skills": "./claude-skills/",
   "description": "Spec-anchored ralph-trio: an external spec.md gates planner / coder / reviewer with allowlist scope checks + §-citation coverage. Planner can request pre-coding research (Antigravity). Uses ask-reviewer.sh + ask-researcher.sh from the dev-trio plugin.",
   "author": { "name": "pandas-studio" },

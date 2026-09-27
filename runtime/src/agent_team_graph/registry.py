@@ -15,13 +15,13 @@ from typing import Any
 from .process import Cancellation, run_process
 
 BUILTIN_MODELS: dict[str, dict[str, Any]] = {
-    # workspace_args/log_args mirror registry.sh; like debate-conductor, this
-    # runtime never passes REGISTRY_WORKSPACE/REGISTRY_CLI_LOG, so its agy argv
-    # is still just `-p {prompt}`.
+    # workspace_args/log_args mirror registry.sh; this runtime never passes
+    # REGISTRY_WORKSPACE/REGISTRY_CLI_LOG. agy reads its prompt on stdin.
     "agy": {
         "command": "agy",
         "env_command": "AGY_CLI",
-        "args": ["-p", "{prompt}"],
+        "prompt_via": "stdin",
+        "args": ["--input-format", "text", "--output-format", "text"],
         "workspace_args": ["--add-dir", "{cwd}"],
         "log_args": ["--log-file", "{cli_log}"],
     },

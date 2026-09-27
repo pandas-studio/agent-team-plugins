@@ -34,9 +34,8 @@
 #                     (bash writes it in full before the CLI starts and removes
 #                     any temp file itself; no writer process outlives the
 #                     start). The CLI never sees the caller's stdin. Built-in
-#                     claude and codex models use it (`claude -p`,
-#                     `codex exec -`); agy has no documented text form and
-#                     stays on argv.
+#                     claude, codex, and agy models use it (`claude -p`,
+#                     `codex exec -`, `agy --input-format text`).
 # A "stdin" template that contains {prompt}, an "argv" model whose template
 # has no {prompt} (the CLI would run without ever seeing the prompt, #119), or
 # any other prompt_via value is a configuration error (rc 3), as
@@ -85,7 +84,8 @@ _registry_builtin_models() {
   "agy": {
     "command": "agy",
     "env_command": "AGY_CLI",
-    "args": ["-p", "{prompt}"],
+    "prompt_via": "stdin",
+    "args": ["--input-format", "text", "--output-format", "text"],
     "workspace_args": ["--add-dir", "{cwd}"],
     "log_args": ["--log-file", "{cli_log}"]
   },

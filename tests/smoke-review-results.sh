@@ -1278,6 +1278,7 @@ cat > "$TMP/agy-reviewer" <<'STUB'
 #!/usr/bin/env bash
 set -eu
 printf '%s\n' "$@" > "$TEST_AGY_ARGV"
+cat >/dev/null
 log=""
 [ "${1:-}" != --log-file ] || log="$2"
 # Like agy's own log: the conversation id, and the user's allow list.
@@ -1316,7 +1317,7 @@ AGY_DENIED='["command(lsof -p $$ || pwd)","command(\"a\\x01b\")","read_url(githu
 
 agy_transcript
 agy_review 3 TEST_AGY_ID="$AGY_ID" TEST_AGY_NOTICE=1
-check 'agy argv pins its log and the workspace' test "$(sed -n '1p;3p;5p' "$TMP/agy-argv" | tr '\n' ' ')" = '--log-file --add-dir -p '
+check 'agy argv pins its log and the workspace without a prompt' test "$(sed -n '1p;3p;5p;6p;7p;8p' "$TMP/agy-argv" | tr '\n' ' ')" = '--log-file --add-dir --input-format text --output-format text '
 check 'agy workspace is the repository root' test "$(sed -n 4p "$TMP/agy-argv")" = "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 check 'agy log lives in agy home' test "$(sed -n 2p "$TMP/agy-argv")" = "$AGY_HOME/log/cli-dev-trio-review-${LOG##*/codex-}"
 check 'denial is its own status with the targets' json_is "$RESULT" ".status==\"permission-denied\" and .exit_code==3 and .invocation_rc==0 and .verdict==null and .denied==$AGY_DENIED and .conversation_ids==[\"$AGY_ID\"]"
