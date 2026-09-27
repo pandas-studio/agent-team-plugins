@@ -66,6 +66,13 @@ jobs:
           [ "$v" = 3 ] || { echo "bash on PATH is $v, want 3" >&2; exit 1; }
           python3 --version
       - run: uv sync --directory runtime --frozen --python 3.12 --extra dev
-      - run: /bin/bash scripts/check.sh
+      # Two runs stalled past timeout-minutes and never uploaded a log, which
+      # points at the runner itself being signalled. Give check.sh its own
+      # session so no process-group signal from a test can reach the runner.
+      - name: Run scripts/check.sh in its own session
+        run: |
+          echo "step shell pgid: $(ps -o pgid= -p $$)"
+          python3 -c 'import os, sys; os.setsid(); os.execv("/bin/bash", ["/bin/bash", "scripts/check.sh"])'
+        timeout-minutes: 40
         env:
           CI: "true"
