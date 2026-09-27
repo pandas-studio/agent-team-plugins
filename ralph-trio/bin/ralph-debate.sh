@@ -206,6 +206,19 @@ parse_critic_verdict() {
   ' "$f" 2>/dev/null
 }
 
+# The task was already marked [x] by pop_top_task. Keep its text in the
+# fix_plan record even when the BACKLOG cannot be made writable again.
+restore_stopped_topic() {
+  local stop="$1" restored="topic restored"
+  if ! append_to_backlog "$BACKLOG_FILE" "$TASK"; then
+    restored="topic NOT restored"
+    ralph_log "  could not restore the topic to BACKLOG ($BACKLOG_FILE): $TASK"
+  fi
+  printf '## iter %d · %s · %s (%s)\nTopic: %s\n\n' \
+    "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$stop" "$restored" "$TASK" \
+    >> "$FIX_PLAN_FILE" || ralph_log "  could not record $stop in fix_plan.md; topic: $TASK"
+}
+
 ITER=0
 COMPLETED=0
 # --dry-run termination ceiling. --max-iter 0 (unlimited) combined with the
@@ -260,8 +273,7 @@ while :; do
   if [ "$USE_WORKTREE" = "1" ]; then
     if ! WT=$(with_worktree "$ITER" "$BASE_BRANCH"); then
       ralph_log "could not create the iter $ITER worktree. Stopping."
-      # pop_top_task already marked the task done; put it back.
-      [ "$DRY_RUN" = "1" ] || append_to_backlog "$BACKLOG_FILE" "$TASK"
+      [ "$DRY_RUN" = "1" ] || restore_stopped_topic WORKTREE-FAILED
       echo "=== STOP (worktree-failed) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
       RUN_FAILED=1
       break
@@ -289,7 +301,7 @@ while :; do
     # before spending model calls, and the task goes back on the backlog.
     if ! DEBATE_RECEIPT=$(mktemp "$LOG_DIR_ABS/debate-receipt-$TS-iter-$ITER.XXXXXX"); then
       ralph_log "could not reserve a debate receipt under $LOG_DIR_ABS. Stopping."
-      [ "$DRY_RUN" = "1" ] || append_to_backlog "$BACKLOG_FILE" "$TASK"
+      restore_stopped_topic RECEIPT-FAILED
       [ -z "$WT" ] || merge_or_discard_worktree "$WT" "$ITER" 0 "$ORIGINAL_DIR" || true
       echo "=== STOP (receipt-failed) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
       RUN_FAILED=1
