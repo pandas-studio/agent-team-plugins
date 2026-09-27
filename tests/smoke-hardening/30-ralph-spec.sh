@@ -69,6 +69,25 @@ assert_eq "$MB_RC" "rc=1"
 assert_eq "$MB_WTS" "2"
 assert_eq "$(grep -c 'WORKTREE-MERGE-BLOCK' "$MB/fix_plan.md")" "1"
 
+# #114: a discard whose branch cannot be deleted leaves only the branch. The
+# summary and fix_plan entry name that branch and not the removed worktree path.
+CL="$TMP/cleanup-left"
+git init -q "$CL"
+git -C "$CL" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
+printf 'prompt\n' > "$CL/PROMPT.md"
+CL_RC=$(cd "$CL" && env AGENT_TEAM="cl-$$" TMUX="" RALPH_TRIO_WORKSPACE="$TMP/cl-ws" \
+  WORKER_CLI="$TMP/mb-worker.sh" "$ROOT/ralph-trio/bin/ralph-solo.sh" --prompt PROMPT.md \
+  --max-iter 3 --worktree \
+  --test-cmd 'b=$(git symbolic-ref --short HEAD) && : > "$(git rev-parse --git-common-dir)/refs/heads/$b.lock"; exit 1' \
+  >/dev/null 2>"$TMP/cl.err" </dev/null; echo "rc=$?")
+CL_BR=$(git -C "$CL" for-each-ref --format='%(refname:short)' 'refs/heads/ralph/*')
+find "$CL/.git/refs/heads" -name '*.lock' -exec rm -f {} +
+assert_eq "$CL_RC" "rc=1"
+assert_eq "$(grep -c 'WORKTREE-CLEANUP-BLOCK' "$CL/fix_plan.md")" "1"
+assert_eq "$(grep -c '^Worktree: ' "$CL/fix_plan.md" || true)" "0"
+assert_eq "$(grep '^Branch: ' "$CL/fix_plan.md")" "Branch: $CL_BR"
+assert_eq "$(grep -rh 'cleanup failed' "$TMP/cl-ws")" "  worktree: discarded, but cleanup failed; left: Branch: $CL_BR"
+
 # Same for a coder that switches the worktree to another branch and leaves
 # edits: the auto-commit is refused, and the loop stops there.
 CB="$TMP/commit-block"
@@ -221,8 +240,8 @@ for plugin in ralph-trio spec-trio; do
     cd "$1" || exit 9
     base=$(git symbolic-ref --short HEAD)
     # The worktrees live under /tmp, outside $TMP: remove them even on failure.
-    a="" b="" c="" d="" e=""
-    trap '\''for w in "$a" "$b" "$c" "$d" "$e"; do [ -n "$w" ] && git worktree remove --force "$w" 2>/dev/null; [ -n "$w" ] && rm -rf "$w"; done; true'\'' EXIT
+    a="" b="" c="" d="" e="" f="" g="" h=""
+    trap '\''for w in "$a" "$b" "$c" "$d" "$e" "$f" "$g" "$h"; do [ -n "$w" ] && git worktree remove --force "$w" 2>/dev/null; [ -n "$w" ] && rm -rf "$w"; done; true'\'' EXIT
     a=$(with_worktree 1 "$base" 2>/dev/null) || exit 9
     printf "a\n" > "$a/a.txt"
     git -C "$a" add a.txt && git -C "$a" -c user.name=t -c user.email=t@t commit -qm a
@@ -264,10 +283,34 @@ for plugin in ralph-trio spec-trio; do
     git worktree lock "$e"
     merge_or_discard_worktree "$e" 5 0 "$PWD" >/dev/null 2>&1
     [ "$?" = 2 ] && [ -d "$e" ] && echo cleanup-fail-rc2
+    [ "$(worktree_leftovers "$e" 5 "$PWD")" = "$(printf "Worktree: %s\nBranch: %s" "$e" "$(worktree_branch "$e" 5)")" ] \
+      && echo leftovers-rc2
     git worktree unlock "$e"
+    # A branch that cannot be deleted after the worktree went is also rc=2, and
+    # the leftovers name only the branch, not the removed path (#114).
+    f=$(with_worktree 6 "$base" 2>/dev/null) || exit 9
+    fbr=$(worktree_branch "$f" 6)
+    lock="$(git rev-parse --git-common-dir)/refs/heads/$fbr.lock"
+    : > "$lock"
+    merge_or_discard_worktree "$f" 6 0 "$PWD" >/dev/null 2>&1
+    [ "$?" = 2 ] && [ ! -d "$f" ] && git rev-parse -q --verify "refs/heads/$fbr" >/dev/null \
+      && [ "$(worktree_leftovers "$f" 6 "$PWD")" = "Branch: $fbr" ] && echo branch-left-rc2
+    rm -f "$lock"
+    # A coder that switched the worktree off its branch and deleted that
+    # branch leaves only the worktree: the leftovers do not name a gone branch.
+    g=$(with_worktree 7 "$base" 2>/dev/null) || exit 9
+    git -C "$g" switch -q -c elsewhere && git branch -q -D "$(worktree_branch "$g" 7)"
+    merge_or_discard_worktree "$g" 7 0 "$PWD" >/dev/null 2>&1
+    [ "$?" = 1 ] && [ "$(worktree_leftovers "$g" 7 "$PWD")" = "Worktree: $g" ] && echo leftovers-no-branch
+    # Nothing is named as a survivor once the coder removed both itself.
+    h=$(with_worktree 8 "$base" 2>/dev/null) || exit 9
+    hbr=$(worktree_branch "$h" 8)
+    git worktree remove --force "$h" && git branch -q -D "$hbr"
+    [ "$(worktree_leftovers "$h" 8 "$PWD")" = "Left: nothing (worktree $h and branch $hbr are gone)" ] \
+      && echo leftovers-none
   ' _ "$WTREPO")" "$(printf '%s\n' distinct branches "bad-rc=1 out=" no-leftover discarded merged \
       missing-refused commit-refused validate-refused feature-untouched discard-refused feature-kept \
-      ff-fail-kept cleanup-fail-rc2)"
+      ff-fail-kept cleanup-fail-rc2 leftovers-rc2 branch-left-rc2 leftovers-no-branch leftovers-none)"
 done
 
 # spec-trio scope gate: paths are listed verbatim (non-ASCII names match the
