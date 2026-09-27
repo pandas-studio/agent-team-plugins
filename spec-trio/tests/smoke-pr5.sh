@@ -22,7 +22,7 @@ unset DEV_TRIO_BIN DEBATE_CONDUCTOR_BIN
 unset DEV_TRIO_REVIEWER_MODEL DEV_TRIO_RESEARCHER_MODEL REVIEWER_CLI RESEARCHER_CLI \
       PLANNER_CLI CODER_CLI
 # agy's home is pinned to a directory that does not exist, as in
-# tests/smoke-hardening.sh, so a stray agy run never writes a log there (#103).
+# tests/smoke-hardening/lib.sh, so a stray agy run never writes a log there (#103).
 export DEV_TRIO_AGY_HOME=/nonexistent/spec-trio-test-agy-home
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
