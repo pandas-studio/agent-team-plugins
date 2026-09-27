@@ -4,11 +4,23 @@ on:
   push:
   pull_request:
 
+env:
+  # Base for scripts/check-version-bump.py (#151): the PR's base branch; on a
+  # push to main, the previous tip, so a multi-commit push is checked whole;
+  # on any other push, origin/main.
+  VERSION_BUMP_BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || (github.ref == 'refs/heads/main' && github.event.before) || 'origin/main' }}
+  # A push to main compares with that previous tip itself, not a merge base,
+  # so a force push that rolls a version back cannot pass.
+  VERSION_BUMP_DIRECT: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
 jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The version-bump check needs the base branch and the merge base.
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"

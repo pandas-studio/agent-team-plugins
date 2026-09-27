@@ -11,6 +11,10 @@ if [ ! -f "$SPEC_VERIFICATION_TEST" ]; then
 fi
 python3 "$SPEC_VERIFICATION_TEST" --check-config
 
+# A plugin changed since the base needs a higher version in every manifest,
+# or installed copies never refresh (#151). VERSION_BUMP_BASE picks the base.
+python3 "$ROOT/scripts/check-version-bump.py"
+
 find_sources() {
   find "$ROOT" -type f -name "$1" -not -path '*/.venv/*' -not -path '*/.git/*' | sort
 }
