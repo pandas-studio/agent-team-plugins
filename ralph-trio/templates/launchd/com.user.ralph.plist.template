@@ -56,10 +56,16 @@
   Caveat — plugin install paths are volatile. The absolute path captured at
   step 1 can drift when the marketplace is re-installed or the plugin updates
   to a new install-id. If launchd starts failing with "command not found",
-  re-run step 1 and re-deploy. For an overnight job that survives plugin
-  re-installs, symlink ralph-solo.sh to a stable location once:
-    ln -sf "$(command -v ralph-solo.sh)" ~/bin/ralph-solo
-  and point this template at ~/bin/ralph-solo instead.
+  re-run step 1 and re-deploy. To keep one stable path in this template,
+  point it at a small wrapper script instead:
+    mkdir -p ~/bin
+    printf '#!/bin/bash\nexec %q "$@"\n' "$(command -v ralph-solo.sh)" > ~/bin/ralph-solo
+    chmod +x ~/bin/ralph-solo
+    RALPH_SOLO_BIN=$HOME/bin/ralph-solo   # then redo steps 2 and 6
+  The wrapper still holds the install path, so after a plugin update re-run
+  the printf line; the plist itself stays the same. Do not symlink ralph-solo.sh
+  instead: started through a symlink it looks for lib/ next to the link and
+  fails with "failed to load .../lib/common.sh".
 
   Cron alternative (one line in `crontab -e`, runs at 23:00 daily):
     0 23 * * * cd {{REPO}} && AGENT_TEAM=overnight {{RALPH_SOLO_BIN}} \

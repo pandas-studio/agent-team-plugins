@@ -50,7 +50,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck disable=SC1091
-. "$PLUGIN_ROOT/lib/common.sh"
+. "$PLUGIN_ROOT/lib/common.sh" || { echo "ralph stop-hook: failed to load $PLUGIN_ROOT/lib/common.sh" >&2; exit 1; }
 
 VARIANT="${RALPH_VARIANT:-solo}"
 PROMPT_FILE="${RALPH_PROMPT:-}"

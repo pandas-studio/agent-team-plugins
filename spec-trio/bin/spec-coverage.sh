@@ -46,7 +46,7 @@ PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 [ -f "$PLUGIN_ROOT/lib/spec-helpers.sh" ] || {
   echo "ERROR: $PLUGIN_ROOT/lib/spec-helpers.sh missing" >&2; exit 2; }
 # shellcheck disable=SC1091
-. "$PLUGIN_ROOT/lib/spec-helpers.sh"
+. "$PLUGIN_ROOT/lib/spec-helpers.sh" || { echo "spec-coverage: failed to load $PLUGIN_ROOT/lib/spec-helpers.sh" >&2; exit 2; }
 
 SPEC=""
 SINCE_REF=""
