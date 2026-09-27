@@ -3,7 +3,8 @@
 Measured on 2026-09-27 with agy 1.2.11 on macOS. The earlier agy 1.2.9
 measurement covered a log path that could not be opened and sent 24.8 KB to
 stderr. This experiment instead used a pre-created mode-0600 log on a full
-32 MiB HFS+ volume.
+32 MiB HFS+ volume. That log had an allocated data block; the wrapper's
+new zero-byte log and its first-write failure remain unmeasured here.
 
 ## Paired runs
 
@@ -44,21 +45,24 @@ capture timeout did not fire in either run.
   `9ea764ef654dc61f19ab23af219e5aa420b68157b1d135dc297ab0527941f951`
   to `3d56e7d12f80b5e4b5b7e8c49d416c1bb88e998ed2c3df7427448ebd82177e19`.
 
-The matching successful control, short failure run, zero free blocks, and agy
-log content reaching the end of its allocated block support the conclusion
-that the full log volume stopped agy. The shell's `ENOSPC` check establishes
-the filesystem condition; agy's own failing write syscall was not traced.
+The successful control, short failure run, zero free blocks, and agy log
+content reaching the end of its allocated block are consistent with the full
+log volume stopping agy. The control also differed in filesystem (APFS versus
+HFS+) and prior log content (empty versus 1,024 bytes). The shell's `ENOSPC`
+check establishes the filesystem condition; agy's own failing write syscall
+was not traced.
 
 ## Stderr and wrapper consequence
 
-The 41 current `settings.permissions.allow` entries were checked against each
-captured stdout and stderr stream without printing their values: **zero
-matches** in both runs. The full-volume run emitted **no stderr bytes**, so it
-did not fall back to stderr in this measured case. `ask-researcher.sh` and
-`ask-reviewer.sh` both redirect agy's stderr into their private transcript;
-the observed zero-byte stderr stream would add no allow-list content through
-that path. The live invocations called agy directly, so a wrapper transcript
-was not separately measured.
+The full-volume run emitted **no stderr bytes**, so it did not fall back to
+stderr in this measured case. The 41 current `settings.permissions.allow`
+entries were checked against each captured stream without printing their
+values; none matched. `ask-researcher.sh` and `ask-reviewer.sh` redirect agy's
+stderr into their private transcript. These live invocations called agy
+directly, with `-p` and a preallocated log block. The wrappers instead send
+the prompt on stdin and create a new zero-byte log. Their first-write failure,
+transcript contents, and user-visible failure reporting were not measured by
+this pair of runs.
 
 Each condition was run once (n=1). This result covers agy 1.2.11 with an
 already allocated log block on this full HFS+ volume. It does not establish
