@@ -31,3 +31,41 @@ jobs:
       - run: bash scripts/check.sh
         env:
           CI: "true"
+
+  # macOS catches what the Ubuntu job cannot: bash 3.2, BSD userland, and the
+  # darwin-only tests (#153). /bin/bash is 3.2 there, but the runner image puts
+  # Homebrew's bash 5 first on PATH, so a shim dir makes every `bash` and
+  # `#!/usr/bin/env bash` resolve to /bin/bash.
+  macos:
+    runs-on: macos-latest
+    # A local full run took 12-25 min depending on load; cap a hung run.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      # Pin python3 for the non-runtime suites; otherwise it is whatever the
+      # image ships first on PATH.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: brew install shellcheck
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+      - name: Put /bin/bash (3.2) first on PATH
+        run: |
+          mkdir -p "$RUNNER_TEMP/bash32"
+          ln -s /bin/bash "$RUNNER_TEMP/bash32/bash"
+          echo "$RUNNER_TEMP/bash32" >> "$GITHUB_PATH"
+      - name: Check bash is 3.2
+        run: |
+          command -v bash
+          v="$(bash -c 'echo "${BASH_VERSINFO[0]}"')"
+          [ "$v" = 3 ] || { echo "bash on PATH is $v, want 3" >&2; exit 1; }
+          python3 --version
+      - run: uv sync --directory runtime --frozen --python 3.12 --extra dev
+      - run: /bin/bash scripts/check.sh
+        env:
+          CI: "true"
