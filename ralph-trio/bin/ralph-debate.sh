@@ -12,6 +12,8 @@
 #      A dispatch that failed (debate.sh non-zero, or no usable receipt) has no
 #      verdict: the topic goes back on BACKLOG and the run stops with exit 1,
 #      since the next topic would meet the same outage.
+#      Worktree creation and receipt reservation failures also restore the
+#      popped topic, record whether restoration worked, and stop with exit 1.
 #
 # Note: this variant produces *text artifacts* (proposals + critiques), not
 # code diffs. It does NOT auto-apply or auto-commit code.
