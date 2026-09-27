@@ -8,6 +8,9 @@ new digests with
     python3 tests/test_vendored_copies.py --print-digests
 
 and update KNOWN_DIFF in the same commit, so the review sees the new difference.
+An edit made the same way on both sides keeps the digest only where the two
+copies agree; the same edit to a line that already differs changes the
+recorded difference, so it needs the same digest update.
 """
 
 import difflib
@@ -71,6 +74,12 @@ def function_section(path, data, name):
     """One shell function, with the plugin's names neutralised."""
     plugin = path.split("/", 1)[0]
     prefix = plugin.replace("-", "_") + "_"
+    # Bash runs the last definition, so a second one would slip past a guard
+    # that reads the first. Count every form: "f()", "f ()", "function f".
+    definitions = re.findall(rb"^[ \t]*(?:function[ \t]+" + prefix.encode() + name.encode() + rb"(?![\w-])|"
+                             + prefix.encode() + name.encode() + rb"[ \t]*\(\))", data, re.M)
+    if len(definitions) > 1:
+        raise ValueError(f"{path} defines {prefix}{name} {len(definitions)} times")
     match = re.search(rb"^" + prefix.encode() + name.encode() + rb"\(\) \{\n.*?^\}\n", data, re.M | re.S)
     if match is None:
         raise ValueError(f"{path} has no {prefix}{name} function")
@@ -119,8 +128,10 @@ KNOWN_DIFF = {
 def diff_lines(a, b):
     """The changed lines of two byte strings, each with its line ending.
 
-    No context and no line numbers: an edit made the same way on both sides
-    keeps the digest, and so does moving a difference without changing it.
+    No context and no line numbers: an edit made the same way on both sides to
+    lines they share keeps the digest, and so does moving a difference without
+    changing it. An edit to a line that differs changes the digest, even when
+    it is made on both sides.
     Every changed byte counts, including a line ending or a missing final newline.
     """
     lines = []
@@ -191,7 +202,10 @@ class VendoredCopyTests(unittest.TestCase):
     def test_known_differences(self):
         for name, (path_a, path_b, normalise, expected) in KNOWN_DIFF.items():
             with self.subTest(pair=name):
-                a, b = normalise(path_a, read(path_a)), normalise(path_b, read(path_b))
+                try:
+                    a, b = normalise(path_a, read(path_a)), normalise(path_b, read(path_b))
+                except ValueError as exc:
+                    self.fail(f"{exc}; the pair ({name}) is {path_a} and {path_b}")
                 self.assertEqual(
                     digest(a, b), expected,
                     f"{path_a} and {path_b} ({name}) no longer differ only as recorded; "
@@ -261,6 +275,20 @@ class CheckerTests(unittest.TestCase):
             function_section(path, nested, "check_cli")
         with self.assertRaisesRegex(ValueError, "no dev_trio_check_cli"):
             function_section(path, b"dev_trio_host() {\n}\n", "check_cli")
+        for second in (b"dev_trio_check_cli() { :; }\n", b"  dev_trio_check_cli () { :; }\n",
+                       b"function dev_trio_check_cli { :; }\n"):
+            with self.subTest(second=second):
+                with self.assertRaisesRegex(ValueError, "defines dev_trio_check_cli 2 times"):
+                    function_section(path, data + second, "check_cli")
+        # A longer name that starts with the guarded one is a different function.
+        self.assertEqual(function_section(path, data + b"function dev_trio_check_cli_extra { :; }\n", "check_cli"),
+                         function_section(path, data, "check_cli"))
+
+    def test_same_edit_to_a_differing_line_changes_the_digest(self):
+        # Documented: the recorded difference itself changed, so the digest is updated.
+        a, b = b"x\nerror: a not found\n", b"x\nerror: b not found (spec)\n"
+        self.assertNotEqual(digest(a.replace(b"not found", b"missing"), b.replace(b"not found", b"missing")),
+                            digest(a, b))
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["--print-digests"]:
