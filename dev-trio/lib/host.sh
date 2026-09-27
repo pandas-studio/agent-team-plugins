@@ -337,11 +337,11 @@ dev_trio_agy_home() {
 # transcript (measured 2026-09-23: rc 0, 24.8 KB on stderr). A writable
 # directory is not enough to know it can (no search permission, a full disk),
 # so the file itself is created here, private and new, and only a file that
-# exists is offered. In the normal-condition measurement, agy kept the
-# pre-created file mode 0600 and emitted no stderr. With agy 1.2.11, a
-# preallocated log on a full volume reached its block limit; agy exited 2
-# without stderr. A zero-byte 1.2.12 run used wrapper-shaped argv but lacked
-# a matched writable control. See docs/agy-open-log-write-failure-149.md.
+# exists is offered. In a paired agy 1.2.11 run, a full-volume log reached its
+# allocated block limit; agy exited 2 without stderr. With agy 1.2.12, the
+# same ask-researcher prompt completed on writable storage but exited 2 on a
+# full volume, without an allow-list match in the private transcript. The
+# failing syscall was not traced; see docs/agy-open-log-write-failure-149.md.
 dev_trio_agy_cli_log() {
   local path
   path="$(dev_trio_agy_home)/log/cli-dev-trio-$1.log"
