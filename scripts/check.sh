@@ -33,7 +33,11 @@ fi
 python3 -m unittest discover -s "$ROOT/tests" -p 'test_*.py'
 python3 -m unittest discover -s "$ROOT/eval-trio/tests" -p 'test_*.py'
 
-"$ROOT/tests/smoke-hardening.sh"
+# One part at a time, in order; each runs on its own and prints its count.
+for part in "$ROOT"/tests/smoke-hardening/[0-9]*.sh; do
+  echo "== ${part#"$ROOT"/}"
+  "$part"
+done
 "$ROOT/tests/smoke-review-results.sh"
 "$ROOT/tests/smoke-review-callers.sh"
 "$ROOT/spec-trio/tests/smoke-pr5.sh"
