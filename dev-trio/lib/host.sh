@@ -338,7 +338,8 @@ dev_trio_agy_home() {
 # directory is not enough to know it can (no search permission, a full disk),
 # so the file itself is created here, private and new, and only a file that
 # exists is offered. agy writes into a file that already exists and leaves its
-# mode alone (measured: 0600 kept, nothing on stderr).
+# mode alone (measured: 0600 kept, nothing on stderr). See
+# docs/agy-open-log-write-failure-149.md for the full-volume measurement.
 dev_trio_agy_cli_log() {
   local path
   path="$(dev_trio_agy_home)/log/cli-dev-trio-$1.log"
