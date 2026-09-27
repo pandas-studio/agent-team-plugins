@@ -8,7 +8,7 @@ allocated block, matching the file state just after wrapper pre-creation.
 
 ## Paired runs
 
-Both live invocations used the same agy command and prompt. The control used
+Both live invocations used agy 1.2.11 with the same command and prompt. The control used
 an empty log on the host APFS Data volume; the failure run used a 1,024-byte
 log on the full HFS+ image:
 
@@ -16,10 +16,10 @@ log on the full HFS+ image:
 agy --log-file <log> -p 'Reply only OK.' --print-timeout 30s
 ```
 
-| Condition | Elapsed | Exit | Stdout | Stderr | Log before → after |
-| --- | ---: | ---: | --- | ---: | ---: |
-| Writable private log | 12.935 s | 0 | `OK` (3 bytes) | 0 bytes | 0 → 25,477 bytes |
-| Full-volume private log | 3.149 s | 2 | 0 bytes | 0 bytes | 1,024 → 4,096 bytes |
+| Condition | agy | Elapsed | Exit | Stdout | Stderr | Log before → after |
+| --- | --- | ---: | ---: | --- | ---: | ---: |
+| Writable private log | 1.2.11 | 12.935 s | 0 | `OK` (3 bytes) | 0 bytes | 0 → 25,477 bytes |
+| Full-volume private log | 1.2.11 | 3.149 s | 2 | 0 bytes | 0 bytes | 1,024 → 4,096 bytes |
 
 The control produced the requested answer before the 30-second timeout. The
 full-volume run ended much sooner, without a model answer. A separate 45-second
@@ -47,7 +47,7 @@ HFS+) and prior log content (empty versus 1,024 bytes). The shell's `ENOSPC`
 check establishes the filesystem condition; agy's own failing write syscall
 was not traced.
 
-## Zero-byte log with wrapper-shaped invocation
+## Exploratory zero-byte log observation
 
 On a second full 32 MiB HFS+ volume, the log was created before the volume was
 filled. Immediately before agy 1.2.12 ran, it was mode 0600, size zero, with
@@ -64,6 +64,9 @@ agy --log-file <zero-byte-log> --add-dir <workspace> --input-format text --outpu
 stdin: Reply only OK. followed by a newline
 ```
 
+The `--add-dir` workspace and agy home were on the writable host APFS Data
+volume, outside the full HFS+ image. Only `--log-file` pointed into that image.
+
 It exited rc 2 in 0.304 seconds, without reaching the 45-second capture
 timeout. Stdout and stderr were both zero bytes. The log remained zero bytes,
 mode 0600, zero allocated blocks, and the same inode. The 41 current
@@ -71,26 +74,30 @@ mode 0600, zero allocated blocks, and the same inode. The 41 current
 stream. The private captures were retained locally for inspection; their
 contents were not copied into this repository.
 
+There was no same-version writable control with this argv and stdin shape.
+Thus rc 2 cannot be attributed to the full volume: an unrelated startup,
+authentication, or argument failure could produce the same observation. This
+run does not establish that agy opened the log or reached a failed write.
+
 This run did not execute `ask-researcher.sh` itself. Its registry configuration
 uses the argv and stdin shape above, and the wrapper redirects agy's stderr
-into its private transcript. Because this direct call emitted no stderr, it
-provides no allow-list bytes for that transcript through the stderr route under
-these measured conditions. This is an inference from the captured stream and
-the wrapper code, not an inspected wrapper transcript. The call ended before a
-model answer, and the failing agy syscall was not traced, so the experiment
-does not establish exactly when agy opened or tried to write the log.
+into its private transcript. This direct call provided zero stderr bytes for
+that route, but does not establish what the wrapper transcript would contain
+in a confirmed first-write failure. Actual transcript contents were not
+inspected.
 
 ## Stderr and wrapper consequence
 
 The allocated-block full-volume run emitted **no stderr bytes**, so it did not
 fall back to stderr in this measured case. Its stdout and stderr were both
-empty, so the 41 `settings.permissions.allow` entries could not appear in either stream.
-`ask-researcher.sh` and `ask-reviewer.sh` redirect agy's
-stderr into their private transcript. These live invocations called agy
-directly. The earlier pair used `-p` and a preallocated log block, while the
-new zero-byte run used the wrapper's argv and stdin shape. Actual wrapper
-transcript contents and user-visible failure reporting were not measured.
+empty, so the 41 `settings.permissions.allow` entries could not appear in
+either stream. `ask-researcher.sh` and `ask-reviewer.sh` redirect agy's stderr
+into their private transcript. All live invocations here called agy directly.
+Actual wrapper transcript contents and user-visible failure reporting were
+not measured.
 
-Each condition was run once (n=1). There was no same-version writable control
-for the agy 1.2.12 zero-byte run. These results do not establish behavior for
-agy 1.2.9, quota errors, or other write-failure timing.
+Each condition was run once (n=1). There was also no same-version test of a
+log path that agy could not open, so these runs cannot distinguish whether
+newer agy versions removed stderr fallback from whether this full-volume
+condition simply did not trigger it. These results do not establish behavior
+for agy 1.2.9, quota errors, or other write-failure timing.

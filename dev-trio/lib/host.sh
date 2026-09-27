@@ -338,9 +338,10 @@ dev_trio_agy_home() {
 # directory is not enough to know it can (no search permission, a full disk),
 # so the file itself is created here, private and new, and only a file that
 # exists is offered. In the normal-condition measurement, agy kept the
-# pre-created file mode 0600 and emitted no stderr. In a direct agy 1.2.12
-# measurement with a zero-byte log on a full volume, agy exited 2 with no
-# stderr or log bytes. See docs/agy-open-log-write-failure-149.md for limits.
+# pre-created file mode 0600 and emitted no stderr. With agy 1.2.11, a
+# preallocated log on a full volume reached its block limit; agy exited 2
+# without stderr. A zero-byte 1.2.12 run used wrapper-shaped argv but lacked
+# a matched writable control. See docs/agy-open-log-write-failure-149.md.
 dev_trio_agy_cli_log() {
   local path
   path="$(dev_trio_agy_home)/log/cli-dev-trio-$1.log"
