@@ -184,6 +184,8 @@ Per topic: runs `debate.sh -n $ROUNDS "$topic"`, parses the verdict of the last 
 
 A dispatch that fails — `debate.sh` exits non-zero, or exits 0 without a usable receipt — has no verdict. The topic goes back on BACKLOG, `fix_plan.md` gets a `DISPATCH-FAILED` entry, and the run stops with exit 1 without counting the iteration as completed: an outage (auth, quota, a missing model) would fail every later topic the same way.
 
+If worktree creation or receipt reservation fails before dispatch, the run also stops with exit 1 and records `WORKTREE-FAILED` or `RECEIPT-FAILED` in `fix_plan.md`, including whether the popped topic was restored to BACKLOG.
+
 The verdict is found through the receipt `debate.sh` publishes for that dispatch (never the team-wide `latest-debate` symlink, which another debate can retarget). Receipts are retained beside the logs as per-dispatch audit artifacts, as dev-trio's review receipts are; the summary log records each one's path and the dispatch's exit code, so which transcript a verdict came from — and whether the iteration accepted it — can be reconstructed afterwards. An untouched reservation left by a dispatch that published nothing is cleaned up; one with contents is kept, because when a receipt is rejected its contents are the evidence.
 
 Produces *text artifacts*, not code diffs. The debate transcripts live under `$PWD/.debate-conductor/log/<team>/debate-<TS>/`.

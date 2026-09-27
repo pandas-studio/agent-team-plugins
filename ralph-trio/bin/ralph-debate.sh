@@ -209,14 +209,18 @@ parse_critic_verdict() {
 # The task was already marked [x] by pop_top_task. Keep its text in the
 # fix_plan record even when the BACKLOG cannot be made writable again.
 restore_stopped_topic() {
-  local stop="$1" restored="topic restored"
+  local stop="$1" detail="${2:-}"
+  RESTORED="topic restored"
   if ! append_to_backlog "$BACKLOG_FILE" "$TASK"; then
-    restored="topic NOT restored"
+    RESTORED="topic NOT restored"
     ralph_log "  could not restore the topic to BACKLOG ($BACKLOG_FILE): $TASK"
   fi
-  printf '## iter %d · %s · %s (%s)\nTopic: %s\n\n' \
-    "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$stop" "$restored" "$TASK" \
-    >> "$FIX_PLAN_FILE" || ralph_log "  could not record $stop in fix_plan.md; topic: $TASK"
+  {
+    printf '## iter %d · %s · %s (%s)\nTopic: %s\n' \
+      "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$stop" "$RESTORED" "$TASK"
+    [ -z "$detail" ] || printf '%s\n' "$detail"
+    printf '\n'
+  } >> "$FIX_PLAN_FILE" || ralph_log "  could not record $stop in fix_plan.md; topic: $TASK"
 }
 
 ITER=0
@@ -353,17 +357,10 @@ while :; do
     if [ "$DISPATCH_FAILED" = "1" ]; then
       VERDICT="DISPATCH-FAILED"
       printf '  dispatch: FAILED (rc=%s)\n' "$DEBATE_RC" >> "$SUMMARY_LOG"
-      RESTORED="topic restored"
-      if ! append_to_backlog "$BACKLOG_FILE" "$TASK"; then
-        RESTORED="topic NOT restored"
-        ralph_log "  could not restore the topic to BACKLOG ($BACKLOG_FILE): $TASK"
-      fi
       # The empty reservation was reclaimed above; only name a receipt that is kept.
       RECEIPT_NOTE="none published"
       [ ! -e "$DEBATE_RECEIPT" ] || RECEIPT_NOTE="$DEBATE_RECEIPT"
-      printf '## iter %d · %s · DISPATCH-FAILED (%s)\nTopic: %s\ndebate.sh rc=%s · receipt: %s\n\n' \
-        "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RESTORED" "$TASK" "$DEBATE_RC" "$RECEIPT_NOTE" \
-        >> "$FIX_PLAN_FILE"
+      restore_stopped_topic DISPATCH-FAILED "debate.sh rc=$DEBATE_RC · receipt: $RECEIPT_NOTE"
     elif [ -z "$DEBATE_DIR" ]; then
       VERDICT="UNKNOWN"
     else
