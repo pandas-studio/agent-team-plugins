@@ -7,8 +7,9 @@ stderr. This experiment instead used a pre-created mode-0600 log on a full
 
 ## Paired runs
 
-Both live invocations used the same command shape and prompt; only the log
-path differed:
+Both live invocations used the same agy command and prompt. The control used
+an empty log on the host APFS Data volume; the failure run used a 1,024-byte
+log on the full HFS+ image:
 
 ```text
 agy --log-file <log> -p 'Reply only OK.' --print-timeout 30s
@@ -36,7 +37,9 @@ capture timeout did not fire in either run.
   (`[IWEF]` plus date and time), and the file contained 29 newline bytes. The
   first line was 92 bytes with SHA-256
   `9eac10588395abb2ebcd647054ad9102323cd3fbb14fdcb76dd7ebfe11734239`.
-  These checks were made without printing log contents.
+  The content change was not append-only: agy overwrote, truncated, or
+  replaced the earlier bytes before writing new log lines. These checks were
+  made without printing log contents.
 - The full-volume log's SHA-256 changed from
   `9ea764ef654dc61f19ab23af219e5aa420b68157b1d135dc297ab0527941f951`
   to `3d56e7d12f80b5e4b5b7e8c49d416c1bb88e998ed2c3df7427448ebd82177e19`.
@@ -57,6 +60,6 @@ the observed zero-byte stderr stream would add no allow-list content through
 that path. The live invocations called agy directly, so a wrapper transcript
 was not separately measured.
 
-This result covers agy 1.2.11 with an already allocated log block on this
-full HFS+ volume. It does not establish behavior for agy 1.2.9, quota errors,
-or other write-failure timing.
+Each condition was run once (n=1). This result covers agy 1.2.11 with an
+already allocated log block on this full HFS+ volume. It does not establish
+behavior for agy 1.2.9, quota errors, or other write-failure timing.
