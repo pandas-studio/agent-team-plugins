@@ -36,14 +36,9 @@ capture timeout did not fire in either run.
   mode 0600. Its size was 4,096 bytes. The original marker was no longer at
   the start; the new first line matched agy's letter-prefixed timestamp form
   (`[IWEF]` plus date and time), and the file contained 29 newline bytes. The
-  first line was 92 bytes with SHA-256
-  `9eac10588395abb2ebcd647054ad9102323cd3fbb14fdcb76dd7ebfe11734239`.
-  The content change was not append-only: agy overwrote, truncated, or
-  replaced the earlier bytes before writing new log lines. These checks were
-  made without printing log contents.
-- The full-volume log's SHA-256 changed from
-  `9ea764ef654dc61f19ab23af219e5aa420b68157b1d135dc297ab0527941f951`
-  to `3d56e7d12f80b5e4b5b7e8c49d416c1bb88e998ed2c3df7427448ebd82177e19`.
+  first line was 92 bytes. The content change was not append-only: agy
+  overwrote, truncated, or replaced the earlier bytes before writing new log
+  lines. These checks were made without printing log contents.
 
 The successful control, short failure run, zero free blocks, and agy log
 content reaching the end of its allocated block are consistent with the full
@@ -55,9 +50,9 @@ was not traced.
 ## Stderr and wrapper consequence
 
 The full-volume run emitted **no stderr bytes**, so it did not fall back to
-stderr in this measured case. The 41 current `settings.permissions.allow`
-entries were checked against each captured stream without printing their
-values; none matched. `ask-researcher.sh` and `ask-reviewer.sh` redirect agy's
+stderr in this measured case. Its stdout and stderr were both empty, so the
+41 `settings.permissions.allow` entries could not appear in either stream.
+`ask-researcher.sh` and `ask-reviewer.sh` redirect agy's
 stderr into their private transcript. These live invocations called agy
 directly, with `-p` and a preallocated log block. The wrappers instead send
 the prompt on stdin and create a new zero-byte log. Their first-write failure,

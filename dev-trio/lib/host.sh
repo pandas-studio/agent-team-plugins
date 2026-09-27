@@ -337,9 +337,10 @@ dev_trio_agy_home() {
 # transcript (measured 2026-09-23: rc 0, 24.8 KB on stderr). A writable
 # directory is not enough to know it can (no search permission, a full disk),
 # so the file itself is created here, private and new, and only a file that
-# exists is offered. This creation check can succeed while a later first log
-# write fails on a full volume. The measured preallocated-log case kept mode
-# 0600 and emitted no stderr; see docs/agy-open-log-write-failure-149.md.
+# exists is offered. In the normal-condition measurement, agy kept the
+# pre-created file mode 0600 and emitted no stderr. A zero-byte file may pass
+# this creation check before its first log write fails on a full volume; that
+# case remains unmeasured (see docs/agy-open-log-write-failure-149.md).
 dev_trio_agy_cli_log() {
   local path
   path="$(dev_trio_agy_home)/log/cli-dev-trio-$1.log"
