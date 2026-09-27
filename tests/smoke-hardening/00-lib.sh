@@ -29,7 +29,7 @@ assert_eq "$(cleanup_case "$REGISTER; assert_eq a b; echo not-reached >> \"\$RAN
 assert_eq "$(cleanup_case "$REGISTER; exit 7")" "rc=7 ran=second first  tmp=gone"
 # An entry that fails, first to run or not, does not stop the rest.
 assert_eq "$(cleanup_case "$REGISTER; register_cleanup false; exit 3")" "rc=3 ran=second first  tmp=gone"
-assert_eq "$(cleanup_case "register_cleanup \"echo first >> \\\"\\\$RAN\\\"\"; register_cleanup \"rm /nonexistent/x\"; register_cleanup \"echo third >> \\\"\\\$RAN\\\"\"")" \
+assert_eq "$(cleanup_case "register_cleanup \"echo first >> \\\"\\\$RAN\\\"\"; register_cleanup false; register_cleanup \"echo third >> \\\"\\\$RAN\\\"\"")" \
   "rc=0 ran=third first  tmp=gone"
 # An entry sees the value its variable holds at exit, not at registration.
 assert_eq "$(cleanup_case 'V=early; register_cleanup "echo \$V >> \"\$RAN\""; V=late')" "rc=0 ran=late  tmp=gone"
