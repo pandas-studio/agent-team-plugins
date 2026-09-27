@@ -1579,7 +1579,8 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         (sub / "nested.txt").write_text("nested untracked\n")
         result = subprocess.run(
             [str(self.plugin / "bin" / "ask-reviewer.sh")], cwd=sub,
-            env=self.env | dict(DEV_TRIO_REVIEWER_MODEL="agy"), text=True, capture_output=True, timeout=20,
+            env=self.env | dict(DEV_TRIO_REVIEWER_MODEL="agy"), stdin=subprocess.DEVNULL,
+            text=True, capture_output=True, timeout=20,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         prompt = self.sent_prompt()
@@ -2484,7 +2485,7 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
             [str(self.plugin / "bin" / "ask-reviewer.sh")], cwd=sub,
             env=self.env | {"DEV_TRIO_REVIEWER_MODEL": "agy",
                             "PATH": f"{shim_dir}{os.pathsep}{self.env['PATH']}"},
-            text=True, capture_output=True, timeout=20,
+            stdin=subprocess.DEVNULL, text=True, capture_output=True, timeout=20,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("<workspace_snapshot>", self.sent_prompt())
