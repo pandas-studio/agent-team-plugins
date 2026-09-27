@@ -874,6 +874,93 @@ SHIM7
   assert_ok grep -q 'could not restore the topic to BACKLOG' "$TMP/rd106ro.err"
 fi
 
+# #112: both pre-dispatch stops must say when a popped topic could not be
+# restored. The shims make BACKLOG read-only only after pop_top_task rewrites it.
+if [ "$(id -u)" != 0 ]; then
+  RD112="$TMP/rd112"
+  mkdir -p "$RD112/repo" "$RD112/bin"
+  git init -q "$RD112/repo"
+  git -C "$RD112/repo" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
+  cat > "$RD112/bin/git" <<'SHIM112GIT'
+#!/bin/bash
+if [ "$RD112_STOP" = worktree ] && [ "$1" = worktree ] && [ "$2" = add ]; then
+  [ "${RD112_READONLY:-1}" != 1 ] || chmod a-w "$RD112_BACKLOG"
+  exit 1
+fi
+exec "$RD112_REAL_GIT" "$@"
+SHIM112GIT
+  cat > "$RD112/bin/mktemp" <<'SHIM112MKTEMP'
+#!/bin/bash
+if [ "$RD112_STOP" = receipt ] && [[ "$1" == *debate-receipt-* ]]; then
+  [ "${RD112_READONLY:-1}" != 1 ] || chmod a-w "$RD112_BACKLOG"
+  [ "${RD112_FIX_PLAN_READONLY:-0}" != 1 ] || chmod a-w "$RD112_FIX_PLAN"
+  exit 1
+fi
+exec "$RD112_REAL_MKTEMP" "$@"
+SHIM112MKTEMP
+  chmod +x "$RD112/bin/git" "$RD112/bin/mktemp"
+  for stop in worktree receipt; do
+    case_dir="$RD112/$stop"
+    mkdir -p "$case_dir"
+    printf -- '- [ ] task %s\n' "$stop" > "$case_dir/BACKLOG.md"
+    args=()
+    [ "$stop" != worktree ] || args=(--worktree)
+    rc=$( (cd "$RD112/repo" && env PATH="$RD112/bin:$ROOT/debate-conductor/bin:$PATH" \
+      RD112_STOP="$stop" RD112_BACKLOG="$case_dir/BACKLOG.md" \
+      RD112_REAL_GIT="$(command -v git)" RD112_REAL_MKTEMP="$(command -v mktemp)" \
+      DEBATE_CONDUCTOR_BIN="$ROOT/debate-conductor/bin" \
+      AGENT_TEAM="rd112-$stop" TMUX="" RALPH_TRIO_WORKSPACE="$case_dir/workspace" \
+      "$ROOT/ralph-trio/bin/ralph-debate.sh" --backlog "$case_dir/BACKLOG.md" \
+      --max-iter 1 ${args[@]+"${args[@]}"} >/dev/null 2>"$case_dir/driver.err" </dev/null; echo "rc=$?") )
+    chmod u+w "$case_dir/BACKLOG.md"
+    assert_eq "$rc" "rc=1"
+    assert_eq "$(cat "$case_dir/BACKLOG.md")" "- [x] task $stop"
+    assert_ok grep -q 'could not restore the topic to BACKLOG' "$case_dir/driver.err"
+    stop_upper=$(printf '%s' "$stop" | tr '[:lower:]' '[:upper:]')
+    header=$(grep '^## iter [0-9]' "$case_dir/fix_plan.md" | sed 's/^## iter \([0-9]*\) · [0-9TZ:-]* · /iter \1 /')
+    assert_eq "$header" "iter 1 $stop_upper-FAILED (topic NOT restored)"
+    assert_ok grep -qx "Topic: task $stop" "$case_dir/fix_plan.md"
+  done
+  for stop in worktree receipt; do
+    case_dir="$RD112/$stop-restored"
+    mkdir -p "$case_dir"
+    printf -- '- [ ] task restored %s\n' "$stop" > "$case_dir/BACKLOG.md"
+    args=()
+    [ "$stop" != worktree ] || args=(--worktree)
+    rc=$( (cd "$RD112/repo" && env PATH="$RD112/bin:$ROOT/debate-conductor/bin:$PATH" \
+      RD112_STOP="$stop" RD112_READONLY=0 RD112_BACKLOG="$case_dir/BACKLOG.md" \
+      RD112_REAL_GIT="$(command -v git)" RD112_REAL_MKTEMP="$(command -v mktemp)" \
+      DEBATE_CONDUCTOR_BIN="$ROOT/debate-conductor/bin" \
+      AGENT_TEAM="rd112-$stop-restored" TMUX="" RALPH_TRIO_WORKSPACE="$case_dir/workspace" \
+      "$ROOT/ralph-trio/bin/ralph-debate.sh" --backlog "$case_dir/BACKLOG.md" \
+      --max-iter 1 ${args[@]+"${args[@]}"} >/dev/null 2>"$case_dir/driver.err" </dev/null; echo "rc=$?") )
+    assert_eq "$rc" "rc=1"
+    assert_eq "$(grep -c "^- \[ \] task restored $stop$" "$case_dir/BACKLOG.md")" "1"
+    stop_upper=$(printf '%s' "$stop" | tr '[:lower:]' '[:upper:]')
+    header=$(grep '^## iter [0-9]' "$case_dir/fix_plan.md" | sed 's/^## iter \([0-9]*\) · [0-9TZ:-]* · /iter \1 /')
+    assert_eq "$header" "iter 1 $stop_upper-FAILED (topic restored)"
+    assert_ok grep -qx "Topic: task restored $stop" "$case_dir/fix_plan.md"
+  done
+  case_dir="$RD112/receipt-unrecorded"
+  mkdir -p "$case_dir"
+  printf -- '- [ ] task unrecorded\n' > "$case_dir/BACKLOG.md"
+  printf '# plan\n' > "$case_dir/fix_plan.md"
+  rc=$( (cd "$RD112/repo" && env PATH="$RD112/bin:$ROOT/debate-conductor/bin:$PATH" \
+    RD112_STOP=receipt RD112_FIX_PLAN_READONLY=1 RD112_FIX_PLAN="$case_dir/fix_plan.md" \
+    RD112_BACKLOG="$case_dir/BACKLOG.md" \
+    RD112_REAL_GIT="$(command -v git)" RD112_REAL_MKTEMP="$(command -v mktemp)" \
+    DEBATE_CONDUCTOR_BIN="$ROOT/debate-conductor/bin" \
+    AGENT_TEAM=rd112-unrecorded TMUX="" RALPH_TRIO_WORKSPACE="$case_dir/workspace" \
+    "$ROOT/ralph-trio/bin/ralph-debate.sh" --backlog "$case_dir/BACKLOG.md" \
+    --max-iter 1 >/dev/null 2>"$case_dir/driver.err" </dev/null; echo "rc=$?") )
+  chmod u+w "$case_dir/BACKLOG.md" "$case_dir/fix_plan.md"
+  assert_eq "$rc" "rc=1"
+  assert_eq "$(cat "$case_dir/BACKLOG.md")" "- [x] task unrecorded"
+  assert_ok grep -q 'could not restore the topic to BACKLOG' "$case_dir/driver.err"
+  assert_ok grep -q 'could not record RECEIPT-FAILED in fix_plan.md; topic: task unrecorded' "$case_dir/driver.err"
+  assert_eq "$(grep -c 'RECEIPT-FAILED' "$case_dir/fix_plan.md" || true)" "0"
+fi
+
 # With --worktree, a failed dispatch discards the iteration's worktree and its
 # branch before stopping. A team name of its own ($RD106_TEAM) keeps the /tmp
 # paths unique to this run, and the EXIT trap removes them if an assertion fails

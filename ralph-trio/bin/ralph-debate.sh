@@ -12,6 +12,8 @@
 #      A dispatch that failed (debate.sh non-zero, or no usable receipt) has no
 #      verdict: the topic goes back on BACKLOG and the run stops with exit 1,
 #      since the next topic would meet the same outage.
+#      Worktree creation and receipt reservation failures also restore the
+#      popped topic, record whether restoration worked, and stop with exit 1.
 #
 # Note: this variant produces *text artifacts* (proposals + critiques), not
 # code diffs. It does NOT auto-apply or auto-commit code.
@@ -206,6 +208,23 @@ parse_critic_verdict() {
   ' "$f" 2>/dev/null
 }
 
+# The task was already marked [x] by pop_top_task. Keep its text in the
+# fix_plan record even when the BACKLOG cannot be made writable again.
+restore_stopped_topic() {
+  local stop="$1" detail="${2:-}"
+  RESTORED="topic restored"
+  if ! append_to_backlog "$BACKLOG_FILE" "$TASK"; then
+    RESTORED="topic NOT restored"
+    ralph_log "  could not restore the topic to BACKLOG ($BACKLOG_FILE): $TASK"
+  fi
+  {
+    printf '## iter %d · %s · %s (%s)\nTopic: %s\n' \
+      "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$stop" "$RESTORED" "$TASK"
+    [ -z "$detail" ] || printf '%s\n' "$detail"
+    printf '\n'
+  } >> "$FIX_PLAN_FILE" || ralph_log "  could not record $stop in fix_plan.md; topic: $TASK"
+}
+
 ITER=0
 COMPLETED=0
 # --dry-run termination ceiling. --max-iter 0 (unlimited) combined with the
@@ -260,8 +279,7 @@ while :; do
   if [ "$USE_WORKTREE" = "1" ]; then
     if ! WT=$(with_worktree "$ITER" "$BASE_BRANCH"); then
       ralph_log "could not create the iter $ITER worktree. Stopping."
-      # pop_top_task already marked the task done; put it back.
-      [ "$DRY_RUN" = "1" ] || append_to_backlog "$BACKLOG_FILE" "$TASK"
+      [ "$DRY_RUN" = "1" ] || restore_stopped_topic WORKTREE-FAILED
       echo "=== STOP (worktree-failed) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
       RUN_FAILED=1
       break
@@ -289,7 +307,7 @@ while :; do
     # before spending model calls, and the task goes back on the backlog.
     if ! DEBATE_RECEIPT=$(mktemp "$LOG_DIR_ABS/debate-receipt-$TS-iter-$ITER.XXXXXX"); then
       ralph_log "could not reserve a debate receipt under $LOG_DIR_ABS. Stopping."
-      [ "$DRY_RUN" = "1" ] || append_to_backlog "$BACKLOG_FILE" "$TASK"
+      restore_stopped_topic RECEIPT-FAILED
       [ -z "$WT" ] || merge_or_discard_worktree "$WT" "$ITER" 0 "$ORIGINAL_DIR" || true
       echo "=== STOP (receipt-failed) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
       RUN_FAILED=1
@@ -341,17 +359,10 @@ while :; do
     if [ "$DISPATCH_FAILED" = "1" ]; then
       VERDICT="DISPATCH-FAILED"
       printf '  dispatch: FAILED (rc=%s)\n' "$DEBATE_RC" >> "$SUMMARY_LOG"
-      RESTORED="topic restored"
-      if ! append_to_backlog "$BACKLOG_FILE" "$TASK"; then
-        RESTORED="topic NOT restored"
-        ralph_log "  could not restore the topic to BACKLOG ($BACKLOG_FILE): $TASK"
-      fi
       # The empty reservation was reclaimed above; only name a receipt that is kept.
       RECEIPT_NOTE="none published"
       [ ! -e "$DEBATE_RECEIPT" ] || RECEIPT_NOTE="$DEBATE_RECEIPT"
-      printf '## iter %d · %s · DISPATCH-FAILED (%s)\nTopic: %s\ndebate.sh rc=%s · receipt: %s\n\n' \
-        "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RESTORED" "$TASK" "$DEBATE_RC" "$RECEIPT_NOTE" \
-        >> "$FIX_PLAN_FILE"
+      restore_stopped_topic DISPATCH-FAILED "debate.sh rc=$DEBATE_RC · receipt: $RECEIPT_NOTE"
     elif [ -z "$DEBATE_DIR" ]; then
       VERDICT="UNKNOWN"
     else
