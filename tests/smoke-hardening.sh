@@ -1840,14 +1840,6 @@ wait "$HELD_PID"
 assert_eq "$(cat "$TMP/held-open.rc")" "0"
 assert_eq "$(grep -ac 'LATE-LINE' "$TMP/view-log/held/latest-debate/stream-gen.log")" "1"
 
-cmp "$ROOT/ralph-trio/lib/stage-result.sh" "$ROOT/spec-trio/lib/stage-result.sh"
-PASS=$((PASS + 1))
-
-cmp "$ROOT/dev-trio/lib/registry.sh" "$ROOT/debate-conductor/lib/registry.sh"
-PASS=$((PASS + 1))
-cmp "$ROOT/dev-trio/bin/agent-team-models.sh" "$ROOT/debate-conductor/bin/agent-team-models.sh"
-PASS=$((PASS + 1))
-
 # #103: agy's workspace_args/log_args are prefixed only when the caller passes
 # REGISTRY_WORKSPACE / REGISTRY_CLI_LOG, each on its own. agy's prompt uses
 # stdin even when neither prefix is present (debate-conductor sets neither).
@@ -2000,18 +1992,6 @@ REG_CALL='registry_run leaky P; echo "rc=$?"; registry_run odd P; echo "rc=$?"; 
 assert_eq "$(count_argv AGENT_TEAM_MODELS_CONFIG="$REG_TMP/via.json" 2>/dev/null)" "$(printf 'rc=3\nrc=3\n[--print] stdin=2')"
 rm -rf "$REG_TMP"
 
-# namespace.sh is vendored the same way registry.sh is.
-for plugin in debate-conductor ralph-trio spec-trio; do
-  cmp "$ROOT/dev-trio/lib/namespace.sh" "$ROOT/$plugin/lib/namespace.sh"
-  PASS=$((PASS + 1))
-done
-
-# manifest.sh is vendored the same way. ralph-trio's copy is the source (itself
-# vendored from agent-team-harness core/lib/manifest.sh); each plugin carries its
-# own copy so none sources another plugin at run time (#121).
-for plugin in dev-trio spec-trio; do
-  cmp "$ROOT/ralph-trio/lib/manifest.sh" "$ROOT/$plugin/lib/manifest.sh"
-  PASS=$((PASS + 1))
-done
+# Vendored copies are compared in tests/test_vendored_copies.py (#150).
 
 printf 'hardening smoke: %d assertions passed\n' "$PASS"

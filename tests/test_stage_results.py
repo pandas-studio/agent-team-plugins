@@ -256,9 +256,6 @@ class StageResultTests(unittest.TestCase):
         self.assertEqual((self.repo / ".harness/first-seen").read_text(), "first\n")
         self.assertEqual((self.repo / ".harness/second-seen").read_text(), "")
 
-    def test_vendored_copy_matches(self):
-        self.assertEqual(LIB.read_bytes(), (ROOT / "spec-trio/lib/stage-result.sh").read_bytes())
-
 
 if __name__ == "__main__":
     unittest.main()

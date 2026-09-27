@@ -145,9 +145,6 @@ class ResolveTests(DiscoveryCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         return json.loads(proc.stdout)
 
-    def test_copies_are_identical(self):
-        self.assertEqual(HELPERS[0].read_bytes(), HELPERS[1].read_bytes())
-
     def test_override_wins_over_path_and_plugin_list(self):
         chosen = self.plugin_tree("chosen", ["ask-reviewer.sh"])
         on_path = self.plugin_tree("on-path", ["ask-reviewer.sh"])
