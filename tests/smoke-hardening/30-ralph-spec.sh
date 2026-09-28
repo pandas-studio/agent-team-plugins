@@ -324,4 +324,19 @@ git -C "$TMP/unborn" -c user.name=t -c user.email=t@t commit -qm first
 assert_eq "$(bash -c '. "$1/spec-trio/lib/spec-helpers.sh"; collect_changed_paths "$2" "$3"' \
   _ "$ROOT" "$TMP/unborn" "$EMPTY_TREE")" "outside.txt"
 
+# #107: the launchd template's wrapper recipe starts ralph-solo.sh from any
+# directory; a symlink cannot find lib/, and the error names the path it tried
+# instead of blaming jq.
+LAUNCH_TMP="$TMP/launch"
+mkdir -p "$LAUNCH_TMP/bin"
+printf '#!/bin/bash\nexec %q "$@"\n' "$ROOT/ralph-trio/bin/ralph-solo.sh" > "$LAUNCH_TMP/bin/ralph-solo"
+chmod +x "$LAUNCH_TMP/bin/ralph-solo"
+assert_ok "$LAUNCH_TMP/bin/ralph-solo" --help >/dev/null 2>&1
+ln -s "$ROOT/ralph-trio/bin/ralph-solo.sh" "$LAUNCH_TMP/bin/ralph-link"
+rc=0; "$LAUNCH_TMP/bin/ralph-link" --help >/dev/null 2>"$LAUNCH_TMP/link.err" || rc=$?
+assert_eq "$rc" "2"
+assert_eq "$(grep -c "ralph-solo: failed to load $LAUNCH_TMP/lib/common.sh" "$LAUNCH_TMP/link.err")" "1"
+assert_eq "$(grep -c 'jq missing' "$LAUNCH_TMP/link.err")" "0"
+
+
 smoke_done 30-ralph-spec

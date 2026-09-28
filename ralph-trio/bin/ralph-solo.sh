@@ -38,9 +38,9 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck disable=SC1091
-. "$PLUGIN_ROOT/lib/common.sh"
+. "$PLUGIN_ROOT/lib/common.sh" || { echo "ralph-solo: failed to load $PLUGIN_ROOT/lib/common.sh" >&2; exit 2; }
 # shellcheck disable=SC1091
-. "$PLUGIN_ROOT/lib/manifest.sh" || { echo "ralph-solo: failed to load lib/manifest.sh (jq missing?)" >&2; exit 2; }
+. "$PLUGIN_ROOT/lib/manifest.sh" || { echo "ralph-solo: failed to load $PLUGIN_ROOT/lib/manifest.sh" >&2; exit 2; }
 . "$PLUGIN_ROOT/lib/model-stage.sh" || exit 2
 
 MAX_ITER=""

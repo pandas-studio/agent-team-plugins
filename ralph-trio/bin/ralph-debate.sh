@@ -35,7 +35,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck disable=SC1091
-. "$PLUGIN_ROOT/lib/common.sh"
+. "$PLUGIN_ROOT/lib/common.sh" || { echo "ralph-debate: failed to load $PLUGIN_ROOT/lib/common.sh" >&2; exit 2; }
 # shellcheck source=SCRIPTDIR/../lib/plugin-deps.sh
 . "$PLUGIN_ROOT/lib/plugin-deps.sh" || { echo "ralph-debate: failed to load lib/plugin-deps.sh" >&2; exit 2; }
 

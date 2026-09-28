@@ -39,13 +39,13 @@ REVIEWER_ROLE_FILE="$ROLES_DIR/reviewer.md"
 [ -f "$REVIEWER_ROLE_FILE" ]    || { echo "ERROR: $REVIEWER_ROLE_FILE missing"    >&2; exit 2; }
 export REVIEWER_ROLE_FILE
 # shellcheck disable=SC1091
-. "$PLUGIN_ROOT/lib/common.sh"
+. "$PLUGIN_ROOT/lib/common.sh" || { echo "spec-trio: failed to load $PLUGIN_ROOT/lib/common.sh" >&2; exit 2; }
 # shellcheck source=/dev/null
 . "$PLUGIN_ROOT/lib/stage-result.sh" || exit 2
 # shellcheck disable=SC1091
-. "$PLUGIN_ROOT/lib/spec-helpers.sh"
+. "$PLUGIN_ROOT/lib/spec-helpers.sh" || { echo "spec-trio: failed to load $PLUGIN_ROOT/lib/spec-helpers.sh" >&2; exit 2; }
 # shellcheck disable=SC1091
-. "$PLUGIN_ROOT/lib/manifest.sh" || { echo "spec-trio: failed to load lib/manifest.sh (jq missing?)" >&2; exit 2; }
+. "$PLUGIN_ROOT/lib/manifest.sh" || { echo "spec-trio: failed to load $PLUGIN_ROOT/lib/manifest.sh" >&2; exit 2; }
 # shellcheck source=SCRIPTDIR/../lib/plugin-deps.sh
 . "$PLUGIN_ROOT/lib/plugin-deps.sh" || { echo "spec-trio: failed to load lib/plugin-deps.sh" >&2; exit 2; }
 . "$PLUGIN_ROOT/lib/model-stage.sh" || exit 2
