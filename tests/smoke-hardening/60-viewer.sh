@@ -118,17 +118,7 @@ for out in "$TMP/view-retry.out" "$TMP/view-retry-late.out"; do
   assert_eq "$(count "$out" 'NEW-FIRST-LINE')" "2"
   assert_eq "$(count "$out" 'NEW body line')" "120"
   assert_eq "$(count "$out" 'NEW-LAST-LINE')" "2"
-  # #169: this has failed under load with 5 markers shown. Print the lines
-  # and the stream's raw bytes so the next failure says how they got through.
-  assert_eq "$(count "$out" '<!-- debate-round')" "0" || {
-    echo "--- marker lines in $out:" >&2
-    grep -an -B2 -A1 -- '<!-- debate-round' "$out" | cat -v >&2 || true
-    for s in "$RETRY_DIR"/stream-gen.log; do
-      echo "--- marker lines in $s:" >&2
-      grep -an -- 'debate-round' "$s" | cat -v >&2 || true
-    done
-    exit 1
-  }
+  assert_eq "$(count "$out" '<!-- debate-round')" "0"
   # Only the failed attempt is reported, with its exit status.
   assert_eq "$(count "$out" 'attempt failed')" "1"
   assert_eq "$(count "$out" 'attempt failed (rc=1)')" "1"
