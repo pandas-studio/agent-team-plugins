@@ -10,3 +10,20 @@ for a valid one. `argv`, where given, is the argv both must run with a final
 file (`final`) and without one (`no_final`); `<prompt>` and `<final>` stand for
 the test's prompt and final path. `no_final` is left out when `final_args` is
 non-empty: the runtime always captures, so it has no such run to compare.
+
+Lone surrogate escapes (`"\ud800"`) cannot live in this file: `scripts/check.sh`
+checks every JSON file with jq, and jq refuses them. Those cases are in
+`runtime/tests/test_registry_differential.py` instead (#133).
+
+Intended differences the fixture does not test (#133):
+- **No final file.** For a model with non-empty `final_args`, `registry.sh`
+  runs `args` when the caller passes no final file, while the runtime always
+  runs `final_args` with a temporary capture. See `no_final` above.
+- **Lone low surrogate.** jq 1.7.1 decodes a lone low surrogate escape
+  (`"\udc00"`..`"\udfff"`) to U+FFFD instead of refusing it, so `registry.sh`
+  runs the CLI with that replacement character. The runtime refuses the
+  definition, since the surrogate cannot be encoded for argv. bash cannot tell
+  that U+FFFD from a real one once jq has read the file.
+- **Stdin newline.** `registry.sh` delivers a stdin prompt with a here-string,
+  which appends one `\n` (#102 chose the here-string). The runtime writes the
+  prompt bytes unchanged.

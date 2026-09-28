@@ -11,15 +11,17 @@ dev_trio_host() {
 }
 
 dev_trio_resolve_role() {
-  local host
+  local host bound=""
   host="$(dev_trio_host)" || return $?
-  if [ "$host" = codex ] && [ "$1" = reviewer ] &&
-     [ -z "${DEV_TRIO_REVIEWER_MODEL:-}" ] &&
-     [ -z "$(registry_config_role dev-trio.reviewer)" ]; then
-    printf 'claude\n'
-  else
-    registry_resolve_role dev-trio "$1" ""
+  if [ "$host" = codex ] && [ "$1" = reviewer ] && [ -z "${DEV_TRIO_REVIEWER_MODEL:-}" ]; then
+    # A malformed config is rc 3 here, not "no binding" (#133).
+    bound="$(registry_config_role dev-trio.reviewer)" || return 3
+    if [ -z "$bound" ]; then
+      printf 'claude\n'
+      return 0
+    fi
   fi
+  registry_resolve_role dev-trio "$1" ""
 }
 
 # Check availability and, for Claude, login. Authentication and billing stay

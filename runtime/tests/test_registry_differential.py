@@ -115,7 +115,10 @@ FINAL_ARGS = [ABSENT, None, "x", [], [2], ["{final}"], ["{final}", "{prompt}"], 
               ["{cwd}", "{final}", "{prompt}"], ["a\u0000", "{prompt}"], ["x\n", "{final}", "{prompt}"]]
 
 
-PREFIXES = [None, "x", [], [3], ["--add-dir", "{cwd}"], ["a\nb"], ["--safe\u0000--danger"]]
+PREFIXES = [None, "x", [], [3], ["--add-dir", "{cwd}"], ["a\nb"], ["--safe\u0000--danger"],
+            ["{prompt}"], ["--f", "{final}"], ["{cli_log}"]]
+COMMANDS = [ABSENT, "x", "", 5, None, True, ["x"], "a\u0000", "x\n", "a\tb", "a\u007f"]
+ENV_COMMANDS = [ABSENT, "", "X_CLI", "A-B", "9X", 1, None]
 
 
 def _generated_shapes() -> list:
@@ -126,6 +129,10 @@ def _generated_shapes() -> list:
     for field, value in itertools.product(("workspace_args", "log_args"), PREFIXES):
         shapes.append({"args": ["{prompt}"], field: value})
         shapes.append({"args": ["{prompt}"], "final_args": None, field: value})
+    for command, env_command in itertools.product(COMMANDS, ENV_COMMANDS):
+        shapes.append({key: value for key, value in
+                       (("command", command), ("env_command", env_command), ("args", ["{prompt}"]))
+                       if value is not ABSENT})
     return shapes + ["invalid", [], 1, None, True]
 
 
@@ -251,3 +258,92 @@ def test_empty_args_with_each_prefix(bash, tmp_path, workspace, cli_log, argv):
                    check=True, env=_bash_env(tmp_path, AGENT_TEAM_MODELS_CONFIG=str(config), REC_OUT=str(out),
                                              REGISTRY_WORKSPACE=workspace, REGISTRY_CLI_LOG=cli_log))
     assert _recorded(out) == argv
+
+
+# ---- lone surrogates ----------------------------------------------------------
+
+# Definitions with a lone high surrogate escape, which jq cannot parse: registry.sh
+# rejects the whole definition as not JSON, the runtime names the field. Both must
+# reject; the field may differ. They live here, not in the fixture, because
+# scripts/check.sh checks every JSON file with jq (#133).
+SURROGATE_DEFINITIONS = {
+    "in args": {"args": ["\ud800", "{prompt}"]},
+    "nested in an unknown field": {"args": ["{prompt}"], "metadata": {"x": "\ud800"}},
+    "in a field name": {"args": ["{prompt}"], "\ud800": 1},
+}
+
+
+@pytest.mark.parametrize("bash", BASHES)
+def test_definitions_with_a_lone_surrogate_are_refused_by_both(bash, tmp_path):
+    names = sorted(SURROGATE_DEFINITIONS)
+    fields = _bash_fields(bash, [SURROGATE_DEFINITIONS[n] for n in names], tmp_path)
+    wrong = [(name, {"bash": field, "python": _python_field(SURROGATE_DEFINITIONS[name])})
+             for name, field in zip(names, fields)
+             if field is None or _python_field(SURROGATE_DEFINITIONS[name]) is None]
+    assert not wrong, _listed(wrong)
+
+
+# ---- config files -------------------------------------------------------------
+
+# Config files both registries must refuse as a whole (#133), rather than one
+# of them falling back to the built-ins: a lone high surrogate escape anywhere
+# (jq cannot parse it), bytes that are not UTF-8 (jq would replace them), and a
+# directory at the config path (not a missing file). Written as raw bytes, so
+# each reaches both parsers unchanged.
+DIRECTORY = object()
+BAD_CONFIGS = {
+    "surrogate in a role value": b'{"roles": {"langgraph-conductor.planner": "\\ud800"}}',
+    "surrogate in a model id": b'{"models": {"\\ud800": {"command": "x", "args": ["{prompt}"]}}}',
+    "surrogate in version": b'{"version": "\\ud800"}',
+    "surrogate in an unknown field": b'{"notes": ["\\ud800"]}',
+    "invalid UTF-8": b'{"roles": {"dev-trio.reviewer": "co\xffdex"}}',
+    "a directory": DIRECTORY,
+    "newline in a role value": b'{"roles": {"langgraph-conductor.planner": "claude\\n"}}',
+    "tab in a role key": b'{"roles": {"dev-trio.reviewer\\t": "codex"}}',
+    "newline in a model id": b'{"models": {"mine\\n": {"command": "x", "args": ["{prompt}"]}}}',
+}
+
+
+@pytest.mark.parametrize("bash", BASHES)
+@pytest.mark.parametrize("case", sorted(BAD_CONFIGS))
+def test_a_malformed_config_file_is_refused_by_both(bash, case, tmp_path):
+    config = tmp_path / "models.json"
+    if BAD_CONFIGS[case] is DIRECTORY:
+        config.mkdir()
+    else:
+        config.write_bytes(BAD_CONFIGS[case])
+    completed = subprocess.run(
+        [bash, "-c", '. "$1"; registry_list_model_ids', "_", str(REGISTRY_SH)],
+        capture_output=True, text=True, check=False,
+        env=_bash_env(tmp_path, AGENT_TEAM_MODELS_CONFIG=str(config)))
+    assert completed.returncode == 3, completed.stderr
+    assert completed.stderr.startswith("registry: config "), completed.stderr
+    assert completed.stderr.rstrip().endswith(str(config)), completed.stderr
+    with pytest.raises(registry.RegistryError):
+        registry.ModelRegistry(config)
+
+
+# A command override replaces the binary, not the checks: with a malformed
+# config or definition, resolution fails on both sides even when
+# REGISTRY_CMD_OVERRIDE is set (#133).
+OVERRIDE_CONFIGS = {
+    "malformed config": b'{bad',
+    "invalid env_command": b'{"models": {"codex": {"command": "c", "env_command": "A-B", "args": ["-"], '
+                           b'"prompt_via": "stdin"}}, "roles": {"langgraph-conductor.reviewer": "codex"}}',
+}
+
+
+@pytest.mark.parametrize("bash", BASHES)
+@pytest.mark.parametrize("case", sorted(OVERRIDE_CONFIGS))
+def test_a_command_override_does_not_skip_the_checks(bash, case, tmp_path, isolated):
+    config = tmp_path / "models.json"
+    config.write_bytes(OVERRIDE_CONFIGS[case])
+    completed = subprocess.run(
+        [bash, "-c", '. "$1"; registry_resolve_command codex', "_", str(REGISTRY_SH)],
+        capture_output=True, text=True, check=False,
+        env=_bash_env(tmp_path, AGENT_TEAM_MODELS_CONFIG=str(config), REGISTRY_CMD_OVERRIDE="/bin/echo"))
+    assert completed.returncode == 3, completed.stdout + completed.stderr
+    isolated.setenv("REGISTRY_CMD_OVERRIDE", "/bin/echo")
+    with pytest.raises(registry.RegistryError):
+        runner = registry.RoleRunner(registry.ModelRegistry(config))
+        runner.resolve_adapter("langgraph-conductor.reviewer", tmp_path)

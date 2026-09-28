@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -91,14 +92,18 @@ ARGV_MAX_BYTES = 131072
 # Placeholders a template may not hold. args runs exactly when nothing captures
 # a final answer, so {final} there has no meaning; {cwd} and {cli_log} belong
 # to registry.sh's caller-gated prefixes, which this runtime never applies.
+# The prefixes themselves take only {cwd} and {cli_log}: this runtime never
+# applies them, so {prompt} or {final} there would reach the CLI only through
+# registry.sh (#133).
 _REFUSED_PLACEHOLDERS = {
     "args": ("{final}", "{cwd}", "{cli_log}"),
     "final_args": ("{cwd}", "{cli_log}"),
-    # Checked only so a definition gets one verdict everywhere: registry.sh
-    # reads these NUL-delimited, and a NUL would split an element in two.
-    "workspace_args": (),
-    "log_args": (),
+    "workspace_args": ("{prompt}", "{final}"),
+    "log_args": ("{prompt}", "{final}"),
 }
+_PREFIXES = ("workspace_args", "log_args")
+# An environment variable name registry.sh can expand with ${!name}.
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def _template_problem(definition: dict[str, Any], field: str) -> str | None:
@@ -109,9 +114,22 @@ def _template_problem(definition: dict[str, Any], field: str) -> str | None:
         return f"has a NUL byte in its {field} template, which no argument can carry"
     for item in template:
         if item in _REFUSED_PLACEHOLDERS[field]:
+            if field in _PREFIXES:
+                return f"has {item} in its {field} template; a prefix takes only {{cwd}} and {{cli_log}}"
             return (f"has {item} in its {field} template; {{final}} belongs in final_args, "
                     "{cwd} and {cli_log} in workspace_args and log_args")
     return None
+
+
+def _has_lone_surrogate(value: Any) -> bool:
+    """A \\uD800-\\uDFFF escape json.loads kept: no argv or file can carry it."""
+    if isinstance(value, str):
+        return any(0xD800 <= ord(c) <= 0xDFFF for c in value)
+    if isinstance(value, list):
+        return any(_has_lone_surrogate(item) for item in value)
+    if isinstance(value, dict):
+        return any(_has_lone_surrogate(k) or _has_lone_surrogate(v) for k, v in value.items())
+    return False
 
 
 def definition_problem(definition: Any) -> tuple[str, str] | None:
@@ -123,6 +141,21 @@ def definition_problem(definition: Any) -> tuple[str, str] | None:
     """
     if not isinstance(definition, dict):
         return "definition", "is not a JSON object"
+    # registry.sh cannot hold these at all (jq refuses the escape), so it
+    # rejects the whole definition as invalid JSON; the fixture marks this
+    # verdict "*" (#133).
+    for field, value in definition.items():
+        if _has_lone_surrogate(field) or _has_lone_surrogate(value):
+            return field, "has a lone surrogate escape (\\uD800-\\uDFFF), which no argument can carry"
+    if "command" in definition:
+        command = definition["command"]
+        if (not isinstance(command, str) or not command
+                or any(ord(c) < 32 or ord(c) == 127 for c in command)):
+            return "command", "has a command that is not a non-empty string without control characters"
+    if "env_command" in definition:
+        env_command = definition["env_command"]
+        if not isinstance(env_command, str) or (env_command and not _ENV_NAME.fullmatch(env_command)):
+            return "env_command", "has an env_command that is not an environment variable name"
     if "prompt_via" in definition and definition["prompt_via"] not in ("argv", "stdin"):
         return "prompt_via", f"has prompt_via {definition['prompt_via']!r}; use 'argv' or 'stdin'"
     if "args" not in definition:
@@ -189,8 +222,13 @@ class ModelRegistry:
             return {"version": 1, "models": {}, "roles": {}}
         try:
             value = json.loads(self.config_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise RegistryError(f"invalid registry config {self.config_path}: {exc}") from exc
+        # jq refuses a lone high surrogate escape anywhere in the file, so
+        # registry.sh refuses the whole config; refuse it here too, wherever
+        # it sits (role values, model ids, version...) (#133).
+        if _has_lone_surrogate(value):
+            raise RegistryError(f"invalid registry config {self.config_path}: lone surrogate escape")
         if not isinstance(value, dict):
             raise RegistryError("registry config root must be an object")
         models = value.get("models", {})
@@ -200,12 +238,16 @@ class ModelRegistry:
                 raise RegistryError(f"registry config {name!r} must be an object")
         if not all(isinstance(value, str) for value in roles.values()):
             raise RegistryError("registry role bindings must be model ID strings")
+        # registry.sh reads these through $(...), which drops a trailing newline:
+        # "codex\n" would select codex there and fail here (#133).
+        for name in (*models, *roles, *roles.values()):
+            if any(ord(c) < 32 or ord(c) == 127 for c in name):
+                raise RegistryError(
+                    f"invalid registry config {self.config_path}: model id or role binding {name!r} "
+                    "has a control character")
         for model_id, definition in models.items():
             if not isinstance(definition, dict):
                 raise RegistryError(f"model {model_id!r} must be an object")
-            for field in ("command", "env_command"):
-                if field in definition and not isinstance(definition[field], str):
-                    raise RegistryError(f"model {model_id!r} {field} must be a string")
         return {"version": value.get("version", 1), "models": models, "roles": roles}
 
     @property
@@ -268,6 +310,9 @@ class RoleRunner:
     def resolve_adapter(self, role: str, workspace: Path) -> tuple[str, dict[str, Any], str]:
         """Resolve the model, definition and executable used for execution and call identity."""
         model_id, definition = self.registry.resolve_model(role)
+        # Before reading env_command or command: a non-string there is the
+        # definition rule's to report, not a TypeError from os.environ (#133).
+        check_definition(model_id, definition)
         command = (
             os.environ.get("REGISTRY_CMD_OVERRIDE")
             or os.environ.get(definition.get("env_command", ""))
