@@ -372,10 +372,11 @@ The repository root is \`$1\`; your working directory is \`$PWD\`. The root is a
 Tool commands run in headless mode, where a command that no allow-rule matches is denied and ends this run with no answer at all. Keep shell commands to these read-only git forms, one simple command per tool call: \`git status\`, \`git diff\`, \`git log\` and \`git show\`, with arguments as needed. When the task requires untracked files, use \`git status --short --untracked-files=all\` instead of \`git ls-files\` to list them (plain \`git status --short\` folds an untracked directory into one line). Read files relevant to the requested scope with your built-in file viewer. No \`cd\`, no \`&&\`, \`||\` or \`;\`, no pipes, and no redirections such as \`2>/dev/null\`. Read and search files with your built-in file viewer and search tools, not with shell commands such as \`cat\`, \`grep\`, \`git grep\` or \`find\`. A test runner, build, interpreter such as \`python3\` or \`node\`, or script counts as a command you cannot run here: if confirming something would need one, name the command and record the gap in your answer instead. If a command is denied, do not retry a variant of it.
 EOF_NOTE
   # Default reviews already have the full working-tree checklist in their role
-  # and focus. A narrower review or research question must not inherit it.
-  if [ "${2:-0}" -eq 0 ]; then
+  # and focus. A named target should not inherit a whole-tree sweep, while a
+  # targetless reviewer focus still uses the role's default checklist.
+  if [ "${2:-0}" != 1 ]; then
     cat <<'EOF_NOTE'
-Stay within the requested focus. Do not run `git status` or inspect other changed or untracked files unless the task explicitly asks about the working tree. For a named file or revision range, inspect that target and only the surrounding files needed to understand it.
+Stay within the requested focus. If it names a file or revision range, inspect that target and only files with a concrete dependency needed to understand it. Limit git commands to the named file or range when possible. Do not open another file merely because a status, diff summary, or commit history lists it. In that case, do not run `git status` or sweep other changed or untracked files unless the task explicitly asks about the working tree. If no file or revision range is named, follow the role's default inspection checklist.
 EOF_NOTE
   fi
 }

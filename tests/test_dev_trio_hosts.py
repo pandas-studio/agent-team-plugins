@@ -1361,8 +1361,8 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         self.assertEqual(result.returncode, 0, result.stderr)
         prompt = self.sent_prompt()
         self.assertNotIn("\n<workspace_snapshot>\n", prompt)
-        self.assertNotIn("then read every file it lists", prompt)
-        self.assertIn("Do not run `git status` or inspect other changed or untracked files", prompt)
+        self.assertIn("If no file or revision range is named, follow the role's default inspection checklist", prompt)
+        self.assertIn("new (untracked) files; read each one", prompt)
 
     def test_agy_reviewer_range_without_snapshot_has_no_worktree_sweep(self):
         self._commit_two()
@@ -1371,8 +1371,9 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         self.assertEqual(result.returncode, 0, result.stderr)
         prompt = self.sent_prompt()
         self.assertNotIn("<workspace_snapshot>", prompt)
-        self.assertNotIn("then read every file it lists", prompt)
-        self.assertIn("Do not run `git status` or inspect other changed or untracked files", prompt)
+        self.assertIn("If it names a file or revision range, inspect that target", prompt)
+        self.assertIn("Do not open another file merely because a status, diff summary, or commit history lists it", prompt)
+        self.assertIn("In that case, do not run `git status` or sweep other changed or untracked files", prompt)
         self.assertIn("no pipes", prompt)
 
     def test_agy_reviewer_embedded_range_focus_gets_diff_snapshot(self):
@@ -1585,6 +1586,7 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         self.assertIn("Inspect the snapshot before deciding whether any independent checks are needed", prompt)
         self.assertIn("The complete <workspace_snapshot> fulfills the role's default git status, git diff, and untracked-file inspection checklist", prompt)
         self.assertNotIn("start with `git status --short`", prompt)
+        self.assertNotIn("Stay within the requested focus", prompt)
         target = self.fenced(prompt, "review_target")
         self.assertTrue(target.startswith("Review the full working-tree state shown in <workspace_snapshot>"))
         self.assertFalse(target.startswith('"') or target.endswith('"'))
@@ -1595,8 +1597,8 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         prompt = self.sent_prompt()
         self.assertNotIn("<workspace_snapshot>", prompt)
         self.assertNotIn("precomputed snapshot", prompt)
-        self.assertNotIn("then read every file it lists", prompt)
-        self.assertIn("Do not run `git status` or inspect other changed or untracked files", prompt)
+        self.assertIn("If it names a file or revision range, inspect that target", prompt)
+        self.assertIn("If no file or revision range is named, follow the role's default inspection checklist", prompt)
 
     def test_agy_reviewer_from_subdirectory(self):
         self._init_git_workspace()
