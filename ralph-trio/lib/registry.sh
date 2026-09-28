@@ -230,50 +230,88 @@ registry_config_file() {
 # Back-compat internal alias.
 _registry_config_file() { registry_config_file; }
 
-# Echo the config as normalized JSON ({version,models,roles}). A missing file
-# yields the empty config; a malformed file is ignored with a warning so a
-# broken edit never aborts a live research/debate run (the CLI `doctor` flags it).
-_registry_config_json() {
-  local f
-  f="$(registry_config_file)"
-  if [ -f "$f" ]; then
-    if jq -e . "$f" >/dev/null 2>&1; then
-      jq '{ version: (.version // 1), models: (.models // {}), roles: (.roles // {}) }' "$f"
-    else
-      echo "registry: warning: config is not valid JSON, ignoring: $f" >&2
-      printf '%s\n' '{"version":1,"models":{},"roles":{}}'
-    fi
-  else
-    printf '%s\n' '{"version":1,"models":{},"roles":{}}'
-  fi
+# _registry_config_problem FILE — echo why FILE is not a usable config, or
+# nothing. The same shape the runtime's ModelRegistry._load accepts (#133).
+_registry_config_problem() {
+  local docs
+  # The runtime reads the path as UTF-8 text; jq would silently replace an
+  # invalid byte, and would never see a directory's contents at all.
+  [ -f "$1" ] || { echo "is not a regular file"; return 0; }
+  iconv -f UTF-8 -t UTF-8 "$1" >/dev/null 2>&1 || { echo "is not valid UTF-8"; return 0; }
+  # Exactly one document: jq reads a stream, so an empty file or two
+  # documents would otherwise pass (json.loads refuses both).
+  docs="$(jq -n '[inputs] | length' "$1" 2>/dev/null)" || { echo "is not valid JSON"; return 0; }
+  case "$docs" in
+    1) ;;
+    0) echo "is empty"; return 0 ;;
+    *) echo "holds $docs JSON documents, not one"; return 0 ;;
+  esac
+  jq -r '
+    if type != "object" then "root is not a JSON object"
+    elif has("models") and (.models | type) != "object" then "models is not a JSON object"
+    elif has("roles") and (.roles | type) != "object" then "roles is not a JSON object"
+    elif any((.roles // {})[]; type != "string") then "has a role binding that is not a model-id string"
+    elif any(((.models // {}) | keys[]), ((.roles // {}) | keys[]), (.roles // {})[];
+             any(explode[]; . < 32 or . == 127)) then
+      "has a model id or role binding with a control character, which the shell cannot carry"
+    elif any((.models // {})[]; type != "object") then "has a model definition that is not a JSON object"
+    else "" end' "$1" 2>/dev/null || echo "is not valid JSON"
 }
 
-# Merge built-in models with config models (config wins per model-id).
+# Echo the config as normalized JSON ({version,models,roles}). A missing file
+# yields the empty config. A malformed one is refused, rc 3 with the reason
+# and the file on stderr: falling back to the built-ins would run a model
+# other than the one the user bound (#133). Every query that reads the config
+# fails with it; callers see that error first.
+_registry_config_json() {
+  local f problem
+  f="$(registry_config_file)"
+  # Only a path that does not exist is "no config"; a directory there is an error.
+  if [ ! -e "$f" ]; then
+    printf '%s\n' '{"version":1,"models":{},"roles":{}}'
+    return 0
+  fi
+  problem="$(_registry_config_problem "$f")"
+  if [ -n "$problem" ]; then
+    echo "registry: config $problem: $f" >&2
+    return 3
+  fi
+  jq '{ version: (.version // 1), models: (.models // {}), roles: (.roles // {}) }' "$f"
+}
+
+# Merge built-in models with config models (config wins per model-id). Each
+# step is captured before use: a caller without pipefail would otherwise lose
+# a config failure.
 _registry_models_merged() {
+  local cfg
+  cfg="$(_registry_config_json)" || return 3
   jq -n \
     --argjson builtin "$(_registry_builtin_models)" \
-    --argjson cfg "$(_registry_config_json)" \
+    --argjson cfg "$cfg" \
     '$builtin + ($cfg.models // {})'
 }
 
 # Echo one model's definition as compact JSON, or the literal "null" if absent.
 _registry_model_def() {
-  _registry_models_merged | jq -c --arg id "$1" '.[$id] // null'
+  local merged
+  merged="$(_registry_models_merged)" || return 3
+  printf '%s' "$merged" | jq -c --arg id "$1" '.[$id] // null'
 }
 
 # Echo each element of a model's array field (args|final_args|workspace_args|
 # log_args), each followed by a NUL, for `while IFS= read -r -d ''`. An element
 # may hold newlines (#130); registry_check_def refuses a template holding NUL.
 _registry_model_array() {
-  local id="$1" field="$2"
-  _registry_model_def "$id" | jq -j --arg f "$field" '(.[$f] // [])[] | (., "\u0000")'
+  local id="$1" field="$2" def
+  def="$(_registry_model_def "$id")" || return 3
+  printf '%s' "$def" | jq -j --arg f "$field" '(.[$f] // [])[] | (., "\u0000")'
 }
 
 # ---- queries ----------------------------------------------------------------
 
 registry_model_exists() {
   local def
-  def="$(_registry_model_def "$1")"
+  def="$(_registry_model_def "$1")" || return 3
   [ -n "$def" ] && [ "$def" != "null" ]
 }
 
@@ -281,7 +319,7 @@ registry_model_exists() {
 # workspace-aware behaviour on this rather than on the binary's name.
 registry_has_workspace() {
   local def
-  def="$(_registry_model_def "$1")"
+  def="$(_registry_model_def "$1")" || return 3
   if [ -z "$def" ] || [ "$def" = "null" ]; then return 1; fi
   [ "$(printf '%s' "$def" | jq -r '((.workspace_args // []) | length) > 0')" = "true" ]
 }
@@ -289,7 +327,7 @@ registry_has_workspace() {
 # rc=0 iff the model defines a non-empty final_args template.
 registry_has_final() {
   local def
-  def="$(_registry_model_def "$1")"
+  def="$(_registry_model_def "$1")" || return 3
   if [ -z "$def" ] || [ "$def" = "null" ]; then return 1; fi
   [ "$(printf '%s' "$def" | jq -r '((.final_args // []) | length) > 0')" = "true" ]
 }
@@ -298,7 +336,7 @@ registry_has_final() {
 # reason on stderr, for an unknown model or any other prompt_via value.
 registry_prompt_via() {
   local def via
-  def="$(_registry_model_def "$1")"
+  def="$(_registry_model_def "$1")" || return 3
   if [ -z "$def" ] || [ "$def" = "null" ]; then
     echo "registry: unknown model '$1'" >&2
     return 3
@@ -319,26 +357,33 @@ registry_prompt_via() {
 # line: null when the definition is valid, otherwise {"field", "reason"} for the
 # first rule it breaks, in this order:
 #   1. definition   it is not an object.
+#   1b. command     present, and not a non-empty string without control
+#                   characters (#133; $(...) would strip a trailing newline).
+#   1c. env_command present, and not "" or an environment variable name.
 #   2. prompt_via   present, and not "argv" or "stdin" (absent means argv).
 #   3. args         missing, or not an array of strings; an element holds NUL,
 #                   or is {final} (args runs exactly when nothing captures a
 #                   final answer), {cwd} or {cli_log} (prefix placeholders).
 #   4. final_args   present, and not an array of strings; an element holds NUL,
 #                   or is {cwd} or {cli_log}.
-#   4b. workspace_args, then log_args: present, and not an array of strings, or
-#                   an element holds NUL (registry_run reads them NUL-delimited).
+#   4b. workspace_args, then log_args: present, and not an array of strings, an
+#                   element holds NUL (registry_run reads them NUL-delimited),
+#                   or is {prompt} or {final} (a prefix takes only {cwd} and
+#                   {cli_log}; the runtime never applies prefixes, #133).
 #   5. args, then final_args: a stdin model has {prompt} there, so the prompt
 #      would go in argv too.
 #   6. the running template — final_args when non-empty, otherwise args — of an
 #      argv model has no {prompt}, so the CLI never sees the prompt (#119). An
 #      unused args beside a non-empty final_args is not checked here;
 #      registry_run refuses it if a caller selects it without a final file.
-# Returns nonzero, printing nothing, when the text is not JSON.
+# Returns nonzero, printing nothing, when the text is not JSON, which is how a
+# lone surrogate escape (\ud800) ends up here: jq refuses it, and the runtime
+# rejects it by name (#133).
 _registry_def_problem() {
   printf '%s' "$1" | jq -c '
     def shown: if type == "string" and all(explode[]; . >= 32) then "\u0027\(.)\u0027" else tojson end;
     def refused($f): if $f == "args" then ["{final}", "{cwd}", "{cli_log}"]
-      elif $f == "final_args" then ["{cwd}", "{cli_log}"] else [] end;
+      elif $f == "final_args" then ["{cwd}", "{cli_log}"] else ["{prompt}", "{final}"] end;
     def template_problem($f):
       .[$f] as $t
       | if ($t | type) != "array" or any($t[]; type != "string") then
@@ -348,6 +393,8 @@ _registry_def_problem() {
         else
           ([$t[] | select(. as $e | any(refused($f)[]; . == $e))] | .[0]) as $p
           | if $p == null then null
+            elif $f == "workspace_args" or $f == "log_args" then
+              "has \($p) in its \($f) template; a prefix takes only {cwd} and {cli_log}"
             else "has \($p) in its \($f) template; {final} belongs in final_args, {cwd} and {cli_log} in workspace_args and log_args"
             end
         end;
@@ -355,6 +402,11 @@ _registry_def_problem() {
     def has_prompt: any(.[]; . == "{prompt}");
     def problem($f; $why): {field: $f, reason: $why};
     if type != "object" then problem("definition"; "is not a JSON object")
+    elif has("command") and ((.command | type) != "string" or .command == "" or any(.command | explode[]; . < 32 or . == 127)) then
+      problem("command"; "has a command that is not a non-empty string without control characters")
+    elif has("env_command") and ((.env_command | type) != "string"
+        or (.env_command != "" and (.env_command | test("^[A-Za-z_][A-Za-z0-9_]*$") | not))) then
+      problem("env_command"; "has an env_command that is not an environment variable name")
     elif has("prompt_via") and .prompt_via != "argv" and .prompt_via != "stdin" then
       problem("prompt_via"; "has prompt_via \(.prompt_via | shown); use \"argv\" or \"stdin\"")
     elif has("args") | not then
@@ -399,7 +451,7 @@ registry_check_def() {
 # rc 3 for an unknown one.
 registry_check_model() {
   local id="$1" def
-  def="$(_registry_model_def "$id")"
+  def="$(_registry_model_def "$id")" || return 3
   if [ -z "$def" ] || [ "$def" = "null" ]; then
     echo "registry: unknown model '$id'" >&2
     return 3
@@ -414,7 +466,9 @@ _registry_prompt_bytes() {
 }
 
 registry_list_model_ids() {
-  _registry_models_merged | jq -r 'keys[]'
+  local merged
+  merged="$(_registry_models_merged)" || return 3
+  printf '%s' "$merged" | jq -r 'keys[]'
 }
 
 # rc=0 iff the model is one of the built-ins (not removable via the CLI).
@@ -429,14 +483,18 @@ registry_model_is_builtin() {
 #   per-role *_CLI override), then the model's env_command, then command.
 registry_resolve_command() {
   local id="$1" def envvar val cmd
-  if [ -n "${REGISTRY_CMD_OVERRIDE:-}" ]; then
-    printf '%s\n' "$REGISTRY_CMD_OVERRIDE"
-    return 0
-  fi
-  def="$(_registry_model_def "$id")"
+  # The model and its definition first, as the runtime's resolve_adapter does:
+  # an override replaces the binary, not the checks (#133).
+  def="$(_registry_model_def "$id")" || return 3
   if [ -z "$def" ] || [ "$def" = "null" ]; then
     echo "registry: unknown model '$id'" >&2
     return 3
+  fi
+  # Before ${!envvar}: a malformed env_command is the rule's to report (#133).
+  registry_check_def "$id" "$def" || return 3
+  if [ -n "${REGISTRY_CMD_OVERRIDE:-}" ]; then
+    printf '%s\n' "$REGISTRY_CMD_OVERRIDE"
+    return 0
   fi
   envvar="$(printf '%s' "$def" | jq -r '.env_command // ""')"
   if [ -n "$envvar" ]; then
@@ -466,7 +524,8 @@ registry_resolve_role() {
     val="${!envname:-}"
     if [ -n "$val" ]; then printf '%s\n' "$val"; return 0; fi
   fi
-  cfg="$(_registry_config_json | jq -r --arg k "$key" '.roles[$k] // ""')"
+  cfg="$(_registry_config_json)" || return 3
+  cfg="$(printf '%s' "$cfg" | jq -r --arg k "$key" '.roles[$k] // ""')"
   if [ -n "$cfg" ]; then printf '%s\n' "$cfg"; return 0; fi
   def="$(_registry_builtin_roles | jq -r --arg k "$key" '.[$k] // ""')"
   if [ -n "$def" ]; then printf '%s\n' "$def"; return 0; fi
@@ -477,7 +536,9 @@ registry_resolve_role() {
 # Echo the config-bound model-id for a role key (empty if none) — lets callers
 # distinguish an explicit user binding from a built-in default.
 registry_config_role() {
-  _registry_config_json | jq -r --arg k "$1" '.roles[$k] // ""'
+  local cfg
+  cfg="$(_registry_config_json)" || return 3
+  printf '%s' "$cfg" | jq -r --arg k "$1" '.roles[$k] // ""'
 }
 
 # ---- run --------------------------------------------------------------------

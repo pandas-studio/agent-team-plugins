@@ -66,14 +66,14 @@ _cfg_save() {
   mv "$tmp" "$CONFIG"
 }
 
-# Refuse to mutate a config that exists but is not valid JSON. Reads fall back
-# to the empty config (so a broken hand edit never aborts a live run), but a
-# write built from that fallback would replace the user's file and silently
-# drop every custom model and role binding.
+# Refuse to mutate a config that exists but is malformed: invalid JSON, or a
+# shape the registry refuses (#133). Reads refuse it too, so a write could
+# only be built from nothing and would drop every custom model and binding.
 _cfg_require_valid() {
-  [ -f "$CONFIG" ] || return 0
-  jq -e . "$CONFIG" >/dev/null 2>&1 \
-    || die "config is not valid JSON; fix or move it before changing it: $CONFIG"
+  local problem
+  [ -e "$CONFIG" ] || return 0
+  problem="$(_registry_config_problem "$CONFIG")"
+  [ -z "$problem" ] || die "config $problem; fix or move it before changing it: $CONFIG"
 }
 
 # Echo a JSON array built from the given argv (empty -> []), set -u safe.
@@ -109,15 +109,18 @@ _role_source() {
 }
 
 cmd_list() {
-  if [ -f "$CONFIG" ]; then
+  if [ -e "$CONFIG" ]; then
     echo "Config: $CONFIG (present)"
   else
     echo "Config: $CONFIG (not created yet — built-in defaults in effect)"
   fi
   echo
   echo "Models:"
-  local id origin cmd
-  for id in $(registry_list_model_ids); do
+  local id origin cmd ids
+  # Captured first: a failed enumeration (a malformed config) must stop here,
+  # not print an empty list (#133).
+  ids="$(registry_list_model_ids)" || exit 3
+  for id in $ids; do
     if registry_model_is_builtin "$id"; then origin="built-in"; else origin="user"; fi
     cmd="$(registry_resolve_command "$id" 2>/dev/null || echo '?')"
     if registry_has_final "$id"; then
@@ -141,7 +144,11 @@ cmd_list() {
 cmd_show() {
   local id="${1:-}"
   [ -n "$id" ] || die "usage: $PROG show <model-id>"
-  registry_model_exists "$id" || die "unknown model '$id' (run: $PROG list)"
+  local rc=0
+  registry_model_exists "$id" || rc=$?
+  # rc 3: the registry already said why (a malformed config).
+  [ "$rc" != 3 ] || exit 3
+  [ "$rc" = 0 ] || die "unknown model '$id' (run: $PROG list)"
   _registry_model_def "$id" | jq .
   echo "resolved binary: $(registry_resolve_command "$id" 2>/dev/null || echo '?')"
 }
@@ -152,11 +159,13 @@ cmd_doctor() {
   echo
 
   echo "1. Config file"
-  if [ -f "$CONFIG" ]; then
-    if jq -e . "$CONFIG" >/dev/null 2>&1; then
+  local problem
+  if [ -e "$CONFIG" ]; then
+    problem="$(_registry_config_problem "$CONFIG")"
+    if [ -z "$problem" ]; then
       echo "  [ok]   $CONFIG (valid JSON)"
     else
-      echo "  [FAIL] $CONFIG exists but is not valid JSON"
+      echo "  [FAIL] $CONFIG: config $problem"
       failed=1
     fi
   else
@@ -165,14 +174,19 @@ cmd_doctor() {
 
   echo
   echo "2. Models"
-  local id cmd why
-  for id in $(registry_list_model_ids); do
+  local id cmd why ids=""
+  if ! ids="$(registry_list_model_ids 2>/dev/null)"; then
+    echo "  [FAIL] models cannot be listed while the config is malformed"; failed=1
+  fi
+  for id in $ids; do
+    # The definition first: resolving the command checks it too, and would
+    # hide the reason behind "no resolvable command".
+    if ! why="$(registry_check_model "$id" 2>&1)"; then
+      echo "  [FAIL] $id: ${why#registry: }"; failed=1; continue
+    fi
     cmd="$(registry_resolve_command "$id" 2>/dev/null || echo '')"
     if [ -z "$cmd" ]; then
       echo "  [FAIL] $id has no resolvable command"; failed=1; continue
-    fi
-    if ! why="$(registry_check_model "$id" 2>&1)"; then
-      echo "  [FAIL] $id: ${why#registry: }"; failed=1; continue
     fi
     if command -v "$cmd" >/dev/null 2>&1; then
       echo "  [ok]   $id -> $cmd ($(command -v "$cmd"))"

@@ -18,8 +18,8 @@ for plugin in dev-trio debate-conductor; do
   assert_eq "$(jq -c '.roles' "$TMP/refs-models.json")" '{"*":"codex","a b":"codex","dev-trio.reviewer":"codex"}'
 done
 
-# agent-team-models must not overwrite a config it could not parse: reads fall
-# back to an empty config, and a write built on that would drop every model.
+# agent-team-models must not overwrite a config it could not parse: a write
+# built without it would drop every model.
 for plugin in dev-trio debate-conductor; do
   bad_cfg='{"version":1,"models":{"mine":{"command":"x","args":["{prompt}"]}},}'
   for cmd in "preset add kimi-code" "add z --command z --arg {prompt}" "edit mine --command y" \
@@ -31,6 +31,51 @@ for plugin in dev-trio debate-conductor; do
       >/dev/null 2>&1 || rc=$?
     assert_eq "$rc" 2
     assert_eq "$(cat "$TMP/bad-models.json")" "$bad_cfg"
+  done
+done
+
+# #133 item 5: a malformed config is refused, never replaced by the built-ins.
+# Each shape the runtime's _load refuses makes every config-reading query fail
+# (rc 3) with the reason and the file first on stderr; list, show and doctor
+# fail too, and writes are refused without touching the file.
+for shape in '' '{} {}' '{bad' '[1]' '{"models":[]}' '{"roles":[]}' '{"roles":{"dev-trio.reviewer":1}}' '{"models":{"m":"s"}}'; do
+  printf '%s' "$shape" > "$TMP/shape.json"
+  out=$(AGENT_TEAM_MODELS_CONFIG="$TMP/shape.json" bash -c '
+    . "$1/dev-trio/lib/registry.sh"
+    for q in "registry_model_exists codex" "registry_has_final codex" "registry_prompt_via codex" \
+             "registry_list_model_ids" "registry_resolve_role dev-trio reviewer" \
+             "registry_config_role dev-trio.reviewer" "registry_resolve_command codex"; do
+      rc=0; err=$($q 2>&1 >/dev/null) || rc=$?
+      printf "%s rc=%s first=%s\n" "${q%% *}" "$rc" "$(printf "%s" "$err" | head -1 | cut -c1-17)"
+    done' _ "$ROOT")
+  assert_eq "$(printf '%s\n' "$out" | grep -vc ' rc=3 first=registry: config ' || true)" "0"
+  # The host helpers read the config binding before applying a host default;
+  # a malformed config must not turn into that default.
+  hosts=$(AGENT_TEAM_MODELS_CONFIG="$TMP/shape.json" DEV_TRIO_PM_HOST=codex bash -c '
+    . "$1/dev-trio/lib/registry.sh"; . "$1/dev-trio/lib/host.sh"
+    rc=0; dev_trio_resolve_role reviewer >/dev/null 2>&1 || rc=$?; printf "dev=%s " "$rc"
+    . "$1/debate-conductor/lib/registry.sh"; . "$1/debate-conductor/lib/host.sh"
+    rc=0; debate_conductor_resolve_role critic >/dev/null 2>&1 || rc=$?; printf "debate=%s" "$rc"' _ "$ROOT")
+  assert_eq "$hosts" "dev=3 debate=3"
+  for plugin in dev-trio debate-conductor; do
+    for cmd in "list" "show codex"; do
+      rc=0
+      # shellcheck disable=SC2086  # $cmd is a word list on purpose
+      AGENT_TEAM_MODELS_CONFIG="$TMP/shape.json" "$ROOT/$plugin/bin/agent-team-models.sh" $cmd \
+        >/dev/null 2>"$TMP/shape.err" || rc=$?
+      assert_eq "$rc" 3
+      assert_eq "$(head -1 "$TMP/shape.err")" "$(sed -n '1p' "$TMP/shape.err" | grep "^registry: config .*: $TMP/shape.json$")"
+    done
+    rc=0
+    AGENT_TEAM_MODELS_CONFIG="$TMP/shape.json" "$ROOT/$plugin/bin/agent-team-models.sh" doctor \
+      >"$TMP/shape.out" 2>&1 || rc=$?
+    assert_eq "$rc" 1
+    assert_ok grep -q "\[FAIL\] $TMP/shape.json: config " "$TMP/shape.out"
+    rc=0
+    AGENT_TEAM_MODELS_CONFIG="$TMP/shape.json" "$ROOT/$plugin/bin/agent-team-models.sh" \
+      set-role dev-trio.reviewer codex >/dev/null 2>&1 || rc=$?
+    assert_eq "$rc" 2
+    assert_eq "$(cat "$TMP/shape.json")" "$shape"
   done
 done
 

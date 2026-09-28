@@ -225,12 +225,16 @@ class ResearchDiagnosticsTests(unittest.TestCase):
                 self.assertFalse(self.calls.exists())
 
     def test_invalid_model_definition_reports_resolution_failure(self):
-        for definition in ("invalid", {}):
+        # A definition that is not an object makes the whole config malformed
+        # (#133); an object without args fails at binary resolution.
+        for definition, message in (
+                ("invalid", "(config has a model definition that is not a JSON object)"),
+                ({}, "researcher binary resolution failed for model: agy")):
             with self.subTest(definition=definition):
                 self.config.write_text(json.dumps({"models": {"agy": definition}}))
                 result = self.run_script("dev-trio-doctor.sh", "--research")
                 self.assertEqual(result.returncode, 1, result.stderr)
-                self.assertIn("researcher binary resolution failed for model: agy", result.stdout)
+                self.assertIn(message, result.stdout)
                 self.assertIn("No invocation started", result.stdout)
                 self.assertFalse(self.calls.exists())
                 self.assertFalse((self.workspace / ".dev-trio").exists())
