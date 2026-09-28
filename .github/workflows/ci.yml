@@ -42,6 +42,10 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          # scripts/check.sh runs the version-bump check (#151), which needs
+          # the base branch and the merge base.
+          fetch-depth: 0
       # Pin python3 for the non-runtime suites; otherwise it is whatever the
       # image ships first on PATH.
       - uses: actions/setup-python@v5
