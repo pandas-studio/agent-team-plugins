@@ -142,6 +142,15 @@ run_stop_hook() {
 hook_reason_part() {
   python3 -c 'import json,sys; print(json.load(sys.stdin)["reason"].split("\n\n---\n\n")[int(sys.argv[1])])' "$1"
 }
+# An invalid explicit team is a setup error: let Claude Code stop instead of
+# returning exit 2, which would block its Stop event.
+rc=0
+run_stop_hook AGENT_TEAM='bad team' > "$HOOK/out-invalid-team.json" || rc=$?
+assert_eq "$rc" "0"
+assert_eq "$(wc -c < "$HOOK/out-invalid-team.json" | tr -d ' ')" "0"
+assert_ok grep -Fq 'ERROR: AGENT_TEAM must match' "$HOOK/err"
+assert_ok grep -Fq '[ralph-hook] cannot determine team — allowing stop' "$HOOK/err"
+assert_eq "$(test -e "$HOOK/ws/state/hook/iter" && echo yes || echo no)" "no"
 run_stop_hook > "$HOOK/out.json"
 assert_eq "$(jq -r '.decision' "$HOOK/out.json")" "block"
 assert_eq "$(jq -r 'has("additionalContext") or has("hookSpecificOutput")' "$HOOK/out.json")" "false"
