@@ -226,16 +226,19 @@ def is_sensitive_filename(name: str) -> bool:
     return any(fnmatch.fnmatch(lower, pat) for pat in SENSITIVE_FILENAME_PATTERNS)
 
 
-# Untracked files a reviewer rarely needs first: lock files and minified or
-# source-map output. They go after the rest, so they cannot use up the budget
-# before the source files (#146). A file larger than the budget left needs no
-# rule: the loop omits it without spending any.
+# Untracked files a reviewer rarely needs first: lock files, minified or
+# source-map output, and data files by extension. They go after the rest, so
+# they cannot use up the budget before the source files (#146). Decided by
+# name alone: a large file with another extension is still read in its place.
 LATE_UNTRACKED_NAMES = frozenset({
     "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
     "bun.lockb", "cargo.lock", "poetry.lock", "uv.lock", "pipfile.lock",
     "gemfile.lock", "composer.lock", "go.sum",
 })
-LATE_UNTRACKED_SUFFIXES = (".lock", ".min.js", ".min.css", ".map")
+LATE_UNTRACKED_SUFFIXES = (
+    ".lock", ".min.js", ".min.css", ".map",
+    ".csv", ".tsv", ".jsonl", ".ndjson", ".parquet", ".sqlite", ".sqlite3", ".db",
+)
 
 
 def untracked_order(paths: list[str]) -> list[str]:

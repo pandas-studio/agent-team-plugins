@@ -2056,6 +2056,22 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         self.assertNotIn("### Untracked file: package-lock.json", snapshot)
         self.assertIn("Untracked files omitted: package-lock.json", snapshot)
 
+    def test_snapshot_untracked_source_before_data_file(self):
+        # A data file that fits alone, listed first, would crowd out the source.
+        self._init_git_workspace()
+        (self.workspace / "base.txt").write_text("base\n")
+        subprocess.run(["git", "add", "base.txt"], cwd=self.workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "base"], cwd=self.workspace,
+                       check=True, stdout=subprocess.DEVNULL)
+        (self.workspace / "big.csv").write_text("a,b\n" + "1,2\n" * 1500)
+        (self.workspace / "src").mkdir()
+        (self.workspace / "src" / "main.py").write_text("SOURCE_BODY\n" + "s" * 3000 + "\n")
+        result = self.run_helper("working-tree", budget="12000")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        snapshot = result.stdout.decode()
+        self.assertIn("SOURCE_BODY", snapshot)
+        self.assertIn("Untracked files omitted: big.csv", snapshot)
+
     def test_snapshot_untracked_order_is_rooted_at_the_repository(self):
         # Run from a subdirectory: the order must not depend on the cwd.
         snapshot = self._untracked_budget_case(self.workspace / "src")
@@ -2071,8 +2087,8 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         paths = ["a.py", "big.csv", "c/app.min.js", "d/Cargo.lock", "e.txt", "missing.txt",
                  "site.css.map", "src/lockfile.py", "yarn.lock"]
         self.assertEqual(module.untracked_order(paths),
-                         ["a.py", "big.csv", "e.txt", "missing.txt", "src/lockfile.py",
-                          "c/app.min.js", "d/Cargo.lock", "site.css.map", "yarn.lock"])
+                         ["a.py", "e.txt", "missing.txt", "src/lockfile.py",
+                          "big.csv", "c/app.min.js", "d/Cargo.lock", "site.css.map", "yarn.lock"])
 
     def test_snapshot_helper_exit_codes(self):
         self._commit_two()
