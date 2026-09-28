@@ -248,7 +248,7 @@ if registry_has_workspace "$RESEARCHER_MODEL"; then
   AGY_WORKSPACE="$(dev_trio_workspace_root)"
   PROMPT="$PROMPT
 
-$(dev_trio_agy_exec_note "$AGY_WORKSPACE")"
+$(dev_trio_agy_exec_note "$AGY_WORKSPACE" 0)"
 fi
 
 CHECK_RC=0

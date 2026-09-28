@@ -287,7 +287,7 @@ if registry_has_workspace "$REVIEWER_MODEL"; then
   AGY_WORKSPACE="$(dev_trio_workspace_root)"
   PROMPT="$PROMPT
 
-$(dev_trio_agy_exec_note "$AGY_WORKSPACE")"
+$(dev_trio_agy_exec_note "$AGY_WORKSPACE" "$FOCUS_IS_DEFAULT")"
 
   ceiling="${DEV_TRIO_SNAPSHOT_MAX_BYTES:-65536}"
   case "$ceiling" in
@@ -402,12 +402,10 @@ $SNAPSHOT
 # Snapshot inspection rule
 The complete <workspace_snapshot> fulfills the role's default git status, git diff, and untracked-file inspection checklist. When it has no omitted or truncated section, use it for those facts without calling CommandLine for git status, git diff, or git ls-files. Other independent checks remain optional."
           else
-            # The execution note's git status step is for working-tree reviews;
-            # a range snapshot replaces it with the range's own commands (#137).
             CANDIDATE_PROMPT="$CANDIDATE_PROMPT
 
 # Snapshot inspection rule (range)
-The <workspace_snapshot> covers only \`git diff ${AGY_RANGE}\`. When it has no omitted or truncated section, use it for that diff without calling CommandLine for the same \`git diff\`; use \`git log\` or \`git show\` for the commits inside the range. The execution environment's \`git status\` step and untracked-file reading apply only when the focus also asks about the working tree or untracked files."
+The <workspace_snapshot> covers only \`git diff ${AGY_RANGE}\`. When it has no omitted or truncated section, use it for that diff without calling CommandLine for the same \`git diff\`; use \`git log\` or \`git show\` for the commits inside the range. Inspect the working tree or untracked files only when the focus also asks for them."
           fi
           snapshot_fits=0
           if [ "$snapshot_via" = stdin ]; then
