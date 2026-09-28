@@ -405,6 +405,7 @@ cat > "$SPECIAL_BIN" <<'STUB'
 {
   printf 'cwd=%s\n' "$PWD"
   printf 'team=%s\n' "${AGENT_TEAM-}"
+  printf 'path=%s\n' "$PATH"
   for arg in "$@"; do printf 'arg=%s\n' "$arg"; done
 } > "$LAUNCH_CAPTURE"
 STUB
@@ -448,7 +449,11 @@ environment = os.environ.copy()
 environment.update(plist["EnvironmentVariables"])
 subprocess.run(arguments, cwd=repo, env=environment, check=True)
 capture = Path(os.environ["LAUNCH_CAPTURE"]).read_text().splitlines()
-assert capture == [f"cwd={repo}", "team=overnight"] + [
+assert capture == [
+    f"cwd={repo}",
+    "team=overnight",
+    "path=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+] + [
     f"arg={argument}" for argument in arguments[1:]
 ]
 PY
@@ -534,17 +539,29 @@ assert_eq "$rc" "2"
 assert_eq "$(grep -c -- '--ralph-solo-bin is not an executable file:' "$SPECIAL_ROOT/bin.err")" "1"
 assert_eq "$(grep -c 'Traceback' "$SPECIAL_ROOT/bin.err")" "0"
 
+NEW_PLIST="$SPECIAL_ROOT/new launchd.plist"
+(umask 077; assert_ok "$LAUNCH_RENDERER" \
+  --repo "$SPECIAL_REPO" \
+  --ralph-solo-bin "$SPECIAL_BIN" \
+  --test-cmd "$SPECIAL_TEST_CMD" \
+  --output "$NEW_PLIST" >/dev/null)
+assert_eq "$(python3 -c \
+  'import os, stat, sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode)))' \
+  "$NEW_PLIST")" "0o600"
+
 CRON_WRAPPER="$SPECIAL_ROOT/cron wrapper"
 CRON_CAPTURE="$SPECIAL_ROOT/cron capture"
-printf '#!/bin/bash\ncd %q || exit 1\nexec env AGENT_TEAM=overnight %q --max-iter 50 --max-runtime 6h --worktree --prompt %q --test-cmd %q >> %q 2>&1\n' \
-  "$SPECIAL_REPO" "$SPECIAL_BIN" "$SPECIAL_REPO/PROMPT.md" \
+SPECIAL_PATH="$SPECIAL_ROOT/tool path:/usr/bin:/bin"
+printf '#!/bin/bash\ncd %q || exit 1\nexec env PATH=%q AGENT_TEAM=overnight %q --max-iter 50 --max-runtime 6h --worktree --prompt %q --test-cmd %q >> %q 2>&1\n' \
+  "$SPECIAL_REPO" "$SPECIAL_PATH" "$SPECIAL_BIN" "$SPECIAL_REPO/PROMPT.md" \
   "$SPECIAL_TEST_CMD" \
   "$SPECIAL_REPO/.ralph-trio/log/overnight/cron.log" > "$CRON_WRAPPER"
 chmod +x "$CRON_WRAPPER"
 assert_ok env LAUNCH_CAPTURE="$CRON_CAPTURE" "$CRON_WRAPPER"
 assert_eq "$(sed -n '1p' "$CRON_CAPTURE")" "cwd=$SPECIAL_REPO"
 assert_eq "$(sed -n '2p' "$CRON_CAPTURE")" "team=overnight"
-assert_eq "$(sed -n '3,$p' "$CRON_CAPTURE")" "$(printf '%s\n' \
+assert_eq "$(sed -n '3p' "$CRON_CAPTURE")" "path=$SPECIAL_PATH"
+assert_eq "$(sed -n '4,$p' "$CRON_CAPTURE")" "$(printf '%s\n' \
   'arg=--max-iter' 'arg=50' 'arg=--max-runtime' 'arg=6h' 'arg=--worktree' \
   'arg=--prompt' "arg=$SPECIAL_REPO/PROMPT.md" \
   'arg=--test-cmd' "arg=$SPECIAL_TEST_CMD")"

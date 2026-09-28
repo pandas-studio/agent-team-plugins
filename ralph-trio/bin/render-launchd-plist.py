@@ -58,6 +58,12 @@ def _absolute(parser: argparse.ArgumentParser, option: str, value: str) -> str:
     return value
 
 
+def _default_output_mode() -> int:
+    current_umask = os.umask(0)
+    os.umask(current_umask)
+    return 0o666 & ~current_umask
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="absolute repository path")
@@ -89,7 +95,9 @@ def main() -> int:
     if output.is_dir():
         parser.error(f"--output is a directory: {output}")
     output_mode = (
-        stat.S_IMODE(output.stat().st_mode) if output.exists() else 0o644
+        stat.S_IMODE(output.stat().st_mode)
+        if output.exists()
+        else _default_output_mode()
     )
 
     with TEMPLATE.open("rb") as stream:

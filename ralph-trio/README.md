@@ -95,13 +95,17 @@ chmod +x "$HOME/bin/ralph-solo"
 RALPH_SOLO_BIN="$HOME/bin/ralph-solo"
 ```
 
+Then re-run the renderer block above so the plist points at the wrapper.
+
 For cron, generate a wrapper rather than interpolating paths into the crontab
-command. Bash `%q` makes each captured path a single literal shell word:
+command. Bash `%q` makes each captured value a single literal shell word. The
+wrapper also captures the current `PATH` so cron can find the same model CLIs:
 
 ```bash
 CRON_WRAPPER="$HOME/bin/ralph-overnight"
-printf '#!/bin/bash\ncd %q || exit 1\nexec env AGENT_TEAM=overnight %q --max-iter 50 --max-runtime 6h --worktree --prompt %q --test-cmd %q >> %q 2>&1\n' \
-  "$REPO" "$RALPH_SOLO_BIN" "$REPO/PROMPT.md" \
+CRON_PATH="$PATH"
+printf '#!/bin/bash\ncd %q || exit 1\nexec env PATH=%q AGENT_TEAM=overnight %q --max-iter 50 --max-runtime 6h --worktree --prompt %q --test-cmd %q >> %q 2>&1\n' \
+  "$REPO" "$CRON_PATH" "$RALPH_SOLO_BIN" "$REPO/PROMPT.md" \
   "$TEST_CMD" \
   "$REPO/.ralph-trio/log/overnight/cron.log" > "$CRON_WRAPPER"
 chmod +x "$CRON_WRAPPER"
