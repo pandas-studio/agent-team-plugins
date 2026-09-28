@@ -95,5 +95,9 @@
   {"name": "{final} in log_args", "issue": "#133 item 6",
    "definition": {"args": ["{prompt}"], "log_args": ["{final}"]}, "expect": "log_args"},
   {"name": "{cwd} and {cli_log} in the prefixes", "issue": "#133 item 6",
-   "definition": {"args": ["{prompt}"], "workspace_args": ["{cwd}"], "log_args": ["{cli_log}"]}, "expect": null}
+   "definition": {"args": ["{prompt}"], "workspace_args": ["{cwd}"], "log_args": ["{cli_log}"]}, "expect": null},
+  {"name": "trailing newline in command", "issue": "#133 item 1",
+   "definition": {"command": "x\n", "args": ["{prompt}"]}, "expect": "command"},
+  {"name": "tab inside command", "issue": "#133 item 1",
+   "definition": {"command": "a\tb", "args": ["{prompt}"]}, "expect": "command"}
 ]

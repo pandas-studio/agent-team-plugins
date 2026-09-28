@@ -149,8 +149,9 @@ def definition_problem(definition: Any) -> tuple[str, str] | None:
             return field, "has a lone surrogate escape (\\uD800-\\uDFFF), which no argument can carry"
     if "command" in definition:
         command = definition["command"]
-        if not isinstance(command, str) or not command or "\0" in command:
-            return "command", "has a command that is not a non-empty string without NUL"
+        if (not isinstance(command, str) or not command
+                or any(ord(c) < 32 or ord(c) == 127 for c in command)):
+            return "command", "has a command that is not a non-empty string without control characters"
     if "env_command" in definition:
         env_command = definition["env_command"]
         if not isinstance(env_command, str) or (env_command and not _ENV_NAME.fullmatch(env_command)):

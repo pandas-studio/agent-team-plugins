@@ -354,7 +354,8 @@ registry_prompt_via() {
 # line: null when the definition is valid, otherwise {"field", "reason"} for the
 # first rule it breaks, in this order:
 #   1. definition   it is not an object.
-#   1b. command     present, and not a non-empty string without NUL (#133).
+#   1b. command     present, and not a non-empty string without control
+#                   characters (#133; $(...) would strip a trailing newline).
 #   1c. env_command present, and not "" or an environment variable name.
 #   2. prompt_via   present, and not "argv" or "stdin" (absent means argv).
 #   3. args         missing, or not an array of strings; an element holds NUL,
@@ -398,8 +399,8 @@ _registry_def_problem() {
     def has_prompt: any(.[]; . == "{prompt}");
     def problem($f; $why): {field: $f, reason: $why};
     if type != "object" then problem("definition"; "is not a JSON object")
-    elif has("command") and ((.command | type) != "string" or .command == "" or any(.command | explode[]; . == 0)) then
-      problem("command"; "has a command that is not a non-empty string without NUL")
+    elif has("command") and ((.command | type) != "string" or .command == "" or any(.command | explode[]; . < 32 or . == 127)) then
+      problem("command"; "has a command that is not a non-empty string without control characters")
     elif has("env_command") and ((.env_command | type) != "string"
         or (.env_command != "" and (.env_command | test("^[A-Za-z_][A-Za-z0-9_]*$") | not))) then
       problem("env_command"; "has an env_command that is not an environment variable name")
@@ -479,10 +480,8 @@ registry_model_is_builtin() {
 #   per-role *_CLI override), then the model's env_command, then command.
 registry_resolve_command() {
   local id="$1" def envvar val cmd
-  if [ -n "${REGISTRY_CMD_OVERRIDE:-}" ]; then
-    printf '%s\n' "$REGISTRY_CMD_OVERRIDE"
-    return 0
-  fi
+  # The model and its definition first, as the runtime's resolve_adapter does:
+  # an override replaces the binary, not the checks (#133).
   def="$(_registry_model_def "$id")" || return 3
   if [ -z "$def" ] || [ "$def" = "null" ]; then
     echo "registry: unknown model '$id'" >&2
@@ -490,6 +489,10 @@ registry_resolve_command() {
   fi
   # Before ${!envvar}: a malformed env_command is the rule's to report (#133).
   registry_check_def "$id" "$def" || return 3
+  if [ -n "${REGISTRY_CMD_OVERRIDE:-}" ]; then
+    printf '%s\n' "$REGISTRY_CMD_OVERRIDE"
+    return 0
+  fi
   envvar="$(printf '%s' "$def" | jq -r '.env_command // ""')"
   if [ -n "$envvar" ]; then
     val="${!envvar:-}"

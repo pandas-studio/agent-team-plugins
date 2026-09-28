@@ -117,7 +117,7 @@ FINAL_ARGS = [ABSENT, None, "x", [], [2], ["{final}"], ["{final}", "{prompt}"], 
 
 PREFIXES = [None, "x", [], [3], ["--add-dir", "{cwd}"], ["a\nb"], ["--safe\u0000--danger"],
             ["{prompt}"], ["--f", "{final}"], ["{cli_log}"]]
-COMMANDS = [ABSENT, "x", "", 5, None, True, ["x"], "a\u0000"]
+COMMANDS = [ABSENT, "x", "", 5, None, True, ["x"], "a\u0000", "x\n", "a\tb", "a\u007f"]
 ENV_COMMANDS = [ABSENT, "", "X_CLI", "A-B", "9X", 1, None]
 
 
@@ -318,3 +318,29 @@ def test_a_malformed_config_file_is_refused_by_both(bash, case, tmp_path):
     assert completed.stderr.rstrip().endswith(str(config)), completed.stderr
     with pytest.raises(registry.RegistryError):
         registry.ModelRegistry(config)
+
+
+# A command override replaces the binary, not the checks: with a malformed
+# config or definition, resolution fails on both sides even when
+# REGISTRY_CMD_OVERRIDE is set (#133).
+OVERRIDE_CONFIGS = {
+    "malformed config": b'{bad',
+    "invalid env_command": b'{"models": {"codex": {"command": "c", "env_command": "A-B", "args": ["-"], '
+                           b'"prompt_via": "stdin"}}, "roles": {"langgraph-conductor.reviewer": "codex"}}',
+}
+
+
+@pytest.mark.parametrize("bash", BASHES)
+@pytest.mark.parametrize("case", sorted(OVERRIDE_CONFIGS))
+def test_a_command_override_does_not_skip_the_checks(bash, case, tmp_path, isolated):
+    config = tmp_path / "models.json"
+    config.write_bytes(OVERRIDE_CONFIGS[case])
+    completed = subprocess.run(
+        [bash, "-c", '. "$1"; registry_resolve_command codex', "_", str(REGISTRY_SH)],
+        capture_output=True, text=True, check=False,
+        env=_bash_env(tmp_path, AGENT_TEAM_MODELS_CONFIG=str(config), REGISTRY_CMD_OVERRIDE="/bin/echo"))
+    assert completed.returncode == 3, completed.stdout + completed.stderr
+    isolated.setenv("REGISTRY_CMD_OVERRIDE", "/bin/echo")
+    with pytest.raises(registry.RegistryError):
+        runner = registry.RoleRunner(registry.ModelRegistry(config))
+        runner.resolve_adapter("langgraph-conductor.reviewer", tmp_path)
