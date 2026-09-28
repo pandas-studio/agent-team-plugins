@@ -59,19 +59,123 @@ command -v tmux >/dev/null 2>&1 || { echo "error: tmux not installed" >&2; exit 
 
 trap 'rc=$?; echo "error: tmux command failed (line $LINENO, exit $rc). Session=$SESSION may be in an inconsistent state — check with: tmux ls" >&2; exit $rc' ERR
 
+# ---- --here guard (#100) ----------------------------------------------------
+# Kept identical in debate-conductor/bin/team-3pane.sh and
+# dev-trio/bin/team-layout.sh. A layout is only ever built from a one-pane
+# window, and @team-layout ("<layout> <pane ids>") is written only once it is
+# complete, so a re-run can tell a finished layout from a half-built or
+# hand-split window. Every tmux call targets $HERE_PANE's window.
+
+# here_panes — the window's pane ids, sorted, space-separated.
+here_panes() {
+  tmux list-panes -t "$HERE_PANE" -F '#{pane_id}' | sort | tr '\n' ' '
+}
+
+# here_guard LAYOUT — rc 0: build the layout (one-pane window); rc 3: this
+# team's LAYOUT is already complete here; rc 2: refused, with a hint on stderr;
+# rc 1: a tmux read failed. Callers use `|| rc=$?`, which turns errexit and the
+# ERR trap off in here, so every read checks its own status.
+here_guard() {
+  local layout="$1" tag record live n rec_ids others p
+  tag=$(tmux show-options -wqv -t "$HERE_PANE" '@team-name') &&
+    record=$(tmux show-options -wqv -t "$HERE_PANE" '@team-layout') &&
+    live=$(here_panes) || {
+    printf 'error: cannot read the state of the tmux window of %s\n' "$HERE_PANE" >&2
+    return 1
+  }
+  n=$(printf '%s' "$live" | wc -w | tr -d ' ')
+  if [ -n "$tag" ] && [ "$tag" != "$SESSION" ]; then
+    printf 'error: this window belongs to team %s, not %s.\n' "$tag" "$SESSION" >&2
+    printf 'Open a new tmux window (prefix + c) and run this there.\n' >&2
+    printf 'To reuse this window instead, close its other panes, then run:\n' >&2
+    printf '  tmux set-option -wu -t %s @team-name; tmux set-option -wu -t %s @team-layout\n' \
+      "$HERE_PANE" "$HERE_PANE" >&2
+    return 2
+  fi
+  [ "$n" != 1 ] || return 0
+  if [ "$tag" = "$SESSION" ] && [ "${record%% *}" = "$layout" ]; then
+    # shellcheck disable=SC2086  # the record is a space-separated id list
+    rec_ids=$(printf '%s\n' ${record#* } | sort | tr '\n' ' ')
+    [ "$rec_ids" != "$live" ] || return 3
+  fi
+  others=""
+  for p in $live; do [ "$p" = "$HERE_PANE" ] || others="$others $p"; done
+  printf 'error: this window already has other panes (%s) that are not a complete %s layout for team %s.\n' \
+    "${others# }" "$layout" "$SESSION" >&2
+  printf 'Open a new tmux window (prefix + c) and run this there, or close the other panes first:\n' >&2
+  for p in $others; do printf '  tmux kill-pane -t %s\n' "$p" >&2; done
+  return 2
+}
+
+# here_stamp LAYOUT PANE... — record the finished layout, but only if the
+# window holds exactly these panes (another run may have split it meanwhile).
+here_stamp() {
+  local layout="$1" want now
+  shift
+  want=$(printf '%s\n' "$@" | sort | tr '\n' ' ')
+  now=$(here_panes) || return 1
+  if [ "$now" != "$want" ]; then
+    printf 'error: the window changed while the layout was being built; not recording it.\n' >&2
+    printf 'Re-run to see what to close, or open a new tmux window.\n' >&2
+    return 2
+  fi
+  tmux set-option -w -t "$HERE_PANE" '@team-layout' "$layout $*"
+}
+# here_lock — serialize the guard, the build and the stamp per window: two
+# runs that both saw one pane would otherwise both split it. A lock directory
+# holding the owner's pid, not `tmux wait-for -L`, so a run that died (even
+# to SIGKILL) cannot leave every later bootstrap blocked. Released at exit.
+here_lock() {
+  local wid owner i=0
+  wid=$(tmux display-message -p -t "$HERE_PANE" '#{window_id}') || return 1
+  HERE_LOCK="${TMPDIR:-/tmp}/agent-team-layout.$(id -u).$(printf '%s %s' "${TMUX%%,*}" "$wid" | cksum | cut -d' ' -f1)"
+  until mkdir "$HERE_LOCK" 2>/dev/null; do
+    owner=$(cat "$HERE_LOCK/pid" 2>/dev/null || true)
+    if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+      rm -rf "$HERE_LOCK"   # its owner is gone
+      continue
+    fi
+    i=$((i + 1))
+    if [ "$i" -ge 100 ]; then
+      printf 'error: another layout run is still setting up this window (lock %s); retry when it finishes.\n' \
+        "$HERE_LOCK" >&2
+      return 2
+    fi
+    sleep 0.1
+  done
+  echo "$$" > "$HERE_LOCK/pid"
+  trap 'rm -rf "$HERE_LOCK"' EXIT
+}
+# -----------------------------------------------------------------------------
+
 if [ "$HERE" = "1" ]; then
   [ -n "${TMUX:-}" ] || { echo "error: --here requires running inside tmux" >&2; exit 2; }
-  tmux display-message -p '#S' >/dev/null 2>&1 || {
+  HERE_PANE="${TMUX_PANE:-}"
+  if [ -z "$HERE_PANE" ]; then
+    HERE_PANE=$(tmux display-message -p '#{pane_id}' 2>/dev/null) || HERE_PANE=""
+  fi
+  [ -n "$HERE_PANE" ] && tmux display-message -t "$HERE_PANE" -p '#S' >/dev/null 2>&1 || {
     echo "error: cannot reach tmux server from \$TMUX=$TMUX" >&2; exit 2; }
+  lock_rc=0
+  here_lock || lock_rc=$?
+  [ "$lock_rc" = 0 ] || exit "$lock_rc"
+  guard_rc=0
+  here_guard dev-trio-layout || guard_rc=$?
+  if [ "$guard_rc" = 3 ]; then
+    echo "✓ Layout already present in this window (team: ${SESSION}). Run '$PM_HOST' in the left pane."
+    exit 0
+  fi
+  [ "$guard_rc" = 0 ] || exit "$guard_rc"
   # Stamp this window with the team name (used by wrappers/dashboard for log isolation)
   # and rename the window for visibility.
-  tmux set-option -w '@team-name' "$SESSION"
-  tmux rename-window "$SESSION"
-  AGY_P=$(tmux split-window -h -c "$REPO_DIR" -P -F "#{pane_id}")
+  tmux set-option -w -t "$HERE_PANE" '@team-name' "$SESSION"
+  tmux rename-window -t "$HERE_PANE" "$SESSION"
+  AGY_P=$(tmux split-window -h -t "$HERE_PANE" -c "$REPO_DIR" -P -F "#{pane_id}")
   tmux send-keys -t "$AGY_P" "$DASH_AGY_CMD" Enter
   CODEX_P=$(tmux split-window -v -t "$AGY_P" -c "$REPO_DIR" -P -F "#{pane_id}")
   tmux send-keys -t "$CODEX_P" "$DASH_CODEX_CMD" Enter
-  tmux select-pane -L 2>/dev/null || true
+  tmux select-pane -t "$HERE_PANE"
+  here_stamp dev-trio-layout "$HERE_PANE" "$AGY_P" "$CODEX_P" || exit $?
   echo "✓ Layout applied to current window (team: ${SESSION}). Run '$PM_HOST' in the left pane."
   exit 0
 fi
@@ -86,6 +190,9 @@ else
   CODEX_P=$(tmux split-window -v -t "$AGY_P" -c "$REPO_DIR" -P -F "#{pane_id}")
   tmux send-keys -t "$CODEX_P" "$DASH_CODEX_CMD" Enter
   tmux select-pane -t "$MAIN_P"
+  # Recorded like a --here layout, so a later --here in it is a no-op (#100).
+  HERE_PANE="$MAIN_P"
+  here_stamp dev-trio-layout "$MAIN_P" "$AGY_P" "$CODEX_P" || exit $?
   tmux send-keys -t "$MAIN_P" "# 3-agent team ready (team: ${SESSION}). Run '$PM_HOST' to start." Enter
 fi
 

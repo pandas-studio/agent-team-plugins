@@ -15,6 +15,11 @@ When already inside tmux and the user requests this window's debate layout, run:
 DEBATE_CONDUCTOR_PM_HOST=codex "<plugin-root>/bin/team-3pane.sh" --here
 ```
 
+The script only builds the layout in a one-pane window. "Already present" with
+exit 0 means the layout is in place. Exit 2 means it refused to change this
+window; relay its error message verbatim and stop. Do not unset tmux options or
+kill panes yourself.
+
 Outside tmux, create a detached layout with `--new-session --no-attach` and
 show the emitted attach command. Do not attach a terminal from Codex's command
 tool or replace its session. Debate runs work without tmux; report that option

@@ -1652,20 +1652,21 @@ stream_header() {
         import shlex
         tools = self.root / "tools"
         tools.mkdir()
+        # The stateful fake from tests/fake_tmux.py (#100): a one-pane window.
+        fake = Path(__file__).resolve().parent / "fake_tmux.py"
+        state = self.root / "tmux.json"
+        state.write_text(json.dumps({"current": "%0", "next": 1, "calls": [], "fail": {},
+                                     "windows": {"@0": {"options": {}, "panes": ["%0"]}}}))
         tmux = tools / "tmux"
-        tmux.write_text(
-            f"#!{sys.executable}\n"
-            "import json, os, sys\n"
-            "with open(os.environ['STUB_CALLS'], 'a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')\n"
-            "if sys.argv[1] == 'split-window': print('%2')\n"
-            "elif sys.argv[1] == 'display-message': print('%1')\n"
-        )
+        tmux.write_text(f"#!/bin/sh\nexec {sys.executable} {fake} \"$@\"\n")
         tmux.chmod(0o755)
         result = self.run_cli("team-3pane.sh", "--here", DEBATE_CONDUCTOR_PM_HOST="codex",
-                              TMUX="fixture", PATH=str(tools) + os.pathsep + self.env["PATH"])
+                              TMUX="fixture", PATH=str(tools) + os.pathsep + self.env["PATH"],
+                              TMUX_PANE="%0", FAKE_TMUX_STATE=str(state))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Run $debate-conductor:run", result.stdout)
-        sent = [shlex.split(call[-2]) for call in self.recorded() if call[0] == "send-keys"]
+        calls = json.loads(state.read_text())["calls"]
+        sent = [shlex.split(call[-2]) for call in calls if call[0] == "send-keys"]
         self.assertEqual(sent, [[str(self.plugin / "bin/tail-role.sh"), role] for role in ("gen", "crit")])
 
     def test_disjoint_skill_trees(self):
