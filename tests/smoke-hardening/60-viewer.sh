@@ -730,6 +730,8 @@ check_crafted() {
   assert_eq "$(count "$out" 'Round 3 · Generator · ')" "0"
   assert_eq "$(grep -ao 'attempt failed (rc=[^)]*)' "$out" | tr '\n' ' ')" \
     "attempt failed (rc=3) attempt failed (rc=4) attempt failed (rc=6) "
+  # A signalled viewer must not append Bash's job notice with the awk source.
+  assert_eq "$(count "$out" 'Terminated: ')" "0"
   assert_eq "$(count "$out" 'example extra words')" "1"
   assert_eq "$(count "$out" '2 crit x')" "0"
   assert_eq "$(count "$out" 'id=')" "0"
