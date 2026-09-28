@@ -543,7 +543,9 @@ case "$2" in
             while [ ! -f "$1.ready" ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done
             stop_attempt
             if kill -0 "$pid" 2>/dev/null; then echo "bounded=1"; else echo "bounded=0"; fi
-            kill -9 "$pid" 2>/dev/null || true ;;
+            # Reap it here, stderr closed: left to exit, bash may report the
+            # killed job ("Killed: 9") into wait57's captured output (#169).
+            { kill -9 "$pid" && wait "$pid"; } 2>/dev/null || true ;;
 esac
 WAIT57
 wait57() { /bin/bash "$TMP/wait57.sh" "$TMP/wait57-funcs.sh" "$1" 2>&1; }
