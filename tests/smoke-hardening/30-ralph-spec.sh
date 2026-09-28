@@ -367,7 +367,7 @@ git -C "$TMP/unborn" -c user.name=t -c user.email=t@t commit -qm first
 assert_eq "$(bash -c '. "$1/spec-trio/lib/spec-helpers.sh"; collect_changed_paths "$2" "$3"' \
   _ "$ROOT" "$TMP/unborn" "$EMPTY_TREE")" "outside.txt"
 
-# #107: the launchd template's wrapper recipe starts ralph-solo.sh from any
+# #107: the README's wrapper recipe starts ralph-solo.sh from any
 # directory; a symlink cannot find lib/, and the error names the path it tried
 # instead of blaming jq.
 LAUNCH_TMP="$TMP/launch"
@@ -392,10 +392,11 @@ if command -v xmllint >/dev/null 2>&1; then
 fi
 
 SPECIAL_ROOT="$TMP/launch space 'single' \"double\" \$dollar & amp"
-SPECIAL_REPO="$SPECIAL_ROOT/repo space 'single' \"double\" \$dollar & amp"
-SPECIAL_BIN_DIR="$SPECIAL_ROOT/bin space 'single' \"double\" \$dollar & amp"
+SPECIAL_REPO="$SPECIAL_ROOT/repo {{REPO}} {{RALPH_SOLO_BIN}} space 'single' \"double\" \$dollar & amp"
+SPECIAL_BIN_DIR="$SPECIAL_ROOT/bin {{REPO}} {{RALPH_SOLO_BIN}} space 'single' \"double\" \$dollar & amp"
 SPECIAL_BIN="$SPECIAL_BIN_DIR/ralph solo 'single' \"double\" \$dollar & amp"
 SPECIAL_PLIST="$SPECIAL_ROOT/generated launchd.plist"
+SPECIAL_TEST_CMD='echo "{{REPO}}" && npm test & lint "$HOME"'
 LAUNCH_CAPTURE="$SPECIAL_ROOT/launch capture"
 export LAUNCH_CAPTURE
 mkdir -p "$SPECIAL_REPO/.ralph-trio/log/overnight" "$SPECIAL_BIN_DIR"
@@ -412,15 +413,16 @@ printf 'replace me\n' > "$SPECIAL_PLIST"
 assert_ok "$LAUNCH_RENDERER" \
   --repo "$SPECIAL_REPO" \
   --ralph-solo-bin "$SPECIAL_BIN" \
-  --output "$SPECIAL_PLIST"
-assert_ok python3 - "$SPECIAL_PLIST" "$SPECIAL_REPO" "$SPECIAL_BIN" <<'PY'
+  --test-cmd "$SPECIAL_TEST_CMD" \
+  --output "$SPECIAL_PLIST" >/dev/null
+assert_ok python3 - "$SPECIAL_PLIST" "$SPECIAL_REPO" "$SPECIAL_BIN" "$SPECIAL_TEST_CMD" <<'PY'
 import os
 import plistlib
 import subprocess
 import sys
 from pathlib import Path
 
-plist_path, repo, executable = sys.argv[1:]
+plist_path, repo, executable, test_command = sys.argv[1:]
 with open(plist_path, "rb") as stream:
     plist = plistlib.load(stream)
 
@@ -430,7 +432,7 @@ arguments = [
     "--max-runtime", "6h",
     "--worktree",
     "--prompt", f"{repo}/PROMPT.md",
-    "--test-cmd", "echo replace-with-your-test-command",
+    "--test-cmd", test_command,
 ]
 assert plist["ProgramArguments"] == arguments
 assert plist["WorkingDirectory"] == repo
@@ -453,11 +455,33 @@ if command -v plutil >/dev/null 2>&1; then
   assert_ok plutil -lint "$SPECIAL_PLIST"
 fi
 
+rc=0
+"$LAUNCH_RENDERER" \
+  --repo "$SPECIAL_REPO" \
+  --ralph-solo-bin "$SPECIAL_BIN" \
+  --test-cmd "$SPECIAL_TEST_CMD" \
+  --output "$SPECIAL_ROOT/missing/generated.plist" \
+  >"$SPECIAL_ROOT/missing.out" 2>"$SPECIAL_ROOT/missing.err" || rc=$?
+assert_eq "$rc" "2"
+assert_eq "$(grep -c -- '--output parent directory does not exist:' "$SPECIAL_ROOT/missing.err")" "1"
+assert_eq "$(grep -c 'Traceback' "$SPECIAL_ROOT/missing.err")" "0"
+
+rc=0
+"$LAUNCH_RENDERER" \
+  --repo "$SPECIAL_REPO" \
+  --ralph-solo-bin "$SPECIAL_BIN" \
+  --test-cmd '   ' \
+  --output "$SPECIAL_PLIST" \
+  >"$SPECIAL_ROOT/empty.out" 2>"$SPECIAL_ROOT/empty.err" || rc=$?
+assert_eq "$rc" "2"
+assert_eq "$(grep -c -- '--test-cmd must not be empty' "$SPECIAL_ROOT/empty.err")" "1"
+assert_eq "$(grep -c 'Traceback' "$SPECIAL_ROOT/empty.err")" "0"
+
 CRON_WRAPPER="$SPECIAL_ROOT/cron wrapper"
 CRON_CAPTURE="$SPECIAL_ROOT/cron capture"
 printf '#!/bin/bash\ncd %q || exit 1\nexec env AGENT_TEAM=overnight %q --max-iter 50 --max-runtime 6h --worktree --prompt %q --test-cmd %q >> %q 2>&1\n' \
   "$SPECIAL_REPO" "$SPECIAL_BIN" "$SPECIAL_REPO/PROMPT.md" \
-  'echo replace-with-your-test-command' \
+  "$SPECIAL_TEST_CMD" \
   "$SPECIAL_REPO/.ralph-trio/log/overnight/cron.log" > "$CRON_WRAPPER"
 chmod +x "$CRON_WRAPPER"
 assert_ok env LAUNCH_CAPTURE="$CRON_CAPTURE" "$CRON_WRAPPER"
@@ -466,7 +490,7 @@ assert_eq "$(sed -n '2p' "$CRON_CAPTURE")" "team=overnight"
 assert_eq "$(sed -n '3,$p' "$CRON_CAPTURE")" "$(printf '%s\n' \
   'arg=--max-iter' 'arg=50' 'arg=--max-runtime' 'arg=6h' 'arg=--worktree' \
   'arg=--prompt' "arg=$SPECIAL_REPO/PROMPT.md" \
-  'arg=--test-cmd' 'arg=echo replace-with-your-test-command')"
+  'arg=--test-cmd' "arg=$SPECIAL_TEST_CMD")"
 
 
 smoke_done 30-ralph-spec

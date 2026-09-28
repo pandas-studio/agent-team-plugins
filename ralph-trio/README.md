@@ -52,23 +52,29 @@ REPO="$(pwd -P)"
 RALPH_SOLO_BIN="$(command -v ralph-solo.sh)"
 RENDERER="$(command -v render-launchd-plist.py)"
 PLIST="$HOME/Library/LaunchAgents/com.user.ralph.plist"
+TEST_CMD='false # replace-with-your-fast-unit-test-command'
 
-mkdir -p "$REPO/.ralph-trio/log/overnight"
+mkdir -p "$HOME/Library/LaunchAgents" "$REPO/.ralph-trio/log/overnight"
 "$RENDERER" \
   --repo "$REPO" \
   --ralph-solo-bin "$RALPH_SOLO_BIN" \
+  --test-cmd "$TEST_CMD" \
   --output "$PLIST"
 plutil -lint "$PLIST"
-launchctl load -w "$PLIST"
 ```
 
 The renderer requires absolute paths and replaces an existing output file
-atomically. It does not expand `~` or `$HOME`. Adjust the generated plist's
-calendar, iteration/runtime budgets, and test command before loading it. Make
-sure `PROMPT.md` exists first; `/ralph-trio:bootstrap` creates a starter.
-Trigger and inspect the job with:
+atomically. It does not expand `~` or `$HOME`. Replace the deliberately failing
+`TEST_CMD` before loading the job; worktree mode discards an iteration whenever
+that command fails. Regenerate the plist to change the test command instead of
+hand-editing XML. Adjust the generated plist's calendar and iteration/runtime
+budgets as needed, then lint it again. Make sure `PROMPT.md` exists first;
+`/ralph-trio:bootstrap` creates a starter. Load, trigger, and inspect the job
+with:
 
 ```bash
+plutil -lint "$PLIST"
+launchctl load -w "$PLIST"
 launchctl start com.user.ralph
 tail -F "$REPO/.ralph-trio/log/overnight/launchd.stdout.log"
 tail -F "$REPO/.ralph-trio/log/overnight/launchd.stderr.log"
@@ -94,7 +100,7 @@ command. Bash `%q` makes each captured path a single literal shell word:
 CRON_WRAPPER="$HOME/bin/ralph-overnight"
 printf '#!/bin/bash\ncd %q || exit 1\nexec env AGENT_TEAM=overnight %q --max-iter 50 --max-runtime 6h --worktree --prompt %q --test-cmd %q >> %q 2>&1\n' \
   "$REPO" "$RALPH_SOLO_BIN" "$REPO/PROMPT.md" \
-  'echo replace-with-your-test-command' \
+  "$TEST_CMD" \
   "$REPO/.ralph-trio/log/overnight/cron.log" > "$CRON_WRAPPER"
 chmod +x "$CRON_WRAPPER"
 ```

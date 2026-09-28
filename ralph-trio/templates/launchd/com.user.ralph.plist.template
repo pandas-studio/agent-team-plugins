@@ -20,7 +20,7 @@
     <string>--prompt</string>
     <string>{{REPO}}/PROMPT.md</string>
     <string>--test-cmd</string>
-    <string>echo replace-with-your-test-command</string>
+    <string>{{TEST_CMD}}</string>
   </array>
 
   <key>RunAtLoad</key>
