@@ -302,14 +302,15 @@ $FP_EXCERPT
         if [ "$MERGE_RC" = "2" ]; then
           # The change landed (or was dropped); only the cleanup failed.
           BLOCK=WORKTREE-CLEANUP-BLOCK
-          printf '  worktree: %s, but cleanup failed: %s\n' "$OUTCOME" "$WT" >> "$SUMMARY_LOG"
+          printf '  worktree: %s, but cleanup failed; left: %s\n' "$OUTCOME" \
+            "$(worktree_leftovers "$WT" "$ITER" "$ORIGINAL_DIR" | paste -sd ' ' -)" >> "$SUMMARY_LOG"
         else
           # Refused (worktree off its branch) or ff-merge failed: nothing landed.
           BLOCK=WORKTREE-MERGE-BLOCK
           printf '  worktree: PRESERVED (not merged or discarded: %s)\n' "$WT" >> "$SUMMARY_LOG"
         fi
-        printf '## iter %d · %s · %s\nIter log: %s\nWorktree: %s\n\n' \
-          "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BLOCK" "$ITER_LOG" "$WT" >> "$FIX_PLAN_FILE"
+        printf '## iter %d · %s · %s\nIter log: %s\n%s\n\n' \
+          "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BLOCK" "$ITER_LOG" "$(worktree_leftovers "$WT" "$ITER" "$ORIGINAL_DIR")" >> "$FIX_PLAN_FILE"
         # Stop here: the next iteration would hit the same obstruction and
         # keep one more full worktree each time.
         ralph_log "worktree for iter $ITER needs attention (blocked). Stopping."

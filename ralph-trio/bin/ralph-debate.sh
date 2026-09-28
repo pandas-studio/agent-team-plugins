@@ -307,8 +307,22 @@ while :; do
     # before spending model calls, and the task goes back on the backlog.
     if ! DEBATE_RECEIPT=$(mktemp "$LOG_DIR_ABS/debate-receipt-$TS-iter-$ITER.XXXXXX"); then
       ralph_log "could not reserve a debate receipt under $LOG_DIR_ABS. Stopping."
-      restore_stopped_topic RECEIPT-FAILED
-      [ -z "$WT" ] || merge_or_discard_worktree "$WT" "$ITER" 0 "$ORIGINAL_DIR" || true
+      # Discard the worktree first, so the fix_plan entry can name anything
+      # the cleanup leaves behind (#114).
+      CLEANUP_LEFT=""
+      if [ -n "$WT" ]; then
+        MERGE_RC=0
+        merge_or_discard_worktree "$WT" "$ITER" 0 "$ORIGINAL_DIR" || MERGE_RC=$?
+        [ "$MERGE_RC" = 0 ] || CLEANUP_LEFT=$(worktree_leftovers "$WT" "$ITER" "$ORIGINAL_DIR")
+      fi
+      restore_stopped_topic RECEIPT-FAILED "$CLEANUP_LEFT"
+      if [ -n "$CLEANUP_LEFT" ]; then
+        # rc=1 refused the discard and kept the worktree; 2 is a failed cleanup.
+        CLEANUP_WHAT="cleanup failed"
+        [ "$MERGE_RC" != 1 ] || CLEANUP_WHAT="PRESERVED (not discarded)"
+        printf '  worktree: %s; left: %s\n' "$CLEANUP_WHAT" \
+          "$(printf '%s\n' "$CLEANUP_LEFT" | paste -sd ' ' -)" >> "$SUMMARY_LOG"
+      fi
       echo "=== STOP (receipt-failed) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
       RUN_FAILED=1
       break
@@ -434,14 +448,15 @@ while :; do
       if [ "$MERGE_RC" = "2" ]; then
         # The change landed (or was dropped); only the cleanup failed.
         BLOCK=WORKTREE-CLEANUP-BLOCK
-        printf '  worktree: %s, but cleanup failed: %s\n' "$OUTCOME" "$WT" >> "$SUMMARY_LOG"
+        printf '  worktree: %s, but cleanup failed; left: %s\n' "$OUTCOME" \
+            "$(worktree_leftovers "$WT" "$ITER" "$ORIGINAL_DIR" | paste -sd ' ' -)" >> "$SUMMARY_LOG"
       else
         # Refused (worktree off its branch) or ff-merge failed: nothing landed.
         BLOCK=WORKTREE-MERGE-BLOCK
         printf '  worktree: PRESERVED (not merged or discarded: %s)\n' "$WT" >> "$SUMMARY_LOG"
       fi
-      printf '## iter %d · %s · %s\nTask: %s\nWorktree: %s\n\n' \
-        "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BLOCK" "$TASK" "$WT" >> "$FIX_PLAN_FILE"
+      printf '## iter %d · %s · %s\nTask: %s\n%s\n\n' \
+        "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BLOCK" "$TASK" "$(worktree_leftovers "$WT" "$ITER" "$ORIGINAL_DIR")" >> "$FIX_PLAN_FILE"
       # Stop here: the next iteration would hit the same obstruction and
       # keep one more full worktree each time.
       ralph_log "worktree for iter $ITER needs attention (blocked). Stopping."

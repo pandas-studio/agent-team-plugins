@@ -184,7 +184,8 @@ commit_worktree_changes() {
 # PASSED_FLAG=0 → leave branch deleted, remove worktree.
 # rc=0 merged (PASSED_FLAG=1) or discarded, and cleaned up; rc=1 nothing landed
 # (worktree off its branch, or the fast-forward failed) and the worktree is kept;
-# rc=2 merged or discarded, but removing the worktree or branch failed.
+# rc=2 merged or discarded, but removing the worktree or its branch failed;
+# worktree_leftovers says which of them is left (#114).
 merge_or_discard_worktree() {
   local wt="$1" iter="$2" passed="$3" orig="$4"
   local br
@@ -205,6 +206,24 @@ merge_or_discard_worktree() {
     ralph_log "could not delete branch $br (iter $iter)"
     return 2
   fi
+}
+
+# worktree_leftovers WT ITER ORIGINAL_DIR — the fix_plan.md lines naming what
+# is left of iteration ITER after a failed merge_or_discard_worktree. Read from
+# disk, not inferred from its rc: a coder can remove the worktree, or switch
+# it off its branch and delete that branch, before cleanup runs.
+worktree_leftovers() {
+  local br found=0
+  br=$(worktree_branch "$1" "$2")
+  if [ -d "$1" ]; then
+    printf 'Worktree: %s\n' "$1"
+    found=1
+  fi
+  if git -C "$3" rev-parse -q --verify "refs/heads/$br" >/dev/null 2>&1; then
+    printf 'Branch: %s\n' "$br"
+    found=1
+  fi
+  [ "$found" = 1 ] || printf 'Left: nothing (worktree %s and branch %s are gone)\n' "$1" "$br"
 }
 
 # ralph_log MSG — stderr with [ralph TS] prefix.
