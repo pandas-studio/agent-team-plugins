@@ -11,6 +11,7 @@ import selectors
 import shlex
 import shutil
 import subprocess
+import platform
 import sys
 import tempfile
 import time
@@ -1946,6 +1947,80 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
             env=os.environ | {"DEV_TRIO_GIT_TIMEOUT": "5"} | env,
             capture_output=True, timeout=20,
         )
+
+    # #142: the working-tree focus swap runs under LC_ALL=C in
+    # dev_trio_replace_first. It must return the bytes the UTF-8 swap did.
+    def _utf8_locale(self, bash):
+        for name in ("C.UTF-8", "en_US.UTF-8"):
+            charmap = subprocess.run([bash, "-c", "locale charmap"], env=self.env | {"LC_ALL": name},
+                                     capture_output=True, text=True).stdout.strip()
+            if charmap == "UTF-8":
+                return name
+        self.skipTest("no UTF-8 locale here; a C-locale comparison would prove nothing")
+
+    def test_replace_first_matches_the_utf8_swap_byte_for_byte(self):
+        host = self.plugin / "lib" / "host.sh"
+        script = (
+            '. "$1"; shift\n'
+            '[ "$(locale charmap)" = UTF-8 ] || { echo "not UTF-8" >&2; exit 3; }\n'
+            'text="$1" from="$2" to="$3"\n'
+            'utf8="${text/"$from"/$to}"\n'
+            'dev_trio_replace_first "$text" "$from" "$to"\n'
+            'mb="é"\n'
+            'printf "%s\\0%s\\0%s" "$utf8" "$DEV_TRIO_REPLACED" "${#mb}"\n'
+        )
+        focus = "Review the full working-tree state (checklist — start with git status)."
+        texts = {
+            "ascii after": "role\n" + focus + "\n" + "a" * 5000,
+            "multibyte around": "é" * 10 + focus + "한글" * 300 + focus,
+            "no match": "é" * 50 + "nothing here",
+        }
+        invalid = [b"\x80", b"\xe2\x80", b"\xff", b"\xc3", b"\xed\xa0\x80"]
+        bashes = ["/bin/bash"] + ([shutil.which("bash")] if shutil.which("bash") not in (None, "/bin/bash") else [])
+        # Replacement text bash may treat specially (bash 5.2's & and \\&), and an
+        # empty pattern: whatever the version does, it must do it the same way.
+        swaps = [(focus.encode(), b"REPLACED"), (focus.encode(), b"a & b \\& c \\\\ d"),
+                 ("é".encode(), b"&&"), (b"", b"X")]
+        for bash in bashes:
+            locale_name = self._utf8_locale(bash)
+            for name, text in texts.items():
+                for junk in [b""] + invalid:
+                    for from_, to in swaps:
+                        raw = junk + text.encode() + junk + b"tail" + junk
+                        with self.subTest(bash=bash, text=name, junk=junk, from_=from_[:8], to=to):
+                            result = subprocess.run(
+                                [bash, "-c", script, "_", str(host), raw, from_, to],
+                                env=self.env | {"LC_ALL": locale_name}, capture_output=True,
+                            )
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                            utf8, replaced, chars = result.stdout.split(b"\0")
+                            self.assertEqual(replaced, utf8)
+                            # The caller's locale is back: é is one character again.
+                            self.assertEqual(chars, b"1")
+                            if from_ == focus.encode() and to == b"REPLACED" and from_ in raw:
+                                self.assertEqual(replaced, raw.replace(from_, to, 1))
+
+    def test_replace_first_is_linear_on_bash_3(self):
+        # The quadratic case is bash 3.2 in a UTF-8 locale (#142): 0.56 s for
+        # the plain swap at 64 KB, about 2 s at 128 KB.
+        major = subprocess.run(["/bin/bash", "-c", "echo ${BASH_VERSINFO[0]}"],
+                               capture_output=True, text=True).stdout.strip()
+        if platform.system() != "Darwin" or major != "3":
+            self.skipTest("the slowdown is measured on macOS /bin/bash 3.2")
+        locale_name = self._utf8_locale("/bin/bash")
+        host = self.plugin / "lib" / "host.sh"
+        script = (
+            '. "$1"\n'
+            'focus="Review the full working-tree state (checklist — start with git status)."\n'
+            'text="role\n$focus\n$(printf "%131072s" "" | tr " " a)"\n'
+            'start=$(python3 -c "import time; print(time.monotonic())")\n'
+            'dev_trio_replace_first "$text" "$focus" "REPLACED"\n'
+            'python3 -c "import sys, time; print(time.monotonic() - float(sys.argv[1]))" "$start"\n'
+        )
+        result = subprocess.run(["/bin/bash", "-c", script, "_", str(host)],
+                                env=self.env | {"LC_ALL": locale_name}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(float(result.stdout), 1.0)
 
     def test_snapshot_helper_exit_codes(self):
         self._commit_two()

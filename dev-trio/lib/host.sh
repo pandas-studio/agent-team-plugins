@@ -351,6 +351,20 @@ dev_trio_agy_cli_log() {
 }
 
 # Prompt section for a workspace-aware model. Kept outside the untrusted tags.
+# dev_trio_replace_first TEXT FROM TO: set DEV_TRIO_REPLACED to TEXT with its
+# first FROM replaced by TO, matching bytes under a function-local LC_ALL=C.
+# ask-reviewer.sh swaps its default focus (ASCII but for one em dash) in a
+# prompt that holds the whole snapshot. In a UTF-8 locale bash 3.2 took 0.56 s
+# for that swap at 64 KB with one multibyte character in the text, and one
+# wrapper run 120 s; under C it took 0.07 s and the run 1.6 s, with the same
+# prompt bytes (#142). A FROM that starts with an ASCII byte cannot match
+# inside a multibyte character, so the first match is the one UTF-8 finds;
+# tests/test_dev_trio_hosts.py compares the two over invalid UTF-8 as well.
+dev_trio_replace_first() {
+  local LC_ALL=C
+  DEV_TRIO_REPLACED="${1/"$2"/$3}"
+}
+
 dev_trio_agy_exec_note() {
   cat <<EOF_NOTE
 # Execution environment
