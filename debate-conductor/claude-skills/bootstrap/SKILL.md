@@ -28,6 +28,8 @@ This skill prepares a 3-pane tmux view: this Claude session stays in the left pa
    ```
    `team-3pane.sh` is on the plugin's PATH while the plugin is active. The script splits the current pane into three equal columns and launches `tail-role.sh gen|crit` in the new panes. Logs land in `$PWD/.debate-conductor/log/<team>/` — the team name is the tmux window's `@team-name` option (set automatically) or session name.
 
+   The script only builds the layout in a window with a single pane. If the layout is already there it says "already present" and exits 0: continue with step 3. If it exits 2, it refused to change this window (another team's window, extra panes, or a half-built layout). Relay its error message to the user verbatim and stop. Do not unset tmux options or kill panes yourself.
+
 3. **Confirm and instruct**. After the split succeeds, tell the user:
    > Layout ready. The middle pane will live-tail the Generator and the right pane the Critic once a debate starts. Pick a topic and run:
    > ```

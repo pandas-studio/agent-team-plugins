@@ -20,6 +20,27 @@ stop_tail() {
   TAIL_PID=""
 }
 register_cleanup stop_tail
+# #169: viewer checks here fail intermittently under load (markers and
+# "attempt failed" lines that should not be shown). When this part fails,
+# dump every viewer capture and every stream record so the failure says how
+# they got there. Cleanup entries run inside smoke_cleanup and see its $rc.
+dump_viewer_state() {
+  [ "$1" != 0 ] || return 0
+  local f
+  # A capture can end without a newline; each header starts its own line.
+  for f in "$TMP"/view-*.out; do
+    [ -e "$f" ] || continue
+    printf -- '\n--- viewer capture %s:\n' "${f##*/}" >&2
+    cat -v "$f" | tail -n 120 >&2 || true
+  done
+  for f in "$TMP"/view-log/*/debate-*/stream-*.log; do
+    [ -e "$f" ] || continue
+    printf -- '\n--- records and markers in %s:\n' "${f#"$TMP"/}" >&2
+    grep -an -- 'debate-round' "$f" | cat -v >&2 || true
+  done
+}
+# shellcheck disable=SC2016  # expanded when smoke_cleanup evals it
+register_cleanup 'dump_viewer_state "$rc"'
 # wait_count FILE PATTERN N: poll up to 15 s until PATTERN occurs on at least N
 # lines of FILE (GNU tail can take seconds to notice a file).
 wait_count() {
@@ -522,7 +543,9 @@ case "$2" in
             while [ ! -f "$1.ready" ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done
             stop_attempt
             if kill -0 "$pid" 2>/dev/null; then echo "bounded=1"; else echo "bounded=0"; fi
-            kill -9 "$pid" 2>/dev/null || true ;;
+            # Reap it here, stderr closed: left to exit, bash may report the
+            # killed job ("Killed: 9") into wait57's captured output (#169).
+            { kill -9 "$pid" && wait "$pid"; } 2>/dev/null || true ;;
 esac
 WAIT57
 wait57() { /bin/bash "$TMP/wait57.sh" "$TMP/wait57-funcs.sh" "$1" 2>&1; }
@@ -707,6 +730,8 @@ check_crafted() {
   assert_eq "$(count "$out" 'Round 3 · Generator · ')" "0"
   assert_eq "$(grep -ao 'attempt failed (rc=[^)]*)' "$out" | tr '\n' ' ')" \
     "attempt failed (rc=3) attempt failed (rc=4) attempt failed (rc=6) "
+  # A signalled viewer must not append Bash's job notice with the awk source.
+  assert_eq "$(count "$out" 'Terminated: ')" "0"
   assert_eq "$(count "$out" 'example extra words')" "1"
   assert_eq "$(count "$out" '2 crit x')" "0"
   assert_eq "$(count "$out" 'id=')" "0"

@@ -226,6 +226,36 @@ def is_sensitive_filename(name: str) -> bool:
     return any(fnmatch.fnmatch(lower, pat) for pat in SENSITIVE_FILENAME_PATTERNS)
 
 
+# Untracked files a reviewer rarely needs first: lock files, minified or
+# source-map output, and data files by extension. They go after the rest, so
+# they cannot use up the budget before the source files (#146). Decided by
+# name alone: a large file with another extension is still read in its place.
+LATE_UNTRACKED_NAMES = frozenset({
+    "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+    "bun.lockb", "cargo.lock", "poetry.lock", "uv.lock", "pipfile.lock",
+    "gemfile.lock", "composer.lock", "go.sum",
+})
+LATE_UNTRACKED_SUFFIXES = (
+    ".lock", ".min.js", ".min.css", ".map",
+    ".csv", ".tsv", ".jsonl", ".ndjson", ".parquet", ".sqlite", ".sqlite3", ".db",
+)
+
+
+def untracked_order(paths: list[str]) -> list[str]:
+    """Stable order by name alone: late names after the rest.
+
+    The filesystem is not touched here; reading still goes through the
+    loop's own O_NOFOLLOW opens.
+    """
+    first: list[str] = []
+    late: list[str] = []
+    for rel_path in paths:
+        name = rel_path.rpartition("/")[2].lower()
+        is_late = name in LATE_UNTRACKED_NAMES or name.endswith(LATE_UNTRACKED_SUFFIXES)
+        (late if is_late else first).append(rel_path)
+    return first + late
+
+
 def is_sensitive_path(
     rel_path: str,
     custom_log_rel: str | None = None,
@@ -883,7 +913,7 @@ def main() -> None:
                         out.write(cap_note)
                         remaining = max(0, remaining - len(cap_note))
 
-                    for rel_path in paths:
+                    for rel_path in untracked_order(paths):
                         clean_path = rel_path.replace("\r", "\\r").replace("\n", "\\n")
                         if rel_path == ".dev-trio" or rel_path.startswith(".dev-trio/") or any(
                             rel_path.casefold() == rel.casefold()

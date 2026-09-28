@@ -2050,6 +2050,74 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertLess(float(result.stdout), 1.0)
 
+    # #146: lock, minified and source-map files are read after the other
+    # untracked files. A lock file that fits alone, but leaves no room once
+    # read, no longer crowds out source.
+    def _untracked_budget_case(self, cwd):
+        self._init_git_workspace()
+        (self.workspace / "base.txt").write_text("base\n")
+        subprocess.run(["git", "add", "base.txt"], cwd=self.workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "base"], cwd=self.workspace,
+                       check=True, stdout=subprocess.DEVNULL)
+        # ls-files lists these in this order: the lock file before the source.
+        (self.workspace / "package-lock.json").write_text("{" + "l" * 6000 + "}\n")
+        (self.workspace / "src").mkdir()
+        (self.workspace / "src" / "main.py").write_text("SOURCE_BODY\n" + "s" * 3000 + "\n")
+        (self.workspace / "src" / "util.py").write_text("UTIL_BODY\n")
+        # 12000 leaves about 7.9 KB after the helper's reserve: the lock file
+        # fits alone, the source after it would not.
+        result = subprocess.run(
+            [sys.executable, str(self.plugin / "lib" / "workspace_snapshot.py"),
+             str(self.workspace), "working-tree", "", "12000", ""],
+            cwd=cwd, env=os.environ | {"DEV_TRIO_GIT_TIMEOUT": "5"}, capture_output=True, timeout=20,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.decode()
+
+    def test_snapshot_untracked_source_before_lock_file(self):
+        snapshot = self._untracked_budget_case(self.workspace)
+        self.assertIn("SOURCE_BODY", snapshot)
+        self.assertIn("UTIL_BODY", snapshot)
+        # Source keeps its own order; the lock file is what the budget drops.
+        self.assertLess(snapshot.index("### Untracked file: src/main.py"),
+                        snapshot.index("### Untracked file: src/util.py"))
+        self.assertNotIn("### Untracked file: package-lock.json", snapshot)
+        self.assertIn("Untracked files omitted: package-lock.json", snapshot)
+
+    def test_snapshot_untracked_source_before_data_file(self):
+        # A data file that fits alone, listed first, would crowd out the source.
+        self._init_git_workspace()
+        (self.workspace / "base.txt").write_text("base\n")
+        subprocess.run(["git", "add", "base.txt"], cwd=self.workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "base"], cwd=self.workspace,
+                       check=True, stdout=subprocess.DEVNULL)
+        (self.workspace / "big.csv").write_text("a,b\n" + "1,2\n" * 1500)
+        (self.workspace / "src").mkdir()
+        (self.workspace / "src" / "main.py").write_text("SOURCE_BODY\n" + "s" * 3000 + "\n")
+        result = self.run_helper("working-tree", budget="12000")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        snapshot = result.stdout.decode()
+        self.assertIn("SOURCE_BODY", snapshot)
+        self.assertIn("Untracked files omitted: big.csv", snapshot)
+
+    def test_snapshot_untracked_order_is_rooted_at_the_repository(self):
+        # Run from a subdirectory: the order must not depend on the cwd.
+        snapshot = self._untracked_budget_case(self.workspace / "src")
+        self.assertIn("SOURCE_BODY", snapshot)
+        self.assertIn("Untracked files omitted: package-lock.json", snapshot)
+
+
+
+    def test_untracked_order_by_name(self):
+        spec = importlib.util.spec_from_file_location("ws146", self.plugin / "lib" / "workspace_snapshot.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        paths = ["a.py", "big.csv", "c/app.min.js", "d/Cargo.lock", "e.txt", "missing.txt",
+                 "site.css.map", "src/lockfile.py", "yarn.lock"]
+        self.assertEqual(module.untracked_order(paths),
+                         ["a.py", "e.txt", "missing.txt", "src/lockfile.py",
+                          "big.csv", "c/app.min.js", "d/Cargo.lock", "site.css.map", "yarn.lock"])
+
     def test_snapshot_helper_exit_codes(self):
         self._commit_two()
         (self.workspace / "u.txt").write_text("untracked\n")
@@ -2710,20 +2778,21 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         import shlex
         tools = self.root / "tools"
         tools.mkdir()
+        # The stateful fake from tests/fake_tmux.py (#100): a one-pane window.
+        fake = Path(__file__).resolve().parent / "fake_tmux.py"
+        state = self.root / "tmux.json"
+        state.write_text(json.dumps({"current": "%0", "next": 1, "calls": [], "fail": {},
+                                     "windows": {"@0": {"options": {}, "panes": ["%0"]}}}))
         tmux = tools / "tmux"
-        tmux.write_text(
-            f"#!{sys.executable}\n"
-            "import json, os, sys\n"
-            "with open(os.environ['STUB_CALLS'], 'a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')\n"
-            "if sys.argv[1] == 'split-window': print('%2')\n"
-            "elif sys.argv[1] == 'display-message': print('fixture')\n"
-        )
+        tmux.write_text(f"#!/bin/sh\nexec {sys.executable} {fake} \"$@\"\n")
         tmux.chmod(0o755)
         result = self.run_cli("team-layout.sh", "--here", DEV_TRIO_PM_HOST="codex",
-                              TMUX="fixture", PATH=str(tools) + os.pathsep + self.env["PATH"])
+                              TMUX="fixture", PATH=str(tools) + os.pathsep + self.env["PATH"],
+                              TMUX_PANE="%0", FAKE_TMUX_STATE=str(state))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Run 'codex'", result.stdout)
-        sent = [shlex.split(call[-2]) for call in self.recorded() if call[0] == "send-keys"]
+        calls = json.loads(state.read_text())["calls"]
+        sent = [shlex.split(call[-2]) for call in calls if call[0] == "send-keys"]
         self.assertEqual(sent, [[str(self.plugin / "bin/dashboard.sh"), role] for role in ("agy", "codex")])
 
     def dashboard(self, role, *extra, expect_rc=0, timeout=10, **env):

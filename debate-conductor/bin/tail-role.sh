@@ -95,6 +95,9 @@ fi
 PIPE_PG=""
 cleanup() {
   if [ -n "$PIPE_PG" ]; then
+    # Bash job control can print the whole pipeline (including awk source) to
+    # the pane when a signal ends the viewer. We still kill its process group.
+    disown "$PIPE_PG" 2>/dev/null || true
     kill -CONT -- "-$PIPE_PG" 2>/dev/null || true   # in case we exit while paused
     kill -TERM -- "-$PIPE_PG" 2>/dev/null || true
   fi
