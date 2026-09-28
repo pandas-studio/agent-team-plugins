@@ -32,16 +32,71 @@ def kill_process_tree(proc: subprocess.Popen) -> None:
             pass
 
 
-def run_bounded(cmd: list[str], max_bytes: int, timeout: float = 10.0) -> tuple[int, bytes]:
-    if max_bytes <= 0:
-        return 0, b""
+def reap(proc: subprocess.Popen) -> None:
+    """Give a killed Git 0.5 s, kill it again, then 0.5 s more; never raise.
+
+    A slow reap must not turn a timeout into another failure (#138).
+    """
+    try:
+        proc.wait(timeout=0.5)
+    except subprocess.TimeoutExpired:
+        kill_process_tree(proc)
+        try:
+            proc.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def deadline_remaining() -> float | None:
+    """Seconds left before DEV_TRIO_SNAPSHOT_DEADLINE, or None without one (#138).
+
+    The wrapper sets the deadline once, on CLOCK_MONOTONIC, for the whole
+    snapshot block; every process in the block reads the same clock.
+    """
+    raw = os.environ.get("DEV_TRIO_SNAPSHOT_DEADLINE", "")
+    if not raw:
+        return None
+    try:
+        deadline = float(raw)
+    except ValueError:
+        return None
+    if not math.isfinite(deadline):
+        return None
+    return deadline - time.clock_gettime(time.CLOCK_MONOTONIC)
+
+
+def deadline_passed() -> bool:
+    remaining = deadline_remaining()
+    return remaining is not None and remaining <= 0
+
+
+def call_timeout(default: float = 10.0) -> float:
+    """The timeout for one Git call: the configured one, cut to the deadline.
+
+    A valid DEV_TRIO_GIT_TIMEOUT replaces the call's default, so a configured
+    25 s stays 25 s. A result <= 0 means the deadline has passed and the call
+    must not start Git.
+    """
+    timeout = default
     try:
         if "DEV_TRIO_GIT_TIMEOUT" in os.environ:
             timeout = float(os.environ["DEV_TRIO_GIT_TIMEOUT"])
     except ValueError:
         pass
     if not math.isfinite(timeout) or timeout <= 0:
-        timeout = 10.0
+        timeout = default
+    remaining = deadline_remaining()
+    if remaining is not None:
+        timeout = min(timeout, remaining)
+    return timeout
+
+
+def run_bounded(cmd: list[str], max_bytes: int, timeout: float = 10.0) -> tuple[int, bytes]:
+    if max_bytes <= 0:
+        return 0, b""
+    timeout = call_timeout(timeout)
+    if timeout <= 0:
+        return 124, b""
     env = os.environ.copy()
     env["GIT_OPTIONAL_LOCKS"] = "0"
     deadline = time.monotonic() + timeout
@@ -130,6 +185,20 @@ SKIP_BUDGET = 8
 
 def skip(code: int) -> None:
     sys.exit(code)
+
+
+def before_workspace_io() -> None:
+    """Start no workspace filesystem call once the deadline has passed (#138)."""
+    if deadline_passed():
+        skip(SKIP_GIT_TIMEOUT)
+
+
+def publish(out: io.BytesIO) -> None:
+    """Write the snapshot and exit 0, unless the deadline passed first (#138)."""
+    if deadline_passed():
+        skip(SKIP_GIT_TIMEOUT)
+    sys.stdout.buffer.write(out.getvalue())
+    sys.exit(0)
 
 
 def run_git(
@@ -394,7 +463,9 @@ def main() -> None:
         candidates.append(os.environ["DEV_TRIO_LOG_DIR"])
     for log_dir_input in candidates:
         try:
+            before_workspace_io()
             cand = Path(log_dir_input).expanduser().resolve()
+            before_workspace_io()
             repo_resolved = Path(repo_root).expanduser().resolve()
             if cand == repo_resolved or repo_resolved in cand.parents:
                 rel = cand.relative_to(repo_resolved).as_posix()
@@ -423,8 +494,7 @@ def main() -> None:
                 if omission else b"the change-name probe was incomplete"
             )
             out.write(b"[... range diff content omitted because " + reason + b"; inspect directly with 'git diff " + target.encode("utf-8", errors="backslashreplace") + b" --' ...]\n")
-            sys.stdout.buffer.write(out.getvalue())
-            sys.exit(0)
+            publish(out)
 
         if remaining <= 0:
             out.write(
@@ -432,8 +502,7 @@ def main() -> None:
                     "utf-8"
                 )
             )
-            sys.stdout.buffer.write(out.getvalue())
-            sys.exit(0)
+            publish(out)
 
         rc, data = run_git(
             [
@@ -488,8 +557,7 @@ def main() -> None:
             out.write(
                 b"[... status exceeded snapshot budget; diff and untracked files were omitted. Run 'git status --short --untracked-files=all', then 'git diff HEAD' if HEAD exists, or 'git diff --cached' and 'git diff --' otherwise ...]\n"
             )
-            sys.stdout.buffer.write(out.getvalue())
-            sys.exit(0)
+            publish(out)
         try:
             status_entries = parse_status_z(data)
         except ValueError:
@@ -542,8 +610,7 @@ def main() -> None:
             out.write(
                 b"\n[... status exceeded snapshot budget; diff and untracked files were omitted. Run 'git status --short --untracked-files=all', then 'git diff HEAD' if HEAD exists, or 'git diff --cached' and 'git diff --' otherwise ...]\n"
             )
-            sys.stdout.buffer.write(out.getvalue())
-            sys.exit(0)
+            publish(out)
         out.write(header)
         out.write(data)
         remaining = max(0, remaining - len(header) - len(data))
@@ -593,8 +660,7 @@ def main() -> None:
             out.write(
                 b"[... tracked diff and untracked contents omitted because a sensitive path, or a tracked deletion or type change, is present; inspect directly with git and your file viewer ...]\n"
             )
-            sys.stdout.buffer.write(out.getvalue())
-            sys.exit(0)
+            publish(out)
 
         # 2. Tracked modifications
         if has_head is None:
@@ -605,8 +671,7 @@ def main() -> None:
                 out.write(
                     b"### Tracked modifications\n[... snapshot budget reached; tracked diff and untracked files were omitted. Run 'git diff HEAD' directly ...]\n"
                 )
-                sys.stdout.buffer.write(out.getvalue())
-                sys.exit(0)
+                publish(out)
             rc, diff_data = run_git(
                 [
                     "git",
@@ -645,8 +710,7 @@ def main() -> None:
                             "utf-8"
                         )
                     )
-                    sys.stdout.buffer.write(out.getvalue())
-                    sys.exit(0)
+                    publish(out)
                 else:
                     out.write(diff_data)
                     remaining = max(
@@ -661,8 +725,7 @@ def main() -> None:
                 out.write(
                     b"### Staged modifications\n[... snapshot budget reached; staged diff, unstaged diff, and untracked files were omitted. Run 'git diff --cached --' directly ...]\n"
                 )
-                sys.stdout.buffer.write(out.getvalue())
-                sys.exit(0)
+                publish(out)
             rc, staged = run_git(
                 [
                     "git",
@@ -690,8 +753,7 @@ def main() -> None:
                     out.write(
                         b"\n[... staged diff filled snapshot budget; unstaged diff and untracked files omitted. Run 'git diff --cached --' and 'git diff --' directly ...]\n"
                     )
-                    sys.stdout.buffer.write(out.getvalue())
-                    sys.exit(0)
+                    publish(out)
                 else:
                     out.write(staged_header + staged)
                     remaining = max(
@@ -703,8 +765,7 @@ def main() -> None:
                 out.write(
                     b"### Unstaged modifications\n[... snapshot budget reached; unstaged diff and untracked files were omitted. Run 'git diff --' directly ...]\n"
                 )
-                sys.stdout.buffer.write(out.getvalue())
-                sys.exit(0)
+                publish(out)
             rc, unstaged = run_git(
                 [
                     "git",
@@ -733,8 +794,7 @@ def main() -> None:
                     out.write(
                         b"\n[... unstaged diff filled snapshot budget; untracked files omitted. Run 'git diff --' directly ...]\n"
                     )
-                    sys.stdout.buffer.write(out.getvalue())
-                    sys.exit(0)
+                    publish(out)
                 else:
                     out.write(unstaged_header + unstaged)
                     remaining = max(
@@ -747,12 +807,15 @@ def main() -> None:
                 b"\n[... snapshot budget reached; untracked files were omitted. Use 'git status --short --untracked-files=all' and your file viewer tool to read untracked files ...]\n"
             )
         else:
+            before_workspace_io()
             root_path = Path(repo_root).expanduser().resolve()
             flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
             root_fd = None
             try:
+                before_workspace_io()
                 root_fd = os.open(root_path.anchor, flags)
                 for part in root_path.parts[1:]:
+                    before_workspace_io()
                     child = os.open(part, flags, dir_fd=root_fd)
                     os.close(root_fd)
                     root_fd = child
@@ -764,6 +827,7 @@ def main() -> None:
                         pass
                     root_fd = None
                 try:
+                    before_workspace_io()
                     root_fd = os.open(
                         str(root_path),
                         os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
@@ -772,8 +836,7 @@ def main() -> None:
                     out.write(
                         b"\n[... repository directory path contains symlink or could not be opened safely ...]\n"
                     )
-                    sys.stdout.buffer.write(out.getvalue())
-                    sys.exit(0)
+                    publish(out)
 
             try:
                 ls_env = os.environ.copy()
@@ -798,6 +861,10 @@ def main() -> None:
                     ls_cmd.extend(
                         f":(exclude,top,icase,literal){rel}" for rel in extra_log_rels
                     )
+                ls_timeout = call_timeout(10.0)
+                if ls_timeout <= 0:
+                    skip(SKIP_GIT_TIMEOUT)
+                deadline = time.monotonic() + ls_timeout
                 proc = subprocess.Popen(
                     ls_cmd,
                     stdin=subprocess.DEVNULL,
@@ -806,15 +873,6 @@ def main() -> None:
                     env=ls_env,
                     start_new_session=True,
                 )
-                ls_timeout = 10.0
-                try:
-                    if "DEV_TRIO_GIT_TIMEOUT" in os.environ:
-                        ls_timeout = float(os.environ["DEV_TRIO_GIT_TIMEOUT"])
-                except ValueError:
-                    pass
-                if not math.isfinite(ls_timeout) or ls_timeout <= 0:
-                    ls_timeout = 10.0
-                deadline = time.monotonic() + ls_timeout
                 if proc.stdout is not None:
                     os.set_blocking(proc.stdout.fileno(), False)
 
@@ -860,6 +918,9 @@ def main() -> None:
                                 break
                         elif proc.poll() is not None:
                             while True:
+                                if deadline - time.monotonic() <= 0:
+                                    timed_out = True
+                                    break
                                 try:
                                     chunk = os.read(proc.stdout.fileno(), 65536)
                                 except OSError:
@@ -874,9 +935,9 @@ def main() -> None:
                         paths.append(os.fsdecode(bytes(buf)))
                     if capped or timed_out or read_failed:
                         # A read error is a failure now; do not wait on Git.
-                        if read_failed:
+                        if read_failed or timed_out:
                             kill_process_tree(proc)
-                        proc.wait(timeout=0.5)
+                        reap(proc)
                     else:
                         # As in run_bounded: the rest of the deadline, then a timeout.
                         try:
@@ -884,7 +945,7 @@ def main() -> None:
                         except subprocess.TimeoutExpired:
                             timed_out = True
                             kill_process_tree(proc)
-                            proc.wait(timeout=0.5)
+                            reap(proc)
                 except Exception:
                     read_failed = True
                     kill_process_tree(proc)
@@ -914,6 +975,9 @@ def main() -> None:
                         remaining = max(0, remaining - len(cap_note))
 
                     for rel_path in untracked_order(paths):
+                        # One deadline for the whole snapshot (#138): no new
+                        # file is opened once it has passed.
+                        before_workspace_io()
                         clean_path = rel_path.replace("\r", "\\r").replace("\n", "\\n")
                         if rel_path == ".dev-trio" or rel_path.startswith(".dev-trio/") or any(
                             rel_path.casefold() == rel.casefold()
@@ -943,6 +1007,7 @@ def main() -> None:
                         try:
                             for part in parts[:-1]:
                                 try:
+                                    before_workspace_io()
                                     next_fd = os.open(
                                         part, flags, dir_fd=cur_fd
                                     )
@@ -951,6 +1016,7 @@ def main() -> None:
                                 except OSError:
                                     failed_intermediate = True
                                     try:
+                                        before_workspace_io()
                                         link_target = os.readlink(
                                             part, dir_fd=cur_fd
                                         )
@@ -976,6 +1042,7 @@ def main() -> None:
                             leaf = parts[-1]
                             leaf_fd = None
                             try:
+                                before_workspace_io()
                                 leaf_fd = os.open(
                                     leaf,
                                     os.O_RDONLY
@@ -985,6 +1052,7 @@ def main() -> None:
                                 )
                             except OSError:
                                 try:
+                                    before_workspace_io()
                                     link_target = os.readlink(leaf, dir_fd=cur_fd)
                                     clean_target = link_target.replace("\r", "\\r").replace("\n", "\\n")
                                     meta = f"### Untracked symlink: {clean_path} -> {clean_target}\n".encode(
@@ -1048,6 +1116,7 @@ def main() -> None:
 
                                     content = bytearray()
                                     while len(content) <= max_content:
+                                        before_workspace_io()
                                         chunk = os.read(
                                             leaf_fd,
                                             min(65536, max_content + 1 - len(content)),
@@ -1123,8 +1192,7 @@ def main() -> None:
                 if root_fd is not None:
                     os.close(root_fd)
 
-    sys.stdout.buffer.write(out.getvalue())
-    sys.exit(0)
+    publish(out)
 
 
 if __name__ == "__main__":
