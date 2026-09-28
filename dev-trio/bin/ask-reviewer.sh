@@ -395,7 +395,8 @@ $SNAPSHOT
           if [ "$AGY_SCOPE" = "working-tree" ]; then
             SNAPSHOT_FOCUS="Review the full working-tree state shown in <workspace_snapshot> (tracked diffs and untracked files). Inspect the snapshot before deciding whether any independent checks are needed."
             snapshot_replacement="$SNAPSHOT_FOCUS"
-            CANDIDATE_PROMPT="${CANDIDATE_PROMPT/"$DEFAULT_FOCUS"/$snapshot_replacement}"
+            dev_trio_replace_first "$CANDIDATE_PROMPT" "$DEFAULT_FOCUS" "$snapshot_replacement"
+            CANDIDATE_PROMPT="$DEV_TRIO_REPLACED"
             CANDIDATE_PROMPT="$CANDIDATE_PROMPT
 
 # Snapshot inspection rule
