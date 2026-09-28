@@ -142,6 +142,31 @@ here_stamp() {
   fi
   tmux set-option -w -t "$HERE_PANE" '@team-layout' "$layout $*"
 }
+# here_lock — serialize the guard, the build and the stamp per window: two
+# runs that both saw one pane would otherwise both split it. A lock directory
+# holding the owner's pid, not `tmux wait-for -L`, so a run that died (even
+# to SIGKILL) cannot leave every later bootstrap blocked. Released at exit.
+here_lock() {
+  local wid owner i=0
+  wid=$(tmux display-message -p -t "$HERE_PANE" '#{window_id}') || return 1
+  HERE_LOCK="${TMPDIR:-/tmp}/agent-team-layout.$(id -u).$(printf '%s %s' "${TMUX%%,*}" "$wid" | cksum | cut -d' ' -f1)"
+  until mkdir "$HERE_LOCK" 2>/dev/null; do
+    owner=$(cat "$HERE_LOCK/pid" 2>/dev/null || true)
+    if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+      rm -rf "$HERE_LOCK"   # its owner is gone
+      continue
+    fi
+    i=$((i + 1))
+    if [ "$i" -ge 100 ]; then
+      printf 'error: another layout run is still setting up this window (lock %s); retry when it finishes.\n' \
+        "$HERE_LOCK" >&2
+      return 2
+    fi
+    sleep 0.1
+  done
+  echo "$$" > "$HERE_LOCK/pid"
+  trap 'rm -rf "$HERE_LOCK"' EXIT
+}
 # -----------------------------------------------------------------------------
 
 if [ "$NEW_SESSION" = "0" ]; then
@@ -167,6 +192,9 @@ EOF
   fi
   [ -n "$HERE_PANE" ] && tmux display-message -t "$HERE_PANE" -p '#S' >/dev/null 2>&1 || {
     echo "error: cannot reach tmux server from \$TMUX=$TMUX" >&2; exit 2; }
+  lock_rc=0
+  here_lock || lock_rc=$?
+  [ "$lock_rc" = 0 ] || exit "$lock_rc"
   guard_rc=0
   here_guard debate-3pane || guard_rc=$?
   if [ "$guard_rc" = 3 ]; then
@@ -190,6 +218,10 @@ else
   MAIN_P=$(tmux new-session -d -s "$SESSION" -n "$SESSION" -P -F "#{pane_id}")
   tmux set-option -w -t "$SESSION" '@team-name' "$SESSION"
   apply_3pane_split "$MAIN_P"
+  # Recorded like a --here layout, so a later --here in it is a no-op (#100).
+  HERE_PANE="$MAIN_P"
+  # shellcheck disable=SC2086  # two pane ids
+  here_stamp debate-3pane "$MAIN_P" $SPLIT_PANES || exit $?
   tmux send-keys -t "$MAIN_P" "# debate-conductor ready for ${PM_LABEL} (team: ${SESSION}). Run ${RUN_HINT} to start." Enter
 fi
 

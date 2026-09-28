@@ -36,8 +36,8 @@ class HereLayoutTests(unittest.TestCase):
 
     # ---- fixture ---------------------------------------------------------
 
-    def state(self, windows=None, current="%0", nxt=1, fail=None):
-        s = {"current": current, "next": nxt, "calls": [], "fail": fail or {},
+    def state(self, windows=None, current="%0", nxt=1, fail=None, delay=None):
+        s = {"current": current, "next": nxt, "calls": [], "fail": fail or {}, "delay": delay or {},
              "windows": windows or {"@0": {"options": {}, "panes": ["%0"]}}}
         self.state_path.write_text(json.dumps(s))
 
@@ -55,7 +55,7 @@ class HereLayoutTests(unittest.TestCase):
                 if k not in ("TMUX_PANE", "AGENT_TEAM") and not k.startswith(("DEV_TRIO_", "DEBATE_CONDUCTOR_"))}
         full.update(host_env)
         full.update(PATH=str(self.tools) + os.pathsep + os.environ["PATH"], TMUX="fake,1,0",
-                    FAKE_TMUX_STATE=str(self.state_path))
+                    FAKE_TMUX_STATE=str(self.state_path), TMPDIR=str(self.root))
         if pane is not None:
             full["TMUX_PANE"] = pane
         full.update(env)
@@ -257,6 +257,74 @@ class HereLayoutTests(unittest.TestCase):
         self.assertEqual(self.window("@0")["panes"], ["%0", "%6", "%7"])
         self.assertEqual(self.window("@1")["panes"], ["%5"])
         self.assertEqual(self.window("@1")["options"], {})
+
+
+    # ---- round-2 review of #180 --------------------------------------------
+
+    def start_here(self, layout):
+        script, host_env = SCRIPTS[layout]
+        full = {k: v for k, v in os.environ.items()
+                if k not in ("TMUX_PANE", "AGENT_TEAM") and not k.startswith(("DEV_TRIO_", "DEBATE_CONDUCTOR_"))}
+        full.update(host_env, PATH=str(self.tools) + os.pathsep + os.environ["PATH"], TMUX="fake,1,0",
+                    FAKE_TMUX_STATE=str(self.state_path), TMPDIR=str(self.root), TMUX_PANE="%0")
+        return subprocess.Popen(["bash", str(script), "--here"], cwd=self.root, env=full, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+
+    def test_concurrent_runs_build_one_layout(self):
+        # Both see one pane; the slow first split keeps them overlapping. The
+        # lock makes the second wait, then find the layout complete.
+        for layout in SCRIPTS:
+            with self.subTest(layout=layout):
+                self.state(delay={"split-window": 0.4})
+                runs = [self.start_here(layout), self.start_here(layout)]
+                results = [(p.communicate(timeout=60) and p.returncode, *p.communicate()) for p in runs]
+                for rc, out, err in results:
+                    self.assertEqual(rc, 0, err)
+                self.assertEqual(len(self.window()["panes"]), 3)
+                self.assertEqual(sum("already present" in out for _, out, _ in results), 1)
+                self.assertEqual([c[0] for c in self.read()["calls"]].count("split-window"), 2)
+
+    def test_a_dead_runs_lock_is_taken_over(self):
+        # A run killed mid-build leaves its lock behind; a later run must take
+        # it over, not wait on it.
+        self.state()
+        r = self.run_here("debate-3pane")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([p for p in self.root.iterdir() if p.name.startswith("agent-team-layout.")], [],
+                         "the lock is released at exit")
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        name = subprocess.run(
+            ["bash", "-c", 'printf "%s %s" "${TMUX%%,*}" "@0" | cksum | cut -d" " -f1'],
+            env={"TMUX": "fake,1,0", "PATH": os.environ["PATH"]}, capture_output=True, text=True, check=True)
+        stale = self.root / f"agent-team-layout.{os.getuid()}.{name.stdout.strip()}"
+        stale.mkdir()
+        (stale / "pid").write_text(f"{dead.pid}\n")
+        self.state()
+        r = self.run_here("debate-3pane")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(self.window()["panes"]), 3)
+        self.assertFalse(stale.exists())
+
+    def test_new_session_layout_is_recorded(self):
+        for layout, session in (("debate-3pane", "debate-conductor"), ("dev-trio-layout", "dev-trio")):
+            with self.subTest(layout=layout):
+                self.state(windows={"@0": {"options": {}, "panes": ["%0"]}})
+                script, host_env = SCRIPTS[layout]
+                full = {k: v for k, v in os.environ.items()
+                        if k not in ("TMUX_PANE", "AGENT_TEAM", "TMUX")
+                        and not k.startswith(("DEV_TRIO_", "DEBATE_CONDUCTOR_"))}
+                full.update(host_env, PATH=str(self.tools) + os.pathsep + os.environ["PATH"],
+                            FAKE_TMUX_STATE=str(self.state_path), TMPDIR=str(self.root))
+                args = ["--new-session", "--no-attach"] if layout == "debate-3pane" else ["--no-attach"]
+                r = subprocess.run(["bash", str(script), *args], cwd=self.root, env=full, text=True,
+                                   capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                wid, win = next((w, v) for w, v in self.read()["windows"].items() if v.get("session") == session)
+                self.assertEqual(win["options"]["@team-layout"], f"{layout} {' '.join(win['panes'])}")
+                r = self.run_here(layout, pane=win["panes"][0])
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertIn("already present", r.stdout)
 
 
 if __name__ == "__main__":
