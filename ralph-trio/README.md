@@ -64,13 +64,15 @@ plutil -lint "$PLIST"
 ```
 
 The renderer requires absolute paths and replaces an existing output file
-atomically. It does not expand `~` or `$HOME`. Replace the deliberately failing
-`TEST_CMD` before loading the job; worktree mode discards an iteration whenever
-that command fails. Regenerate the plist to change the test command instead of
-hand-editing XML. Adjust the generated plist's calendar and iteration/runtime
-budgets as needed, then lint it again. Make sure `PROMPT.md` exists first;
-`/ralph-trio:bootstrap` creates a starter. Load, trigger, and inspect the job
-with:
+atomically while preserving its file mode. It rejects an output path that is a
+directory or symbolic link, and it does not expand `~` or `$HOME`. Replace the
+deliberately failing `TEST_CMD` before loading the job; worktree mode discards
+an iteration whenever that command fails. Regenerate the plist to change the
+test command instead of hand-editing XML. Adjust the generated plist's calendar
+and iteration/runtime budgets as needed, then lint it again. Regeneration
+replaces the whole plist, so reapply any manual schedule or budget changes.
+Make sure `PROMPT.md` exists first; `/ralph-trio:bootstrap` creates a starter.
+Load, trigger, and inspect the job with:
 
 ```bash
 plutil -lint "$PLIST"

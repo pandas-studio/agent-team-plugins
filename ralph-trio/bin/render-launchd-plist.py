@@ -7,6 +7,7 @@ import argparse
 import os
 import plistlib
 import re
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -71,12 +72,25 @@ def main() -> int:
 
     repo = _absolute(parser, "--repo", args.repo)
     ralph_solo_bin = _absolute(parser, "--ralph-solo-bin", args.ralph_solo_bin)
+    if not os.path.isdir(repo):
+        parser.error(f"--repo is not a directory: {repo}")
+    if not os.path.isfile(ralph_solo_bin) or not os.access(
+        ralph_solo_bin, os.X_OK
+    ):
+        parser.error(f"--ralph-solo-bin is not an executable file: {ralph_solo_bin}")
     if not args.test_cmd.strip():
         parser.error("--test-cmd must not be empty")
     output = Path(args.output)
     output_parent = output.parent
     if not output_parent.is_dir():
         parser.error(f"--output parent directory does not exist: {output_parent}")
+    if output.is_symlink():
+        parser.error(f"--output must not be a symbolic link: {output}")
+    if output.is_dir():
+        parser.error(f"--output is a directory: {output}")
+    output_mode = (
+        stat.S_IMODE(output.stat().st_mode) if output.exists() else 0o644
+    )
 
     with TEMPLATE.open("rb") as stream:
         template = plistlib.load(stream)
@@ -99,6 +113,7 @@ def main() -> int:
     ) as stream:
         temporary = Path(stream.name)
         try:
+            os.fchmod(stream.fileno(), output_mode)
             stream.write(encoded)
             stream.flush()
             os.fsync(stream.fileno())

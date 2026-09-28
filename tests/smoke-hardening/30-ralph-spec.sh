@@ -410,11 +410,15 @@ cat > "$SPECIAL_BIN" <<'STUB'
 STUB
 chmod +x "$SPECIAL_BIN"
 printf 'replace me\n' > "$SPECIAL_PLIST"
+chmod 0640 "$SPECIAL_PLIST"
 assert_ok "$LAUNCH_RENDERER" \
   --repo "$SPECIAL_REPO" \
   --ralph-solo-bin "$SPECIAL_BIN" \
   --test-cmd "$SPECIAL_TEST_CMD" \
   --output "$SPECIAL_PLIST" >/dev/null
+assert_eq "$(python3 -c \
+  'import os, stat, sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode)))' \
+  "$SPECIAL_PLIST")" "0o640"
 assert_ok python3 - "$SPECIAL_PLIST" "$SPECIAL_REPO" "$SPECIAL_BIN" "$SPECIAL_TEST_CMD" <<'PY'
 import os
 import plistlib
@@ -476,6 +480,59 @@ rc=0
 assert_eq "$rc" "2"
 assert_eq "$(grep -c -- '--test-cmd must not be empty' "$SPECIAL_ROOT/empty.err")" "1"
 assert_eq "$(grep -c 'Traceback' "$SPECIAL_ROOT/empty.err")" "0"
+
+rc=0
+"$LAUNCH_RENDERER" \
+  --repo "$SPECIAL_REPO" \
+  --ralph-solo-bin "$SPECIAL_BIN" \
+  --test-cmd "$SPECIAL_TEST_CMD" \
+  --output "$SPECIAL_ROOT" \
+  >"$SPECIAL_ROOT/directory.out" 2>"$SPECIAL_ROOT/directory.err" || rc=$?
+assert_eq "$rc" "2"
+assert_eq "$(grep -c -- '--output is a directory:' "$SPECIAL_ROOT/directory.err")" "1"
+assert_eq "$(grep -c 'Traceback' "$SPECIAL_ROOT/directory.err")" "0"
+
+SYMLINK_TARGET="$SPECIAL_ROOT/symlink target.plist"
+SYMLINK_OUTPUT="$SPECIAL_ROOT/symlink output.plist"
+printf 'keep target\n' > "$SYMLINK_TARGET"
+ln -s "$SYMLINK_TARGET" "$SYMLINK_OUTPUT"
+rc=0
+"$LAUNCH_RENDERER" \
+  --repo "$SPECIAL_REPO" \
+  --ralph-solo-bin "$SPECIAL_BIN" \
+  --test-cmd "$SPECIAL_TEST_CMD" \
+  --output "$SYMLINK_OUTPUT" \
+  >"$SPECIAL_ROOT/symlink.out" 2>"$SPECIAL_ROOT/symlink.err" || rc=$?
+assert_eq "$rc" "2"
+assert_eq "$(grep -c -- '--output must not be a symbolic link:' "$SPECIAL_ROOT/symlink.err")" "1"
+assert_eq "$(grep -c 'Traceback' "$SPECIAL_ROOT/symlink.err")" "0"
+assert_eq "$(readlink "$SYMLINK_OUTPUT")" "$SYMLINK_TARGET"
+assert_eq "$(cat "$SYMLINK_TARGET")" "keep target"
+
+rc=0
+"$LAUNCH_RENDERER" \
+  --repo "$SPECIAL_ROOT/not a repo" \
+  --ralph-solo-bin "$SPECIAL_BIN" \
+  --test-cmd "$SPECIAL_TEST_CMD" \
+  --output "$SPECIAL_PLIST" \
+  >"$SPECIAL_ROOT/repo.out" 2>"$SPECIAL_ROOT/repo.err" || rc=$?
+assert_eq "$rc" "2"
+assert_eq "$(grep -c -- '--repo is not a directory:' "$SPECIAL_ROOT/repo.err")" "1"
+assert_eq "$(grep -c 'Traceback' "$SPECIAL_ROOT/repo.err")" "0"
+
+NONEXECUTABLE_BIN="$SPECIAL_ROOT/not executable"
+printf '#!/bin/bash\n' > "$NONEXECUTABLE_BIN"
+chmod 0644 "$NONEXECUTABLE_BIN"
+rc=0
+"$LAUNCH_RENDERER" \
+  --repo "$SPECIAL_REPO" \
+  --ralph-solo-bin "$NONEXECUTABLE_BIN" \
+  --test-cmd "$SPECIAL_TEST_CMD" \
+  --output "$SPECIAL_PLIST" \
+  >"$SPECIAL_ROOT/bin.out" 2>"$SPECIAL_ROOT/bin.err" || rc=$?
+assert_eq "$rc" "2"
+assert_eq "$(grep -c -- '--ralph-solo-bin is not an executable file:' "$SPECIAL_ROOT/bin.err")" "1"
+assert_eq "$(grep -c 'Traceback' "$SPECIAL_ROOT/bin.err")" "0"
 
 CRON_WRAPPER="$SPECIAL_ROOT/cron wrapper"
 CRON_CAPTURE="$SPECIAL_ROOT/cron capture"
