@@ -1344,6 +1344,16 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         self.assertIn("### Working tree status", snapshot)
         self.assertIn("### Untracked file: f.txt\nhello\n", snapshot)
 
+    def test_agy_reviewer_default_without_snapshot_keeps_full_worktree_scope(self):
+        result = self.run_cli(DEV_TRIO_REVIEWER_MODEL="agy", DEV_TRIO_SNAPSHOT_MAX_BYTES="0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        prompt = self.sent_prompt()
+        self.assertNotIn("<workspace_snapshot>", prompt)
+        self.assertIn("Review the full working-tree state in this repo", self.fenced(prompt, "review_target"))
+        self.assertIn("new (untracked) files; read each one", prompt)
+        self.assertIn("use `git status --short --untracked-files=all` instead of `git ls-files`", prompt)
+        self.assertNotIn("Stay within the requested focus", prompt)
+
     def test_agy_reviewer_freeform_focus_skips_snapshot(self):
         self._init_git_workspace()
         (self.workspace / "f.txt").write_text("hello\n")
@@ -1351,6 +1361,19 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         self.assertEqual(result.returncode, 0, result.stderr)
         prompt = self.sent_prompt()
         self.assertNotIn("\n<workspace_snapshot>\n", prompt)
+        self.assertNotIn("then read every file it lists", prompt)
+        self.assertIn("Do not run `git status` or inspect other changed or untracked files", prompt)
+
+    def test_agy_reviewer_range_without_snapshot_has_no_worktree_sweep(self):
+        self._commit_two()
+        result = self.run_cli("ask-reviewer.sh", "review HEAD~1..HEAD",
+                              DEV_TRIO_REVIEWER_MODEL="agy", DEV_TRIO_SNAPSHOT_MAX_BYTES="0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        prompt = self.sent_prompt()
+        self.assertNotIn("<workspace_snapshot>", prompt)
+        self.assertNotIn("then read every file it lists", prompt)
+        self.assertIn("Do not run `git status` or inspect other changed or untracked files", prompt)
+        self.assertIn("no pipes", prompt)
 
     def test_agy_reviewer_embedded_range_focus_gets_diff_snapshot(self):
         self._init_git_workspace()
@@ -1572,6 +1595,8 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         prompt = self.sent_prompt()
         self.assertNotIn("<workspace_snapshot>", prompt)
         self.assertNotIn("precomputed snapshot", prompt)
+        self.assertNotIn("then read every file it lists", prompt)
+        self.assertIn("Do not run `git status` or inspect other changed or untracked files", prompt)
 
     def test_agy_reviewer_from_subdirectory(self):
         self._init_git_workspace()
@@ -1917,6 +1942,7 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         prompt = self.sent_prompt()
         self.assertIn("\n# Snapshot inspection rule (range)\nThe <workspace_snapshot> covers only `git diff HEAD~1..HEAD`.", prompt)
         self.assertNotIn("\n# Snapshot inspection rule\n", prompt)
+        self.assertNotIn("The execution environment's `git status` step", prompt)
 
     def test_snapshot_working_tree_prompt_has_no_range_rule(self):
         self._init_git_workspace()
