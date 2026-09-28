@@ -381,5 +381,92 @@ assert_eq "$rc" "2"
 assert_eq "$(grep -c "ralph-solo: failed to load $LAUNCH_TMP/lib/common.sh" "$LAUNCH_TMP/link.err")" "1"
 assert_eq "$(grep -c 'jq missing' "$LAUNCH_TMP/link.err")" "0"
 
+# #170/#172: the plist is strict XML and paths are data, not shell source.
+# Exercise every character called out by #170 through the generated argv, cwd,
+# environment and cron-wrapper contracts.
+LAUNCH_TEMPLATE="$ROOT/ralph-trio/templates/launchd/com.user.ralph.plist.template"
+LAUNCH_RENDERER="$ROOT/ralph-trio/bin/render-launchd-plist.py"
+assert_ok python3 -c 'import plistlib, sys; plistlib.load(open(sys.argv[1], "rb"))' "$LAUNCH_TEMPLATE"
+if command -v xmllint >/dev/null 2>&1; then
+  assert_ok xmllint --noout "$LAUNCH_TEMPLATE"
+fi
+
+SPECIAL_ROOT="$TMP/launch space 'single' \"double\" \$dollar & amp"
+SPECIAL_REPO="$SPECIAL_ROOT/repo space 'single' \"double\" \$dollar & amp"
+SPECIAL_BIN_DIR="$SPECIAL_ROOT/bin space 'single' \"double\" \$dollar & amp"
+SPECIAL_BIN="$SPECIAL_BIN_DIR/ralph solo 'single' \"double\" \$dollar & amp"
+SPECIAL_PLIST="$SPECIAL_ROOT/generated launchd.plist"
+LAUNCH_CAPTURE="$SPECIAL_ROOT/launch capture"
+export LAUNCH_CAPTURE
+mkdir -p "$SPECIAL_REPO/.ralph-trio/log/overnight" "$SPECIAL_BIN_DIR"
+cat > "$SPECIAL_BIN" <<'STUB'
+#!/bin/bash
+{
+  printf 'cwd=%s\n' "$PWD"
+  printf 'team=%s\n' "${AGENT_TEAM-}"
+  for arg in "$@"; do printf 'arg=%s\n' "$arg"; done
+} > "$LAUNCH_CAPTURE"
+STUB
+chmod +x "$SPECIAL_BIN"
+printf 'replace me\n' > "$SPECIAL_PLIST"
+assert_ok "$LAUNCH_RENDERER" \
+  --repo "$SPECIAL_REPO" \
+  --ralph-solo-bin "$SPECIAL_BIN" \
+  --output "$SPECIAL_PLIST"
+assert_ok python3 - "$SPECIAL_PLIST" "$SPECIAL_REPO" "$SPECIAL_BIN" <<'PY'
+import os
+import plistlib
+import subprocess
+import sys
+from pathlib import Path
+
+plist_path, repo, executable = sys.argv[1:]
+with open(plist_path, "rb") as stream:
+    plist = plistlib.load(stream)
+
+arguments = [
+    executable,
+    "--max-iter", "50",
+    "--max-runtime", "6h",
+    "--worktree",
+    "--prompt", f"{repo}/PROMPT.md",
+    "--test-cmd", "echo replace-with-your-test-command",
+]
+assert plist["ProgramArguments"] == arguments
+assert plist["WorkingDirectory"] == repo
+assert plist["StandardOutPath"] == f"{repo}/.ralph-trio/log/overnight/launchd.stdout.log"
+assert plist["StandardErrorPath"] == f"{repo}/.ralph-trio/log/overnight/launchd.stderr.log"
+assert plist["EnvironmentVariables"]["AGENT_TEAM"] == "overnight"
+
+environment = os.environ.copy()
+environment.update(plist["EnvironmentVariables"])
+subprocess.run(arguments, cwd=repo, env=environment, check=True)
+capture = Path(os.environ["LAUNCH_CAPTURE"]).read_text().splitlines()
+assert capture == [f"cwd={repo}", "team=overnight"] + [
+    f"arg={argument}" for argument in arguments[1:]
+]
+PY
+if command -v xmllint >/dev/null 2>&1; then
+  assert_ok xmllint --noout "$SPECIAL_PLIST"
+fi
+if command -v plutil >/dev/null 2>&1; then
+  assert_ok plutil -lint "$SPECIAL_PLIST"
+fi
+
+CRON_WRAPPER="$SPECIAL_ROOT/cron wrapper"
+CRON_CAPTURE="$SPECIAL_ROOT/cron capture"
+printf '#!/bin/bash\ncd %q || exit 1\nexec env AGENT_TEAM=overnight %q --max-iter 50 --max-runtime 6h --worktree --prompt %q --test-cmd %q >> %q 2>&1\n' \
+  "$SPECIAL_REPO" "$SPECIAL_BIN" "$SPECIAL_REPO/PROMPT.md" \
+  'echo replace-with-your-test-command' \
+  "$SPECIAL_REPO/.ralph-trio/log/overnight/cron.log" > "$CRON_WRAPPER"
+chmod +x "$CRON_WRAPPER"
+assert_ok env LAUNCH_CAPTURE="$CRON_CAPTURE" "$CRON_WRAPPER"
+assert_eq "$(sed -n '1p' "$CRON_CAPTURE")" "cwd=$SPECIAL_REPO"
+assert_eq "$(sed -n '2p' "$CRON_CAPTURE")" "team=overnight"
+assert_eq "$(sed -n '3,$p' "$CRON_CAPTURE")" "$(printf '%s\n' \
+  'arg=--max-iter' 'arg=50' 'arg=--max-runtime' 'arg=6h' 'arg=--worktree' \
+  'arg=--prompt' "arg=$SPECIAL_REPO/PROMPT.md" \
+  'arg=--test-cmd' 'arg=echo replace-with-your-test-command')"
+
 
 smoke_done 30-ralph-spec

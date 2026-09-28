@@ -1,88 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Ralph overnight launchd template — macOS LaunchAgent for the ralph-trio plugin.
-
-  Two placeholders to fill in:
-    {{REPO}}            absolute path to your repo (workspace)
-    {{RALPH_SOLO_BIN}}  absolute path to the plugin's ralph-solo.sh
-
-  Why {{RALPH_SOLO_BIN}} is a placeholder: launchd inherits a minimal
-  environment that does NOT see your shell's PATH, so plugin scripts that are
-  on PATH inside a `claude` session are NOT discoverable when launchd fires
-  out-of-band. You need the absolute path.
-
-  The trio variants (ralph-trio.sh, ralph-meta.sh, ralph-debate.sh) also run
-  scripts from the dev-trio / debate-conductor plugins. Out of a session, add
-  DEV_TRIO_BIN / DEBATE_CONDUCTOR_BIN (the installed plugin's bin/), or a PATH
-  that includes the directory holding claude, to EnvironmentVariables, spelled
-  out in full (launchd does not expand ~ or $HOME); see the README section
-  "Sibling plugins outside a Claude Code session".
-
-  Setup steps:
-    1. Inside a shell that has the ralph-trio plugin active (any shell where
-       `claude` would activate plugins works), discover the absolute path:
-         command -v ralph-solo.sh
-       It will look something like
-         /Users/you/.claude/plugins/<marketplace>/<install-id>/ralph-trio/bin/ralph-solo.sh
-       Capture it:
-         RALPH_SOLO_BIN=$(command -v ralph-solo.sh)
-         REPO=$(pwd)   # or the absolute path to your repo
-
-    2. Substitute both placeholders in this template:
-         sed -e "s|{{REPO}}|$REPO|g" \
-             -e "s|{{RALPH_SOLO_BIN}}|$RALPH_SOLO_BIN|g" \
-             com.user.ralph.plist.template > com.user.ralph.plist
-
-    3. (Optional) Adjust Hour/Minute below for your preferred start time.
-    4. (Optional) Adjust --max-iter / --max-runtime to your overnight budget.
-    5. Make sure {{REPO}}/PROMPT.md exists and is filled in — see
-       /ralph-trio:bootstrap (skill) or copy prompts/PROMPT.md.template manually.
-
-    6. Copy + load:
-         cp com.user.ralph.plist ~/Library/LaunchAgents/
-         launchctl load -w ~/Library/LaunchAgents/com.user.ralph.plist
-
-    7. Manually trigger once to verify (this fires immediately rather than
-       waiting for the scheduled time):
-         launchctl start com.user.ralph
-
-    8. Inspect:
-         tail -F {{REPO}}/.ralph-trio/log/overnight/launchd.stdout.log
-         tail -F {{REPO}}/.ralph-trio/log/overnight/launchd.stderr.log
-
-  To stop / unload:
-    launchctl unload -w ~/Library/LaunchAgents/com.user.ralph.plist
-
-  Caveat — plugin install paths are volatile. The absolute path captured at
-  step 1 can drift when the marketplace is re-installed or the plugin updates
-  to a new install-id. If launchd starts failing with "command not found",
-  re-run step 1 and re-deploy. To keep one stable path in this template,
-  point it at a small wrapper script instead:
-    mkdir -p ~/bin
-    printf '#!/bin/bash\nexec %q "$@"\n' "$(command -v ralph-solo.sh)" > ~/bin/ralph-solo
-    chmod +x ~/bin/ralph-solo
-    RALPH_SOLO_BIN=$HOME/bin/ralph-solo   # then redo steps 2 and 6
-  The wrapper still holds the install path, so after a plugin update re-run
-  the printf line; the plist itself stays the same. Do not symlink ralph-solo.sh
-  instead: started through a symlink it looks for lib/ next to the link and
-  fails with "failed to load .../lib/common.sh".
-
-  Cron alternative (one line in `crontab -e`, runs at 23:00 daily):
-    0 23 * * * cd {{REPO}} && AGENT_TEAM=overnight {{RALPH_SOLO_BIN}} \
-      --max-iter 50 --max-runtime 6h --worktree \
-      --prompt {{REPO}}/PROMPT.md \
-      >> {{REPO}}/.ralph-trio/log/overnight/cron.log 2>&1
-
-  Safety notes:
-    - --worktree is STRONGLY recommended for unattended runs. Without it,
-      ralph commits land directly on your current branch. With it, each
-      iteration's branch is merged on test pass and discarded on test fail
-      (define --test-cmd to gate merges).
-    - --max-iter and --max-runtime are both required as belt-and-suspenders.
-      Set --max-runtime conservatively — a stuck claude can burn an entire
-      night otherwise.
-    - The --test-cmd should be fast (under a few minutes) and trustworthy.
-      Avoid full integration suites; run unit tests only.
+  Ralph overnight launchd template for macOS.
+  Generate the installed plist with the renderer documented in the README.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -92,9 +11,16 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/bash</string>
-    <string>-c</string>
-    <string>cd {{REPO}} &amp;&amp; AGENT_TEAM=overnight {{RALPH_SOLO_BIN}} --max-iter 50 --max-runtime 6h --worktree --prompt {{REPO}}/PROMPT.md --test-cmd 'echo replace-with-your-test-command'</string>
+    <string>{{RALPH_SOLO_BIN}}</string>
+    <string>--max-iter</string>
+    <string>50</string>
+    <string>--max-runtime</string>
+    <string>6h</string>
+    <string>--worktree</string>
+    <string>--prompt</string>
+    <string>{{REPO}}/PROMPT.md</string>
+    <string>--test-cmd</string>
+    <string>echo replace-with-your-test-command</string>
   </array>
 
   <key>RunAtLoad</key>
@@ -119,6 +45,8 @@
 
   <key>EnvironmentVariables</key>
   <dict>
+    <key>AGENT_TEAM</key>
+    <string>overnight</string>
     <key>PATH</key>
     <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
