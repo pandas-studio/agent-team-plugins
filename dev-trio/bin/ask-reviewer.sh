@@ -79,6 +79,7 @@ Environment:
   DEV_TRIO_REVIEWER_MODEL   reviewer model (over config role binding and host default)
   DEV_TRIO_SNAPSHOT_MAX_BYTES  snapshot ceiling in bytes for workspace-aware models (0 disables, default: 65536)
   DEV_TRIO_GIT_TIMEOUT      git subprocess timeout in seconds for snapshot (default: 10.0)
+  DEV_TRIO_SNAPSHOT_TIMEOUT  seconds for the whole snapshot, every git call and file read (default: 30)
   REVIEWER_ROLE_FILE        reviewer role prompt override
   DEV_TRIO_LOG_DIR          log root (default: $PWD/.dev-trio/log)
   DEV_TRIO_REVIEW_PROFILE   default | spec
@@ -284,6 +285,10 @@ AGY_CLI_LOG=""
 SNAPSHOT_STATUS=""
 SNAPSHOT_MANIFEST_ENTRY=""
 if registry_has_workspace "$REVIEWER_MODEL"; then
+  # One deadline for every git call and file read of the snapshot (#138).
+  # Exported for this block only and unset at its end: the model never sees it.
+  DEV_TRIO_SNAPSHOT_DEADLINE="$(dev_trio_snapshot_deadline)" || DEV_TRIO_SNAPSHOT_DEADLINE=""
+  export DEV_TRIO_SNAPSHOT_DEADLINE
   AGY_WORKSPACE="$(dev_trio_workspace_root)"
   PROMPT="$PROMPT
 
@@ -298,6 +303,9 @@ $(dev_trio_agy_exec_note "$AGY_WORKSPACE" "$FOCUS_IS_DEFAULT")"
   # skipped:<reason> (#137). The opt-out runs no snapshot probe at all.
   if [ "$ceiling" -eq 0 ]; then
     SNAPSHOT_STATUS="skipped:disabled"
+  elif [ -z "$DEV_TRIO_SNAPSHOT_DEADLINE" ]; then
+    # No python3 to set the deadline; the helper needs it anyway.
+    SNAPSHOT_STATUS="skipped:helper-unsupported"
   else
     # A failed root probe can fall back to cwd, which may be a subdirectory.
     # Never use that fallback as the root for a partial workspace snapshot.
@@ -414,11 +422,19 @@ The <workspace_snapshot> covers only \`git diff ${AGY_RANGE}\`. When it has no o
             [ "$(_registry_prompt_bytes "$CANDIDATE_PROMPT")" -lt "$limit" ] && snapshot_fits=1
           fi
           if [ "$snapshot_fits" -eq 1 ]; then
-            PROMPT="$CANDIDATE_PROMPT"
-            if [ "$AGY_SCOPE" = "working-tree" ]; then FOCUS="$SNAPSHOT_FOCUS"; fi
             SNAPSHOT_BYTES="$(_registry_prompt_bytes "$SNAPSHOT")"
-            SNAPSHOT_MANIFEST_ENTRY="$AGY_SCOPE:$budget:$SNAPSHOT_BYTES:$(manifest_sha256_string "$SNAPSHOT")"
-            SNAPSHOT_STATUS="ok:$AGY_SCOPE"
+            snapshot_entry="$AGY_SCOPE:$budget:$SNAPSHOT_BYTES:$(manifest_sha256_string "$SNAPSHOT")"
+            # The last check before anything is committed: a snapshot that
+            # sanitising, sizing and hashing carried past the deadline is
+            # dropped like any other late one (#138).
+            if dev_trio_snapshot_in_time; then
+              PROMPT="$CANDIDATE_PROMPT"
+              if [ "$AGY_SCOPE" = "working-tree" ]; then FOCUS="$SNAPSHOT_FOCUS"; fi
+              SNAPSHOT_MANIFEST_ENTRY="$snapshot_entry"
+              SNAPSHOT_STATUS="ok:$AGY_SCOPE"
+            else
+              SNAPSHOT_STATUS="skipped:timeout"
+            fi
           else
             SNAPSHOT_STATUS="skipped:oversize"
           fi
@@ -426,6 +442,7 @@ The <workspace_snapshot> covers only \`git diff ${AGY_RANGE}\`. When it has no o
       fi
     fi
   fi
+  unset DEV_TRIO_SNAPSHOT_DEADLINE
   case "$SNAPSHOT_STATUS" in
     skipped:disabled|skipped:focus|ok:*) ;;
     *) echo "[ask-reviewer] workspace snapshot skipped: ${SNAPSHOT_STATUS#skipped:}" >&2 ;;

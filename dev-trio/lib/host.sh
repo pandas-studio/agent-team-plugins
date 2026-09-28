@@ -276,37 +276,54 @@ dev_trio_new_log_fd_is_private() {
 # the wrappers what to tell it; they apply to any model that defines
 # workspace_args (registry_has_workspace), not to a binary name.
 
-# Execute a git probe command bounded by DEV_TRIO_GIT_TIMEOUT.
+# Execute a git probe command bounded by DEV_TRIO_GIT_TIMEOUT and, inside the
+# snapshot block, by DEV_TRIO_SNAPSHOT_DEADLINE (#138): the same rule as
+# call_timeout in workspace_snapshot.py. Once the deadline has passed, Git is
+# not started and the probe returns 124, as a timed-out one does.
 dev_trio_git_bounded() {
   local repo="$1"; shift
   python3 -c '
-import math, os, signal, subprocess, sys
-repo = sys.argv[1]
-args = sys.argv[2:]
-try:
-    timeout = float(os.environ.get("DEV_TRIO_GIT_TIMEOUT", "10.0"))
-except ValueError:
-    timeout = 10.0
-if not math.isfinite(timeout) or timeout <= 0:
-    timeout = 10.0
-cmd = ["git", "-c", "core.fsmonitor=false", "-C", repo] + args
-env = os.environ.copy()
-env["GIT_OPTIONAL_LOCKS"] = "0"
-proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, start_new_session=True)
-try:
-    # This helper is for small rev-parse probes; do not use it for diffs.
-    data, _ = proc.communicate(timeout=timeout)
-    if proc.returncode == 0 and data:
-        if len(data) > 8192:
-            sys.exit(125)
-        sys.stdout.buffer.write(data)
-    sys.exit(proc.returncode)
-except subprocess.TimeoutExpired:
+import math, os, signal, subprocess, sys, time
+def main():
+    repo = sys.argv[1]
+    args = sys.argv[2:]
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except OSError:
-        proc.kill()
-    sys.exit(124)
+        timeout = float(os.environ.get("DEV_TRIO_GIT_TIMEOUT", "10.0"))
+    except ValueError:
+        timeout = 10.0
+    if not math.isfinite(timeout) or timeout <= 0:
+        timeout = 10.0
+    try:
+        deadline = float(os.environ.get("DEV_TRIO_SNAPSHOT_DEADLINE", ""))
+    except ValueError:
+        deadline = math.nan
+    if math.isfinite(deadline):
+        timeout = min(timeout, deadline - time.clock_gettime(time.CLOCK_MONOTONIC))
+        if timeout <= 0:
+            sys.exit(124)
+    cmd = ["git", "-c", "core.fsmonitor=false", "-C", repo] + args
+    env = os.environ.copy()
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, start_new_session=True)
+    try:
+        # This helper is for small rev-parse probes; do not use it for diffs.
+        data, _ = proc.communicate(timeout=timeout)
+        if proc.returncode == 0 and data:
+            if len(data) > 8192:
+                sys.exit(125)
+            sys.stdout.buffer.write(data)
+        sys.exit(proc.returncode)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except OSError:
+            proc.kill()
+        sys.exit(124)
+try:
+    main()
+except Exception:
+    # A probe that cannot run is 125, never 1 ("not a commit").
+    sys.exit(125)
 ' "$repo" "$@" 2>/dev/null
 }
 
@@ -457,6 +474,33 @@ dev_trio_extract_git_range() {
     return 0
   fi
   return 1
+}
+
+# The deadline for the whole snapshot block (#138): CLOCK_MONOTONIC now plus
+# DEV_TRIO_SNAPSHOT_TIMEOUT seconds (default 30; an invalid or non-positive
+# value means 30). The clock is system-wide, so every later process in the
+# block compares against the same value. Prints nothing when python3 fails.
+dev_trio_snapshot_deadline() {
+  python3 -c '
+import math, os, time
+try:
+    budget = float(os.environ.get("DEV_TRIO_SNAPSHOT_TIMEOUT", "30"))
+except ValueError:
+    budget = 30.0
+if not math.isfinite(budget) or budget <= 0:
+    budget = 30.0
+print(repr(time.clock_gettime(time.CLOCK_MONOTONIC) + budget))
+' 2>/dev/null
+}
+
+# Succeeds only while DEV_TRIO_SNAPSHOT_DEADLINE is set and still ahead. Any
+# failure to tell counts as passed, so a snapshot is never injected on a guess.
+dev_trio_snapshot_in_time() {
+  [ -n "${DEV_TRIO_SNAPSHOT_DEADLINE:-}" ] || return 1
+  python3 -c '
+import sys, time
+sys.exit(0 if time.clock_gettime(time.CLOCK_MONOTONIC) < float(sys.argv[1]) else 1)
+' "$DEV_TRIO_SNAPSHOT_DEADLINE" 2>/dev/null
 }
 
 # Invoke python workspace snapshot helper.

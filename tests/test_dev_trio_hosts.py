@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 PLUGIN = Path(__file__).resolve().parents[1] / "dev-trio"
 REVIEW = "## Verdict\nSHIP — inspected fixture\n\n## Findings\n### Blocker\n- none\n"
@@ -67,6 +68,9 @@ class HostTests(unittest.TestCase):
             "    alias = pathlib.Path(os.environ['STUB_SWAP_LOG_ALIAS'])\n"
             "    alias.unlink()\n"
             "    alias.symlink_to(os.environ['STUB_SWAP_LOG_TARGET'], target_is_directory=True)\n"
+            # A variable the model must never inherit (#138).
+            "if os.environ.get('STUB_FORBID_ENV', '') in os.environ:\n"
+            "    sys.exit(97)\n"
             "if os.environ.get('STUB_STDERR'):\n"
             "    print(os.environ['STUB_STDERR'], file=sys.stderr)\n"
             "print(response)\n"
@@ -1965,6 +1969,232 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
                 for inputs in (manifest, run):
                     self.assertFalse([i for i in inputs if i.get("kind", "").startswith("workspace-snapshot")], inputs)
                 self.assertNotIn("workspace snapshot", result.stderr)
+
+    # #138: one deadline for the whole snapshot block. Timing is judged by
+    # which Git calls started, with only a loose wall-clock bound.
+    @staticmethod
+    def deadline_in(seconds):
+        return repr(time.clock_gettime(time.CLOCK_MONOTONIC) + seconds)
+
+    def test_snapshot_deadline_stops_the_probe_sequence(self):
+        self._init_git_workspace()
+        (self.workspace / "f.txt").write_text("hello\n")
+        # Each probe alone fits DEV_TRIO_GIT_TIMEOUT; together they do not
+        # fit the snapshot's 2 s. Without the deadline this is ok:working-tree.
+        path, log = self.git_shim('case "$*" in *rev-parse*) sleep 3 ;; esac')
+        t0 = time.time()
+        result = self.run_cli(DEV_TRIO_REVIEWER_MODEL="agy", DEV_TRIO_GIT_TIMEOUT="5",
+                              DEV_TRIO_SNAPSHOT_TIMEOUT="2", PATH=path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot_status(result, "skipped:timeout")
+        self.assertNotIn("<workspace_snapshot>", self.sent_prompt())
+        # Only the root lookup started Git; the probes after the deadline did not.
+        self.assertEqual(len([c for c in log.read_text().splitlines() if "rev-parse" in c]), 1)
+        self.assertLess(time.time() - t0, 14.0)
+
+    def test_snapshot_helper_git_call_is_cut_to_the_deadline(self):
+        self._init_git_workspace()
+        (self.workspace / "f.txt").write_text("hello\n")
+        pids = self.root / "status.pids"
+        path, _ = self.git_shim(f'case "$*" in *" status "*) echo $$ >> "{pids}"; sleep 30 ;; esac')
+        t0 = time.time()
+        result = self.run_helper("working-tree", DEV_TRIO_GIT_TIMEOUT="15", PATH=path,
+                                 DEV_TRIO_SNAPSHOT_DEADLINE=self.deadline_in(1.5))
+        self.assertEqual((result.returncode, result.stdout), (6, b""), result.stderr)
+        # DEV_TRIO_GIT_TIMEOUT alone would have waited 15 s.
+        self.assertLess(time.time() - t0, 10.0)
+        pid = int(pids.read_text().split()[0])
+        for _ in range(40):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            self.fail(f"git shim {pid} outlived the snapshot")
+
+    def test_snapshot_helper_starts_no_git_after_the_deadline(self):
+        self._init_git_workspace()
+        path, log = self.git_shim("")
+        result = self.run_helper("working-tree", PATH=path,
+                                 DEV_TRIO_SNAPSHOT_DEADLINE=self.deadline_in(-1))
+        self.assertEqual((result.returncode, result.stdout), (6, b""), result.stderr)
+        self.assertFalse(log.exists() and log.read_text().strip(), "git started after the deadline")
+
+    def test_bounded_git_starts_no_git_after_the_deadline(self):
+        path, log = self.git_shim("")
+        for deadline, expect in ((self.deadline_in(-1), 124), ("not a number", 0), ("", 0)):
+            with self.subTest(deadline=deadline):
+                result = subprocess.run(
+                    ["bash", "-c", '. "$P/lib/host.sh"; dev_trio_git_bounded . rev-parse --git-dir'],
+                    cwd=self.root, text=True, capture_output=True, timeout=10,
+                    env=self.env | {"P": str(self.plugin), "PATH": path,
+                                    "DEV_TRIO_SNAPSHOT_DEADLINE": deadline},
+                )
+                # self.root is no repository; rc 128 means git ran and said so.
+                self.assertEqual(result.returncode, 124 if expect else 128, result.stderr)
+        self.assertEqual(len(log.read_text().splitlines()), 2)
+
+    def test_bounded_git_that_cannot_start_is_125_not_1(self):
+        # rc 1 means "not a commit" to dev_trio_extract_git_range.
+        only_python = self.root / "only python"
+        only_python.mkdir()
+        (only_python / "python3").symlink_to(sys.executable)
+        result = subprocess.run(
+            ["/bin/bash", "-c", '. "$P/lib/host.sh"; dev_trio_git_bounded . rev-parse --git-dir'],
+            cwd=self.root, text=True, capture_output=True, timeout=10,
+            env=self.env | {"P": str(self.plugin), "PATH": str(only_python)},
+        )
+        self.assertEqual(result.returncode, 125, result.stderr)
+
+    def test_snapshot_ls_files_slow_reap_is_still_a_timeout(self):
+        # A killed ls-files that is slow to reap was classified git-failed.
+        self._init_git_workspace()
+        (self.workspace / "u.txt").write_text("untracked\n")
+        path, _ = self.git_shim('case "$*" in *ls-files*) sleep 3 ;; esac')
+        code = (
+            "import runpy, sys\n"
+            f"ns = runpy.run_path({str(self.plugin / 'lib' / 'workspace_snapshot.py')!r})\n"
+            # A Git that survives its kill: every reap wait times out.
+            "ns['kill_process_tree'].__globals__['kill_process_tree'] = lambda proc: None\n"
+            f"sys.argv = ['x', {str(self.workspace)!r}, 'working-tree', '', '65536', '']\n"
+            "ns['main']()\n"
+        )
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, timeout=20,
+                                env=os.environ | {"PATH": path, "DEV_TRIO_GIT_TIMEOUT": "1"})
+        self.assertEqual((result.returncode, result.stdout), (6, b""), result.stderr)
+
+    def test_snapshot_file_loop_stops_at_the_deadline(self):
+        self._init_git_workspace()
+        (self.workspace / "d").mkdir()
+        for name in ("d/a.txt", "d/b.txt"):
+            (self.workspace / name).write_text(f"{name}\n")
+        # The hook moves the deadline into the past at one workspace call
+        # (a directory component's open, or a regular file's read), so the
+        # clock crosses it exactly there, however slow the runner is.
+        code = (
+            "import os, runpy, stat, sys, time\n"
+            "real_open, real_read, real_readlink = os.open, os.read, os.readlink\n"
+            "flip, state = sys.argv[1], {'crossed': False, 'after': []}\n"
+            "def cross():\n"
+            "    os.environ['DEV_TRIO_SNAPSHOT_DEADLINE'] = repr(time.clock_gettime(time.CLOCK_MONOTONIC) - 1)\n"
+            "    state['crossed'] = True\n"
+            "def note(call, *args):\n"
+            "    if state['crossed']:\n"
+            "        state['after'].append(call)\n"
+            "def opn(path, *a, **kw):\n"
+            "    note('open')\n"
+            "    fd = real_open(path, *a, **kw)\n"
+            "    if flip == 'open' and path == 'd' and 'dir_fd' in kw and not state['crossed']:\n"
+            "        cross()\n"
+            "    return fd\n"
+            "def read(fd, n):\n"
+            "    regular = stat.S_ISREG(os.fstat(fd).st_mode)\n"
+            "    if regular:\n"
+            "        note('read')\n"
+            "    data = real_read(fd, n)\n"
+            "    if flip == 'read' and regular and not state['crossed']:\n"
+            "        cross()\n"
+            "    return data\n"
+            "def readlink(*a, **kw):\n"
+            "    note('readlink')\n"
+            "    return real_readlink(*a, **kw)\n"
+            "os.open, os.read, os.readlink = opn, read, readlink\n"
+            f"sys.argv = ['x', {str(self.workspace)!r}, 'working-tree', '', '65536', '']\n"
+            "try:\n"
+            f"    runpy.run_path({str(self.plugin / 'lib' / 'workspace_snapshot.py')!r}, run_name='__main__')\n"
+            "finally:\n"
+            "    sys.stderr.write(repr((state['crossed'], state['after'])))\n"
+        )
+        for flip in ("open", "read"):
+            with self.subTest(flip=flip):
+                result = subprocess.run(
+                    [sys.executable, "-c", code, flip], capture_output=True, timeout=20,
+                    env=os.environ | {"DEV_TRIO_GIT_TIMEOUT": "5",
+                                      "DEV_TRIO_SNAPSHOT_DEADLINE": self.deadline_in(60)})
+                self.assertEqual((result.returncode, result.stdout), (6, b""), result.stderr)
+                # The hook fired, and no workspace call started after it.
+                self.assertEqual(result.stderr.decode().splitlines()[-1], "(True, [])")
+
+    def test_snapshot_publish_checks_the_deadline(self):
+        self._commit_two()
+        code = (
+            "import runpy, sys, time\n"
+            f"ns = runpy.run_path({str(self.plugin / 'lib' / 'workspace_snapshot.py')!r})\n"
+            "g = ns['publish'].__globals__\n"
+            "real_publish = g['publish']\n"
+            "def late(out):\n"
+            "    while not g['deadline_passed']():\n"
+            "        time.sleep(0.05)\n"
+            "    real_publish(out)\n"
+            "g['publish'] = late\n"
+            f"sys.argv = ['x', {str(self.workspace)!r}, 'range', 'HEAD~1..HEAD', '65536', '']\n"
+            "ns['main']()\n"
+        )
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, timeout=20,
+                                env=os.environ | {"DEV_TRIO_GIT_TIMEOUT": "5",
+                                                  "DEV_TRIO_SNAPSHOT_DEADLINE": self.deadline_in(3)})
+        self.assertEqual((result.returncode, result.stdout), (6, b""), result.stderr)
+        # Every exit that writes the snapshot goes through publish.
+        source = (self.plugin / "lib" / "workspace_snapshot.py").read_text()
+        self.assertEqual(source.count("sys.stdout.buffer.write("), 1)
+
+    def test_snapshot_late_helper_success_is_not_injected(self):
+        self._init_git_workspace()
+        (self.workspace / "f.txt").write_text("hello\n")
+        helper = self.plugin / "lib" / "workspace_snapshot.py"
+        called = self.root / "helper.called"
+        # Exits 0 with content only once the wrapper's own deadline has passed,
+        # so the commit-point check is what must drop it.
+        helper.write_text(
+            "import os, sys, time\n"
+            f"open({str(called)!r}, 'w').write('x')\n"
+            "deadline = float(os.environ['DEV_TRIO_SNAPSHOT_DEADLINE'])\n"
+            "while time.clock_gettime(time.CLOCK_MONOTONIC) <= deadline:\n"
+            "    time.sleep(0.05)\n"
+            "sys.stdout.write('LATE-SENTINEL\\n')\n"
+        )
+        result = self.run_cli(DEV_TRIO_REVIEWER_MODEL="agy", DEV_TRIO_SNAPSHOT_TIMEOUT="8",
+                              STUB_FORBID_ENV="DEV_TRIO_SNAPSHOT_DEADLINE")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(called.exists(), "the helper never ran; the check under test was not reached")
+        self.assert_snapshot_status(result, "skipped:timeout")
+        self.assertNotIn("LATE-SENTINEL", self.sent_prompt())
+        manifest, _ = self.snapshot_record()
+        self.assertFalse([i for i in manifest if i.get("kind") == "workspace-snapshot"], manifest)
+
+    def test_snapshot_deadline_never_reaches_the_model(self):
+        self._init_git_workspace()
+        (self.workspace / "f.txt").write_text("hello\n")
+        result = self.run_cli(DEV_TRIO_REVIEWER_MODEL="agy", STUB_FORBID_ENV="DEV_TRIO_SNAPSHOT_DEADLINE")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot_status(result, "ok:working-tree")
+
+    def test_snapshot_call_timeout(self):
+        spec = importlib.util.spec_from_file_location("ws138", self.plugin / "lib" / "workspace_snapshot.py")
+        ws = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ws)
+        now = time.clock_gettime(time.CLOCK_MONOTONIC)
+        cases = [
+            ({}, 10.0, 10.0),
+            ({"DEV_TRIO_GIT_TIMEOUT": "25"}, 25.0, 25.0),
+            ({"DEV_TRIO_GIT_TIMEOUT": "nan"}, 10.0, 10.0),
+            ({"DEV_TRIO_GIT_TIMEOUT": "0"}, 10.0, 10.0),
+            ({"DEV_TRIO_GIT_TIMEOUT": "x"}, 10.0, 10.0),
+            ({"DEV_TRIO_GIT_TIMEOUT": "25", "DEV_TRIO_SNAPSHOT_DEADLINE": repr(now + 100)}, 24.0, 25.0),
+            ({"DEV_TRIO_GIT_TIMEOUT": "25", "DEV_TRIO_SNAPSHOT_DEADLINE": repr(now + 3)}, 1.0, 3.0),
+            ({"DEV_TRIO_SNAPSHOT_DEADLINE": repr(now - 1)}, -5.0, 0.0),
+            ({"DEV_TRIO_SNAPSHOT_DEADLINE": "inf"}, 10.0, 10.0),
+            ({"DEV_TRIO_SNAPSHOT_DEADLINE": "soon"}, 10.0, 10.0),
+        ]
+        for env, low, high in cases:
+            with self.subTest(env=env):
+                with mock.patch.dict(os.environ, env, clear=False):
+                    for key in ("DEV_TRIO_GIT_TIMEOUT", "DEV_TRIO_SNAPSHOT_DEADLINE"):
+                        if key not in env:
+                            os.environ.pop(key, None)
+                    value = ws.call_timeout(10.0)
+                self.assertTrue(low <= value <= high, value)
 
     def run_helper(self, scope, target="", budget="65536", **env):
         return subprocess.run(
