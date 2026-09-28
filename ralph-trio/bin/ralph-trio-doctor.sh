@@ -7,8 +7,8 @@
 #   1. Required tools on PATH: bash, git, jq, sha256sum/shasum, python3.
 #   2. Optional tools: tmux (dashboard.sh), claude (real runs).
 #   3. Plugin layout intact (bin/ralph-{solo,trio,debate,meta}.sh, dashboard.sh,
-#      stop-hook.sh, lib/common.sh, lib/manifest.sh, lib/roles/{planner,worker}.md,
-#      prompts/*.template, hooks/settings.snippet.json).
+#      stop-hook.sh, render-launchd-plist.py, lib/common.sh, lib/manifest.sh,
+#      lib/roles/{planner,worker}.md, prompts/*.template, hooks/settings.snippet.json).
 #   4. Cross-plugin dependencies, found as the drivers find them (DEV_TRIO_BIN /
 #      DEBATE_CONDUCTOR_BIN, then PATH, then `claude plugin list`; the source is shown):
 #        - ask-reviewer.sh / ask-researcher.sh from dev-trio plugin (needed for trio/meta)
@@ -88,7 +88,7 @@ done
 echo
 echo "3. Plugin layout"
 for rel in bin/ralph-solo.sh bin/ralph-trio.sh bin/ralph-debate.sh bin/ralph-meta.sh \
-           bin/dashboard.sh bin/stop-hook.sh \
+           bin/dashboard.sh bin/stop-hook.sh bin/render-launchd-plist.py \
            lib/common.sh lib/manifest.sh lib/plugin-deps.sh lib/registry.sh lib/model-stage.sh lib/pm.md lib/pm-codex.md lib/roles/planner.md lib/roles/worker.md \
            prompts/PROMPT.md.template prompts/BACKLOG.md.template prompts/fix_plan.md.template \
            hooks/settings.snippet.json \

@@ -38,7 +38,82 @@ A plugin's `bin/` is on PATH only inside a Claude Code session with that plugin 
 2. `PATH`, as inside a session.
 3. The active host's plugin list: `claude plugin list --json` or `codex plugin list --json`. Claude project or local installs count only in the matching project; Codex uses the enabled installed cache version.
 
-Under cron or launchd, either set `DEV_TRIO_BIN` / `DEBATE_CONDUCTOR_BIN` to the installed plugin's real `bin/` (not a directory of symlinks; the scripts find their `lib/` next to it), or put the directory holding `claude` on PATH (e.g. `PATH=/Users/you/.local/bin:/usr/bin:/bin`). Step 3 always runs the `claude` it finds on PATH, never `CLAUDE_CLI`: that is the planner/coder model override, and a wrapper there could take `plugin list --json` as a prompt. Write absolute paths: launchd and crontab do not expand `~` or `$HOME` in these values. The model CLIs those scripts start (`codex`, `agy`, `claude`) still come from PATH or their own `*_CLI` variables. The doctor shows which step found each script.
+Under cron or launchd, either set `DEV_TRIO_BIN` / `DEBATE_CONDUCTOR_BIN` to the installed plugin's real `bin/` (not a directory of symlinks; the scripts find their `lib/` next to it), or put the directory holding `claude` on PATH (e.g. `PATH=/Users/you/.local/bin:/usr/bin:/bin`). Step 3 always runs the `claude` it finds on PATH, never `CLAUDE_CLI`: that is the planner/coder model override, and a wrapper there could take `plugin list --json` as a prompt. Write absolute paths: launchd plist values and crontab environment assignments do not expand `~` or `$HOME`. The model CLIs those scripts start (`codex`, `agy`, `claude`) still come from PATH or their own `*_CLI` variables. The doctor shows which step found each script.
+
+### Scheduled solo runs with launchd or cron
+
+The bundled macOS LaunchAgent template uses separate `ProgramArguments` entries;
+it never sends repository or executable paths through `bash -c`. Generate a
+plist with the bundled renderer so XML characters and shell metacharacters in
+those paths remain literal:
+
+```bash
+REPO="$(pwd -P)"
+RALPH_SOLO_BIN="$(command -v ralph-solo.sh)"
+RENDERER="$(command -v render-launchd-plist.py)"
+PLIST="$HOME/Library/LaunchAgents/com.user.ralph.plist"
+TEST_CMD='false # replace-with-your-fast-unit-test-command'
+
+mkdir -p "$HOME/Library/LaunchAgents" "$REPO/.ralph-trio/log/overnight"
+"$RENDERER" \
+  --repo "$REPO" \
+  --ralph-solo-bin "$RALPH_SOLO_BIN" \
+  --test-cmd "$TEST_CMD" \
+  --output "$PLIST"
+plutil -lint "$PLIST"
+```
+
+The renderer requires absolute paths and replaces an existing output file
+atomically while preserving its file mode. It rejects an output path that is a
+directory or symbolic link, and it does not expand `~` or `$HOME`. Replace the
+deliberately failing `TEST_CMD` before loading the job; worktree mode discards
+an iteration whenever that command fails. Regenerate the plist to change the
+test command instead of hand-editing XML. Adjust the generated plist's calendar
+and iteration/runtime budgets as needed, then lint it again. Regeneration
+replaces the whole plist, so reapply any manual schedule or budget changes.
+Make sure `PROMPT.md` exists first; `/ralph-trio:bootstrap` creates a starter.
+Load, trigger, and inspect the job with:
+
+```bash
+plutil -lint "$PLIST"
+launchctl load -w "$PLIST"
+launchctl start com.user.ralph
+tail -F "$REPO/.ralph-trio/log/overnight/launchd.stdout.log"
+tail -F "$REPO/.ralph-trio/log/overnight/launchd.stderr.log"
+# Later: launchctl unload -w "$PLIST"
+```
+
+Plugin install paths change when a marketplace install is refreshed. To keep
+the plist stable, point it at a wrapper and regenerate only that wrapper after
+an update. Do not symlink `ralph-solo.sh`: the driver loads `lib/` relative to
+its real script location.
+
+```bash
+mkdir -p "$HOME/bin"
+printf '#!/bin/bash\nexec %q "$@"\n' "$RALPH_SOLO_BIN" > "$HOME/bin/ralph-solo"
+chmod +x "$HOME/bin/ralph-solo"
+RALPH_SOLO_BIN="$HOME/bin/ralph-solo"
+```
+
+Then re-run the renderer block above so the plist points at the wrapper.
+
+For cron, generate a wrapper rather than interpolating paths into the crontab
+command. Bash `%q` makes each captured value a single literal shell word. The
+wrapper also captures the current `PATH` so cron can find the same model CLIs:
+
+```bash
+CRON_WRAPPER="$HOME/bin/ralph-overnight"
+CRON_PATH="$PATH"
+printf '#!/bin/bash\ncd %q || exit 1\nexec env PATH=%q AGENT_TEAM=overnight %q --max-iter 50 --max-runtime 6h --worktree --prompt %q --test-cmd %q >> %q 2>&1\n' \
+  "$REPO" "$CRON_PATH" "$RALPH_SOLO_BIN" "$REPO/PROMPT.md" \
+  "$TEST_CMD" \
+  "$REPO/.ralph-trio/log/overnight/cron.log" > "$CRON_WRAPPER"
+chmod +x "$CRON_WRAPPER"
+```
+
+Then add `0 23 * * * "$HOME/bin/ralph-overnight"` with `crontab -e`.
+Keep `--worktree`, both iteration/runtime bounds, and a fast trustworthy
+`--test-cmd` for unattended runs.
 
 ### Planner and coder success
 
@@ -258,6 +333,7 @@ ralph-trio/
 │   ├── ralph-meta.sh             # one-shot post-run audit
 │   ├── dashboard.sh              # tail-F wrapper with coloured header
 │   ├── stop-hook.sh              # Claude Code Stop hook (in-session solo driver)
+│   ├── render-launchd-plist.py   # safely fill the macOS LaunchAgent template
 │   └── ralph-trio-doctor.sh      # env probe + stub smoke
 ├── lib/                          # internal (sourced, not on PATH)
 │   ├── common.sh                 # detect_team, init_log_dir, worktree helpers, …

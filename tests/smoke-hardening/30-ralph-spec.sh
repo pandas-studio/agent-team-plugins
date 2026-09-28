@@ -367,7 +367,7 @@ git -C "$TMP/unborn" -c user.name=t -c user.email=t@t commit -qm first
 assert_eq "$(bash -c '. "$1/spec-trio/lib/spec-helpers.sh"; collect_changed_paths "$2" "$3"' \
   _ "$ROOT" "$TMP/unborn" "$EMPTY_TREE")" "outside.txt"
 
-# #107: the launchd template's wrapper recipe starts ralph-solo.sh from any
+# #107: the README's wrapper recipe starts ralph-solo.sh from any
 # directory; a symlink cannot find lib/, and the error names the path it tried
 # instead of blaming jq.
 LAUNCH_TMP="$TMP/launch"
@@ -380,6 +380,191 @@ rc=0; "$LAUNCH_TMP/bin/ralph-link" --help >/dev/null 2>"$LAUNCH_TMP/link.err" ||
 assert_eq "$rc" "2"
 assert_eq "$(grep -c "ralph-solo: failed to load $LAUNCH_TMP/lib/common.sh" "$LAUNCH_TMP/link.err")" "1"
 assert_eq "$(grep -c 'jq missing' "$LAUNCH_TMP/link.err")" "0"
+
+# #170/#172: the plist is strict XML and paths are data, not shell source.
+# Exercise every character called out by #170 through the generated argv, cwd,
+# environment and cron-wrapper contracts.
+LAUNCH_TEMPLATE="$ROOT/ralph-trio/templates/launchd/com.user.ralph.plist.template"
+LAUNCH_RENDERER="$ROOT/ralph-trio/bin/render-launchd-plist.py"
+assert_ok python3 -c 'import plistlib, sys; plistlib.load(open(sys.argv[1], "rb"))' "$LAUNCH_TEMPLATE"
+if command -v xmllint >/dev/null 2>&1; then
+  assert_ok xmllint --noout "$LAUNCH_TEMPLATE"
+fi
+
+SPECIAL_ROOT="$TMP/launch space 'single' \"double\" \$dollar & amp"
+SPECIAL_REPO="$SPECIAL_ROOT/repo {{REPO}} {{RALPH_SOLO_BIN}} space 'single' \"double\" \$dollar & amp"
+SPECIAL_BIN_DIR="$SPECIAL_ROOT/bin {{REPO}} {{RALPH_SOLO_BIN}} space 'single' \"double\" \$dollar & amp"
+SPECIAL_BIN="$SPECIAL_BIN_DIR/ralph solo 'single' \"double\" \$dollar & amp"
+SPECIAL_PLIST="$SPECIAL_ROOT/generated launchd.plist"
+SPECIAL_TEST_CMD='echo "{{REPO}}" && npm test & lint "$HOME"'
+LAUNCH_CAPTURE="$SPECIAL_ROOT/launch capture"
+export LAUNCH_CAPTURE
+mkdir -p "$SPECIAL_REPO/.ralph-trio/log/overnight" "$SPECIAL_BIN_DIR"
+cat > "$SPECIAL_BIN" <<'STUB'
+#!/bin/bash
+{
+  printf 'cwd=%s\n' "$PWD"
+  printf 'team=%s\n' "${AGENT_TEAM-}"
+  printf 'path=%s\n' "$PATH"
+  for arg in "$@"; do printf 'arg=%s\n' "$arg"; done
+} > "$LAUNCH_CAPTURE"
+STUB
+chmod +x "$SPECIAL_BIN"
+printf 'replace me\n' > "$SPECIAL_PLIST"
+chmod 0640 "$SPECIAL_PLIST"
+assert_ok "$LAUNCH_RENDERER" \
+  --repo "$SPECIAL_REPO" \
+  --ralph-solo-bin "$SPECIAL_BIN" \
+  --test-cmd "$SPECIAL_TEST_CMD" \
+  --output "$SPECIAL_PLIST" >/dev/null
+assert_eq "$(python3 -c \
+  'import os, stat, sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode)))' \
+  "$SPECIAL_PLIST")" "0o640"
+assert_ok python3 - "$SPECIAL_PLIST" "$SPECIAL_REPO" "$SPECIAL_BIN" "$SPECIAL_TEST_CMD" <<'PY'
+import os
+import plistlib
+import subprocess
+import sys
+from pathlib import Path
+
+plist_path, repo, executable, test_command = sys.argv[1:]
+with open(plist_path, "rb") as stream:
+    plist = plistlib.load(stream)
+
+arguments = [
+    executable,
+    "--max-iter", "50",
+    "--max-runtime", "6h",
+    "--worktree",
+    "--prompt", f"{repo}/PROMPT.md",
+    "--test-cmd", test_command,
+]
+assert plist["ProgramArguments"] == arguments
+assert plist["WorkingDirectory"] == repo
+assert plist["StandardOutPath"] == f"{repo}/.ralph-trio/log/overnight/launchd.stdout.log"
+assert plist["StandardErrorPath"] == f"{repo}/.ralph-trio/log/overnight/launchd.stderr.log"
+assert plist["EnvironmentVariables"]["AGENT_TEAM"] == "overnight"
+
+environment = os.environ.copy()
+environment.update(plist["EnvironmentVariables"])
+subprocess.run(arguments, cwd=repo, env=environment, check=True)
+capture = Path(os.environ["LAUNCH_CAPTURE"]).read_text().splitlines()
+assert capture == [
+    f"cwd={repo}",
+    "team=overnight",
+    "path=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+] + [
+    f"arg={argument}" for argument in arguments[1:]
+]
+PY
+if command -v xmllint >/dev/null 2>&1; then
+  assert_ok xmllint --noout "$SPECIAL_PLIST"
+fi
+if command -v plutil >/dev/null 2>&1; then
+  assert_ok plutil -lint "$SPECIAL_PLIST"
+fi
+
+rc=0
+"$LAUNCH_RENDERER" \
+  --repo "$SPECIAL_REPO" \
+  --ralph-solo-bin "$SPECIAL_BIN" \
+  --test-cmd "$SPECIAL_TEST_CMD" \
+  --output "$SPECIAL_ROOT/missing/generated.plist" \
+  >"$SPECIAL_ROOT/missing.out" 2>"$SPECIAL_ROOT/missing.err" || rc=$?
+assert_eq "$rc" "2"
+assert_eq "$(grep -c -- '--output parent directory does not exist:' "$SPECIAL_ROOT/missing.err")" "1"
+assert_eq "$(grep -c 'Traceback' "$SPECIAL_ROOT/missing.err")" "0"
+
+rc=0
+"$LAUNCH_RENDERER" \
+  --repo "$SPECIAL_REPO" \
+  --ralph-solo-bin "$SPECIAL_BIN" \
+  --test-cmd '   ' \
+  --output "$SPECIAL_PLIST" \
+  >"$SPECIAL_ROOT/empty.out" 2>"$SPECIAL_ROOT/empty.err" || rc=$?
+assert_eq "$rc" "2"
+assert_eq "$(grep -c -- '--test-cmd must not be empty' "$SPECIAL_ROOT/empty.err")" "1"
+assert_eq "$(grep -c 'Traceback' "$SPECIAL_ROOT/empty.err")" "0"
+
+rc=0
+"$LAUNCH_RENDERER" \
+  --repo "$SPECIAL_REPO" \
+  --ralph-solo-bin "$SPECIAL_BIN" \
+  --test-cmd "$SPECIAL_TEST_CMD" \
+  --output "$SPECIAL_ROOT" \
+  >"$SPECIAL_ROOT/directory.out" 2>"$SPECIAL_ROOT/directory.err" || rc=$?
+assert_eq "$rc" "2"
+assert_eq "$(grep -c -- '--output is a directory:' "$SPECIAL_ROOT/directory.err")" "1"
+assert_eq "$(grep -c 'Traceback' "$SPECIAL_ROOT/directory.err")" "0"
+
+SYMLINK_TARGET="$SPECIAL_ROOT/symlink target.plist"
+SYMLINK_OUTPUT="$SPECIAL_ROOT/symlink output.plist"
+printf 'keep target\n' > "$SYMLINK_TARGET"
+ln -s "$SYMLINK_TARGET" "$SYMLINK_OUTPUT"
+rc=0
+"$LAUNCH_RENDERER" \
+  --repo "$SPECIAL_REPO" \
+  --ralph-solo-bin "$SPECIAL_BIN" \
+  --test-cmd "$SPECIAL_TEST_CMD" \
+  --output "$SYMLINK_OUTPUT" \
+  >"$SPECIAL_ROOT/symlink.out" 2>"$SPECIAL_ROOT/symlink.err" || rc=$?
+assert_eq "$rc" "2"
+assert_eq "$(grep -c -- '--output must not be a symbolic link:' "$SPECIAL_ROOT/symlink.err")" "1"
+assert_eq "$(grep -c 'Traceback' "$SPECIAL_ROOT/symlink.err")" "0"
+assert_eq "$(readlink "$SYMLINK_OUTPUT")" "$SYMLINK_TARGET"
+assert_eq "$(cat "$SYMLINK_TARGET")" "keep target"
+
+rc=0
+"$LAUNCH_RENDERER" \
+  --repo "$SPECIAL_ROOT/not a repo" \
+  --ralph-solo-bin "$SPECIAL_BIN" \
+  --test-cmd "$SPECIAL_TEST_CMD" \
+  --output "$SPECIAL_PLIST" \
+  >"$SPECIAL_ROOT/repo.out" 2>"$SPECIAL_ROOT/repo.err" || rc=$?
+assert_eq "$rc" "2"
+assert_eq "$(grep -c -- '--repo is not a directory:' "$SPECIAL_ROOT/repo.err")" "1"
+assert_eq "$(grep -c 'Traceback' "$SPECIAL_ROOT/repo.err")" "0"
+
+NONEXECUTABLE_BIN="$SPECIAL_ROOT/not executable"
+printf '#!/bin/bash\n' > "$NONEXECUTABLE_BIN"
+chmod 0644 "$NONEXECUTABLE_BIN"
+rc=0
+"$LAUNCH_RENDERER" \
+  --repo "$SPECIAL_REPO" \
+  --ralph-solo-bin "$NONEXECUTABLE_BIN" \
+  --test-cmd "$SPECIAL_TEST_CMD" \
+  --output "$SPECIAL_PLIST" \
+  >"$SPECIAL_ROOT/bin.out" 2>"$SPECIAL_ROOT/bin.err" || rc=$?
+assert_eq "$rc" "2"
+assert_eq "$(grep -c -- '--ralph-solo-bin is not an executable file:' "$SPECIAL_ROOT/bin.err")" "1"
+assert_eq "$(grep -c 'Traceback' "$SPECIAL_ROOT/bin.err")" "0"
+
+NEW_PLIST="$SPECIAL_ROOT/new launchd.plist"
+(umask 077; assert_ok "$LAUNCH_RENDERER" \
+  --repo "$SPECIAL_REPO" \
+  --ralph-solo-bin "$SPECIAL_BIN" \
+  --test-cmd "$SPECIAL_TEST_CMD" \
+  --output "$NEW_PLIST" >/dev/null)
+assert_eq "$(python3 -c \
+  'import os, stat, sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode)))' \
+  "$NEW_PLIST")" "0o600"
+
+CRON_WRAPPER="$SPECIAL_ROOT/cron wrapper"
+CRON_CAPTURE="$SPECIAL_ROOT/cron capture"
+SPECIAL_PATH="$SPECIAL_ROOT/tool path:/usr/bin:/bin"
+printf '#!/bin/bash\ncd %q || exit 1\nexec env PATH=%q AGENT_TEAM=overnight %q --max-iter 50 --max-runtime 6h --worktree --prompt %q --test-cmd %q >> %q 2>&1\n' \
+  "$SPECIAL_REPO" "$SPECIAL_PATH" "$SPECIAL_BIN" "$SPECIAL_REPO/PROMPT.md" \
+  "$SPECIAL_TEST_CMD" \
+  "$SPECIAL_REPO/.ralph-trio/log/overnight/cron.log" > "$CRON_WRAPPER"
+chmod +x "$CRON_WRAPPER"
+assert_ok env LAUNCH_CAPTURE="$CRON_CAPTURE" "$CRON_WRAPPER"
+assert_eq "$(sed -n '1p' "$CRON_CAPTURE")" "cwd=$SPECIAL_REPO"
+assert_eq "$(sed -n '2p' "$CRON_CAPTURE")" "team=overnight"
+assert_eq "$(sed -n '3p' "$CRON_CAPTURE")" "path=$SPECIAL_PATH"
+assert_eq "$(sed -n '4,$p' "$CRON_CAPTURE")" "$(printf '%s\n' \
+  'arg=--max-iter' 'arg=50' 'arg=--max-runtime' 'arg=6h' 'arg=--worktree' \
+  'arg=--prompt' "arg=$SPECIAL_REPO/PROMPT.md" \
+  'arg=--test-cmd' "arg=$SPECIAL_TEST_CMD")"
 
 
 smoke_done 30-ralph-spec
