@@ -298,6 +298,9 @@ BAD_CONFIGS = {
     "surrogate in an unknown field": b'{"notes": ["\\ud800"]}',
     "invalid UTF-8": b'{"roles": {"dev-trio.reviewer": "co\xffdex"}}',
     "a directory": DIRECTORY,
+    "newline in a role value": b'{"roles": {"langgraph-conductor.planner": "claude\\n"}}',
+    "tab in a role key": b'{"roles": {"dev-trio.reviewer\\t": "codex"}}',
+    "newline in a model id": b'{"models": {"mine\\n": {"command": "x", "args": ["{prompt}"]}}}',
 }
 
 

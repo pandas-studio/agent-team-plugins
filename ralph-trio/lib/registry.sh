@@ -251,6 +251,9 @@ _registry_config_problem() {
     elif has("models") and (.models | type) != "object" then "models is not a JSON object"
     elif has("roles") and (.roles | type) != "object" then "roles is not a JSON object"
     elif any((.roles // {})[]; type != "string") then "has a role binding that is not a model-id string"
+    elif any(((.models // {}) | keys[]), ((.roles // {}) | keys[]), (.roles // {})[];
+             any(explode[]; . < 32 or . == 127)) then
+      "has a model id or role binding with a control character, which the shell cannot carry"
     elif any((.models // {})[]; type != "object") then "has a model definition that is not a JSON object"
     else "" end' "$1" 2>/dev/null || echo "is not valid JSON"
 }

@@ -238,6 +238,13 @@ class ModelRegistry:
                 raise RegistryError(f"registry config {name!r} must be an object")
         if not all(isinstance(value, str) for value in roles.values()):
             raise RegistryError("registry role bindings must be model ID strings")
+        # registry.sh reads these through $(...), which drops a trailing newline:
+        # "codex\n" would select codex there and fail here (#133).
+        for name in (*models, *roles, *roles.values()):
+            if any(ord(c) < 32 or ord(c) == 127 for c in name):
+                raise RegistryError(
+                    f"invalid registry config {self.config_path}: model id or role binding {name!r} "
+                    "has a control character")
         for model_id, definition in models.items():
             if not isinstance(definition, dict):
                 raise RegistryError(f"model {model_id!r} must be an object")
