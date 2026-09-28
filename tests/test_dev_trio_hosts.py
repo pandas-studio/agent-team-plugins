@@ -2236,7 +2236,8 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         result = self.run_cli(DEV_TRIO_REVIEWER_MODEL="agy")
         self.assertEqual(result.returncode, 0, result.stderr)
         snapshot = self.fenced(self.sent_prompt(), "workspace_snapshot")
-        self.assertIn("tracked diff and untracked contents omitted", snapshot)
+        # The deletion hides only its own content now (#145).
+        self.assertIn("content of deleted and type-changed files omitted", snapshot)
         self.assertNotIn("SECRET=ignored_move", snapshot)
 
     def test_agy_reviewer_tracked_log_move_omits_untracked_destination(self):
@@ -2254,6 +2255,105 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         snapshot = self.fenced(self.sent_prompt(), "workspace_snapshot")
         self.assertIn("tracked diff and untracked contents omitted", snapshot)
         self.assertNotIn("SECRET=logged_content", snapshot)
+
+    # #145: an ordinary tracked deletion no longer omits the whole snapshot.
+    # Deleted and type-changed paths never show their old content, which may
+    # now be an ignored file's; a sensitive removal, or any removal without
+    # HEAD, still omits everything.
+    def _commit_files(self, files):
+        self._init_git_workspace()
+        for name, text in files.items():
+            (self.workspace / name).write_text(text)
+        subprocess.run(["git", "add", *files], cwd=self.workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "base"], cwd=self.workspace,
+                       check=True, stdout=subprocess.DEVNULL)
+
+    def _snapshot(self):
+        result = self.run_helper("working-tree")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.decode()
+
+    def test_snapshot_ordinary_deletion_keeps_other_diffs_and_untracked(self):
+        self._commit_files({"gone.txt": "GONE_CONTENT\n", "kept.txt": "kept\n"})
+        (self.workspace / "gone.txt").unlink()
+        (self.workspace / "kept.txt").write_text("kept\nKEPT_EDIT\n")
+        (self.workspace / "new.txt").write_text("NEW_UNTRACKED\n")
+        snapshot = self._snapshot()
+        self.assertNotIn("tracked diff and untracked contents omitted", snapshot)
+        self.assertIn(" D gone.txt", snapshot)
+        self.assertIn("+KEPT_EDIT", snapshot)
+        self.assertIn("NEW_UNTRACKED", snapshot)
+        self.assertNotIn("GONE_CONTENT", snapshot)
+        self.assertIn("content of deleted and type-changed files omitted", snapshot)
+
+    def test_snapshot_staged_edit_moved_to_ignored_path_is_not_shown(self):
+        self._commit_files({".gitignore": ".env\n", "config.txt": "old\n", "kept.txt": "kept\n"})
+        (self.workspace / "config.txt").write_text("SECRET=staged_then_moved\n")
+        subprocess.run(["git", "add", "config.txt"], cwd=self.workspace, check=True)
+        (self.workspace / "config.txt").rename(self.workspace / ".env")
+        (self.workspace / "kept.txt").write_text("kept\nKEPT_EDIT\n")
+        snapshot = self._snapshot()
+        self.assertIn("MD config.txt", snapshot)
+        self.assertIn("+KEPT_EDIT", snapshot)
+        self.assertNotIn("SECRET=staged_then_moved", snapshot)
+        self.assertNotIn("\n-old", snapshot)
+
+    def test_snapshot_type_change_never_shows_old_content(self):
+        # A tracked file moved to an ignored path and replaced by a symlink to
+        # it reads as a type change, with or without a deletion beside it.
+        for with_deletion in (False, True):
+            with self.subTest(with_deletion=with_deletion):
+                if (self.workspace / ".git").exists():
+                    shutil.rmtree(self.workspace / ".git")
+                for child in self.workspace.iterdir():
+                    child.unlink()
+                self._commit_files({".gitignore": ".env\n", "notes.txt": "TRACKED_SECRET\n",
+                                    "gone.txt": "g\n", "kept.txt": "kept\n"})
+                (self.workspace / "notes.txt").rename(self.workspace / ".env")
+                (self.workspace / "notes.txt").symlink_to(".env")
+                (self.workspace / "kept.txt").write_text("kept\nKEPT_EDIT\n")
+                if with_deletion:
+                    (self.workspace / "gone.txt").unlink()
+                snapshot = self._snapshot()
+                self.assertIn(" T notes.txt", snapshot)
+                self.assertIn("+KEPT_EDIT", snapshot)
+                self.assertNotIn("TRACKED_SECRET", snapshot)
+
+    def test_snapshot_no_head_removal_omits_everything(self):
+        # Without HEAD the staged diff would show what a removed path held.
+        cases = {
+            "deleted": lambda: (self.workspace / "a.txt").rename(self.workspace / "b.txt"),
+            "type-changed": lambda: ((self.workspace / "a.txt").rename(self.workspace / ".env"),
+                                     (self.workspace / "a.txt").symlink_to(".env")),
+        }
+        for name, remove in cases.items():
+            with self.subTest(case=name):
+                if (self.workspace / ".git").exists():
+                    shutil.rmtree(self.workspace / ".git")
+                for child in self.workspace.iterdir():
+                    child.unlink()
+                self._init_git_workspace()
+                (self.workspace / ".gitignore").write_text(".env\n")
+                (self.workspace / "a.txt").write_text("SECRET=staged_no_head\n")
+                subprocess.run(["git", "add", "a.txt"], cwd=self.workspace, check=True)
+                remove()
+                snapshot = self._snapshot()
+                self.assertIn("tracked diff and untracked contents omitted", snapshot)
+                self.assertNotIn("SECRET=staged_no_head", snapshot)
+
+    def test_snapshot_sensitive_type_change_under_log_root_omits_everything(self):
+        self._commit_files({"kept.txt": "kept\n"})
+        log = self.workspace / ".dev-trio"
+        log.mkdir()
+        (log / "old.log").write_text("SECRET=logged\n")
+        subprocess.run(["git", "add", "-f", ".dev-trio/old.log"], cwd=self.workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "log"], cwd=self.workspace,
+                       check=True, stdout=subprocess.DEVNULL)
+        (log / "old.log").rename(self.workspace / "notes.txt")
+        (log / "old.log").symlink_to("../notes.txt")
+        snapshot = self._snapshot()
+        self.assertIn("tracked diff and untracked contents omitted", snapshot)
+        self.assertNotIn("SECRET=logged", snapshot)
 
     def test_agy_reviewer_tracked_rename_into_custom_log_root_omits_diff(self):
         self._init_git_workspace()

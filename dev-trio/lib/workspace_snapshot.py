@@ -466,9 +466,21 @@ def main() -> None:
             skip(SKIP_PARSE_FAILED)
         # Excluded log directories can still be either side of a move.
         # Preserve deletion and rename signals before hiding log paths.
+        # A deleted or type-changed path left its content somewhere this
+        # snapshot may not see, possibly an ignored file. The diff below does
+        # not show deletions or type changes (--diff-filter=dt); when the path
+        # itself is sensitive, its content may now sit in any ordinary file,
+        # so nothing is shown.
+        has_removal = any(
+            code != "??" and ("D" in code or "T" in code)
+            for code, path, source in status_entries
+        )
         has_hidden_move_risk = any(
             code != "??" and (
-                "D" in code or (
+                (
+                    ("D" in code or "T" in code)
+                    and is_sensitive_path(path, custom_log_rels=extra_log_rels)
+                ) or (
                     ("R" in code or "C" in code)
                     and any(
                         entry and is_sensitive_path(entry, custom_log_rels=extra_log_rels)
@@ -506,42 +518,57 @@ def main() -> None:
         out.write(data)
         remaining = max(0, remaining - len(header) - len(data))
 
+        def head_exists() -> bool:
+            rc_head, _ = run_git(
+                [
+                    "git",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "-C",
+                    repo_root,
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "HEAD",
+                ],
+                1024,
+                # rev-parse --verify --quiet exits 1 for an unborn HEAD.
+                ok=(0, 1),
+            )
+            return rc_head == 0
+
         # A tracked deletion can be a move to an ignored sensitive path, or
-        # from a tracked sensitive path into an ordinary file. An ignored or
-        # untracked source moved into an ordinary file is indistinguishable
-        # from a copy and cannot be detected here.
-        if has_hidden_move_risk or any(
-            (code != "??" and "D" in code)
-            or any(
+        # from a tracked sensitive path into an ordinary file. The first
+        # leaves only the old content, which the diff below never shows; the
+        # second is caught by has_hidden_move_risk. Without HEAD the staged
+        # diff would show what a removed path held, so any removal omits all.
+        # Content that leaves no deletion or type change of a sensitive path
+        # behind cannot be detected here: a copy from any file, a move whose
+        # source path is written again, or committed content moved into an
+        # ignored file while its path is written again. A modified file's
+        # removed lines are HEAD content and are shown, as git show HEAD:<path>
+        # would show them. An unrelated deletion elsewhere changes none of it.
+        omit_all = has_hidden_move_risk or any(
+            any(
                 entry and is_sensitive_path(entry, custom_log_rels=extra_log_rels)
                 for entry in (path, source)
             )
             for code, path, source in visible_entries
-        ):
+        )
+        has_head = None
+        if not omit_all and has_removal:
+            has_head = head_exists()
+            omit_all = not has_head
+        if omit_all:
             out.write(
-                b"[... tracked diff and untracked contents omitted because a sensitive path or tracked deletion is present; inspect directly with git and your file viewer ...]\n"
+                b"[... tracked diff and untracked contents omitted because a sensitive path, or a tracked deletion or type change, is present; inspect directly with git and your file viewer ...]\n"
             )
             sys.stdout.buffer.write(out.getvalue())
             sys.exit(0)
 
         # 2. Tracked modifications
-        rc_head, _ = run_git(
-            [
-                "git",
-                "-c",
-                "core.fsmonitor=false",
-                "-C",
-                repo_root,
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                "HEAD",
-            ],
-            1024,
-            # rev-parse --verify --quiet exits 1 for an unborn HEAD.
-            ok=(0, 1),
-        )
-        has_head = rc_head == 0
+        if has_head is None:
+            has_head = head_exists()
 
         if has_head:
             if remaining <= 0:
@@ -562,6 +589,9 @@ def main() -> None:
                     "--no-ext-diff",
                     "--no-textconv",
                     "--no-renames",
+                    # Deleted and type-changed paths: their old content may
+                    # now be an ignored file's (see has_removal above).
+                    "--diff-filter=dt",
                     "HEAD",
                     "--",
                     *sensitive_excludes,
@@ -569,6 +599,11 @@ def main() -> None:
                 remaining,
             )
             diff_header = b"### Tracked modifications\n"
+            if has_removal:
+                diff_header += (
+                    b"[... content of deleted and type-changed files omitted; "
+                    b"their paths are in the status above. Use 'git show HEAD:<path>' to read one ...]\n"
+                )
             out.write(diff_header)
             remaining = max(0, remaining - len(diff_header))
             if len(diff_data) > 0:
