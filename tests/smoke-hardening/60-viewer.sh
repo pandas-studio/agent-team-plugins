@@ -20,6 +20,27 @@ stop_tail() {
   TAIL_PID=""
 }
 register_cleanup stop_tail
+# #169: viewer checks here fail intermittently under load (markers and
+# "attempt failed" lines that should not be shown). When this part fails,
+# dump every viewer capture and every stream record so the failure says how
+# they got there. Cleanup entries run inside smoke_cleanup and see its $rc.
+dump_viewer_state() {
+  [ "$1" != 0 ] || return 0
+  local f
+  # A capture can end without a newline; each header starts its own line.
+  for f in "$TMP"/view-*.out; do
+    [ -e "$f" ] || continue
+    printf -- '\n--- viewer capture %s:\n' "${f##*/}" >&2
+    cat -v "$f" | tail -n 120 >&2 || true
+  done
+  for f in "$TMP"/view-log/*/debate-*/stream-*.log; do
+    [ -e "$f" ] || continue
+    printf -- '\n--- records and markers in %s:\n' "${f#"$TMP"/}" >&2
+    grep -an -- 'debate-round' "$f" | cat -v >&2 || true
+  done
+}
+# shellcheck disable=SC2016  # expanded when smoke_cleanup evals it
+register_cleanup 'dump_viewer_state "$rc"'
 # wait_count FILE PATTERN N: poll up to 15 s until PATTERN occurs on at least N
 # lines of FILE (GNU tail can take seconds to notice a file).
 wait_count() {
@@ -97,17 +118,7 @@ for out in "$TMP/view-retry.out" "$TMP/view-retry-late.out"; do
   assert_eq "$(count "$out" 'NEW-FIRST-LINE')" "2"
   assert_eq "$(count "$out" 'NEW body line')" "120"
   assert_eq "$(count "$out" 'NEW-LAST-LINE')" "2"
-  # #169: this has failed under load with 5 markers shown. Print the lines
-  # and the stream's raw bytes so the next failure says how they got through.
-  assert_eq "$(count "$out" '<!-- debate-round')" "0" || {
-    echo "--- marker lines in $out:" >&2
-    grep -an -B2 -A1 -- '<!-- debate-round' "$out" | cat -v >&2 || true
-    for s in "$RETRY_DIR"/stream-gen.log; do
-      echo "--- marker lines in $s:" >&2
-      grep -an -- 'debate-round' "$s" | cat -v >&2 || true
-    done
-    exit 1
-  }
+  assert_eq "$(count "$out" '<!-- debate-round')" "0"
   # Only the failed attempt is reported, with its exit status.
   assert_eq "$(count "$out" 'attempt failed')" "1"
   assert_eq "$(count "$out" 'attempt failed (rc=1)')" "1"
