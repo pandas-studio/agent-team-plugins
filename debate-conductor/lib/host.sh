@@ -40,7 +40,8 @@ debate_conductor_resolve_role() {
       ;;
     *) echo "debate-conductor: unknown role '$role'" >&2; return 2 ;;
   esac
-  cfg="$(registry_config_role "$key")"
+  # A malformed config is rc 3 here, not "no binding" (#133).
+  cfg="$(registry_config_role "$key")" || return 3
   if [ -n "$cfg" ]; then printf '%s\n' "$cfg"; return 0; fi
   debate_conductor_default_role "$role" "$gen"
 }

@@ -66,12 +66,11 @@ FAILED=0
 if [ "$RESEARCH_ONLY" = true ]; then
   command -v python3 >/dev/null 2>&1 || { fail 'python3 is required'; exit 1; }
   config="$(registry_config_file)"
-  if [ -e "$config" ] && ! jq -e '
-    type == "object" and
-    ((.models // {}) | type == "object") and
-    ((.roles // {}) | type == "object")
-  ' "$config" >/dev/null 2>&1; then
-    fail "model registry is unreadable or malformed: $config"
+  # The registry's own rule (#133), so the doctor and every query agree.
+  problem=""
+  [ ! -e "$config" ] || problem="$(_registry_config_problem "$config")"
+  if [ -n "$problem" ]; then
+    fail "model registry is unreadable or malformed: $config (config $problem)"
     note 'Fix the registry JSON before checking research. No invocation started.'
     exit 1
   fi
