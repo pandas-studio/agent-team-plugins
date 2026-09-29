@@ -11,9 +11,17 @@ Do not assume the plugin added its bin directory to PATH.
 
 ## Before dispatch: host execution permissions
 
-For the selected agy researcher, startup needs writes under
-`~/.gemini/antigravity-cli` (logs/crashes), a localhost listener, and external
-network access. These host resources are separate from agy's tool permissions.
+The selected agy researcher needs three host resources. It binds a localhost
+listener and reaches its provider over the network: a sandbox without network
+access stops it at `bind 127.0.0.1:0` before it answers (measured with agy
+1.2.12 and 1.2.13; Codex's sandbox grants the listener and outbound access
+together, so they were never measured apart).
+It also writes its own
+records under `~/.gemini/antigravity-cli` (log, crashes, conversations,
+`brain/`). With only those writes blocked it still answers, but the wrapper
+cannot pin agy's log, so agy's log, including its permission allow list, lands
+in the wrapper's transcript, and a headless denial cannot be named. Treat all
+three as required. These host resources are separate from agy's tool permissions.
 Use the current host's supplied sandbox/approval policy and restrictions already
 observed in this session; do not infer them from `rc=1` alone or from a passing
 doctor check.
@@ -22,7 +30,8 @@ doctor check.
   do not request escalation merely because the PM is Codex.
 - If a required resource is known to be blocked and the host supports approval,
   request permission for this wrapper invocation before the first dispatch.
-  Explain the agy home writes, localhost listener and external network access.
+  Explain that the listener and network access are needed to answer, and the
+  home writes for agy's records and for naming a denial.
   Use the host's normal approval mechanism (for example, `require_escalated`
   when offered), respecting existing grants; do not seek blanket/persistent
   permission or change the host policy.
@@ -34,7 +43,7 @@ doctor check.
   probe or invent sandbox restrictions to justify escalation.
 
 Preserve explicit researcher/CLI overrides. For another researcher or a custom
-adapter, use its known requirements rather than assuming agy's startup needs.
+adapter, use its known requirements rather than assuming agy's.
 An unexpected startup failure follows the recovery section below and the host's
 permission policy; never silently retry. Approval to start agy does not grant
 `read_url`, shell-command or MCP access inside agy.
@@ -54,8 +63,24 @@ The wrapper chooses the researcher and records its actual model in the log.
 
 Capture the invocation's exit code and the log path printed on stderr. On a
 nonzero exit follow the recovery steps below; do not silently retry or use an
-older log. On success summarize that invocation's `.final.md` with cited URLs
-and link its log. The transcript is not the answer.
+older log. On success read that invocation's `.final.md` (never a `latest` link) and
+report the following, starting with the lead paragraph. Put nothing about the
+research before it, not even a one-line paraphrase of the final:
+
+- **Lead paragraph**: its first non-empty paragraph, verbatim.
+- **Sources cited**: the `https?://` URLs the final contains, as a count and up
+  to three of them.
+- **Run**: the researcher model and exit code from this run's `.run.json`
+  (`.model`, `.completion.exit_code`), with links to its `.final.md` and `.log`.
+
+The research content of the report is only what the final says. Do not add
+examples, options or facts from your own knowledge, and do not restate the
+final in your own words as the research result. If the final is one line, that
+line is the quoted research content. When the task needs more than the lead,
+quote further paragraphs verbatim or point at the final file. Your own analysis
+of what the research means for the task, if any, goes after the report under
+its own heading, as yours rather than the researcher's. The transcript is not
+the answer.
 If this is part of an authorized review workflow, pass the captured research
 file to the reviewer. No tmux session is required.
 
@@ -85,7 +110,11 @@ Report the selected model, exit code, cause and the next recovery step:
 - Host sandbox/keychain restriction: use the host's normal permission flow.
 - **Confirmed agy headless denial:** identify the action and target only when
   the wrapper printed it (`agy denied: <kind>(<target>)`, read from agy's own
-  record of this run). Explain the corresponding
+  record of this run). That record needs agy's per-run log under
+  `~/.gemini/antigravity-cli/log/` and its `brain/` directory there. When the
+  wrapper printed no target and this run's log shows either write failing
+  (`operation not permitted`), say that is why the target is unknown. Explain
+  the corresponding
   `command(<target>)`, `read_url(<domain>)`, or `mcp(<server/tool>)` allow rule
   using [the recovery guide](../../README.md#research-troubleshooting).
   If the target is absent, say it is unknown and direct the user to inspect
