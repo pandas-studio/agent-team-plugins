@@ -179,8 +179,11 @@ The check script's zero-sources pattern first missed the form
 form, and every row was checked again with the widened pattern. No other
 change was made to the script after seeing a reply.
 
-In the passing runs the remainder is only Codex's own memory-citation block
-(`oai-mem-citation`, which cites a `MEMORY.md` note), with no topic content.
+The script's pass does not require an empty remainder, so each passing
+remainder was read. Each holds Codex's own memory-citation block
+(`oai-mem-citation`, which cites a `MEMORY.md` note), sometimes with fragments
+of its rollout ids. Two also hold words from a link label: `artifacts` and `md`
+in `01a0eca8-b666`, and `md` in `01a0ecb1-c2af`. None is topic content.
 This shows the skill's wording steers a one-line final. It does not show the
 behavior on a long real final, and only the person reading the remainder would
 catch a new kind of addition.
