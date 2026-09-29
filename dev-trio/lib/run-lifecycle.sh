@@ -34,12 +34,42 @@
 # conversation id — and through it a denied tool — can be found after the run.
 # It stays in agy's log directory: it holds the user's whole allow list, so it
 # is never copied here. dev_trio_agy_cli_log creates that file, so a caller
-# that refuses a run on its own inputs does so before calling this.
+# that refuses a run on its own inputs does so before calling this. When agy's
+# log directory cannot take it (a host sandbox, #193), AGY_CLI_LOG_TAG asks
+# run_agy_log_fallback for a private temporary one.
 run_paths() {
   TS="$(date +%Y%m%d-%H%M%S)-$$"
   LOG="$LOG_DIR/$1-$TS.log"
   FINAL="$LOG_DIR/$1-$TS.final.md"
-  [ -z "$3" ] || AGY_CLI_LOG="$(dev_trio_agy_cli_log "$2-$TS")"
+  AGY_CLI_LOG_TMPDIR=""
+  AGY_CLI_LOG_TAG=""
+  [ -n "$3" ] || return 0
+  AGY_CLI_LOG="$(dev_trio_agy_cli_log "$2-$TS")"
+  [ -n "$AGY_CLI_LOG" ] || AGY_CLI_LOG_TAG="$2-$TS"
+}
+
+# run_agy_log_fallback — best-effort; called right after run_install_traps, so
+# the EXIT trap already owns whatever it allocates. The directory arrives in one
+# assignment, the only value run_cleanup needs to remove it: a signal handled
+# after that assignment cleans it up, and one during the allocation is handled
+# by the helper's own traps. Which helper produced the log marks the fallback,
+# never its path: a TMPDIR inside agy home is still a fallback.
+# run_install_traps leaves SIGHUP at its default, which would end the wrapper
+# before the directory is handed over; it is caught for the allocation only,
+# then put back as it was. A signal ignored on entry stays ignored: a
+# non-interactive Bash does not let a trap replace it.
+run_agy_log_fallback() {
+  local hup
+  [ -n "${AGY_CLI_LOG_TAG:-}" ] || return 0
+  hup=$(trap -p HUP) || hup=""
+  trap 'exit 129' HUP
+  AGY_CLI_LOG_TMPDIR="$(dev_trio_agy_cli_log_private "$AGY_CLI_LOG_TAG")" || AGY_CLI_LOG_TMPDIR=""
+  if [ -n "$hup" ]; then eval "$hup"; else trap - HUP; fi
+  [ -n "$AGY_CLI_LOG_TMPDIR" ] || return 0
+  AGY_CLI_LOG="$AGY_CLI_LOG_TMPDIR/cli-dev-trio-$AGY_CLI_LOG_TAG.log"
+  printf "[%s] could not create agy's per-run log under %s/log; using a private temporary file, removed when this run ends. If agy cannot write its home, its denial records are missing too.\n" \
+    "$RUN_TAG" "$(dev_trio_agy_home)" >&2 || true
+  return 0
 }
 
 # run_cleanup — best-effort; the EXIT trap. Its first command captures the
@@ -55,6 +85,7 @@ run_cleanup() {
     runstate_complete "$RUNSTATE_LOG" exit_code="$_cleanup_rc" reason=aborted 2>/dev/null || true
   fi
   run_cleanup_files
+  [ -z "${AGY_CLI_LOG_TMPDIR:-}" ] || rm -rf "$AGY_CLI_LOG_TMPDIR" 2>/dev/null || true
   manifest_cleanup || true
 }
 
@@ -100,6 +131,7 @@ run_write_header() {
   {
     echo "=== $RUN_TAG.sh @ $TS ==="
     run_header_body
+    [ -z "${AGY_CLI_LOG_TMPDIR:-}" ] || echo "=== AGY LOG: private temporary fallback ==="
     echo "=== PM HOST: $PM_HOST ==="
     echo "=== MODEL: $1 ==="
     echo "=== RESPONSE ==="

@@ -18,10 +18,11 @@ access stops it at `bind 127.0.0.1:0` before it answers (measured with agy
 together, so they were never measured apart).
 It also writes its own
 records under `~/.gemini/antigravity-cli` (log, crashes, conversations,
-`brain/`). With only those writes blocked it still answers, but the wrapper
-cannot pin agy's log, so agy's log, including its permission allow list, lands
-in the wrapper's transcript, and a headless denial cannot be named. Treat all
-three as required. These host resources are separate from agy's tool permissions.
+`brain/`). With only those writes blocked it still answers. The wrapper then
+keeps agy's log, which holds its permission allow list, in a private temporary
+file and removes it at the end of the run, and says so on stderr (`could not
+create agy's per-run log`). A headless denial cannot be named when `brain/` is
+not writable either. Treat all three as required. These host resources are separate from agy's tool permissions.
 Use the current host's supplied sandbox/approval policy and restrictions already
 observed in this session; do not infer them from `rc=1` alone or from a passing
 doctor check.
@@ -111,10 +112,10 @@ Report the selected model, exit code, cause and the next recovery step:
 - **Confirmed agy headless denial:** identify the action and target only when
   the wrapper printed it (`agy denied: <kind>(<target>)`, read from agy's own
   record of this run). That record needs agy's per-run log under
-  `~/.gemini/antigravity-cli/log/` and its `brain/` directory there. When the
-  wrapper printed no target and this run's log shows either write failing
-  (`operation not permitted`), say that is why the target is unknown. Explain
-  the corresponding
+  `~/.gemini/antigravity-cli/log/` or the wrapper's temporary fallback, and
+  agy's `brain/` directory. When the wrapper printed no target but did print
+  `could not create agy's per-run log`, say the target is probably unknown
+  because agy could not write its home. Explain the corresponding
   `command(<target>)`, `read_url(<domain>)`, or `mcp(<server/tool>)` allow rule
   using [the recovery guide](../../README.md#research-troubleshooting).
   If the target is absent, say it is unknown and direct the user to inspect

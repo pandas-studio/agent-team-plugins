@@ -6,8 +6,10 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -42,6 +44,8 @@ class ResearchDiagnosticsTests(unittest.TestCase):
             'if [ "$1" = --log-file ] && [ -n "${DIAG_CONVERSATION:-}" ]; then\n'
             '  printf "I0923 1 server.go:1239] Created conversation %s\\n" "$DIAG_CONVERSATION" > "$2"\n'
             'fi\n'
+            'if [ -n "${DIAG_READY:-}" ]; then : > "$DIAG_READY"; fi\n'
+            'if [ -n "${DIAG_SLEEP:-}" ]; then sleep "$DIAG_SLEEP"; fi\n'
             'printf "%s" "${DIAG_ANSWER:-}"\n'
             'printf "%s" "${DIAG_STDERR:-}" >&2\n'
             'exit "${DIAG_RC:-0}"\n'
@@ -291,6 +295,101 @@ class ResearchDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("rc=5 alone does not establish permission denial", result.stderr)
         manifest = json.loads(next(self.workspace.glob(".dev-trio/log/*/*.manifest.json")).read_text())
         self.assertIn({"kind": "agy-conversation", "value": self.CONVERSATION}, manifest["inputs"])
+
+    def test_denial_is_named_through_the_temporary_log(self):
+        # #193: agy's log directory cannot take the pinned log (a host sandbox);
+        # the private temporary one still carries the conversation id.
+        shutil.rmtree(self.agy_home / "log")
+        tmp = self.root / "tmp"
+        tmp.mkdir()
+        self.record_denial()
+        result = self.run_script("ask-researcher.sh", "question", DIAG_RC="0", DIAG_ANSWER="",
+                                 DIAG_STDERR=self.NOTICE, DIAG_CONVERSATION=self.CONVERSATION,
+                                 TMPDIR=str(tmp))
+        self.assertEqual(result.returncode, 5, result.stderr)
+        lines = result.stderr.splitlines()
+        self.assertIn("[ask-researcher] agy denied: command(lsof -p $$ || pwd)", lines)
+        self.assertIn(f"[ask-researcher] agy conversation: {self.CONVERSATION}", lines)
+        self.assertIn("[ask-researcher] could not create agy's per-run log under", result.stderr)
+        self.assertEqual(list(tmp.glob("dev-trio-agy.*")), [])
+
+    def test_temporary_log_is_removed_when_the_run_is_interrupted(self):
+        shutil.rmtree(self.agy_home / "log")
+        for sig, code in ((signal.SIGTERM, 143), (signal.SIGINT, 130)):
+            with self.subTest(signal=sig.name):
+                tmp = self.root / f"tmp-{sig.name}"
+                tmp.mkdir()
+                ready = self.root / f"ready-{sig.name}"
+                proc = subprocess.Popen(
+                    [str(self.plugin / "bin" / "ask-researcher.sh"), "question"], cwd=self.workspace,
+                    env=self.env | dict(TMPDIR=str(tmp), DIAG_SLEEP="2", DIAG_ANSWER="answer",
+                                        DIAG_READY=str(ready)),
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                # The CLI is running: the wrapper's traps and the fallback are set.
+                deadline = time.monotonic() + 10
+                while not ready.exists():
+                    self.assertLess(time.monotonic(), deadline, "the CLI never started")
+                    time.sleep(0.05)
+                self.assertEqual(len(list(tmp.glob("dev-trio-agy.*/cli-dev-trio-research-*.log"))), 1)
+                proc.send_signal(sig)
+                _, err = proc.communicate(timeout=15)
+                self.assertEqual(proc.returncode, code, err)
+                self.assertEqual(list(tmp.glob("dev-trio-agy.*")), [])
+
+    def test_fallback_helper_removes_its_allocation_when_interrupted(self):
+        # A signal while the helper validates its directory: the helper's own
+        # traps remove what mktemp made (the wrapper's traps are not set yet
+        # for anything the helper has not handed over).
+        tmp = self.root / "tmp-helper"
+        tmp.mkdir()
+        ready = self.root / "helper-ready"
+        script = (f'. {shlex.quote(str(self.plugin / "lib" / "host.sh"))}\n'
+                  'dev_trio_prepare_log_dir() { : > "$READY"; sleep 5; printf "%s\\n" "$1"; }\n'
+                  'dev_trio_agy_cli_log_private research-x\n')
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            with self.subTest(signal=sig.name):
+                ready.unlink(missing_ok=True)
+                proc = subprocess.Popen(["/bin/bash", "-c", script], env=self.env | dict(TMPDIR=str(tmp), READY=str(ready)),
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                        start_new_session=True)
+                deadline = time.monotonic() + 10
+                while not ready.exists():
+                    self.assertLess(time.monotonic(), deadline, "the helper never reached validation")
+                    time.sleep(0.05)
+                self.assertEqual(len(list(tmp.glob("dev-trio-agy.*"))), 1)
+                os.killpg(proc.pid, sig)
+                out, err = proc.communicate(timeout=15)
+                self.assertEqual(out, "", err)
+                self.assertEqual(list(tmp.glob("dev-trio-agy.*")), [])
+
+    def test_wrapper_hangup_during_fallback_allocation_leaves_nothing(self):
+        # SIGHUP to the wrapper alone while the helper validates: the wrapper
+        # waits for the handover and its EXIT trap removes the directory.
+        shutil.rmtree(self.agy_home / "log")
+        tmp = self.root / "tmp-hup"
+        tmp.mkdir()
+        ready = self.root / "hup-ready"
+        host = self.plugin / "lib" / "host.sh"
+        host.write_text(host.read_text() + (
+            '\n_dev_trio_real_prepare=$(declare -f dev_trio_prepare_log_dir)\n'
+            'eval "${_dev_trio_real_prepare/dev_trio_prepare_log_dir/_dev_trio_real_prepare_log_dir}"\n'
+            'dev_trio_prepare_log_dir() {\n'
+            '  case "$1" in *dev-trio-agy.*) : > "$HUP_READY"; sleep 2 ;; esac\n'
+            '  _dev_trio_real_prepare_log_dir "$@"\n'
+            '}\n'))
+        proc = subprocess.Popen(
+            [str(self.plugin / "bin" / "ask-researcher.sh"), "question"], cwd=self.workspace,
+            env=self.env | dict(TMPDIR=str(tmp), HUP_READY=str(ready), DIAG_ANSWER="answer"),
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        deadline = time.monotonic() + 10
+        while not ready.exists():
+            self.assertLess(time.monotonic(), deadline, "the helper never reached validation")
+            time.sleep(0.05)
+        proc.send_signal(signal.SIGHUP)
+        _, err = proc.communicate(timeout=15)
+        self.assertEqual(proc.returncode, 129, err)
+        self.assertFalse(self.calls.exists(), "the CLI must not start after a hangup")
+        self.assertEqual(list(tmp.glob("dev-trio-agy.*")), [])
 
     def test_notice_quoted_in_the_question_is_not_evidence(self):
         # The transcript does record a denial, but this run printed no notice:
