@@ -48,7 +48,7 @@ class ResearchDiagnosticsTests(unittest.TestCase):
             # Hold until the test releases it (#195): a handshake, not a timed
             # sleep. A hold that times out fails the run with 97.
             'if [ -n "${DIAG_RELEASE:-}" ]; then w=0; until [ -e "$DIAG_RELEASE" ]; do\n'
-            '  sleep 0.05; w=$((w+1)); [ "$w" -lt 600 ] || exit 97; done; fi\n'
+            '  sleep 0.05; w=$((w+1)); [ "$w" -lt 600 ] || { : > "$DIAG_RELEASE.timeout"; exit 97; }; done; fi\n'
             'printf "%s" "${DIAG_ANSWER:-}"\n'
             'printf "%s" "${DIAG_STDERR:-}" >&2\n'
             'exit "${DIAG_RC:-0}"\n'
@@ -355,6 +355,8 @@ class ResearchDiagnosticsTests(unittest.TestCase):
                     if proc.poll() is None:
                         proc.kill()
                         proc.communicate()
+                # The wrapper's own signal handling would hide a hold that timed out.
+                self.assertFalse(Path(f"{release}.timeout").exists(), "the CLI's hold timed out")
                 self.assertEqual(proc.returncode, code, err)
                 self.assertEqual(list(tmp.glob("dev-trio-agy.*")), [])
 
@@ -417,6 +419,61 @@ class ResearchDiagnosticsTests(unittest.TestCase):
                 out, tmp = self.run_helper(shims, sig, "create", path_dir=fake)
                 self.assertEqual(out, "")
                 self.assertEqual(list(tmp.glob("dev-trio-agy.*")), [])
+
+    def test_fallback_helper_honours_a_signal_sent_to_it_alone(self):
+        # A signal to the helper alone, at creation and at validation: it must
+        # end with the signal's code and leave nothing. The process-group tests
+        # above cannot tell this apart, since a pending signal plus a failed
+        # validation also cleans up; here nothing else fails, so only the
+        # abort traps can.
+        fake = self.root / "fake-bin-self"
+        fake.mkdir(exist_ok=True)
+        # The helper execs mkdir, so this process's parent is the helper.
+        (fake / "mkdir").write_text(
+            "#!/bin/bash\n" + self.HOLD +
+            '/bin/mkdir "$@" || exit\n'
+            'case "${@: -1}" in *dev-trio-agy.*) echo "$PPID" > "$HELPER_PID"; hold || exit 97 ;; esac\n')
+        (fake / "mkdir").chmod(0o755)
+        phases = {
+            "create": ("", fake),
+            # prepare runs in a command substitution under the helper; the
+            # waiter's grandparent is the helper.
+            "validate": ('_dev_trio_real_prepare=$(declare -f dev_trio_prepare_log_dir)\n'
+                         'eval "${_dev_trio_real_prepare/dev_trio_prepare_log_dir/_real_prepare}"\n'
+                         'dev_trio_prepare_log_dir() { '
+                         'sh -c \'ps -o ppid= -p "$PPID"\' | tr -d " " > "$HELPER_PID"; '
+                         'hold || return 97; _real_prepare "$@"; }\n', None),
+        }
+        for phase, (shims, path_dir) in phases.items():
+            for sig, code in ((signal.SIGHUP, 129), (signal.SIGINT, 130), (signal.SIGTERM, 143)):
+                with self.subTest(phase=phase, signal=sig.name):
+                    tag = f"self-{phase}-{sig.name}"
+                    tmp = self.root / f"tmp-{tag}"
+                    tmp.mkdir()
+                    ready, release = self.root / f"ready-{tag}", self.root / f"release-{tag}"
+                    helper_pid = self.root / f"pid-{tag}"
+                    script = (f'. {shlex.quote(str(self.plugin / "lib" / "host.sh"))}\n' + self.HOLD + shims
+                              + 'dev_trio_agy_cli_log_private research-x\necho "rc=$?" >&2\n')
+                    env = self.env | dict(TMPDIR=str(tmp), READY=str(ready), RELEASE=str(release),
+                                          HELPER_PID=str(helper_pid))
+                    if path_dir:
+                        env["PATH"] = f"{path_dir}{os.pathsep}{env['PATH']}"
+                    proc = subprocess.Popen(["/bin/bash", "-c", script], env=env, stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE, text=True, start_new_session=True)
+                    try:
+                        self.wait_for(ready, "the helper never reached the hold", proc)
+                        self.wait_for(helper_pid, "the helper's pid was not recorded", proc)
+                        os.kill(int(helper_pid.read_text().strip()), sig)
+                        release.touch()
+                        out, err = proc.communicate(timeout=15)
+                    finally:
+                        if proc.poll() is None:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                            proc.communicate()
+                    self.assertFalse(Path(f"{ready}.timeout").exists(), "the hold timed out")
+                    self.assertEqual(out, "", err)
+                    self.assertIn(f"rc={code}", err.splitlines())
+                    self.assertEqual(list(tmp.glob("dev-trio-agy.*")), [])
 
     def test_wrapper_hangup_during_fallback_allocation_leaves_nothing(self):
         # SIGHUP to the wrapper alone while the helper validates: the wrapper
