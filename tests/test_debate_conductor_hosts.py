@@ -835,6 +835,29 @@ class DebateHostTests(unittest.TestCase):
                 self.assertFalse(self.lock_of(debate).is_symlink())
                 release.touch()
 
+    def test_stop_attempt_resumes_the_tree_before_terminating_it(self):
+        # TERM to the stopped tree lost a hosted macOS runner in the same
+        # process group; CONT first kept it (#174).
+        kill_log = self.root / "kill.log"
+        self.inject_debate_hooks(r'''
+kill() {
+  printf '%s\n' "$*" >> "$KILL_LOG"
+  builtin kill "$@"
+}
+''')
+        proc, _ready, release = self.start_blocked_debate("-n", "1", "t", KILL_LOG=str(kill_log))
+        proc.send_signal(signal.SIGTERM)
+        proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, -signal.SIGTERM)
+        release.touch()
+        calls = [line.split() for line in kill_log.read_text().splitlines()]
+        stopped = {p for c in calls if c[:2] == ["-s", "STOP"] for p in c[2:]}
+        self.assertTrue(stopped, calls)
+        term = next(i for i, c in enumerate(calls)
+                    if c[:2] in (["-s", "TERM"], ["-s", "KILL"]) and stopped & set(c[2:]))
+        resumed = {p for c in calls[:term] if c[:2] == ["-s", "CONT"] for p in c[2:]}
+        self.assertEqual(stopped - resumed, set(), calls)
+
     def test_failed_continue_preflight_leaves_no_lock(self):
         self.assertEqual(self.run_cli("debate.sh", "-n", "1", "t").returncode, 0)
         debate = self.latest_debate()

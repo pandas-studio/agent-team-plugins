@@ -70,9 +70,16 @@ jobs:
           [ "$v" = 3 ] || { echo "bash on PATH is $v, want 3" >&2; exit 1; }
           python3 --version
       - run: uv sync --directory runtime --frozen --python 3.12 --extra dev
-      # Two runs stalled past timeout-minutes and never uploaded a log, which
-      # points at the runner itself being signalled. Give check.sh its own
-      # session so no process-group signal from a test can reach the runner.
+      # The step shares one process group with hosted-compute-agent,
+      # Runner.Listener and Runner.Worker. Unisolated, check.sh lost the runner
+      # (no log, timeout-minutes never fired) whenever debate.sh's stop_attempt,
+      # driven by two tests in test_debate_conductor_hosts, sent TERM to the
+      # attempt it had stopped; no signal went to a runner process, and why the
+      # runner went down is not known (#174; runs 36503223500 topology,
+      # 36512979478 bisect, 36516295519 and 36517682066 signals, 36519413756
+      # orders, 36521255542 the fix unisolated). stop_attempt now resumes before
+      # it terminates; this session keeps any other group-wide effect off the
+      # runner.
       # `exec` keeps the step's PID on check.sh, so a timeout's signal reaches
       # it; its descendants go with the hosted runner's VM at job end.
       - name: Run scripts/check.sh in its own session
