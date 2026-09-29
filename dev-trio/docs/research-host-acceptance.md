@@ -34,7 +34,7 @@ the POSIX cat utility do?":
 | Command | Where | Run | Observed |
 | --- | --- | --- | --- |
 | `DEV_TRIO_PM_HOST=codex ask-researcher.sh "<question>"` | sandboxed | `agy-20260929-182921-48400` | rc 1 in 1.6 s, no answer. The same three log lines as the 1.2.12 run: log redirect and crash reporter `operation not permitted` under `~/.gemini/antigravity-cli`, then `CLI failed to start - listen tcp 127.0.0.1:0: bind: operation not permitted` |
-| same | sandboxed, `-c sandbox_workspace_write.network_access=true` | `agy-20260929-182937-49550` | rc 0 in 15 s with an answer (`.run.json` exit 0). `operation not permitted` lines under agy home: 12 `conversations`, 6 `brain`, 2 each `cache`, `mcp`, `jetbox_summaries_proto`, 1 each `log`, `crashes`, `annotations`, `implicit`, `presence`. No `CLI failed to start` line. No pinned `log/cli-dev-trio-research-20260929-182937.log` was created, and conversation `9b7eabec-…` has no `brain/` directory |
+| same | sandboxed, `-c sandbox_workspace_write.network_access=true` | `agy-20260929-182937-49550` | rc 0 in 15 s with an answer (`.run.json` exit 0). 28 `operation not permitted` lines, all under agy home. Path mentions in them: 12 `conversations`, 6 `brain`, 2 each `cache`, `mcp`, `jetbox_summaries_proto`, 1 each `log`, `crashes`, `annotations`, `implicit`, `presence`. No `CLI failed to start` line. No pinned `log/cli-dev-trio-research-20260929-182937.log` was created, and conversation `9b7eabec-…` has no `brain/` directory |
 
 With only the home writes blocked, agy's own log went to its stderr, which is
 the wrapper's transcript: that `.log` is 39,837 bytes, and all 41 entries of
