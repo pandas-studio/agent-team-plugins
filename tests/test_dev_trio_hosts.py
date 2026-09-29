@@ -1304,15 +1304,45 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         self.agy_argv(self.recorded()[0], "review")
         self.assert_model("agy")
 
-    def test_agy_without_log_dir_still_gets_workspace(self):
+    def test_agy_without_log_dir_gets_a_private_temporary_log(self):
+        # #193: without --log-file agy writes its whole log, allow list
+        # included, into the transcript; the wrapper pins a temporary one.
         shutil.rmtree(self.agy_home / "log")
-        result = self.run_cli("ask-researcher.sh", "research question")
+        tmp = self.root / "tmp"
+        tmp.mkdir()
+        result = self.run_cli("ask-researcher.sh", "research question", TMPDIR=str(tmp))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        call = self.recorded()[0]
+        self.assertEqual(call[0], "--log-file", call)
+        self.assertRegex(call[1], "^" + re.escape(os.path.realpath(tmp))
+                         + r"/dev-trio-agy\.[^/]+/cli-dev-trio-research-[0-9]{8}-[0-9]{6}-[0-9]+\.log$")
+        self.assertEqual(call[2:8], ["--add-dir", os.path.realpath(self.workspace),
+                                     "--input-format", "text", "--output-format", "text"], call)
+        self.assertEqual(call[8], "<stdin>")
+        self.assertEqual(len(call), 10, call)
+        self.assertEqual(list(tmp.glob("dev-trio-agy.*")), [])
+        self.assertIn("[ask-researcher] could not create agy's per-run log under", result.stderr)
+
+    def test_agy_without_log_dir_or_safe_tmpdir_still_gets_workspace(self):
+        # A TMPDIR others can write to (not sticky) is refused for the
+        # fallback; the run proceeds as before it, without --log-file.
+        shutil.rmtree(self.agy_home / "log")
+        tmp = self.root / "tmp"
+        tmp.mkdir()
+        tmp.chmod(0o777)
+        try:
+            result = self.run_cli("ask-researcher.sh", "research question", TMPDIR=str(tmp))
+            leftovers = [e.name for e in tmp.iterdir() if e.name.startswith("dev-trio-agy.")]
+        finally:
+            tmp.chmod(0o700)
+        self.assertEqual(leftovers, [])
         self.assertEqual(result.returncode, 0, result.stderr)
         call = self.recorded()[0]
         self.assertEqual(call[:6], ["--add-dir", os.path.realpath(self.workspace),
                                     "--input-format", "text", "--output-format", "text"], call)
         self.assertEqual(call[6], "<stdin>")
         self.assertEqual(len(call), 8, call)
+        self.assertNotIn("could not create agy", result.stderr)
 
     def _init_git_workspace(self):
         subprocess.run(["git", "init"], cwd=self.workspace, check=True, stdout=subprocess.DEVNULL)

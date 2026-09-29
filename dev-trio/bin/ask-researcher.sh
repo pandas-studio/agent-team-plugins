@@ -268,6 +268,7 @@ run_cleanup_files() {
   [ -z "$LATEST_TMP" ] || rm -f "$LATEST_TMP" || true
 }
 run_install_traps
+run_agy_log_fallback
 
 manifest_init dev-trio-research "$LOG"
 manifest_add_role researcher "$RESEARCHER_MODEL" "$ROLE_FILE" "$(manifest_sha256_string "$PROMPT")"

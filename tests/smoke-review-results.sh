@@ -1305,6 +1305,10 @@ cat >/dev/null
 log=""
 [ "${1:-}" != --log-file ] || log="$2"
 # Like agy's own log: the conversation id, and the user's allow list.
+# The log's and its directory's modes while the run is live, before cleanup.
+if [ -n "$log" ] && [ -n "${TEST_AGY_PERMS:-}" ]; then
+  { ls -ld "${log%/*}" | cut -c1-10; ls -l "$log" | cut -c1-10; } > "$TEST_AGY_PERMS"
+fi
 if [ -n "$log" ] && [ -n "${TEST_AGY_ID:-}" ]; then
   printf 'I0923 17:51:49.1 1 server.go:1239] Created conversation %s\n' "$TEST_AGY_ID" > "$log"
   printf 'I0923 17:51:49.2 1 cli_setting_manager.go:92] permissions=&{Allow:[command(SENTINEL-RULE)]}\n' >> "$log"
@@ -1410,19 +1414,71 @@ agy_transcript
 agy_review 3 TEST_AGY_ID="$AGY_ID" TEST_AGY_NOTICE=1 TEST_AGY_STDOUT="$TMP/agy-stdout.md"
 check 'a notice, recorded denials and a malformed review stay a parse failure' json_is "$RESULT" '.status=="parse-failed" and .error=="duplicate Verdict headings"'
 
-# A log directory agy could not create a file in gets no --log-file either:
-# the wrapper creates the file itself first, and here it cannot.
+# #193: a log directory agy could not create a file in (a host sandbox that
+# blocks agy home) gets a private temporary log instead of none: given no
+# --log-file, agy writes its whole log, allow list included, to the transcript.
+# TMPDIR is given with a trailing slash; the path is the physical one.
 chmod 600 "$AGY_HOME/log"
-agy_review 3 TEST_AGY_NOTICE=1
+mkdir -p "$TMP/tmproot"
+TMP_ROOT=$(cd -P "$TMP/tmproot" && pwd -P)
+agy_transcript
+agy_review 3 TEST_AGY_ID="$AGY_ID" TEST_AGY_NOTICE=1 TEST_AGY_PERMS="$TMP/agy-perms" TMPDIR="$TMP/tmproot/"
 chmod 700 "$AGY_HOME/log"
-check 'unsearchable log directory: no --log-file' test "$(head -1 "$TMP/agy-argv")" = --add-dir
-check 'the reserved agy log is private' test "$(find "$AGY_HOME/log" -name 'cli-dev-trio-review-*' ! -perm 600 | wc -l | tr -d ' ')" = 0
+FALLBACK_LOG=$(sed -n 2p "$TMP/agy-argv")
+check 'unsearchable log directory: the log is pinned in a private temporary directory' \
+  test "$(head -1 "$TMP/agy-argv")" = --log-file
+check 'the fallback log is under the physical TMPDIR' \
+  eval 'case "$FALLBACK_LOG" in "$TMP_ROOT"/dev-trio-agy.*/cli-dev-trio-review-*.log) true ;; *) false ;; esac'
+check 'the fallback directory and log are private while the run is live' \
+  test "$(tr '\n' ' ' < "$TMP/agy-perms")" = 'drwx------ -rw------- '
+check 'the fallback directory is removed when the run ends' test ! -e "${FALLBACK_LOG%/*}"
+check 'nothing of the fallback is left in TMPDIR' test -z "$(ls -A "$TMP/tmproot" | grep "^dev-trio-agy\.")"
+check 'stderr says the fallback was used' grep -Fq "[ask-reviewer] could not create agy's per-run log under $AGY_HOME/log; using a private temporary file" "$TMP/wrapper.err"
+check 'the transcript header says so, before the response marker' \
+  test "$(grep -n -e '^=== AGY LOG: private temporary fallback ===$' -e '^=== RESPONSE ===$' "$LOG" | cut -d: -f2- | tr '\n' '|')" = '=== AGY LOG: private temporary fallback ===|=== RESPONSE ===|'
+check 'the allow list stays out of the transcript' no_match 'SENTINEL-RULE' "$LOG"
+check 'a denial is still named through the fallback log' json_is "$RESULT" ".status==\"permission-denied\" and .denied==$AGY_DENIED and .conversation_ids==[\"$AGY_ID\"]"
 
-# Without a writable log directory agy gets no --log-file — given one it
-# cannot create, it writes its whole log to stderr — but keeps --add-dir.
+# A TMPDIR reached through a symlink resolves to its physical directory.
+ln -s "$TMP/tmproot" "$TMP/tmplink"
+chmod 600 "$AGY_HOME/log"
+agy_review 3 TEST_AGY_NOTICE=1 TMPDIR="$TMP/tmplink"
+chmod 700 "$AGY_HOME/log"
+check 'a symlinked TMPDIR gives a physical fallback path' \
+  eval 'case "$(sed -n 2p "$TMP/agy-argv")" in "$TMP_ROOT"/dev-trio-agy.*) true ;; *) false ;; esac'
+check 'and is cleaned up' test -z "$(ls -A "$TMP/tmproot" | grep "^dev-trio-agy\.")"
+
+# A TMPDIR inside agy home is still a fallback: marked and removed.
+chmod 600 "$AGY_HOME/log"
+mkdir -p "$AGY_HOME/tmpin"
+agy_review 3 TEST_AGY_NOTICE=1 TMPDIR="$AGY_HOME/tmpin"
+chmod 700 "$AGY_HOME/log"
+check 'a TMPDIR inside agy home is marked as the fallback' grep -Fq 'could not create agy' "$TMP/wrapper.err"
+check 'and removed' test -z "$(ls -A "$AGY_HOME/tmpin" | grep "^dev-trio-agy\.")"
+rm -rf "$AGY_HOME/tmpin"
+
+# A group/other-writable, non-sticky TMPDIR is refused, and nothing is left
+# in it: agy gets no --log-file, as before the fallback.
+mkdir -p "$TMP/tmpbad"
+chmod 777 "$TMP/tmpbad"
+chmod 600 "$AGY_HOME/log"
+agy_review 3 TEST_AGY_NOTICE=1 TMPDIR="$TMP/tmpbad"
+chmod 700 "$AGY_HOME/log"
+check 'an unsafe TMPDIR: no --log-file' test "$(head -1 "$TMP/agy-argv")" = --add-dir
+check 'an unsafe TMPDIR keeps nothing' test -z "$(ls -A "$TMP/tmpbad" | grep "^dev-trio-agy\.")"
+check 'an unsafe TMPDIR: no fallback notice' no_match 'could not create agy' "$TMP/wrapper.err"
+chmod 700 "$TMP/tmpbad"
+
+# Without a log directory or a safe TMPDIR agy gets no --log-file — given one
+# it cannot create, it writes its whole log to stderr — but keeps --add-dir.
+# (An unwritable TMPDIR is not a case to test here: the answer capture needs
+# it too, and the run fails with 6 whatever this fallback does.)
 mv "$AGY_HOME/log" "$AGY_HOME/log.off"
-agy_review 3 TEST_AGY_NOTICE=1
-check 'no log directory: no --log-file' test "$(head -1 "$TMP/agy-argv")" = --add-dir
+chmod 777 "$TMP/tmpbad"
+agy_review 3 TEST_AGY_NOTICE=1 TMPDIR="$TMP/tmpbad"
+chmod 700 "$TMP/tmpbad"
+check 'no log directory and no safe TMPDIR: no --log-file' test "$(head -1 "$TMP/agy-argv")" = --add-dir
 mv "$AGY_HOME/log.off" "$AGY_HOME/log"
+check 'the reserved agy log is private' test "$(find "$AGY_HOME/log" -name 'cli-dev-trio-review-*' ! -perm 600 | wc -l | tr -d ' ')" = 0
 
 printf 'review-result smoke: %s assertions passed\n' "$PASS"

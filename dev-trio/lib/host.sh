@@ -369,6 +369,45 @@ dev_trio_agy_cli_log() {
   printf '%s\n' "$path"
 }
 
+# The fallback when agy's own log directory cannot take that file (a host
+# sandbox that blocks agy home, #193): a new private directory under TMPDIR
+# holding cli-dev-trio-TAG.log, created empty. Prints the directory, or nothing.
+# Without a --log-file, agy writes its whole log — the user's allow list
+# included — to stderr, which is the wrapper's transcript (measured with agy
+# 1.2.13: all 41 allow rules). The log still holds that list, so it never goes
+# in the workspace's log directory; the caller removes the directory when the
+# run ends. The directory gets the same checks as a log directory
+# (dev_trio_prepare_log_dir: caller-owned, no group/other write, trusted
+# ancestors, no foreign ACL entry). A refusal is silent, since it leaves the
+# behavior the wrapper had before this fallback. The allocated path is kept
+# apart from the validated one so a refusal can still remove what mktemp made.
+# The body is its own subshell with its own traps: a signal while it works
+# removes what it allocated, and the caller's traps are left alone.
+dev_trio_agy_cli_log_private() (
+  allocated=""
+  _dev_trio_agy_private_abort() {
+    if [ -n "$allocated" ]; then
+      rm -f "$allocated/cli-dev-trio-$1.log" 2>/dev/null
+      rmdir "$allocated" 2>/dev/null
+    fi
+    return 0
+  }
+  trap '_dev_trio_agy_private_abort "$1"; exit 129' HUP
+  trap '_dev_trio_agy_private_abort "$1"; exit 130' INT
+  trap '_dev_trio_agy_private_abort "$1"; exit 143' TERM
+  allocated=$(mktemp -d "${TMPDIR:-/tmp}/dev-trio-agy.XXXXXX" 2>/dev/null) || allocated=""
+  [ -n "$allocated" ] || exit 0
+  dir=$(dev_trio_prepare_log_dir "$allocated" 2>/dev/null) || dir=""
+  if [ -n "$dir" ] \
+     && ( umask 077 && set -C && : > "$dir/cli-dev-trio-$1.log" ) 2>/dev/null \
+     && [ -f "$dir/cli-dev-trio-$1.log" ] && [ -w "$dir/cli-dev-trio-$1.log" ]; then
+    printf '%s\n' "$dir"
+    exit 0
+  fi
+  _dev_trio_agy_private_abort "$1"
+  exit 0
+)
+
 # Prompt section for a workspace-aware model. Kept outside the untrusted tags.
 # dev_trio_replace_first TEXT FROM TO: set DEV_TRIO_REPLACED to TEXT with its
 # first FROM replaced by TO, matching bytes under a function-local LC_ALL=C.

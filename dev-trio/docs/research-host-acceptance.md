@@ -44,18 +44,31 @@ Line counts in that transcript, also without printing the lines: 1 with
 The unsandboxed #90 run of the jq question (`agy-20260929-160208-99978`) has
 a 1,422-byte transcript containing none of them.
 
+**After #193 (dev-trio 0.8.34).** The wrapper now pins agy's log in a private
+temporary directory when agy home cannot take it. The same sandboxed,
+network-enabled command, run from a fresh scratch workspace on 2026-09-29 with
+agy 1.2.13 (`agy-20260929-210715-14631`), gave rc 0 in 13 s with an answer.
+Its transcript is 1,245 bytes, holds 0 of the 41 allow-list entries and no
+`operation not permitted` line, and its header carries
+`=== AGY LOG: private temporary fallback ===`. Stderr said
+`could not create agy's per-run log under …/log; using a private temporary
+file`. No `dev-trio-agy.*` directory was left in the sandbox's `$TMPDIR`
+afterwards.
+
 **Decision (#190).** Both versions show the same split: without the sandbox's
 network grant agy fails at the localhost bind before answering, and with it
 the blocked home writes are not fatal. That grant enables the listener and
 external access together, so neither is shown to be needed on its own. The
 skill and README therefore no longer call the home writes a startup need. They
 still list them as required, because without them agy keeps no records, its
-log and allow list land in the wrapper's transcript, and a headless denial
+log and allow list landed in the wrapper's transcript (until #193), and a headless denial
 cannot be named. The last point is not exercised: no denial was produced in a
-sandboxed run. It follows from the code path. `dev_trio_agy_cli_log`
-(`lib/host.sh`) cannot create the pinned log, so no `--log-file` is passed, and
-`research_agy_denials` (`bin/ask-researcher.sh`) then returns nothing. The
-`brain/` transcript that `lib/agy-denial.sh` reads is not written either.
+sandboxed run. It follows from the code path. Before #193,
+`dev_trio_agy_cli_log` (`lib/host.sh`) could not create the pinned log, so no
+`--log-file` was passed, and `research_agy_denials` (`bin/ask-researcher.sh`)
+returned nothing. Since #193 the temporary fallback log still gives the
+conversation id, but the `brain/` transcript that `lib/agy-denial.sh` reads is
+in agy home and is not written.
 
 ## 3. Codex-session behavior
 

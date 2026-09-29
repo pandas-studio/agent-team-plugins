@@ -489,6 +489,7 @@ run_cleanup_files() {
   [ -z "${TRANSCRIPT_SNAP:-}" ] || rm -f "$TRANSCRIPT_SNAP" || true
 }
 run_install_traps
+run_agy_log_fallback
 
 # Manifest lifecycle (RFC 0004 PR 10 — sha256 of post-injection prompt for
 # byte-exact replayability without writing the prompt to disk).
