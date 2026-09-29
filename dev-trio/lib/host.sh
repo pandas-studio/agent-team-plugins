@@ -380,22 +380,41 @@ dev_trio_agy_cli_log() {
 # (dev_trio_prepare_log_dir: caller-owned, no group/other write, trusted
 # ancestors, no foreign ACL entry). A refusal is silent, since it leaves the
 # behavior the wrapper had before this fallback. The allocated path is kept
-# apart from the validated one so a refusal can still remove what mktemp made.
-# The body is its own subshell with its own traps: a signal while it works
-# removes what it allocated, and the caller's traps are left alone.
+# apart from the validated one so a refusal can still remove what it made.
+# The body is its own subshell with its own traps, so the caller's are left
+# alone. Until mkdir has decided, HUP/INT/TERM only record a pending exit code
+# (#195): mktemp -u names the directory without creating it, and `allocated`
+# is set only once mkdir -m 700 has made it, so the abort never removes a
+# path this call did not create — not a name another process took first, not
+# a symlink. A pending signal is honoured as soon as the abort traps are set.
 dev_trio_agy_cli_log_private() (
   allocated=""
+  pending=""
   _dev_trio_agy_private_abort() {
-    if [ -n "$allocated" ]; then
+    if [ -n "$allocated" ] && [ ! -L "$allocated" ] && [ -d "$allocated" ]; then
       rm -f "$allocated/cli-dev-trio-$1.log" 2>/dev/null
       rmdir "$allocated" 2>/dev/null
     fi
     return 0
   }
+  trap 'pending=129' HUP
+  trap 'pending=130' INT
+  trap 'pending=143' TERM
+  candidate=$(mktemp -u -d "${TMPDIR:-/tmp}/dev-trio-agy.XXXXXX" 2>/dev/null) || candidate=""
+  # mkdir runs with the three signals ignored, so a process-group signal
+  # cannot kill it between creating the directory and reporting success; the
+  # helper records the signal meanwhile and honours it right after.
+  if [ -n "$candidate" ] && [ -z "$pending" ] \
+     && ( trap '' HUP INT TERM; exec mkdir -m 700 "$candidate" ) 2>/dev/null; then
+    allocated="$candidate"
+  fi
   trap '_dev_trio_agy_private_abort "$1"; exit 129' HUP
   trap '_dev_trio_agy_private_abort "$1"; exit 130' INT
   trap '_dev_trio_agy_private_abort "$1"; exit 143' TERM
-  allocated=$(mktemp -d "${TMPDIR:-/tmp}/dev-trio-agy.XXXXXX" 2>/dev/null) || allocated=""
+  if [ -n "$pending" ]; then
+    _dev_trio_agy_private_abort "$1"
+    exit "$pending"
+  fi
   [ -n "$allocated" ] || exit 0
   dir=$(dev_trio_prepare_log_dir "$allocated" 2>/dev/null) || dir=""
   if [ -n "$dir" ] \

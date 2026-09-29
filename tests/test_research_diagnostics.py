@@ -45,7 +45,10 @@ class ResearchDiagnosticsTests(unittest.TestCase):
             '  printf "I0923 1 server.go:1239] Created conversation %s\\n" "$DIAG_CONVERSATION" > "$2"\n'
             'fi\n'
             'if [ -n "${DIAG_READY:-}" ]; then : > "$DIAG_READY"; fi\n'
-            'if [ -n "${DIAG_SLEEP:-}" ]; then sleep "$DIAG_SLEEP"; fi\n'
+            # Hold until the test releases it (#195): a handshake, not a timed
+            # sleep. A hold that times out fails the run with 97.
+            'if [ -n "${DIAG_RELEASE:-}" ]; then w=0; until [ -e "$DIAG_RELEASE" ]; do\n'
+            '  sleep 0.05; w=$((w+1)); [ "$w" -lt 600 ] || exit 97; done; fi\n'
             'printf "%s" "${DIAG_ANSWER:-}"\n'
             'printf "%s" "${DIAG_STDERR:-}" >&2\n'
             'exit "${DIAG_RC:-0}"\n'
@@ -313,53 +316,106 @@ class ResearchDiagnosticsTests(unittest.TestCase):
         self.assertIn("[ask-researcher] could not create agy's per-run log under", result.stderr)
         self.assertEqual(list(tmp.glob("dev-trio-agy.*")), [])
 
+    # A hold for shell shims (#195): readiness, then an external waiter that a
+    # process-group signal ends at once. A waiter that times out leaves a
+    # marker the test checks, so a late test fails instead of drifting.
+    # hold returns 97 only when it timed out; a waiter ended by a signal counts
+    # as released.
+    HOLD = ('hold() { : > "$READY"; sh -c \'w=0; until [ -e "$RELEASE" ]; do sleep 0.05; '
+            'w=$((w+1)); [ "$w" -lt 600 ] || { : > "$READY.timeout"; exit 97; }; done\'; '
+            '[ "$?" -ne 97 ] || return 97; return 0; }\n')
+
+    def wait_for(self, path, what, proc):
+        deadline = time.monotonic() + 15
+        while not path.exists():
+            if proc.poll() is not None or time.monotonic() > deadline:
+                self.fail(f"{what} (rc {proc.poll()}): {proc.communicate()[1] if proc.poll() is not None else ''}")
+            time.sleep(0.02)
+
     def test_temporary_log_is_removed_when_the_run_is_interrupted(self):
         shutil.rmtree(self.agy_home / "log")
         for sig, code in ((signal.SIGTERM, 143), (signal.SIGINT, 130)):
             with self.subTest(signal=sig.name):
                 tmp = self.root / f"tmp-{sig.name}"
                 tmp.mkdir()
-                ready = self.root / f"ready-{sig.name}"
+                ready, release = self.root / f"ready-{sig.name}", self.root / f"release-{sig.name}"
                 proc = subprocess.Popen(
                     [str(self.plugin / "bin" / "ask-researcher.sh"), "question"], cwd=self.workspace,
-                    env=self.env | dict(TMPDIR=str(tmp), DIAG_SLEEP="2", DIAG_ANSWER="answer",
-                                        DIAG_READY=str(ready)),
+                    env=self.env | dict(TMPDIR=str(tmp), DIAG_ANSWER="answer",
+                                        DIAG_READY=str(ready), DIAG_RELEASE=str(release)),
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-                # The CLI is running: the wrapper's traps and the fallback are set.
-                deadline = time.monotonic() + 10
-                while not ready.exists():
-                    self.assertLess(time.monotonic(), deadline, "the CLI never started")
-                    time.sleep(0.05)
-                self.assertEqual(len(list(tmp.glob("dev-trio-agy.*/cli-dev-trio-research-*.log"))), 1)
-                proc.send_signal(sig)
-                _, err = proc.communicate(timeout=15)
+                try:
+                    # The CLI is running: the wrapper's traps and the fallback are set.
+                    self.wait_for(ready, "the CLI never started", proc)
+                    self.assertEqual(len(list(tmp.glob("dev-trio-agy.*/cli-dev-trio-research-*.log"))), 1)
+                    proc.send_signal(sig)
+                    release.touch()
+                    _, err = proc.communicate(timeout=15)
+                finally:
+                    if proc.poll() is None:
+                        proc.kill()
+                        proc.communicate()
                 self.assertEqual(proc.returncode, code, err)
                 self.assertEqual(list(tmp.glob("dev-trio-agy.*")), [])
 
-    def test_fallback_helper_removes_its_allocation_when_interrupted(self):
-        # A signal while the helper validates its directory: the helper's own
-        # traps remove what mktemp made (the wrapper's traps are not set yet
-        # for anything the helper has not handed over).
-        tmp = self.root / "tmp-helper"
+    def run_helper(self, shims, sig, tag, path_dir=None):
+        """Run the helper alone in its own process group with SHIMS defined
+        (and PATH_DIR first on PATH), wait for a hold, signal the group, then
+        release any hold that survived the signal. Returns (out, tmp)."""
+        tmp = self.root / f"tmp-{tag}-{sig.name}"
         tmp.mkdir()
-        ready = self.root / "helper-ready"
-        script = (f'. {shlex.quote(str(self.plugin / "lib" / "host.sh"))}\n'
-                  'dev_trio_prepare_log_dir() { : > "$READY"; sleep 5; printf "%s\\n" "$1"; }\n'
-                  'dev_trio_agy_cli_log_private research-x\n')
+        ready, release = self.root / f"ready-{tag}-{sig.name}", self.root / f"release-{tag}-{sig.name}"
+        script = (f'. {shlex.quote(str(self.plugin / "lib" / "host.sh"))}\n' + self.HOLD + shims
+                  + 'dev_trio_agy_cli_log_private research-x\n')
+        env = self.env | dict(TMPDIR=str(tmp), READY=str(ready), RELEASE=str(release))
+        if path_dir:
+            env["PATH"] = f"{path_dir}{os.pathsep}{env['PATH']}"
+        proc = subprocess.Popen(["/bin/bash", "-c", script], env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        try:
+            self.wait_for(ready, "the helper never reached the hold", proc)
+            self.assertEqual(len(list(tmp.glob("dev-trio-agy.*"))), 1)
+            os.killpg(proc.pid, sig)
+            release.touch()
+            out, err = proc.communicate(timeout=15)
+        finally:
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.communicate()
+        self.assertFalse(Path(f"{ready}.timeout").exists(), "the hold timed out")
+        return out, tmp
+
+    def test_fallback_helper_removes_its_allocation_when_interrupted(self):
+        # A signal while the helper validates its directory: its abort traps
+        # remove what it made.
+        shims = 'dev_trio_prepare_log_dir() { hold || return 97; printf "%s\\n" "$1"; }\n'
         for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             with self.subTest(signal=sig.name):
-                ready.unlink(missing_ok=True)
-                proc = subprocess.Popen(["/bin/bash", "-c", script], env=self.env | dict(TMPDIR=str(tmp), READY=str(ready)),
-                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                        start_new_session=True)
-                deadline = time.monotonic() + 10
-                while not ready.exists():
-                    self.assertLess(time.monotonic(), deadline, "the helper never reached validation")
-                    time.sleep(0.05)
-                self.assertEqual(len(list(tmp.glob("dev-trio-agy.*"))), 1)
-                os.killpg(proc.pid, sig)
-                out, err = proc.communicate(timeout=15)
-                self.assertEqual(out, "", err)
+                out, tmp = self.run_helper(shims, sig, "validate")
+                self.assertEqual(out, "")
+                self.assertEqual(list(tmp.glob("dev-trio-agy.*")), [])
+
+    def test_fallback_helper_leaves_nothing_when_interrupted_at_creation(self):
+        # #195: a signal to the process group right after the directory is
+        # created, before the helper holds its name. mktemp is held with its
+        # real output captured and unprinted, and an external mkdir is held
+        # after creating the directory, before reporting its status. With mktemp
+        # -d allocating inside a command substitution, or with mkdir killable
+        # there, this left one empty directory.
+        fake = self.root / "fake-bin"
+        fake.mkdir(exist_ok=True)
+        (fake / "mkdir").write_text(
+            "#!/bin/bash\n" + self.HOLD +
+            '/bin/mkdir "$@" || exit\n'
+            'case "${@: -1}" in *dev-trio-agy.*) hold || exit 97 ;; esac\n')
+        (fake / "mkdir").chmod(0o755)
+        shims = ('mktemp() { local out; out=$(command mktemp "$@") || return; '
+                 'case "$out" in *dev-trio-agy.*) [ ! -d "$out" ] || hold || return 97 ;; esac; '
+                 'printf "%s\\n" "$out"; }\n')
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            with self.subTest(signal=sig.name):
+                out, tmp = self.run_helper(shims, sig, "create", path_dir=fake)
+                self.assertEqual(out, "")
                 self.assertEqual(list(tmp.glob("dev-trio-agy.*")), [])
 
     def test_wrapper_hangup_during_fallback_allocation_leaves_nothing(self):
@@ -368,25 +424,30 @@ class ResearchDiagnosticsTests(unittest.TestCase):
         shutil.rmtree(self.agy_home / "log")
         tmp = self.root / "tmp-hup"
         tmp.mkdir()
-        ready = self.root / "hup-ready"
+        ready, release = self.root / "hup-ready", self.root / "hup-release"
         host = self.plugin / "lib" / "host.sh"
         host.write_text(host.read_text() + (
-            '\n_dev_trio_real_prepare=$(declare -f dev_trio_prepare_log_dir)\n'
+            '\n' + self.HOLD +
+            '_dev_trio_real_prepare=$(declare -f dev_trio_prepare_log_dir)\n'
             'eval "${_dev_trio_real_prepare/dev_trio_prepare_log_dir/_dev_trio_real_prepare_log_dir}"\n'
             'dev_trio_prepare_log_dir() {\n'
-            '  case "$1" in *dev-trio-agy.*) : > "$HUP_READY"; sleep 2 ;; esac\n'
+            '  case "$1" in *dev-trio-agy.*) hold || return 97 ;; esac\n'
             '  _dev_trio_real_prepare_log_dir "$@"\n'
             '}\n'))
         proc = subprocess.Popen(
             [str(self.plugin / "bin" / "ask-researcher.sh"), "question"], cwd=self.workspace,
-            env=self.env | dict(TMPDIR=str(tmp), HUP_READY=str(ready), DIAG_ANSWER="answer"),
+            env=self.env | dict(TMPDIR=str(tmp), READY=str(ready), RELEASE=str(release), DIAG_ANSWER="answer"),
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-        deadline = time.monotonic() + 10
-        while not ready.exists():
-            self.assertLess(time.monotonic(), deadline, "the helper never reached validation")
-            time.sleep(0.05)
-        proc.send_signal(signal.SIGHUP)
-        _, err = proc.communicate(timeout=15)
+        try:
+            self.wait_for(ready, "the helper never reached validation", proc)
+            proc.send_signal(signal.SIGHUP)
+            release.touch()
+            _, err = proc.communicate(timeout=15)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+        self.assertFalse(Path(f"{ready}.timeout").exists(), "the hold timed out")
         self.assertEqual(proc.returncode, 129, err)
         self.assertFalse(self.calls.exists(), "the CLI must not start after a hangup")
         self.assertEqual(list(tmp.glob("dev-trio-agy.*")), [])
