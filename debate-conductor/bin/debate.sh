@@ -964,10 +964,16 @@ trap 'record_attempt_end "$?" || true; release_lock' EXIT
 # they are always sent TERM. The attempt's processes are this shell's jobs that
 # are still its children, plus their descendants; each is stopped (SIGSTOP) as
 # it is found, so none forks or exits, and gets reparented out of reach, while
-# the tree is collected. Best effort: a process that exited before it was found
-# can leave children behind, and one that ignores TERM keeps running. Waits up
-# to about 2 s for the collected processes to go — one budget, covering the
-# attempt itself — and never longer: the caller's cleanup runs after it (#66).
+# the tree is collected. The collected processes are then all sent CONT before
+# any is sent TERM. On a hosted macOS runner, whose Runner.Worker shares the
+# step's process group, TERM (or KILL) to the stopped tree lost the runner, and
+# CONT first kept it; no signal went to a runner process, and why is not known
+# (#174). CONT reaches the processes one by one, so there is still a short window
+# in which a resumed one can fork or exit. Best effort: a process that exited
+# before it was found can leave children behind, and one that ignores TERM keeps
+# running. Waits up to about 2 s for the collected processes to go — one budget,
+# covering the attempt itself — and never longer: the caller's cleanup runs
+# after it (#66).
 # Needs ps (see below).
 stop_attempt() {
   local roots jobs_out table new tree="" i=0 p pstat
@@ -1003,10 +1009,11 @@ stop_attempt() {
     i=$((i + 1))
   done
   [ -n "$tree" ] || return 0
-  # shellcheck disable=SC2086
-  kill -s TERM $tree 2>/dev/null || true
+  # CONT, then TERM (#174): TERM then CONT, and KILL, lost the macOS runner.
   # shellcheck disable=SC2086
   kill -s CONT $tree 2>/dev/null || true
+  # shellcheck disable=SC2086
+  kill -s TERM $tree 2>/dev/null || true
   # `wait $roots` stood here and was unbounded (#66). Every root has been sent
   # TERM above, but one that ignores it held this call open for as long as it
   # kept running, and on_signal's record_attempt_end and release_lock sit behind
