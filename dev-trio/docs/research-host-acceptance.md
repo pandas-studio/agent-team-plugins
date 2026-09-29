@@ -78,5 +78,7 @@ classification are introduced by this change.
   reply added material that is not in that run's `.final.md` (a usage example
   in both; `--argjson` in the stub run). The skill asks for a summary of the
   final. This does not affect the approval scenarios above.
-- **Home writes are listed as a startup need.** See §2: in the measured run
-  only the missing network access stopped agy from starting.
+- **Home writes are listed as a startup need.** See §2: the network-disabled
+  sandbox run failed at the localhost bind, while the network-enabled run
+  succeeded despite the home-write errors. That setting allows the localhost
+  listener and external access together, so the two were not separated.
