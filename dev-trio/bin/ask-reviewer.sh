@@ -145,6 +145,7 @@ while [ $# -gt 0 ]; do
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUN_TAG=ask-reviewer
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 _NAMESPACE_LIB="$PLUGIN_ROOT/lib/namespace.sh"
@@ -175,6 +176,8 @@ unset _REGISTRY_LIB
 . "$PLUGIN_ROOT/lib/agy-denial.sh" || exit 2
 # shellcheck source=../lib/runstate.sh
 . "$PLUGIN_ROOT/lib/runstate.sh" || exit 2
+# shellcheck source=../lib/run-lifecycle.sh
+. "$PLUGIN_ROOT/lib/run-lifecycle.sh" || exit 2
 REVIEW_PROFILE="${DEV_TRIO_REVIEW_PROFILE:-default}"
 case "$REVIEW_PROFILE" in
   default|spec) ;;
@@ -458,34 +461,22 @@ case "$RECEIPT" in
   ""|/*) ;;
   *) echo "error: DEV_TRIO_REVIEW_RECEIPT must be absolute" >&2; exit 2 ;;
 esac
-TS="$(date +%Y%m%d-%H%M%S)-$$"
-LOG="$LOG_DIR/codex-$TS.log"
-# Codex's last assistant message (the structured review) captured verbatim and
-# independent of stdout streaming/flush — this is the authoritative artifact the
-# wrapper parses into the shared review result. See `--output-last-message` below.
-FINAL="$LOG_DIR/codex-$TS.final.md"
+# $FINAL is the reviewer's last assistant message (the structured review),
+# captured verbatim and independent of stdout streaming/flush — the
+# authoritative artifact this wrapper parses into the shared review result. See
+# `--output-last-message` below.
+run_paths codex review "$AGY_WORKSPACE"
 RESULT="$LOG_DIR/codex-$TS.review.json"
-# agy's own per-run log, pinned so its conversation id — and through it the
-# denied command — can be found after the run. It stays in agy's log
-# directory: it holds the user's whole allow list, so it is never copied here.
-[ -z "$AGY_WORKSPACE" ] || AGY_CLI_LOG="$(dev_trio_agy_cli_log "review-$TS")"
 RUNSTATE_LOG=""
 REVIEW_PUBLISHED=0
-cleanup_review() {
-  _cleanup_rc=$?
-  # Backstop for an abort (INT/TERM/errexit): a run whose completion is never
-  # published would otherwise read as live forever on the dashboard. This is a
-  # no-op once a real completion has been published, and it runs *first* so a
-  # failing cleanup step cannot take the handler down before it records one.
-  if [ -n "$RUNSTATE_LOG" ]; then
-    runstate_complete "$RUNSTATE_LOG" exit_code="$_cleanup_rc" reason=aborted 2>/dev/null || true
-  fi
-  # After the completion above, so a failure here cannot cost the dashboard its
-  # record. An out-of-band transcript is the only copy of what the CLI produced
-  # — the log could not be opened — so any run that ends without publishing a
-  # review keeps it and says where. A published run has been read and does not
-  # need it. The condition is this run's own flag, not the presence of a result
-  # file: an interrupted run must not be talked out of keeping its only copy.
+run_cleanup_files() {
+  # After the completion run_cleanup records, so a failure here cannot cost
+  # the dashboard its record. An out-of-band transcript is the only copy of
+  # what the CLI produced — the log could not be opened — so any run that ends
+  # without publishing a review keeps it and says where. A published run has
+  # been read and does not need it. The condition is this run's own flag, not
+  # the presence of a result file: an interrupted run must not be talked out of
+  # keeping its only copy.
   if [ "${REVIEW_PUBLISHED:-0}" -eq 0 ] && [ -n "${TRANSCRIPT_TMP:-}" ] \
      && [ -s "$TRANSCRIPT_TMP" ]; then
     echo "[ask-reviewer] no review was published; the transcript is at $TRANSCRIPT_TMP" >&2
@@ -496,11 +487,8 @@ cleanup_review() {
   [ -z "${TRANSCRIPT_TMP:-}" ] || rm -f "$TRANSCRIPT_TMP" || true
   [ -z "${FROZEN_TRANSCRIPT:-}" ] || rm -f "$FROZEN_TRANSCRIPT" || true
   [ -z "${TRANSCRIPT_SNAP:-}" ] || rm -f "$TRANSCRIPT_SNAP" || true
-  manifest_cleanup || true
 }
-trap cleanup_review EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+run_install_traps
 
 # Manifest lifecycle (RFC 0004 PR 10 — sha256 of post-injection prompt for
 # byte-exact replayability without writing the prompt to disk).
@@ -515,30 +503,8 @@ esac
 [ -n "$SPEC_FILE" ]     && manifest_add_input kind=spec     path="$SPEC_FILE"
 [ -n "$CONTEXT_FILE" ]  && manifest_add_input kind=context  path="$CONTEXT_FILE"
 
-# Refuse an existing path before opening (including nonregular files that Bash
-# noclobber permits), then verify the descriptor before writing the header.
-if [ -e "$LOG" ] || [ -L "$LOG" ]; then
-  echo "[ask-reviewer] raw log path already exists: $LOG" >&2
-  exit 2
-fi
-LOG_UID=$(id -u) || exit 2
-LOG_UMASK=$(umask)
-umask 077
-set -C
-if ! exec 8>"$LOG"; then
-  set +C
-  umask "$LOG_UMASK"
-  exit 2
-fi
-set +C
-umask "$LOG_UMASK"
-if ! dev_trio_new_log_fd_is_private "$LOG" 8 "$LOG_UID"; then
-  echo "[ask-reviewer] raw log is not a new private regular file: $LOG" >&2
-  exec 8>&-
-  exit 2
-fi
-{
-  echo "=== ask-reviewer.sh @ $TS ==="
+run_open_log
+run_header_body() {
   echo "=== FOCUS ==="
   echo "$FOCUS"
   if [ -n "$RESEARCH_FILE" ]; then
@@ -550,61 +516,17 @@ fi
   if [ -n "$CONTEXT_FILE" ]; then
     echo "=== CONTEXT FILE: $CONTEXT_FILE ==="
   fi
-  echo "=== PM HOST: $PM_HOST ==="
-  echo "=== MODEL: $REVIEWER_MODEL ==="
-  echo "=== RESPONSE ==="
-} >&8
+}
+run_write_header "$REVIEWER_MODEL"
 
-# Structured run metadata for the dashboard — published before the latest-*
-# links, so a reader that follows a link always finds a described run rather
-# than a bare log it would have to parse. Values the dashboard renders come
-# from here, never from the log body, which carries untrusted text.
-RUNSTATE_ARGS=(
-  channel=codex
-  wrapper=ask-reviewer.sh
-  variant=dev-trio-review
-  team="$TEAM"
-  run_stem="codex-$TS"
-  started_display="$TS"
-  pid="$$"
-  role=reviewer
-  model="$REVIEWER_MODEL"
-  pm_host="$PM_HOST"
-  result_path="$RESULT"
-  final_path="$FINAL"
-  "input=focus:$FOCUS"
-)
+RUNSTATE_ARGS=(result_path="$RESULT" "input=focus:$FOCUS")
 [ -z "$SNAPSHOT_STATUS" ] || RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" "input=workspace-snapshot-status:$SNAPSHOT_STATUS")
-if registry_has_final "$REVIEWER_MODEL"; then
-  RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" final_source=native)
-else
-  RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" final_source=stdout)
-fi
-if manifest_is_nested; then
-  RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" nested=true)
-else
-  RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" nested=false)
-fi
 [ -z "$RESEARCH_FILE" ] || RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" "inputpath=research:$RESEARCH_FILE")
 [ -z "$SPEC_FILE" ]     || RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" "inputpath=spec:$SPEC_FILE")
 [ -z "$CONTEXT_FILE" ]  || RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" "inputpath=context:$CONTEXT_FILE")
-# A dashboard sidecar never changes this wrapper's outcome.
-if runstate_begin "$LOG" "${RUNSTATE_ARGS[@]}"; then
-  RUNSTATE_LOG="$LOG"
-else
-  echo "[ask-reviewer] run metadata unavailable; the dashboard will show this run as legacy" >&2
-fi
+run_begin_metadata codex dev-trio-review reviewer "$REVIEWER_MODEL" "${RUNSTATE_ARGS[@]}"
 
-# ln -sfn unlinks then creates and can fail under concurrent dispatch. Rename
-# a unique sibling link instead; readers see either complete target.
-LATEST_TMP="$LOG_DIR/.latest-codex-$TS"
-ln -s "codex-$TS.log" "$LATEST_TMP"
-mv -f "$LATEST_TMP" "$LOG_DIR/latest-codex.log"
-ln -s "codex-$TS.final.md" "$LATEST_TMP"
-mv -f "$LATEST_TMP" "$LOG_DIR/latest-codex.final.md"
-LATEST_TMP=""
-
-echo "[ask-reviewer] running ($REVIEWER_MODEL) — monitor: dashboard.sh codex  (raw: tail -F $LOG_DIR/latest-codex.log)" >&2
+run_publish_latest codex "$REVIEWER_MODEL"
 RC=0
 # For models with native final-message capture (codex's --output-last-message),
 # the registry's final_args template writes the structured review to $FINAL
@@ -679,10 +601,8 @@ emit_transcript() {
   transcript_range 2>/dev/null || true
   return 0
 }
-if exec 7<"$LOG" \
-   && dev_trio_fd_matches_path "$LOG" 8 \
-   && dev_trio_fd_matches_path "$LOG" 7; then
-  TRANSCRIPT_OFFSET="$(dev_trio_fd_size 8)" || TRANSCRIPT_OFFSET=""
+if run_attach_reader; then
+  TRANSCRIPT_OFFSET="$RUN_OFFSET"
 else
   # Keep the original inode for END while fd 8 captures the out-of-band run.
   if exec 9>&8; then ORIGINAL_LOG_FD=9; fi
@@ -738,9 +658,7 @@ fi
 if [ -n "$TRANSCRIPT_OFFSET" ] && [ -n "$TRANSCRIPT_END" ]; then
   FROZEN_TRANSCRIPT="$(mktemp "$LOG_DIR/ask-reviewer-frozen.XXXXXX")" || FROZEN_TRANSCRIPT=""
   if [ -n "$FROZEN_TRANSCRIPT" ]; then
-    tail -c "+$((TRANSCRIPT_OFFSET + 1))" <&7 \
-      | head -c "$((TRANSCRIPT_END - TRANSCRIPT_OFFSET))" > "$FROZEN_TRANSCRIPT" || true
-    if [ "$(wc -c < "$FROZEN_TRANSCRIPT")" -eq "$((TRANSCRIPT_END - TRANSCRIPT_OFFSET))" ]; then
+    if run_freeze_range "$FROZEN_TRANSCRIPT" "$TRANSCRIPT_OFFSET" "$TRANSCRIPT_END"; then
       TRANSCRIPT_PATH="$FROZEN_TRANSCRIPT"
       TRANSCRIPT_END=$((TRANSCRIPT_END - TRANSCRIPT_OFFSET))
       TRANSCRIPT_OFFSET=0
@@ -781,16 +699,6 @@ if ! registry_has_final "$REVIEWER_MODEL" && [ ! -s "$FINAL" ] \
   fi
 fi
 INVOCATION_RC="$RC"
-finish_review_log() {
-  # The result and run metadata carry the outcome. A missing END marker must
-  # not replace it with a logging error or prevent completion publication.
-  if [ "$ORIGINAL_LOG_FD" -eq 9 ]; then
-    printf '\n=== END (rc=%d) ===\n' "$RC" >&9 || \
-      echo "[ask-reviewer] final log append failed; $LOG may be incomplete" >&2 || true
-  elif ! printf '\n=== END (rc=%d) ===\n' "$RC" >&8; then
-    echo "[ask-reviewer] final log append failed; $LOG may be incomplete" >&2 || true
-  fi
-}
 result_output_failed() {
   # An I/O failure is not a successful review. Preserve a failed invocation's
   # rc, otherwise use 2. Completion metadata tells the dashboard it has ended,
@@ -803,7 +711,7 @@ result_output_failed() {
   # The transcript is still this wrapper's stdout on the failure path, and this
   # exits — without the replay here, a result-write failure would lose it.
   emit_transcript
-  finish_review_log
+  run_finish_log "$RC"
   exec 8>&- 7<&- 9>&- || true
   echo "[ask-reviewer] result write failed: $1 (log: $LOG, final: $FINAL, rc=$RC)" >&2
   # Last, so nothing fallible can change the code after it is recorded.
@@ -864,7 +772,7 @@ fi
 manifest_finalize || result_output_failed 'finalize manifest'
 # Completion is published only after the final, result and manifest are ready.
 emit_transcript
-finish_review_log
+run_finish_log "$RC"
 exec 8>&- 7<&- 9>&- || true
 echo || true
 if [ "$RC" -ne 0 ]; then
