@@ -36,8 +36,9 @@ unavailable. That was not exercised.
 
 ## 3. Codex-session behavior
 
-Each run loaded the installed dev-trio 0.8.31 skill (byte-identical to the
-repository) from the same scratch workspace, with
+Each run loaded the installed dev-trio 0.8.31 skill (checked with `cmp`
+against `origin/main` at `0b710d6`: `codex-skills/research/SKILL.md`,
+`bin/ask-researcher.sh`, `lib/registry.sh` and `lib/agy-denial.sh` are identical) from the same scratch workspace, with
 `$dev-trio:research What does the jq --arg option do?`. `codex exec` sessions
 run with approval `never`; the interactive sessions ran with
 `-s workspace-write -a on-request` (network off). Evidence per run: the
