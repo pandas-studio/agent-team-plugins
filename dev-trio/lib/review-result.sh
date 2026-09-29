@@ -28,14 +28,15 @@ review_result_parse() {
     function verdict(line, token, reason) {
       raw = line
       token = line
-      sub(/[ .].*$/, "", token)
+      sub(/[ .:].*$/, "", token)
       if (token !~ /^(SHIP|NEEDS-FIX|DISCUSS)$/ && !(profile == "spec" && token == "OUT-OF-SCOPE")) {
         problem = "unknown or malformed verdict token"; return
       }
       reason = substr(line, length(token) + 1)
       if (reason ~ /^ — /) sub(/^ — /, "", reason)
       else if (reason ~ /^\. /) sub(/^\. /, "", reason)
-      else { problem = "expected TOKEN — reason or TOKEN. reason"; return }
+      else if (reason ~ /^: /) sub(/^: /, "", reason)
+      else { problem = "expected TOKEN — reason, TOKEN. reason or TOKEN: reason"; return }
       if (reason !~ /[^[:space:]]/) { problem = "empty verdict reason"; return }
       parsed = token
     }

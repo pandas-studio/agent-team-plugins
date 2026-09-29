@@ -45,7 +45,7 @@ contradictory_fixture() {
   printf -- '- %s\n' "$second" >> "$TMP/review.md"
 }
 for token in SHIP NEEDS-FIX DISCUSS; do
-  for separator in ' — ' '. '; do
+  for separator in ' — ' '. ' ': '; do
     fixture "$token${separator}reason"
     parse
     check "$token punctuation parsed" json_is "$TMP/parsed.json" ".verdict == \"$token\" and .exit_code == 0 and .status == \"ok\""
@@ -53,6 +53,22 @@ for token in SHIP NEEDS-FIX DISCUSS; do
     check 'result reader agrees' review_result_read "$TMP/parsed.json" >/dev/null
   done
 done
+# A colon separator (#128) is a separator only when followed by a space and a reason.
+for line in 'SHIP:reason' 'SHIP: ' 'NEEDS-FIX:: two colons' 'SHIPPED: unknown token'; do
+  fixture "$line"
+  parse
+  check "malformed colon verdict fails: $line" json_is "$TMP/parsed.json" \
+    '.status=="parse-failed" and .exit_code==3 and .verdict==null and .findings=={blocker:null,major:null,minor:null}'
+done
+fixture 'SHIP:reason'
+parse
+check 'missing space after the colon names the accepted forms' json_is "$TMP/parsed.json" '.error|contains("TOKEN: reason")'
+fixture 'SHIP: '
+parse
+check 'colon with no reason is an empty reason' json_is "$TMP/parsed.json" '.error=="empty verdict reason"'
+fixture 'SHIPPED: unknown token'
+parse
+check 'colon does not widen the token vocabulary' json_is "$TMP/parsed.json" '.error=="unknown or malformed verdict token"'
 cat > "$TMP/review.md" <<'REVIEW'
 ## Verdict
 NEEDS-FIX — findings
@@ -282,6 +298,11 @@ parse
 check 'default vocabulary stays closed' json_is "$TMP/parsed.json" '.exit_code==3 and .verdict==null'
 parse 0 spec
 check 'explicit spec profile permits contract verdict' json_is "$TMP/parsed.json" '.verdict=="OUT-OF-SCOPE" and .exit_code==0'
+fixture 'OUT-OF-SCOPE: contract violation'
+parse
+check 'default vocabulary stays closed with a colon' json_is "$TMP/parsed.json" '.exit_code==3 and .verdict==null'
+parse 0 spec
+check 'spec profile permits a colon contract verdict' json_is "$TMP/parsed.json" '.verdict=="OUT-OF-SCOPE" and .exit_code==0 and .verdict_line=="OUT-OF-SCOPE: contract violation"'
 fixture 'SHIP — apparently valid'
 parse 7
 check 'failed invocation overrides valid text' json_is "$TMP/parsed.json" '.status=="invocation-failed" and .exit_code==7 and .invocation_rc==7 and .verdict==null'
@@ -392,7 +413,7 @@ for model in codex claude; do
   check "$model corrected placement displays zero majors" grep -q '0 major' "$TMP/dashboard.out"
 done
 for token in SHIP NEEDS-FIX DISCUSS; do
-  for separator in ' — ' '. '; do
+  for separator in ' — ' '. ' ': '; do
     for model in codex claude; do
       fixture "$token${separator}wrapper reason"
       run_review 0 DEV_TRIO_REVIEWER_MODEL="$model"
@@ -484,11 +505,13 @@ check 'dashboard pins the original log target' grep -q 'SHIP — pinned invocati
 check 'retarget cannot mix another review into the frame' no_match 'retargeted invocation' "$TMP/dashboard.out"
 rm "$TMP/bin/readlink"
 
-fixture 'OUT-OF-SCOPE. violates spec'
-run_review 0 DEV_TRIO_REVIEW_PROFILE=spec
-check 'spec wrapper verdict preserved' json_is "$MANIFEST" '.verdict=="OUT-OF-SCOPE"'
-dashboard
-check 'spec dashboard reports contract verdict' grep -q 'OUT-OF-SCOPE. violates spec' "$TMP/dashboard.out"
+for separator in '. ' ': '; do
+  fixture "OUT-OF-SCOPE${separator}violates spec"
+  run_review 0 DEV_TRIO_REVIEW_PROFILE=spec
+  check 'spec wrapper verdict preserved' json_is "$MANIFEST" '.verdict=="OUT-OF-SCOPE"'
+  dashboard
+  check 'spec dashboard reports contract verdict' grep -Fq "OUT-OF-SCOPE${separator}violates spec" "$TMP/dashboard.out"
+done
 fixture 'SHIP — bound receipt'
 RECEIPT=$(review_receipt_create "$TMP/caller.log")
 run_review 0 DEV_TRIO_REVIEW_RECEIPT="$RECEIPT"
