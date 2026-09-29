@@ -103,6 +103,7 @@ done
 [ "$POSITIONAL_SEEN" -eq 1 ] || usage_error "a research question is required"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUN_TAG=ask-researcher
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROLE_FILE="$PLUGIN_ROOT/lib/roles/researcher.md"
 
@@ -128,6 +129,8 @@ unset _REGISTRY_LIB
 . "$PLUGIN_ROOT/lib/runstate.sh" || exit 2
 # shellcheck source=../lib/agy-denial.sh
 . "$PLUGIN_ROOT/lib/agy-denial.sh" || exit 2
+# shellcheck source=../lib/run-lifecycle.sh
+. "$PLUGIN_ROOT/lib/run-lifecycle.sh" || exit 2
 
 # shellcheck source=../lib/host.sh
 . "$PLUGIN_ROOT/lib/host.sh"
@@ -154,9 +157,7 @@ research_agy_denials() {
   trap 'exit 143' TERM
   snapshot=$(mktemp "$LOG_DIR/ask-researcher-frozen.XXXXXX") || return 0
   RESEARCH_SNAPSHOT_PATH="$snapshot"
-  tail -c "+$((LOG_OFFSET + 1))" <&7 \
-    | head -c "$((LOG_END - LOG_OFFSET))" > "$snapshot" || true
-  if [ "$(wc -c < "$snapshot")" -ne "$((LOG_END - LOG_OFFSET))" ] \
+  if ! run_freeze_range "$snapshot" "$LOG_OFFSET" "$LOG_END" \
      || ! agy_denial_notice_in "$snapshot" 0 "$((LOG_END - LOG_OFFSET))"; then
     return 0
   fi
@@ -259,127 +260,40 @@ if [ "$CHECK_RC" -ne 0 ]; then
 fi
 
 LOG_DIR=$(dev_trio_prepare_log_dir "$LOG_DIR") || exit 2
-# PID suffix avoids log and manifest collisions when two researchers start
-# within the same second (BSD `date` has no sub-second precision).
-TS="$(date +%Y%m%d-%H%M%S)-$$"
-LOG="$LOG_DIR/agy-$TS.log"
-# The answer as its own artifact. The dashboard reads its lead and its cited
-# URLs from here; it must never have to find the answer inside the transcript,
-# where the researcher's own output can quote the wrapper's framing.
-FINAL="$LOG_DIR/agy-$TS.final.md"
-# agy's own per-run log, pinned so its conversation id — and through it a
-# denied command — can be found after the run. It stays in agy's log
-# directory: it holds the user's whole allow list, so it is never copied here.
-[ -z "$AGY_WORKSPACE" ] || AGY_CLI_LOG="$(dev_trio_agy_cli_log "research-$TS")"
+# The dashboard reads the answer's lead and its cited URLs from $FINAL.
+run_paths agy research "$AGY_WORKSPACE"
 LATEST_TMP=""
 RUNSTATE_LOG=""
-cleanup_research() {
-  _cleanup_rc=$?
-  # Backstop for an abort (INT/TERM/errexit): a run whose completion is never
-  # published would otherwise read as live forever on the dashboard. This is a
-  # no-op once a real completion has been published, and it runs *first* so a
-  # failing cleanup step cannot take the handler down before it records one.
-  if [ -n "$RUNSTATE_LOG" ]; then
-    runstate_complete "$RUNSTATE_LOG" exit_code="$_cleanup_rc" reason=aborted 2>/dev/null || true
-  fi
+run_cleanup_files() {
   [ -z "$LATEST_TMP" ] || rm -f "$LATEST_TMP" || true
-  manifest_cleanup || true
 }
-trap cleanup_research EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+run_install_traps
 
 manifest_init dev-trio-research "$LOG"
 manifest_add_role researcher "$RESEARCHER_MODEL" "$ROLE_FILE" "$(manifest_sha256_string "$PROMPT")"
 manifest_add_input kind=question value="$QUERY"
 [ -n "$STDIN_CONTEXT" ] && manifest_add_input kind=context value="$STDIN_CONTEXT"
 
-# Refuse an existing path before opening (including nonregular files that Bash
-# noclobber permits), then verify the descriptor before writing the header.
-if [ -e "$LOG" ] || [ -L "$LOG" ]; then
-  echo "[ask-researcher] raw log path already exists: $LOG" >&2
-  exit 2
-fi
-LOG_UID=$(id -u) || exit 2
-LOG_UMASK=$(umask)
-umask 077
-set -C
-if ! exec 8>"$LOG"; then
-  set +C
-  umask "$LOG_UMASK"
-  exit 2
-fi
-set +C
-umask "$LOG_UMASK"
-if ! dev_trio_new_log_fd_is_private "$LOG" 8 "$LOG_UID"; then
-  echo "[ask-researcher] raw log is not a new private regular file: $LOG" >&2
-  exec 8>&-
-  exit 2
-fi
-{
-  echo "=== ask-researcher.sh @ $TS ==="
+run_open_log
+run_header_body() {
   echo "=== QUERY ==="
   echo "$QUERY"
   if [ -n "$STDIN_CONTEXT" ]; then
     echo "=== STDIN CONTEXT ==="
     echo "$STDIN_CONTEXT"
   fi
-  echo "=== PM HOST: $PM_HOST ==="
-  echo "=== MODEL: $RESEARCHER_MODEL ==="
-  echo "=== RESPONSE ==="
-} >&8
+}
+run_write_header "$RESEARCHER_MODEL"
 
-# How the answer artifact gets filled. A model that can write its own last
-# message (final_args) is authoritative; otherwise the answer is this run's
-# stdout, and the CLI's diagnostics stay on stderr where they belong. The role
-# is filled from the registry, so this is decided per model, never per channel.
-if registry_has_final "$RESEARCHER_MODEL"; then
-  FINAL_SOURCE=native
-else
-  FINAL_SOURCE=stdout
-fi
-
-# Structured run metadata for the dashboard — published before the latest-*
-# links, so a reader that follows a link always finds a described run rather
-# than a bare log it would have to parse.
-RUNSTATE_ARGS=(
-  channel=agy
-  wrapper=ask-researcher.sh
-  variant=dev-trio-research
-  team="$TEAM"
-  run_stem="agy-$TS"
-  started_display="$TS"
-  pid="$$"
-  role=researcher
-  model="$RESEARCHER_MODEL"
-  pm_host="$PM_HOST"
-  final_path="$FINAL"
-  final_source="$FINAL_SOURCE"
-  "input=question:$QUERY"
-)
-if manifest_is_nested; then
-  RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" nested=true)
-else
-  RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" nested=false)
-fi
+# The answer artifact is filled natively by a model that can write its own last
+# message (final_args); otherwise it is this run's stdout, and the CLI's
+# diagnostics stay on stderr where they belong. run_begin_metadata records
+# which, decided per model from the registry, never per channel.
+RUNSTATE_ARGS=("input=question:$QUERY")
 [ -z "$STDIN_CONTEXT" ] || RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" "inputdigest=context:$STDIN_CONTEXT")
-# A dashboard sidecar never changes this wrapper's outcome.
-if runstate_begin "$LOG" "${RUNSTATE_ARGS[@]}"; then
-  RUNSTATE_LOG="$LOG"
-else
-  echo "[ask-researcher] run metadata unavailable; the dashboard will show this run as legacy" >&2
-fi
+run_begin_metadata agy dev-trio-research researcher "$RESEARCHER_MODEL" "${RUNSTATE_ARGS[@]}"
 
-# ln -sfn unlinks then creates and can fail under concurrent dispatch. Rename
-# a unique sibling link instead; readers see either complete target.
-LATEST_TMP="$LOG_DIR/.latest-agy-$TS"
-ln -s "agy-$TS.log" "$LATEST_TMP"
-mv -f "$LATEST_TMP" "$LOG_DIR/latest-agy.log"
-ln -s "agy-$TS.final.md" "$LATEST_TMP"
-mv -f "$LATEST_TMP" "$LOG_DIR/latest-agy.final.md"
-LATEST_TMP=""
-
-echo "[ask-researcher] running ($RESEARCHER_MODEL) — monitor: dashboard.sh agy  (raw: tail -F $LOG_DIR/latest-agy.log)" >&2
+run_publish_latest agy "$RESEARCHER_MODEL"
 RC=0
 ORIGINAL_LOG_FD=8
 # Legacy RESEARCHER_CLI still wins as a per-role binary override; otherwise the
@@ -421,10 +335,8 @@ ORIGINAL_LOG_FD=8
 # after the run, which costs the live transcript a `tail -F` reader follows. Recorded on #71 instead.
 #
 # errexit is lifted around the call so the 5/6 answer codes survive as $RC.
-if exec 7<"$LOG" \
-   && dev_trio_fd_matches_path "$LOG" 8 \
-   && dev_trio_fd_matches_path "$LOG" 7; then
-  LOG_OFFSET="$(dev_trio_fd_size 8)" || LOG_OFFSET=""
+if run_attach_reader; then
+  LOG_OFFSET="$RUN_OFFSET"
 else
   echo "[ask-researcher] the transcript could not be logged; $LOG may be incomplete" >&2
   # Preserve the original inode for END even when the model uses /dev/null.
@@ -458,14 +370,7 @@ if [ "$RC" -eq 0 ]; then
   cat "$FINAL" || true
 fi
 manifest_finalize
-# As in ask-reviewer, END is best-effort framing; the answer and run metadata
-# determine the outcome even when this final log write fails.
-if [ "$ORIGINAL_LOG_FD" -eq 9 ]; then
-  printf '\n=== END (rc=%d) ===\n' "$RC" >&9 || \
-    echo "[ask-researcher] final log append failed; $LOG may be incomplete" >&2 || true
-elif ! printf '\n=== END (rc=%d) ===\n' "$RC" >&8; then
-  echo "[ask-researcher] final log append failed; $LOG may be incomplete" >&2 || true
-fi
+run_finish_log "$RC"
 exec 8>&- 9>&- || true
 exec 7<&- || true
 echo || true
