@@ -224,9 +224,22 @@ claude --plugin-dir ./agent-team-plugins/dev-trio
 
 ### Before the first Codex research call
 
-agy startup needs writes under `~/.gemini/antigravity-cli` (logs/crashes),
-a localhost listener, and external network access. The Codex research skill
-uses the host's supplied execution policy and known session restrictions:
+agy needs three host resources: a localhost listener, external network access,
+and writes under `~/.gemini/antigravity-cli`. The Codex research skill treats
+all three as required. [Measured](docs/research-host-acceptance.md#2-live-wrapper-runs-real-agy-no-codex-session)
+with agy 1.2.12 and 1.2.13 under `codex sandbox`, whose network grant allows
+the listener and outbound access together:
+
+- Without that grant agy stops at `bind 127.0.0.1:0` before it answers.
+- With it but with the home writes blocked, agy answers. The wrapper cannot pin
+  agy's log, so agy's log, including its permission allow list, lands in the
+  wrapper's transcript.
+
+From the code path, not exercised: such a run cannot name a headless denial,
+because the pinned log and agy's `brain/` record are both missing.
+
+The skill uses the host's supplied execution policy and known session
+restrictions:
 
 | Host state | Action before dispatch |
 | --- | --- |
@@ -235,8 +248,9 @@ uses the host's supplied execution policy and known session restrictions:
 | A required resource is blocked; approval unavailable or refused | Stop without starting research. |
 | Restrictions unknown | State the uncertainty and follow host policy; do not use research as a probe. |
 
-Approval describes home writes, localhost binding and external network access;
-the plugin does not change host policy or request blanket persistent grants.
+Approval says the listener and network access are needed to answer and the
+home writes for agy's records and for naming a denial; the plugin does not
+change host policy or request blanket persistent grants.
 Other researchers/custom adapters retain their own execution requirements.
 Host approval does not grant agy's internal `read_url`, command or MCP permissions.
 An unexpected failure still needs its own diagnostic; `rc=1` alone is not proof
@@ -311,8 +325,10 @@ run. See the [official headless guide](https://www.antigravity.google/docs/cli/h
    review result carries the same in `denied` and `conversation_ids`. They only
    do so when this run printed agy's headless no-output notice, never from code
    5 or an empty answer alone. If the target is reported as unknown — agy
-   recorded none, the record was not written yet, or the log directory was not
-   writable — open interactive agy from the same
+   recorded none, the record was not written yet, or agy could not write its
+   per-run log or `brain/` record (a host sandbox; the run's log then shows
+   `operation not permitted` for `log/` or `brain/` under agy's home) — open
+   interactive agy from the same
    workspace and reproduce the original question/context to see the permission
    request. This is another model call and may repeat external actions; inspect
    the request before deciding whether to grant it. Do not infer a broad permission
