@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "preset": "bug-fix",
+  "task": "task.md",
+  "criteria": "criteria.md",
+  "submission": {
+    "kind": "git",
+    "repo": "__PROJECT_REPO__",
+    "base": "__BASE_SHA__",
+    "head": "__HEAD_SHA__"
+  },
+  "checks": [
+    {
+      "id": "reproducer",
+      "baseline": true,
+      "argv": ["python3", "_scenario_bug_reproducer.py"],
+      "timeout_seconds": 30,
+      "expected_base": {
+        "rc": [1],
+        "stderr_regex": "AssertionError: [^\n]*BUG_REPRO"
+      },
+      "files": [
+        {"source": "reproducer.py", "target": "_scenario_bug_reproducer.py"}
+      ]
+    },
+    {
+      "id": "regression",
+      "argv": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+      "timeout_seconds": 60
+    }
+  ]
+}

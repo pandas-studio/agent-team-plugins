@@ -1,0 +1,15 @@
+"""실행 전에 실제 재현 입력·호출·assert로 교체할 독립 검사."""
+
+import unittest
+
+
+class BugReproducer(unittest.TestCase):
+    def test_original_failure(self):
+        # Replace this fail with a real call and assertion, for example:
+        # self.assertEqual(actual, expected, "BUG_REPRO: wrong exit status")
+        # Do not catch imports or infrastructure errors as expected failures.
+        self.fail("TEMPLATE_NOT_READY: __IMPLEMENT_REAL_REPRODUCER__")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
