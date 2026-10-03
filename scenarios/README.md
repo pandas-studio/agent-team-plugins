@@ -39,6 +39,20 @@
    리뷰·토론 transcript와 루프 로그·상태가 커밋이나 Eval 제출물에 섞이지 않도록
    준비 변경에 포함한다. 이미 추적 중인 로그는 `.gitignore`만으로 제외되지 않으므로
    커밋 대상에서 빠졌는지 별도로 확인한다.
+7. Ralph·Spec의 `--worktree` 예시에서는 루트 `fix_plan.md`를 로컬 실행 상태로 둔다.
+   `.gitignore`에 `/fix_plan.md`도 추가한다. 이미 추적 중이면 내용을 보존한 채
+   `git rm --cached -- fix_plan.md`로 추적만 해제하고 이를 준비 커밋에 포함한다.
+   입력인 PROMPT·spec·BACKLOG와 계약·테스트는 커밋하지만 fix-plan은 커밋하지 않는다.
+   원본과 반복 worktree가 같은 추적 파일에 각각 기록하면 fast-forward 병합이
+   막힐 수 있다. 단순히 미추적 상태로만 두지 말고 아래 두 조건을 확인한다.
+
+```bash
+git ls-files -- fix_plan.md
+git check-ignore -- fix_plan.md
+```
+
+첫 명령은 출력이 없어야 하고, 둘째는 `fix_plan.md`를 출력해야 한다. 기존 프로젝트에서
+이 파일의 추적을 유지해야 한다면 이 worktree 예시를 그대로 실행하지 않는다.
 
 ### 호스트별 스킬 표기
 

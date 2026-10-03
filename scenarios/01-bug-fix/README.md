@@ -19,8 +19,9 @@ eval-trio가 제출된 커밋의 전후 동작을 독립 검사한다.
 | [reproducer.py.template](templates/reproducer.py.template) | `reproducer.py` | 실제 결함을 검출하는 독립 unittest |
 
 `__PROJECT_REPO__`, `__BASE_SHA__`, `__HEAD_SHA__`, `__EXPECTED_BEHAVIOR__`
-등 모든 치환 항목을 채운다. head SHA는 수정 후 확정한다. task와 criteria는 구현 전
-고정한다. 재현 검사 템플릿의 `self.fail`은 미완성 표시이므로 실제 입력·호출·assert로
+등 모든 치환 항목을 채운다. base SHA는 1단계의 준비 커밋 뒤에, head SHA는 수정 후
+확정한다. task와 criteria는 base SHA를 반영한 뒤 구현 전에 고정한다.
+재현 검사 템플릿의 `self.fail`은 미완성 표시이므로 실제 입력·호출·assert로
 교체해야 한다. 단순히 삭제해 항상 통과하는 검사를 만들지 않는다.
 
 ## 1단계: 수정 전 실패 확인
@@ -35,12 +36,37 @@ BASE_SHA=$(git rev-parse HEAD)
 printf '%s\n' "$BASE_SHA"
 ```
 
-이 SHA를 case의 base에 기록한다. 독립 검사는 base와 head 어느 쪽에도 없는
+이 SHA를 case의 base와 task·criteria의 `__BASE_SHA__`에 동일하게 기록한다.
+독립 검사는 base와 head 어느 쪽에도 없는
 `_scenario_bug_reproducer.py`라는 이름으로 주입된다. 두 커밋 모두에 그 경로가 없도록
 확인한다. Eval은 기존 파일을 덮어쓰는 검사 주입을 거부한다.
 
-재현 검사를 기준 커밋의 별도 작업 공간에서 실행해, 실제 결함 때문에 실패하는지
-먼저 확인한다. 템플릿의 예상 신호는 종료 코드 1과 `BUG_REPRO`를 포함한 `AssertionError`다.
+재현 검사를 아래처럼 기준 커밋의 별도 작업 공간에 주입해 실행한다. 프로젝트 루트에서
+실행해야 프로젝트 모듈을 import할 수 있다. 기존 파일이 있으면 복사는 실패하며
+덮어쓰지 않는다. 프로젝트 의존성은 이 작업 공간에서도 사용할 수 있게 준비한다.
+
+```bash
+CASE_DIR='/absolute/path/to/bug-case'
+REPRO_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/scenario-repro.XXXXXX")
+git worktree add --detach "$REPRO_ROOT/base" "$BASE_SHA"
+python3 - "$CASE_DIR/reproducer.py" "$REPRO_ROOT/base/_scenario_bug_reproducer.py" <<'PY'
+import sys
+from pathlib import Path
+with open(sys.argv[2], 'xb') as target:
+    target.write(Path(sys.argv[1]).read_bytes())
+PY
+REPRO_RC=0
+(
+  cd "$REPRO_ROOT/base" || exit 1
+  python3 _scenario_bug_reproducer.py
+) || REPRO_RC=$?
+printf 'reproducer exit=%s\n' "$REPRO_RC"
+```
+
+확인용 worktree는 조사할 수 있도록 남는다. case 디렉터리에서 검사 파일만 직접 실행해
+발생한 import 오류는 재현이 아니다. 위 빠른 확인은 현재 셸의 HOME·LANG을 사용하며,
+최종 검증은 3단계의 Eval 환경(임시 HOME/TMPDIR, `LANG=C.UTF-8`)에서 다시 수행한다.
+템플릿의 예상 신호는 종료 코드 1과 `BUG_REPRO`를 포함한 `AssertionError`다.
 실제 assert의 메시지에 `BUG_REPRO`를 붙이고, 필요하다면 case의 예상 신호도 실제
 출력에 맞춘다. 기본 정규식은 `AssertionError:`와 `BUG_REPRO`가 같은 줄에 있을 때만
 매치된다. 여러 줄 문자열을 비교하면 메시지가 diff 뒤로 밀릴 수 있으므로 스칼라
@@ -89,8 +115,19 @@ CHECK_OUTPUT='/absolute/path/to/new-bug-checks-001'
 
 출력 디렉터리는 존재하면 안 된다. `--allow-execution`은 제출 코드·검사를 실행한다는
 뜻이며, 복사된 작업 공간은 OS 샌드박스가 아니다. 신뢰할 수 있는 로컬 입력에 사용한다.
-검사만 성공하면 종료 코드 **2 / HOLD**가 정상이다. `report.json`과 `checks.json`에서
-base의 예상 실패와 head의 성공을 확인한다.
+검사만 성공하면 종료 코드 **2 / HOLD**가 정상이다. `report.json`의
+`checks[].runs.base`와 `checks[].runs.head`에서 `outcome`과 `rc`를 확인한다.
+이 템플릿의 reproducer는 base가 `exit`/1, head가 `exit`/0이어야 한다.
+원문 출력은 각 run의 `output_files` 경로를 출력 디렉터리의 `evidence/` 아래에서
+찾는다. 첫 재현 검사의 stderr는 `evidence/outputs/00-base.stderr`다.
+
+```bash
+jq '.checks[] | {id, runs}' "$CHECK_OUTPUT/report.json"
+cat "$CHECK_OUTPUT/evidence/outputs/00-base.stderr"
+```
+
+checks-only는 `checks.json`을 만들지 않는다. `evidence/checks.json`은 전체 평가가
+고정 검사를 통과해 모델 리뷰용 근거를 준비하는 단계에 도달했을 때 생성된다.
 
 모델을 통한 전체 평가를 실행할 때는 **새 출력 디렉터리**를 사용한다.
 

@@ -48,6 +48,8 @@ Codex에서 `$spec-trio:bootstrap`, Claude에서 `/spec-trio:bootstrap`을 호�
 대안만**의 구체 인터페이스를 적고, §3과 §5를 관찰 가능한 동작·검사로 채운다.
 미결정 A/B를 남긴 채 구현을 시작하지 않는다. backlog의 § 인용이 실제 조항과 맞는지
 확인한다. worktree에서 읽을 명세·backlog와 관련 자료를 프로젝트 절차에 따라 커밋한다.
+`fix_plan.md`는 이 커밋에 포함하지 않는다. 공통 준비의 추적 해제·ignore 확인을
+마친 로컬 상태로 유지해, 원본과 반복 worktree의 기록이 병합을 막지 않도록 한다.
 
 ## 3단계: 명세 기반 구현
 

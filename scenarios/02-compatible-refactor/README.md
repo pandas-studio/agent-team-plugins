@@ -21,7 +21,8 @@ ralph-trio가 작업별 계획·구현·리뷰를 반복하며 dev-trio가 리�
 Codex에서 `$ralph-trio:bootstrap`, Claude Code에서 `/ralph-trio:bootstrap`을 호출한다.
 생성되거나 기존에 있던 파일을 읽고 템플릿 내용을 편집해 반영한다. `__MODULE_A__`,
 `__MODULE_B__`, `__SHARED_MODULE__`, `__TEST_COMMAND__` 등 모든 치환 항목을 채운다.
-아래 `--worktree` 실행에서 읽을 입력과 계약·테스트는 시작 커밋에 포함되어 있어야 한다.
+아래 `--worktree` 실행에서 읽을 PROMPT·BACKLOG와 계약·테스트는 시작 커밋에 포함한다.
+`fix_plan.md`는 공통 준비의 추적 해제·ignore 확인을 마친 로컬 상태로 유지한다.
 입력 준비 커밋은 프로젝트 절차를 따르고 기존 작업 파일을 덮어쓰지 않는다.
 
 ## 1단계: 기준 동작 검증
@@ -34,7 +35,7 @@ CLI 정상 입력, 잘못된 입력, 빈 결과에 대한 계약 검사가 없�
 python3 -m unittest discover -s tests -v
 ```
 
-통과한 계약·테스트, 완성한 입력 파일과 `.gitignore`를 프로젝트 절차에 따라 먼저
+통과한 계약·테스트, 완성한 PROMPT·BACKLOG와 `.gitignore`를 프로젝트 절차에 따라 먼저
 커밋한다. 준비 변경이 모두 커밋되어 작업 트리가 깨끗한 것을 확인한 **후에** 기준
 SHA를 기록한다. 이 순서로 worktree에 계약 검사가 포함되고 리팩터링 비교에서 준비
 변경이 제외된다.
@@ -89,8 +90,11 @@ DRY_RUN_DIR=$(mktemp -d .ralph-trio/dry-run.XXXXXX)
 루프가 끝나면 현재 작업 브랜치에서 계약 명령과 전체 회귀 검사를 다시 실행한다.
 `refactor-contract.md`의 정상·오류·빈 결과 비교 명령이 테스트 스위트에 포함되지
 않았다면 별도로 실행하고 그 결과도 verification에 기록한다.
+새 셸이나 스킬 세션으로 바뀌었다면 `.ralph-trio/refactor-verification.md`에 저장한
+**시작 시점의 base SHA**로 `BASE_SHA`를 다시 설정한다. 현재 HEAD로 새로 계산하지 않는다.
 
 ```bash
+: "${BASE_SHA:?기록한 시작 시점의 base SHA를 BASE_SHA에 설정하세요}"
 python3 -m unittest discover -s tests -v
 git diff --check "$BASE_SHA" HEAD
 git diff --stat "$BASE_SHA" HEAD
