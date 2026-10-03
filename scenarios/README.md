@@ -28,6 +28,8 @@
    브랜치로 fast-forward 병합할 수 있으므로 기본 브랜치에서 실행하지 않는다.
 4. 템플릿의 `__UPPER_SNAKE_CASE__`를 모두 실제 값으로 채운다. 경로는 대상
    프로젝트 기준이며, Eval case 내부의 파일 경로는 case 디렉터리 기준이다.
+   셸 예시의 `/absolute/path/to/...`도 실제 경로로 교체한다. `PLUGIN_SOURCE`,
+   `CASE_DIR`, `CHECK_OUTPUT`, `FULL_OUTPUT`의 값이 해당하며 출력 경로는 새 경로를 쓴다.
    예시의 `python3 -m unittest discover -s tests -v`도 실제 테스트를 수집하는지 확인한다.
 5. 기존 `PROMPT.md`, `spec.md`, `BACKLOG.md`, `fix_plan.md`는 먼저 읽는다.
    bootstrap은 없는 파일만 만든다. 템플릿 내용을 필요한 위치에 편집해 반영하며
@@ -83,7 +85,7 @@ Claude를 PM으로 사용하면 네 `*_PM_HOST` 값을 모두 `claude`로 바꾼
   추가한다. 리팩터링 가이드는 이 파일을 실행마다 별도 dry-run 디렉터리로 분리한다.
   명령·입력 경로 확인용이며 구현, 테스트 통과, 리뷰 성공의 증거가 아니다.
 - Ralph·Spec 예시는 최대 3회·30분으로 제한한다. 이 상한은 성공을 보장하지 않으며
-  남은 작업과 중단 사유를 확인해야 한다. 토론은 최대 4라운드로 실행한다.
+  남은 작업과 중단 사유를 확인해야 한다. 토론은 4라운드로 실행한다.
 - dev-trio는 해당 호출의 `.run.json`에서 실행 모델·종료 상태를, `.review.json`에서
   리뷰 판정을 확인한다. `.final.md`는 같은 실행의 설명 자료다. `latest` 링크를
   고정된 실행 근거로 사용하지 않는다.

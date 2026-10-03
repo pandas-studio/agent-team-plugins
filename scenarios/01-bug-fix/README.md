@@ -18,14 +18,19 @@ eval-trio가 제출된 커밋의 전후 동작을 독립 검사한다.
 | [case.json.template](templates/case.json.template) | `case.json` | 저장소 절대 경로, base/head SHA |
 | [reproducer.py.template](templates/reproducer.py.template) | `reproducer.py` | 실제 결함을 검출하는 독립 unittest |
 
-`__CASE_DIR__`, `__PROJECT_REPO__`, `__BASE_SHA__`, `__HEAD_SHA__`, `__EXPECTED_BEHAVIOR__`
+`__PROJECT_REPO__`, `__BASE_SHA__`, `__HEAD_SHA__`, `__EXPECTED_BEHAVIOR__`
 등 모든 치환 항목을 채운다. head SHA는 수정 후 확정한다. task와 criteria는 구현 전
 고정한다. 재현 검사 템플릿의 `self.fail`은 미완성 표시이므로 실제 입력·호출·assert로
 교체해야 한다. 단순히 삭제해 항상 통과하는 검사를 만들지 않는다.
 
 ## 1단계: 수정 전 실패 확인
 
+공통 준비에서 추가한 `.gitignore` 등 준비 변경을 프로젝트 절차에 따라 먼저 커밋한다.
+작업 트리가 깨끗한지 확인한 후 base SHA를 기록해, 준비 변경이 버그 수정의 평가
+범위에 섞이지 않도록 한다.
+
 ```bash
+git status --short
 BASE_SHA=$(git rev-parse HEAD)
 printf '%s\n' "$BASE_SHA"
 ```

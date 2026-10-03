@@ -87,6 +87,8 @@ DRY_RUN_DIR=$(mktemp -d .ralph-trio/dry-run.XXXXXX)
 ## 3단계: 전체 호환성 검증과 판정
 
 루프가 끝나면 현재 작업 브랜치에서 계약 명령과 전체 회귀 검사를 다시 실행한다.
+`refactor-contract.md`의 정상·오류·빈 결과 비교 명령이 테스트 스위트에 포함되지
+않았다면 별도로 실행하고 그 결과도 verification에 기록한다.
 
 ```bash
 python3 -m unittest discover -s tests -v
