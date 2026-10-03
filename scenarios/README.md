@@ -32,6 +32,8 @@
 5. 기존 `PROMPT.md`, `spec.md`, `BACKLOG.md`, `fix_plan.md`는 먼저 읽는다.
    bootstrap은 없는 파일만 만든다. 템플릿 내용을 필요한 위치에 편집해 반영하며
    기존 작업 파일에 `cp`로 덮어쓰지 않는다.
+   Ralph·Spec을 사용한다면 대상 프로젝트의 기존 `.gitignore`에 `.ralph-trio/`와
+   `.spec-trio/`를 추가해 실행 로그·상태가 코드 변경에 섞이지 않도록 한다.
 
 ### 호스트별 스킬 표기
 

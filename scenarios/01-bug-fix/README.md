@@ -37,12 +37,19 @@ printf '%s\n' "$BASE_SHA"
 재현 검사를 기준 커밋의 별도 작업 공간에서 실행해, 실제 결함 때문에 실패하는지
 먼저 확인한다. 템플릿의 예상 신호는 종료 코드 1과 `BUG_REPRO`를 포함한 `AssertionError`다.
 실제 assert의 메시지에 `BUG_REPRO`를 붙이고, 필요하다면 case의 예상 신호도 실제
-출력에 맞춰 좁힌다. import 실패, 테스트 파일 부재, timeout은 버그 재현으로 인정하지 않는다.
+출력에 맞춘다. 기본 정규식은 `AssertionError:`와 `BUG_REPRO`가 같은 줄에 있을 때만
+매치된다. 여러 줄 문자열을 비교하면 메시지가 diff 뒤로 밀릴 수 있으므로 스칼라
+결과를 비교하거나 `stderr_regex`를 `(?s)AssertionError: .*BUG_REPRO`로 조정한다.
+조정 후에도 실제 결함의 assertion은 매치되고 미완성 템플릿·import 오류는 매치되지
+않는지 확인한다. 테스트 파일 부재나 timeout도 버그 재현으로 인정하지 않는다.
 Python 의존성이 필요한 프로젝트는 base/head 모두에서 사용할 실행 환경을 준비한다.
 
 ## 2단계: PM 수정과 dev-trio 리뷰
 
 PM에게 완성한 task·criteria를 주고 최소 수정 및 회귀 테스트 추가를 요청한다.
+`task.md`의 재현 입력·실제 결과·기대 결과·수정 범위를 `review-prompt.md`의 작업 요약에
+반영한다. `--with-spec`에는 판정 기준을 전달한다. `--with-context`는 PM이 확보한
+원격 저장소 사실(PR·이슈·CI 등)을 전달하는 용도이므로 작업 설명에는 사용하지 않는다.
 리뷰 프롬프트는 [호스트별 스킬](../README.md#호스트별-스킬-표기)에 전달하거나,
 공통 셸 설정 후 다음처럼 직접 호출한다.
 
@@ -50,8 +57,7 @@ PM에게 완성한 task·criteria를 주고 최소 수정 및 회귀 테스트 �
 CASE_DIR='/absolute/path/to/bug-case'
 "$DEV_TRIO_BIN/ask-reviewer.sh" \
   "$(cat "$CASE_DIR/review-prompt.md")" \
-  --with-spec "$CASE_DIR/criteria.md" \
-  --with-context "$CASE_DIR/task.md"
+  --with-spec "$CASE_DIR/criteria.md"
 ```
 
 이 호출은 현재 작업 트리의 수정을 검토한다. `NEEDS-FIX`면 지적을 수정하고 테스트를
@@ -65,8 +71,9 @@ case의 repo/base/head를 실제 값으로 채운다. Eval의 Git 제출은 커�
 ## 3단계: 고정 검사 후 전체 평가
 
 case의 regression 명령은 프로젝트의 전체 회귀 검사로 교체한다. 예시 `unittest`
-명령이 테스트를 0개 수집하지 않는지 먼저 확인한다. Eval의 검사 환경에는 PATH·LANG과
-임시 HOME/TMPDIR만 전달되므로 프로젝트 전용 환경변수에 의존하는 검사도 조정한다.
+명령이 테스트를 0개 수집하지 않는지 먼저 확인한다. Eval의 검사 환경은 상속한 PATH,
+고정된 `LANG=C.UTF-8`, 임시 HOME/TMPDIR로 구성된다. 사용자 locale이나 프로젝트 전용
+환경변수에 의존하는 검사는 이 환경에서도 의도한 동작을 검증하도록 조정한다.
 
 ```bash
 CHECK_OUTPUT='/absolute/path/to/new-bug-checks-001'
