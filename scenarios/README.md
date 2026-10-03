@@ -32,8 +32,11 @@
 5. 기존 `PROMPT.md`, `spec.md`, `BACKLOG.md`, `fix_plan.md`는 먼저 읽는다.
    bootstrap은 없는 파일만 만든다. 템플릿 내용을 필요한 위치에 편집해 반영하며
    기존 작업 파일에 `cp`로 덮어쓰지 않는다.
-   Ralph·Spec을 사용한다면 대상 프로젝트의 기존 `.gitignore`에 `.ralph-trio/`와
-   `.spec-trio/`를 추가해 실행 로그·상태가 코드 변경에 섞이지 않도록 한다.
+6. 모델 호출 전에 대상 프로젝트의 `.gitignore`에 `.dev-trio/`, `.debate-conductor/`,
+   `.ralph-trio/`, `.spec-trio/`를 추가한다. 파일이 없으면 만들고, 기존 규칙은 보존한다.
+   리뷰·토론 transcript와 루프 로그·상태가 커밋이나 Eval 제출물에 섞이지 않도록
+   준비 변경에 포함한다. 이미 추적 중인 로그는 `.gitignore`만으로 제외되지 않으므로
+   커밋 대상에서 빠졌는지 별도로 확인한다.
 
 ### 호스트별 스킬 표기
 
@@ -76,7 +79,8 @@ Claude를 PM으로 사용하면 네 `*_PM_HOST` 값을 모두 `claude`로 바꾼
 ## 실행과 결과 판정
 
 - dry-run은 실제 모델을 부르지 않지만 로그·manifest 등의 로컬 파일을 만들 수 있다.
-  Ralph trio는 `fix_plan.md`에도 모의 작업의 `SHIP` 기록을 추가한다.
+  Ralph trio는 지정한 fix-plan 파일(기본 `fix_plan.md`)에도 모의 작업의 `SHIP` 기록을
+  추가한다. 리팩터링 가이드는 이 파일을 실행마다 별도 dry-run 디렉터리로 분리한다.
   명령·입력 경로 확인용이며 구현, 테스트 통과, 리뷰 성공의 증거가 아니다.
 - Ralph·Spec 예시는 최대 3회·30분으로 제한한다. 이 상한은 성공을 보장하지 않으며
   남은 작업과 중단 사유를 확인해야 한다. 토론은 최대 4라운드로 실행한다.

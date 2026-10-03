@@ -16,7 +16,7 @@ ralph-trio가 작업별 계획·구현·리뷰를 반복하며 dev-trio가 리�
 | [contract.md](templates/contract.md) | 새 `refactor-contract.md` | 유지할 동작과 비교 명령 |
 | [PROMPT.md](templates/PROMPT.md) | bootstrap 후 `PROMPT.md` | 전체 목표와 공통 제한 |
 | [BACKLOG.md](templates/BACKLOG.md) | bootstrap 후 `BACKLOG.md` | 한 번에 한 변경 단위 |
-| [verification.md](templates/verification.md) | 새 `refactor-verification.md` | 전후 결과와 판정 기록 |
+| [verification.md](templates/verification.md) | `.ralph-trio/refactor-verification.md` | 커밋에서 제외할 전후 결과와 판정 기록 |
 
 Codex에서 `$ralph-trio:bootstrap`, Claude Code에서 `/ralph-trio:bootstrap`을 호출한다.
 생성되거나 기존에 있던 파일을 읽고 템플릿 내용을 편집해 반영한다. `__MODULE_A__`,
@@ -26,28 +26,46 @@ Codex에서 `$ralph-trio:bootstrap`, Claude Code에서 `/ralph-trio:bootstrap`�
 
 ## 1단계: 기준 동작 검증
 
+CLI 정상 입력, 잘못된 입력, 빈 결과에 대한 계약 검사가 없으면 먼저 추가한다.
+아래 명령은 프로젝트 테스트 명령으로 바꾸고, 기존 구현에서 계약 검사와 전체 회귀가
+통과하며 테스트가 실제로 수집되는지 확인한다.
+
 ```bash
-BASE_SHA=$(git rev-parse HEAD)
 python3 -m unittest discover -s tests -v
 ```
 
-기준 SHA와 실제 테스트 수를 verification에 기록한다. 명령은 프로젝트 테스트로
-바꾼다. CLI 정상 입력, 잘못된 입력, 빈 결과에 대한 계약 검사가 없으면 먼저 추가해
-기존 구현에서 통과시키고 기준을 고정한다. 전체 목표는 3개 작업으로 나누되, 한 번의
-반복에서 여러 모듈을 동시에 전환하지 않는다.
+통과한 계약·테스트, 완성한 입력 파일과 `.gitignore`를 프로젝트 절차에 따라 먼저
+커밋한다. 준비 변경이 모두 커밋되어 작업 트리가 깨끗한 것을 확인한 **후에** 기준
+SHA를 기록한다. 이 순서로 worktree에 계약 검사가 포함되고 리팩터링 비교에서 준비
+변경이 제외된다.
+
+```bash
+git status --short
+BASE_SHA=$(git rev-parse HEAD)
+printf '%s\n' "$BASE_SHA"
+mkdir -p .ralph-trio
+```
+
+기준 SHA와 실제 테스트 수는 무시되는 `.ralph-trio/refactor-verification.md`에 기록한다.
+추적 중인 입력 파일에 SHA를 다시 써서 기준 커밋 이후 변경을 만들지 않는다.
+전체 목표는 3개 작업으로 나누되, 한 번의 반복에서 여러 모듈을 동시에 전환하지 않는다.
 
 ## 2단계: dry-run과 제한된 반복
 
 [공통 셸 설정](../README.md#직접-셸에서-실행할-때) 후 대상 프로젝트 루트에서 실행한다.
-dry-run에는 worktree 옵션을 넣지 않는다.
+dry-run에는 worktree 옵션을 넣지 않는다. 모의 `SHIP` 기록은 무시되는 `.ralph-trio/`
+아래 새 디렉터리에 남겨 실제 실행의 `fix_plan.md`를 보존한다.
 
 ```bash
+mkdir -p .ralph-trio
+DRY_RUN_DIR=$(mktemp -d .ralph-trio/dry-run.XXXXXX)
 "$PLUGIN_SOURCE/ralph-trio/bin/ralph-trio.sh" \
-  --prompt PROMPT.md --backlog BACKLOG.md --fix-plan fix_plan.md \
+  --prompt PROMPT.md --backlog BACKLOG.md --fix-plan "$DRY_RUN_DIR/fix_plan.md" \
   --max-iter 3 --max-runtime 30m --dry-run
 ```
 
-경로와 로그 생성을 확인한 뒤 실제 모델 실행을 시작한다.
+경로와 로그 생성을 확인한 뒤 실제 모델 실행을 시작한다. dry-run 파일의 `SHIP`은
+구현 성공이 아니며 실제 fix-plan이나 결과 기록에 옮기지 않는다.
 
 ```bash
 "$PLUGIN_SOURCE/ralph-trio/bin/ralph-trio.sh" \
@@ -56,7 +74,8 @@ dry-run에는 worktree 옵션을 넣지 않는다.
 ```
 
 스킬로 실행한다면 Codex의 `$ralph-trio:run`에, Claude에서는 자연어 요청으로
-“trio 변형, 위 입력 파일, 최대 3회·30분, dry-run 먼저, 실제 실행은 worktree 사용”을
+“trio 변형, 위 입력 파일, 최대 3회·30분, dry-run은 별도 fix-plan 사용,
+실제 실행은 기존 fix_plan.md와 worktree 사용”을
 요청한다. 연구가 필요하다는 결과가 나오면 근거를 확보한 뒤 진행한다.
 
 `ralph-trio.sh`에는 `--test-cmd` 옵션이 없다. PROMPT와 각 backlog 작업에 테스트

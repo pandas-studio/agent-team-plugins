@@ -1,6 +1,6 @@
 # 리팩터링 전후 유지할 계약
 
-- 기준 커밋: __BASE_SHA__
+- 기준 커밋: 준비 변경을 커밋한 후 `.ralph-trio/refactor-verification.md`에 기록한다.
 - 변경 목적: __REFACTOR_PURPOSE__
 - 허용 경로: __ALLOWED_PATHS__
 - 금지 경로·의존성: __OFF_LIMITS_PATHS_AND_DEPENDENCIES__
