@@ -47,6 +47,13 @@ codex plugin add eval-trio@pandas-studio
 | [eval-trio](./eval-trio) | Fixed checks · Challenger · Judge | EP E | preview |
 | [langgraph-conductor](./runtime) | Durable planner/researcher/coder/reviewer graph | Guide v1 | preview |
 
+## Practical scenarios
+
+Looking for an end-to-end workflow? The [practical scenarios (한국어)](./scenarios/README.md)
+combine these plugins for a reproducible bug fix, a compatibility-preserving
+refactor, and a design decision followed by spec-driven implementation. Each
+guide includes editable inputs and explains how to check the resulting evidence.
+
 ## Shared model configuration
 
 The role-based plugins resolve their companion CLIs through a **shared model registry**. A *model* is a named CLI adapter (how to spawn a CLI and feed it a prompt); a *role* (e.g. `dev-trio.researcher`) is bound to a model. Seven models ship built-in — `agy`, `codex`, `codex-plan`, `codex-write`, `codex-no-memories`, `claude`, `claude-write` — and the default bindings match the role tables, so **zero configuration is required**. `claude-write` is `claude` plus `--permission-mode acceptEdits`: headless `claude -p` cannot edit files without it, so only roles meant to write are bound to it. `codex-plan` uses a read-only sandbox and `codex-write` uses workspace-write. `codex-no-memories` is `codex` plus `-c features.memories=false`, for reviews that should not receive the memory summary from earlier Codex sessions.
