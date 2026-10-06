@@ -66,18 +66,19 @@ manifest(`dev-trio/lib/manifest.sh` 계열)를 남기고, 판정은 마지막 �
 [spec.md 템플릿](../spec-trio/prompts/spec.md.template) 형식의 `spec.md`와 § 인용이
 붙은 `BACKLOG.md` 초안을 만든다. spec-trio가 그대로 소비할 수 있어야 한다.
 
+> 상세 설계는 [RFC 0005](../rfcs/0005-spec-forge.md)를 따른다. 아래는 요약이다.
+
 | 역할 | 이름 | 기본 모델 | 하는 일 |
 | --- | --- | --- | --- |
-| Drafter | PM (호스트) | — | 결정 기록의 채택안만으로 §1–§6을 작성한다. 기각안은 §6 Non-goals에 남긴다. |
-| Ambiguity Auditor | `spec-forge.auditor` | `codex` | 검증할 수 없는 조항, 수치 없는 성능 요구, 모호한 §4 금지 경로, §5에 대응 검사가 없는 §3 동작을 찾는다. |
-| Test Mapper | `spec-forge.mapper` | `agy` | §5의 각 `### §5.N`에 실제 실행 가능한 검사 명령 후보를 붙이고, backlog 항목마다 § 인용을 확인한다. |
+| Drafter | PM (호스트) | — | 결정 기록의 채택안만으로 §1–§6을 작성한다. 기각안은 §6 Non-goals에 남기고, 조항마다 출처를 기록한다. |
+| Auditor | `SPEC_FORGE_AUDITOR_MODEL` | PM과 다른 계열(`codex` 또는 `claude`) | 검증할 수 없는 조항, 수치 없는 성능 요구, 모호한 §4 금지 경로, §5 검사가 없는 §3 동작, 결정 기록과의 충돌을 찾는다. dev-trio의 `ask-reviewer.sh`를 재사용한다. |
 
 - **입력:** `design-decision.md`(상태가 확정이 아니면 거부), 선택적으로 debate 결과 receipt(`debate-conductor/lib/debate-result.sh` 형식)
-- **출력:** `spec.md`, `BACKLOG.md`, `spec-forge-report.md`(Auditor finding과 처리 여부)
-- **verdict:** `READY` / `NEEDS-HUMAN`(결정 기록에 없는 선택이 필요) / `UNTESTABLE`(§5를 검사로 만들 수 없음)
-- **기계 검증:** [`spec-coverage.sh`](../spec-trio/bin/spec-coverage.sh)가 §5.N을 찾지 못하면(exit 2) 실패로 본다. 출력 직후 `spec-trio.sh --dry-run`으로 형식을 확인한다.
-- **재사용:** spec-trio의 템플릿과 reviewer가 쓰는 § 인용 규칙. 의존 플러그인은 spec-trio다(`lib/plugin-deps.sh` 패턴).
-- **리스크:** 결정 기록에 없는 계약을 모델이 채워 넣는 것이 가장 위험하다. Drafter가 추가한 조항은 출처가 결정 기록의 어느 항목인지 주석으로 남기고, 출처가 없으면 `NEEDS-HUMAN`으로 멈춘다.
+- **출력:** `.spec-forge/runs/<run_id>/`의 `spec.md`, `BACKLOG.md`, `report.md`(출처 표, Auditor finding). `promote`는 대상 파일이 없을 때만 복사한다.
+- **verdict:** 기존 토큰을 재사용한다. `SHIP`(준비됨) / `NEEDS-FIX`(결정 기록만으로 고칠 수 있는 결함) / `DISCUSS`(사람 결정 필요)
+- **기계 검증:** spec-trio의 `parse_test_criteria`를 source하는 결정적 `lint`로 §1–§6 구조, §5.N 검사 명령, backlog의 § 인용, 출처 표를 확인한다. `spec-trio.sh --dry-run`은 구조를 읽지 않으므로 쓰지 않는다.
+- **재사용:** spec-trio의 템플릿과 파서, dev-trio의 reviewer wrapper와 판정 parser, `lib/plugin-deps.sh` 패턴. v1에서는 registry 역할을 등록하지 않는다.
+- **리스크:** 결정 기록에 없는 계약을 모델이 채워 넣는 것이 가장 위험하다. 출처 표에 원천이 없는 조항은 lint에서 실패하고, 결정 기록에 없는 선택은 `DISCUSS`로 멈춘다.
 - **에피소드 각도:** "명세를 쓰는 AI와 명세의 빈틈을 찾는 AI." 기존 EP D(spec-trio)의 앞 단계다.
 
 ### 2. council-conductor: N자 결정
