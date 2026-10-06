@@ -32,7 +32,7 @@ IDENTICAL = {
     # ralph-trio's copy is itself vendored from agent-team-harness core/lib/manifest.sh (#121).
     "manifest.sh": tuple(f"{p}/lib/manifest.sh" for p in ("ralph-trio", "dev-trio", "spec-trio")),
     "stage-result.sh": ("ralph-trio/lib/stage-result.sh", "spec-trio/lib/stage-result.sh"),
-    "plugin-deps.sh": ("ralph-trio/lib/plugin-deps.sh", "spec-trio/lib/plugin-deps.sh"),
+    "plugin-deps.sh": ("ralph-trio/lib/plugin-deps.sh", "spec-trio/lib/plugin-deps.sh", "spec-forge/lib/plugin-deps.sh"),
     "model-stage.sh": ("ralph-trio/lib/model-stage.sh", "spec-trio/lib/model-stage.sh"),
     "agent-team-models.sh": ("dev-trio/bin/agent-team-models.sh", "debate-conductor/bin/agent-team-models.sh"),
 }

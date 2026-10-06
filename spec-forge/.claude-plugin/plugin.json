@@ -1,0 +1,9 @@
+{
+  "name": "spec-forge",
+  "version": "0.1.0",
+  "description": "Turn a confirmed design decision into a spec-trio-ready spec.md and BACKLOG.md draft, checked by a deterministic lint.",
+  "author": {"name": "pandas-studio"},
+  "homepage": "https://github.com/pandas-studio/agent-team-plugins/tree/main/spec-forge",
+  "repository": "https://github.com/pandas-studio/agent-team-plugins",
+  "license": "MIT"
+}

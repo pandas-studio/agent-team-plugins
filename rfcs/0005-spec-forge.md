@@ -100,13 +100,17 @@ PM 정책 문서 `lib/pm.md`와 `lib/pm-codex.md`에서는 Drafter가 다음을 
 
 ## 6. 출력 계약
 
-실행마다 `.spec-forge/runs/<run_id>/`(0700)를 만들고, 다음 세 파일을 둔다.
+실행마다 `.spec-forge/runs/<run_id>/`(0700)를 만든다. PM이 쓰는 세 파일과 도구가 쓰는
+기록 파일을 둔다.
 
-| 파일 | 형식 |
-| --- | --- |
-| `spec.md` | [spec.md 템플릿](../spec-trio/prompts/spec.md.template)의 `## §1`–`## §6` 구조 |
-| `BACKLOG.md` | 미완료 작업 줄은 `- [ ] (§…) 설명` |
-| `report.md` | 출처 표, 사람 결정 필요 목록, audit 라운드별 finding과 처리 |
+| 파일 | 쓰는 쪽 | 형식 |
+| --- | --- | --- |
+| `spec.md` | PM | [spec.md 템플릿](../spec-trio/prompts/spec.md.template)의 `## §1`–`## §6` 구조 |
+| `BACKLOG.md` | PM | 미완료 작업 줄은 `- [ ] (§…) 설명` |
+| `report.md` | PM | 출처 표, 사람 결정 필요 목록, audit 라운드별 finding과 처리 |
+| `decision.md` | `gate` | 결정 기록 스냅샷. 이후 단계는 원본이 아니라 이 사본을 기준으로 한다. |
+| `run.json` | `gate` | `schema_version`, `run_id`, `created_at`, `decision{path, sha256}`, `debate`(receipt 정보 또는 null) |
+| `lint.json` | `lint` | `ok`, `checked_at`, 세 파일의 sha256, `violations[{file, line, rule, message}]` |
 
 ### 6.1 출처 표
 
@@ -122,17 +126,18 @@ PM 정책 문서 `lib/pm.md`와 `lib/pm-codex.md`에서는 Drafter가 다음을 
 | §5.1 | 수용 기준과 실제 검사 명령 |
 ```
 
-기본 대응은 다음과 같다. PM은 이 대응을 벗어나도 되지만, 결정 기록 항목은 반드시
-`decision-fields.tsv`에 있는 라벨이어야 한다.
+둘째 칸에는 `decision-fields.tsv`의 라벨이나 key(`selected`, `contract` 등)를 `,`로 구분해
+쓴다. 기본 대응은 다음과 같다. PM은 이 대응을 벗어나도 되지만, 표에 없는 라벨은 lint에서
+실패한다.
 
 | 조항 | 기본 원천 |
 | --- | --- |
-| §1 Goals | 채택 대안 |
-| §2 Interfaces | 허용할 인터페이스 변경 |
-| §3 Behavior | 채택 대안, 허용할 인터페이스 변경 |
-| §4 Constraints | 호환성 요구, 적용 후 지표와 되돌림 조건 |
+| §1 Goals | 채택 대안·기각 대안과 이유 |
+| §2 Interfaces | 허용할 인터페이스 변경·호환성 요구 |
+| §3 Behavior | 채택 대안·기각 대안과 이유, 허용할 인터페이스 변경·호환성 요구 |
+| §4 Constraints | 허용할 인터페이스 변경·호환성 요구, 적용 후 확인할 지표와 되돌림 조건 |
 | §5 Test criteria | 수용 기준과 실제 검사 명령 |
-| §6 Non-goals | 기각 대안 |
+| §6 Non-goals | 채택 대안·기각 대안과 이유 |
 
 ## 7. `lint` 규칙
 
@@ -141,16 +146,17 @@ PM 정책 문서 `lib/pm.md`와 `lib/pm-codex.md`에서는 Drafter가 다음을 
 
 | ID | 규칙 | 근거 |
 | --- | --- | --- |
+| F1 | `spec.md`, `BACKLOG.md`, `report.md`가 모두 일반 파일로 있다. 하나라도 없으면 다른 규칙은 검사하지 않는다. | — |
 | S1 | `## §1`–`## §6`이 이 순서로 한 번씩 있다. | 템플릿 구조, 역할 프롬프트의 § 참조 |
-| S2 | §5 파싱 결과가 하나 이상이다. | spec-trio의 `parse_test_criteria`를 source해 그대로 사용 (`spec-trio/lib/spec-helpers.sh:264-293`) |
+| S2 | §5 파싱 결과가 하나 이상이고, id가 모두 `§5.N` 형식이며, 코드 펜스와 HTML 주석을 인식한 읽기와 결과가 같다. 펜스 안의 `### §5.N`을 spec-trio가 세거나, 펜스 안의 `## §N` 때문에 spec-trio가 §5 블록을 일찍 닫으면 실패한다. | spec-trio의 `parse_test_criteria`를 source해 그대로 사용 (`spec-trio/lib/spec-helpers.sh:264-293`). 이 파서는 펜스를 인식하지 않는다. |
 | S3 | §5.N 번호가 중복되지 않는다. | 파서가 중복을 잡지 않으므로 여기서 보완 |
 | S4 | 각 `### §5.N` 본문에 backtick으로 감싼 명령이 하나 이상 있다. | 템플릿 §5 주석("observable check") |
-| B1 | 미완료 작업 줄은 spec-trio와 같은 정규식 `^[[:space:]]*-[[:space:]]*\[ \][[:space:]]+`에 맞는다. `* [ ]`처럼 작업으로 인식되지 않는 줄은 경고한다. | `spec-trio/lib/verification.sh:89` |
-| B2 | 미완료 작업마다 괄호 안에 § 인용이 하나 이상 있다. | 시나리오 3 backlog 형식, `planner.md:11` |
+| B1 | 미완료 작업 줄은 spec-trio와 같은 정규식 `^[[:space:]]*-[[:space:]]*\[ \][[:space:]]+`에 맞는다. `* [ ]`처럼 작업처럼 보이지만 spec-trio가 건너뛰는 줄, 코드 펜스 안의 작업 줄(spec-trio는 펜스를 무시하지 않고 집어 간다), 미완료 작업이 하나도 없는 경우는 실패다. | `spec-trio/lib/verification.sh:89` |
+| B2 | 미완료 작업마다 괄호 안에 § 인용이 하나 이상 있다. `(§2, §3.1)`, `(spec §3.2)`, `(spec coverage gap §5.1)` 형식을 모두 인정한다. | 시나리오 3 backlog 형식, `planner.md:11` |
 | B3 | 인용한 § 번호가 spec에 실제로 있다. | — |
 | B4 | 모든 §5.N이 적어도 한 작업에서 인용된다. | spec-trio의 reviewer verdict rollup이 작업 본문의 §5.N만 집계 |
 | P1 | 출처 표가 spec의 모든 § 제목을 덮고, 원천 라벨이 `decision-fields.tsv`에 있다. | 목표 2 |
-| P2 | 세 출력 파일에 `__UPPER_SNAKE__` 자리표시자나 템플릿의 `<bullet …>` 자리표시자가 남지 않는다. | — |
+| P2 | 세 출력 파일에 `__UPPER_SNAKE__` 자리표시자, spec-trio 템플릿의 주석 밖 `<…>` 자리표시자, `(replace this)`가 남지 않는다. | 자리표시자 목록은 해석한 spec-trio 설치본의 `prompts/spec.md.template`에서 읽는다. |
 
 `spec-trio.sh --dry-run`은 lint에 쓰지 않는다. 섹션 구조를 읽지 않으면서
 `fix_plan.md` 복사, 로그 생성 같은 부작용이 있기 때문이다. `spec-coverage.sh`도 쓰지
@@ -293,7 +299,7 @@ spec-trio의 coverage rollup은 `variant == "spec-review"`만 읽으므로 spec-
 
 | PR | 범위 | 다른 플러그인 버전 bump |
 | --- | --- | --- |
-| 1 | 플러그인 골격, `gate`, `lint`, `decision-fields.tsv`, fixture 테스트, `scripts/check.sh`에 테스트 줄 추가 | 없음 |
+| 1 (구현됨) | 플러그인 골격, `gate`, `lint`, `decision-fields.tsv`, fixture 테스트, `scripts/check.sh`에 테스트 줄 추가 | 없음 |
 | 2 | `audit`, `lib/roles/auditor.md`, manifest vendoring, 스텁 CLI 테스트 | 없음. vendoring 목록 테스트(`tests/test_vendored_copies.py`, `tests/test_manifest_copies.py`, `tests/test_publication_safety.py`)는 `tests/` 변경이라 bump가 필요 없음 |
 | 3 | `promote`, Claude·Codex 스킬, `install-pm`, doctor, 두 마켓플레이스 등록, README Plugins 표, 시나리오 3 갱신 | 없음 |
 | 4 (선택) | registry 역할 `spec-forge.auditor` 등록 | dev-trio, debate-conductor, ralph-trio, spec-trio |
