@@ -266,6 +266,33 @@ printf x >&8
                 self.assertEqual(self.recorded(), [])
                 self.assertFalse((root / "host-test").exists())
 
+    def test_native_windows_shells_are_refused_with_wsl_hint(self):
+        root = self.root / "windows logs"
+        shim_dir = self.root / "windows path shims"
+        shim_dir.mkdir()
+        uname = shim_dir / "uname"
+        # A malformed model registry fails later in the wrappers (rc 3); the
+        # refusal must come first so the user sees the WSL hint, not that.
+        broken = self.root / "broken models.json"
+        broken.write_text("{not json")
+        cases = [(name, config)
+                 for name in ("MINGW64_NT-10.0-26200", "MSYS_NT-10.0-26100", "CYGWIN_NT-10.0")
+                 for config in (self.config, broken)]
+        for name, config in cases:
+            uname.write_text(f"#!/bin/sh\nprintf '{name}\\n'\n")
+            uname.chmod(0o755)
+            for wrapper in ("ask-reviewer.sh", "ask-researcher.sh"):
+                with self.subTest(uname=name, config=config.name, wrapper=wrapper):
+                    result = self.run_cli(
+                        wrapper, "private input", DEV_TRIO_LOG_DIR=str(root),
+                        AGENT_TEAM_MODELS_CONFIG=str(config),
+                        PATH=f"{shim_dir}:{self.env['PATH']}")
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("native Windows shells", result.stderr)
+                    self.assertIn("inside WSL", result.stderr)
+                    self.assertEqual(self.recorded(), [])
+                    self.assertFalse(root.exists())
+
     def test_caller_owned_sticky_ancestor_and_safe_symlink_target_work(self):
         root = self.root / "custom logs"
         root.mkdir(mode=0o700)

@@ -147,6 +147,11 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_TAG=ask-reviewer
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Sourcing host.sh runs only `uname -s` and defines functions, so it loads
+# first: a native Windows shell is refused before anything needs jq or a CLI.
+# shellcheck source=../lib/host.sh
+. "$PLUGIN_ROOT/lib/host.sh"
+dev_trio_check_platform || exit 2
 
 _NAMESPACE_LIB="$PLUGIN_ROOT/lib/namespace.sh"
 [ -f "$_NAMESPACE_LIB" ] || { echo "ask-reviewer: namespace.sh not found at $_NAMESPACE_LIB" >&2; exit 1; }
@@ -184,8 +189,6 @@ case "$REVIEW_PROFILE" in
   *) echo "error: DEV_TRIO_REVIEW_PROFILE must be default or spec" >&2; exit 2 ;;
 esac
 
-# shellcheck source=../lib/host.sh
-. "$PLUGIN_ROOT/lib/host.sh"
 PM_HOST="$(dev_trio_host)" || exit $?
 
 # Reviewer model — DEV_TRIO_REVIEWER_MODEL env > config role binding > host
