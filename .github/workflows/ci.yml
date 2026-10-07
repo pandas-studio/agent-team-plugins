@@ -32,6 +32,34 @@ jobs:
         env:
           CI: "true"
 
+  # dev-trio refuses native Windows shells with a WSL hint (lib/host.sh). This
+  # runs the real wrapper in Git Bash, where the refusal was measured;
+  # scripts/check.sh itself needs macOS or Linux.
+  windows-refusal:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: ask-reviewer.sh exits 2 with the WSL hint before any model call
+        run: |
+          uname -s
+          stub="$RUNNER_TEMP/reviewer"
+          printf '#!/bin/sh\necho called >> "%s/calls"\n' "$RUNNER_TEMP" > "$stub"
+          chmod +x "$stub"
+          rc=0
+          env AGENT_TEAM=windows-ci TMUX='' DEV_TRIO_REVIEWER_MODEL=codex \
+            CODEX_CLI="$stub" AGENT_TEAM_MODELS_CONFIG="$RUNNER_TEMP/no-models.json" \
+            DEV_TRIO_LOG_DIR="$RUNNER_TEMP/log" \
+            bash dev-trio/bin/ask-reviewer.sh 'windows refusal' < /dev/null 2> err.txt || rc=$?
+          cat err.txt
+          [ "$rc" = 2 ] || { echo "want rc 2, got $rc" >&2; exit 1; }
+          grep -F 'native Windows shells (Git Bash, MSYS2, Cygwin) are not supported; run Claude Code inside WSL' err.txt
+          [ ! -e "$RUNNER_TEMP/calls" ] || { echo 'the reviewer stub was called' >&2; exit 1; }
+          [ ! -e "$RUNNER_TEMP/log" ] || { echo 'a log directory was created' >&2; exit 1; }
+
   # macOS catches what the Ubuntu job cannot: bash 3.2, BSD userland, and the
   # darwin-only tests (#153). /bin/bash is 3.2 there, but the runner image puts
   # Homebrew's bash 5 first on PATH, so a shim dir makes every `bash` and

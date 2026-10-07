@@ -196,11 +196,27 @@ _dev_trio_check_log_ancestors() {
   done
 }
 
+# Native Windows shells are refused: POSIX modes cannot establish privacy
+# there. In Git Bash and MSYS2 on windows-latest (2026-10-07) NTFS was mounted
+# noacl, so chmod 700 read back 755 and the Windows grants did not change; the
+# directory checks below accepted all four probed paths and the descriptor
+# check rejected every new log (0644). The wrappers call this before loading
+# anything that needs jq or a model CLI; dev_trio_prepare_log_dir repeats it
+# for every other caller.
+dev_trio_check_platform() {
+  case "$_DEV_TRIO_OS" in
+    MINGW*|MSYS*|CYGWIN*)
+      echo 'dev-trio: native Windows shells (Git Bash, MSYS2, Cygwin) are not supported; run Claude Code inside WSL' >&2
+      return 2 ;;
+  esac
+}
+
 # Check the existing path before creating anything, then return the physical
 # team directory so artifact paths cannot re-traverse a validated symlink.
 dev_trio_prepare_log_dir() {
   local requested="$1" physical uid caller private_gid existing existing_physical team_arg
   case "$requested" in /*) ;; *) requested="$PWD/$requested" ;; esac
+  dev_trio_check_platform || return 2
   case "$_DEV_TRIO_OS" in Darwin|Linux) ;; *) echo 'dev-trio: unsupported OS for log validation' >&2; return 2 ;; esac
   uid=$(id -u) || return 2
   caller=$(id -un) || caller=""

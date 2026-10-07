@@ -105,6 +105,11 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_TAG=ask-researcher
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Sourcing host.sh runs only `uname -s` and defines functions, so it loads
+# first: a native Windows shell is refused before anything needs jq or a CLI.
+# shellcheck source=../lib/host.sh
+. "$PLUGIN_ROOT/lib/host.sh"
+dev_trio_check_platform || exit 2
 ROLE_FILE="$PLUGIN_ROOT/lib/roles/researcher.md"
 
 _NAMESPACE_LIB="$PLUGIN_ROOT/lib/namespace.sh"
@@ -132,8 +137,6 @@ unset _REGISTRY_LIB
 # shellcheck source=../lib/run-lifecycle.sh
 . "$PLUGIN_ROOT/lib/run-lifecycle.sh" || exit 2
 
-# shellcheck source=../lib/host.sh
-. "$PLUGIN_ROOT/lib/host.sh"
 # Only dev_trio_check_cli may set this; research_failure_hint reads it on
 # every failure path, including ones before the login check runs (#127).
 DEV_TRIO_LOGIN_CHECK=

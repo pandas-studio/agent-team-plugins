@@ -81,6 +81,12 @@ detached tmux layout outside tmux and prints an attach command for a terminal.
 
 ## Prerequisites
 
+- macOS or Linux. On Windows, run Claude Code inside WSL and install the tools
+  below there (`sudo apt install jq`, for example). The wrappers exit 2 in Git
+  Bash, MSYS2 and Cygwin. Their log checks rely on POSIX modes, and in Git Bash
+  and MSYS2 on a GitHub Windows runner (NTFS mounted `noacl`) `chmod` had no
+  effect, so the checks could not tell a private log from a readable one.
+  Cygwin was not tested and is refused as well.
 - `tmux` for optional dashboards (research/review work without it)
 - `claude` (Claude Code)
 - `agy` (Antigravity CLI) authenticated
