@@ -1310,7 +1310,7 @@ if [ -n "$log" ] && [ -n "${TEST_AGY_PERMS:-}" ]; then
   { ls -ld "${log%/*}" | cut -c1-10; ls -l "$log" | cut -c1-10; } > "$TEST_AGY_PERMS"
 fi
 if [ -n "$log" ] && [ -n "${TEST_AGY_ID:-}" ]; then
-  printf 'I0923 17:51:49.1 1 server.go:1239] Created conversation %s\n' "$TEST_AGY_ID" > "$log"
+  printf 'I0923 17:51:49.1 1 server.go:1239] Created conversation %s%s\n' "$TEST_AGY_ID" "${TEST_AGY_LOG_SUFFIX:-}" > "$log"
   printf 'I0923 17:51:49.2 1 cli_setting_manager.go:92] permissions=&{Allow:[command(SENTINEL-RULE)]}\n' >> "$log"
 fi
 [ -z "${TEST_AGY_STDOUT:-}" ] || cat "$TEST_AGY_STDOUT"
@@ -1365,6 +1365,8 @@ manifest_init fixture-agy-parent "$TMP/agy-parent.log"
 agy_review 3 TEST_AGY_ID="$AGY_ID" TEST_AGY_NOTICE=1 MANIFEST_PARENT_TMP="$MANIFEST_TMP"
 check 'a nested run still reports the conversation' json_is "$RESULT" ".status==\"permission-denied\" and .conversation_ids==[\"$AGY_ID\"]"
 check 'the nested run adds nothing but its role to the parent' json_is "$MANIFEST_TMP" '(.inputs | any(.kind=="agy-conversation") | not) and (.roles|length)==1'
+agy_review 3 TEST_AGY_ID="$AGY_ID" TEST_AGY_LOG_SUFFIX=' (backend=BACKEND_TYPE_UNSPECIFIED)' TEST_AGY_NOTICE=1
+check 'agy 1.4+ trailing backend tag still resolves the conversation and denials' json_is "$RESULT" ".status==\"permission-denied\" and .denied==$AGY_DENIED and .conversation_ids==[\"$AGY_ID\"]"
 
 rm -rf "$AGY_HOME/brain"
 agy_review 3 TEST_AGY_NOTICE=1

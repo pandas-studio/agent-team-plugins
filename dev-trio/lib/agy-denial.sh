@@ -12,7 +12,7 @@
 # one JSON object per line; a denial is {"status":"ERROR","error":"permission
 # check failed for <kind> \"<target>\": …"} with the target quoted Go-style.
 # The conversation id is read from the CLI log a wrapper pinned with
-# --log-file (line "server.go:NNNN] Created conversation <id>").
+# --log-file (line "server.go:NNNN] Created conversation <id> …").
 #
 # Everything here is best-effort diagnosis: missing or partly written files
 # yield fewer lines, never an error, and callers must not let it change a
@@ -23,11 +23,11 @@ _AGY_DENIAL_UUID_RE='^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
 _AGY_DENIAL_NOTICE='jetski: no output produced'
 
 # agy_denial_conversations CLI_LOG — each well-formed conversation id the log
-# records, in order. Anything else on such a line (a path, "../x") is dropped
-# before it can become part of a path.
+# records, in order. Anything else on such a line (a path, "../x", or trailing
+# fields such as "(backend=...)") is dropped before it can become part of a path.
 agy_denial_conversations() {
   [ -f "$1" ] && [ -r "$1" ] || return 0
-  sed -n 's/^.*server\.go:[0-9][0-9]*\] Created conversation \([^[:space:]]*\)[[:space:]]*$/\1/p' "$1" 2>/dev/null \
+  sed -n 's/^.*server\.go:[0-9][0-9]*\] Created conversation \([^[:space:]]*\)\([[:space:]].*\)\{0,1\}$/\1/p' "$1" 2>/dev/null \
     | grep -E "$_AGY_DENIAL_UUID_RE" 2>/dev/null \
     | awk '!seen[$0]++'
   return 0

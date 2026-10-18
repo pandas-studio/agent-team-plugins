@@ -42,7 +42,7 @@ class ResearchDiagnosticsTests(unittest.TestCase):
             'if [ "$1" = --version ]; then echo "fixture CLI 1.2.7"; exit 0; fi\n'
             # Like agy, record the conversation in the pinned --log-file.
             'if [ "$1" = --log-file ] && [ -n "${DIAG_CONVERSATION:-}" ]; then\n'
-            '  printf "I0923 1 server.go:1239] Created conversation %s\\n" "$DIAG_CONVERSATION" > "$2"\n'
+            '  printf "I0923 1 server.go:1239] Created conversation %s%s\\n" "$DIAG_CONVERSATION" "${DIAG_CONVERSATION_SUFFIX:-}" > "$2"\n'
             'fi\n'
             'if [ -n "${DIAG_READY:-}" ]; then : > "$DIAG_READY"; fi\n'
             # Hold until the test releases it (#195): a handshake, not a timed
@@ -289,15 +289,21 @@ class ResearchDiagnosticsTests(unittest.TestCase):
 
     def test_recorded_denial_names_its_target(self):
         self.record_denial()
-        result = self.run_script("ask-researcher.sh", "question", DIAG_RC="0", DIAG_ANSWER="",
-                                 DIAG_STDERR=self.NOTICE, DIAG_CONVERSATION=self.CONVERSATION)
-        self.assertEqual(result.returncode, 5, result.stderr)
-        lines = result.stderr.splitlines()
-        self.assertIn("[ask-researcher] agy denied: command(lsof -p $$ || pwd)", lines)
-        self.assertIn(f"[ask-researcher] agy conversation: {self.CONVERSATION}", lines)
-        self.assertNotIn("rc=5 alone does not establish permission denial", result.stderr)
-        manifest = json.loads(next(self.workspace.glob(".dev-trio/log/*/*.manifest.json")).read_text())
-        self.assertIn({"kind": "agy-conversation", "value": self.CONVERSATION}, manifest["inputs"])
+        for suffix in ("", " (backend=BACKEND_TYPE_UNSPECIFIED)"):
+            with self.subTest(suffix=suffix):
+                before = set(self.workspace.glob(".dev-trio/log/*/*.manifest.json"))
+                result = self.run_script("ask-researcher.sh", "question", DIAG_RC="0", DIAG_ANSWER="",
+                                         DIAG_STDERR=self.NOTICE, DIAG_CONVERSATION=self.CONVERSATION,
+                                         DIAG_CONVERSATION_SUFFIX=suffix)
+                self.assertEqual(result.returncode, 5, result.stderr)
+                lines = result.stderr.splitlines()
+                self.assertIn("[ask-researcher] agy denied: command(lsof -p $$ || pwd)", lines)
+                self.assertIn(f"[ask-researcher] agy conversation: {self.CONVERSATION}", lines)
+                self.assertNotIn("rc=5 alone does not establish permission denial", result.stderr)
+                new = set(self.workspace.glob(".dev-trio/log/*/*.manifest.json")) - before
+                self.assertEqual(len(new), 1)
+                manifest = json.loads(new.pop().read_text())
+                self.assertIn({"kind": "agy-conversation", "value": self.CONVERSATION}, manifest["inputs"])
 
     def test_denial_is_named_through_the_temporary_log(self):
         # #193: agy's log directory cannot take the pinned log (a host sandbox);
