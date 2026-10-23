@@ -3,7 +3,7 @@ name: research
 description: One-shot Antigravity research call. Use when before coding you need library/API behavior, recent changes, spec details, or option comparisons. Streaming output lands in the top-right dashboard pane; chat-side surfaces the lead paragraph + cited URL count.
 disable-model-invocation: true
 allowed-tools: Bash(ask-researcher.sh:*) Bash(dev-trio-doctor.sh:*) Bash(cat:*) Bash(ls:*) Read
-argument-hint: <research question>
+argument-hint: [--model <id>] [--] <research question>
 ---
 
 # Research (Antigravity, one-shot)
@@ -12,23 +12,30 @@ You are the **PM**. Antigravity is the researcher (top-right pane). You dispatch
 
 ## 1 · Resolve the question
 
-`$ARGUMENTS` is the research question, free-form.
+`$ARGUMENTS` is the research question, free-form, optionally preceded by options. Look only at its start:
 
-- **Empty** → ask the user what to research. Do not proceed without a question.
-- **Non-empty** → pass `$ARGUMENTS` verbatim to `ask-researcher.sh` as a single argument. Do not paraphrase or "improve" it.
+1. If it starts with `--model <id>`, that is the researcher model for this call (`agy`, `codex`, `claude`, or any id from `agent-team-models list`). It wins over `DEV_TRIO_RESEARCHER_MODEL` and the role binding. Remove those two tokens.
+2. If what is left starts with a `--` token, remove it. Everything after it is the question, so `-- --model is deprecated?` asks about `--model`.
+3. The rest, with its whitespace kept, is QUESTION. A `--model` later in the text is part of the question.
+
+- **QUESTION empty** → ask the user what to research. Do not proceed without a question.
+- **Otherwise** → pass QUESTION verbatim to `ask-researcher.sh` as a single argument after `--`. Do not paraphrase or "improve" it.
 
 ## 2 · Dispatch
 
 Single Bash call (blocking, ~10–60 s depending on the query). `ask-researcher.sh` is on the plugin's `bin/` PATH while the plugin is active — call it bare (no absolute path).
 
 ```bash
-ask-researcher.sh "<the user's question, verbatim>"
+ask-researcher.sh -- "<the user's question, verbatim>"
+ask-researcher.sh --model codex -- "<question>"    # $ARGUMENTS began with --model codex
 ```
+
+Always put `--` before the question, so a question such as `--help` is researched instead of being read as an option.
 
 To pipe extra context (e.g., your own grep results):
 
 ```bash
-echo "<context bullets>" | ask-researcher.sh "<question>"
+echo "<context bullets>" | ask-researcher.sh -- "<question>"
 ```
 
 **Streaming output is already visible in the top-right pane — do not duplicate it in the chat.** Just acknowledge that it's running and wait.
@@ -57,7 +64,10 @@ Keep the chat-side summary under ~150 words. The full output is in the pane and 
 
 With the default Claude host and no overrides, run `dev-trio-doctor.sh --research`
 from the same workspace. Preserve any explicit host, model, registry and CLI
-overrides from the failed invocation when running the check. A prefixed or
+overrides from the failed invocation when running the check. The doctor has no
+`--model`: after a `--model <id>` call, check with
+`DEV_TRIO_RESEARCHER_MODEL=<id> dev-trio-doctor.sh --research` (the wrapper's
+own failure hint prints this command), and keep `--model <id>` on any retry. A prefixed or
 absolute-path command may require the host's normal permission flow; do not
 drop overrides or broaden permissions to avoid that flow. This is a read-only
 setup check, not authentication, inference, or proof of research access.

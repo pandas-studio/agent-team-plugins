@@ -52,11 +52,24 @@ permission policy; never silently retry. Approval to start agy does not grant
 ## Run the research
 
 Run from the user's workspace under that host policy, passing the question as
-one quoted argument:
+one quoted argument after `--`:
 
 ```bash
-DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/ask-researcher.sh" "<question>" </dev/null
+DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/ask-researcher.sh" [--model <id>] -- "<question>" </dev/null
 ```
+
+Extract options from the start of the request only:
+
+1. If it starts with `--model <id>`, remove those two tokens and pass them as
+   two argv entries before `--`; this picks the researcher for this call over
+   `DEV_TRIO_RESEARCHER_MODEL` and the role binding.
+2. If what is left starts with a `--` token, remove it: everything after it is
+   the question (`--model codex -- --help` researches `--help`).
+3. The rest, verbatim with its whitespace, is the question. A `--model` later
+   in the text is part of it.
+
+`--` before the question keeps a question such as `--help` from being read as
+an option.
 
 When there is additional context, pass it through stdin instead of /dev/null.
 Preserve the actual working directory and any explicit role model overrides.
@@ -94,7 +107,9 @@ host approval rule in the [review skill](../review/SKILL.md#host-permission-for-
 for this wrapper instead.
 
 Otherwise run the read-only setup check from the same workspace, preserving the
-model, registry and CLI overrides used for the failed call:
+model, registry and CLI overrides used for the failed call. The doctor has no
+`--model`; translate one to `DEV_TRIO_RESEARCHER_MODEL=<id>` (the wrapper's
+failure hint prints the exact command), and keep `--model <id>` on any retry:
 
 ```bash
 DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/dev-trio-doctor.sh" --research

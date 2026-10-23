@@ -6,6 +6,7 @@
 #   ask-reviewer.sh "focus or scope instructions"
 #   ask-reviewer.sh "review HEAD~1..HEAD with focus on security"
 #   ask-reviewer.sh -- "-literal focus"          # focus that looks like an option
+#   ask-reviewer.sh --model agy "focus"          # pick the reviewer model for this call
 #   ask-reviewer.sh -h | --help                  # usage; runs nothing, exit 0
 #
 # Arguments are parsed before anything is loaded, so --help and a mistyped
@@ -40,8 +41,8 @@
 # Reviewer role override:
 #   REVIEWER_ROLE_FILE=/path/to/role.md ask-reviewer.sh ...
 #
-# The reviewer model is resolved via the shared registry (DEV_TRIO_REVIEWER_MODEL
-# env > config role binding > host default); see lib/host.sh.
+# The reviewer model is resolved via the shared registry (--model >
+# DEV_TRIO_REVIEWER_MODEL env > config role binding > host default); see lib/host.sh.
 #
 # Output goes to stdout AND $PWD/.dev-trio/log/<team>/codex-<TS>.log (the full
 # streamed transcript). The reviewer's final structured review is ALSO captured
@@ -64,6 +65,7 @@ Options (any order relative to the focus):
   --with-research FILE  research answer to include as untrusted context
   --with-spec FILE      spec/contract the changes are expected to satisfy
   --with-context FILE   repository facts fetched by the PM (PR, issue, CI)
+  --model ID            reviewer model for this call (see: agent-team-models list)
   --no-memories         run Codex without its memory summary (codex reviewer only)
   --                    end of options: the one argument after it is the
                         focus, even if it starts with a dash
@@ -76,7 +78,7 @@ option with trailing whitespace ("--hlep ") is not option-shaped and becomes
 the focus.
 
 Environment:
-  DEV_TRIO_REVIEWER_MODEL   reviewer model (over config role binding and host default)
+  DEV_TRIO_REVIEWER_MODEL   reviewer model (under --model; over config role binding and host default)
   DEV_TRIO_SNAPSHOT_MAX_BYTES  snapshot ceiling in bytes for workspace-aware models (0 disables, default: 65536)
   DEV_TRIO_GIT_TIMEOUT      git subprocess timeout in seconds for snapshot (default: 10.0)
   DEV_TRIO_SNAPSHOT_TIMEOUT  seconds for the whole snapshot, every git call and file read (default: 30)
@@ -113,6 +115,7 @@ RESEARCH_FILE=""
 SPEC_FILE=""
 CONTEXT_FILE=""
 FOCUS=""
+MODEL_ARG=""
 NO_MEMORIES=0
 POSITIONAL_SEEN=0
 take_positional() {
@@ -135,6 +138,11 @@ while [ $# -gt 0 ]; do
         *)               CONTEXT_FILE="$2" ;;
       esac
       shift 2 ;;
+    --model)
+      # `--` and option-shaped values are a forgotten id, not a model name.
+      { [ $# -ge 2 ] && [ -n "$2" ] && [ "$2" != -- ] && ! is_option_shaped "$2"; } \
+        || usage_error "--model requires a model id"
+      MODEL_ARG="$2"; shift 2 ;;
     --no-memories) NO_MEMORIES=1; shift ;;
     --) shift
         while [ $# -gt 0 ]; do take_positional "$1"; shift; done ;;
@@ -191,10 +199,10 @@ esac
 
 PM_HOST="$(dev_trio_host)" || exit $?
 
-# Reviewer model — DEV_TRIO_REVIEWER_MODEL env > config role binding > host
-# default (Claude PM: codex; Codex PM: claude). The legacy
+# Reviewer model — --model > DEV_TRIO_REVIEWER_MODEL env > config role binding >
+# host default (Claude PM: codex; Codex PM: claude). The legacy
 # REVIEWER_CLI/CODEX_CLI still override the *binary* at run time below.
-REVIEWER_MODEL="$(dev_trio_resolve_role reviewer)"
+REVIEWER_MODEL="$(dev_trio_resolve_role reviewer "$MODEL_ARG")"
 registry_model_exists "$REVIEWER_MODEL" || { echo "ask-reviewer: reviewer model '$REVIEWER_MODEL' is not registered (run: agent-team-models list)" >&2; exit 2; }
 
 # Team namespace — isolates logs per tmux window/session.

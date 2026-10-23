@@ -10,10 +10,13 @@ dev_trio_host() {
   esac
 }
 
+# dev_trio_resolve_role <role> [cli-model] — a non-empty cli-model (a wrapper's
+# --model) wins over env, config binding and host default.
 dev_trio_resolve_role() {
-  local host bound=""
+  local host bound="" cli="${2:-}"
   host="$(dev_trio_host)" || return $?
-  if [ "$host" = codex ] && [ "$1" = reviewer ] && [ -z "${DEV_TRIO_REVIEWER_MODEL:-}" ]; then
+  if [ "$host" = codex ] && [ "$1" = reviewer ] && [ -z "$cli" ] \
+     && [ -z "${DEV_TRIO_REVIEWER_MODEL:-}" ]; then
     # A malformed config is rc 3 here, not "no binding" (#133).
     bound="$(registry_config_role dev-trio.reviewer)" || return 3
     if [ -z "$bound" ]; then
@@ -21,7 +24,7 @@ dev_trio_resolve_role() {
       return 0
     fi
   fi
-  registry_resolve_role dev-trio "$1" ""
+  registry_resolve_role dev-trio "$1" "$cli"
 }
 
 # Check availability and, for Claude, login. Authentication and billing stay

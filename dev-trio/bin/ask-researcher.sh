@@ -5,6 +5,7 @@
 #   ask-researcher.sh "research question"
 #   echo "extra context" | ask-researcher.sh "research question"
 #   ask-researcher.sh -- "-literal question"     # question that looks like an option
+#   ask-researcher.sh --model codex "question"   # pick the researcher model for this call
 #   ask-researcher.sh -h | --help                # usage; runs nothing, exit 0
 #
 # Arguments are parsed before anything is loaded, so --help and a mistyped
@@ -35,13 +36,14 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: ask-researcher.sh "research question"
-       ask-researcher.sh -- "research question"
+Usage: ask-researcher.sh [--model ID] "research question"
+       ask-researcher.sh [--model ID] -- "research question"
        echo "extra context" | ask-researcher.sh "research question"
 
 Runs the researcher model on one question; stdin, when given, is extra context.
 
 Options:
+  --model ID  researcher model for this call (see: agent-team-models list)
   --          end of options: the one argument after it is the question, even
               if it starts with a dash
   -h, --help  show this help and exit
@@ -53,7 +55,7 @@ option with trailing whitespace ("--hlep ") is not option-shaped and becomes
 the question.
 
 Environment:
-  DEV_TRIO_RESEARCHER_MODEL  researcher model (over config role binding and default)
+  DEV_TRIO_RESEARCHER_MODEL  researcher model (under --model; over config role binding and default)
   DEV_TRIO_LOG_DIR           log root (default: $PWD/.dev-trio/log)
 
 Exit: the model's own code; 2 usage or setup error; 5 no answer; 6 answer not
@@ -81,6 +83,7 @@ is_option_shaped() {
 }
 
 QUERY=""
+MODEL_ARG=""
 POSITIONAL_SEEN=0
 take_positional() {
   [ "$POSITIONAL_SEEN" -eq 0 ] || usage_error "unexpected extra positional argument: $1"
@@ -92,6 +95,11 @@ take_positional() {
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
+    --model)
+      # `--` and option-shaped values are a forgotten id, not a model name.
+      { [ $# -ge 2 ] && [ -n "$2" ] && [ "$2" != -- ] && ! is_option_shaped "$2"; } \
+        || usage_error "--model requires a model id"
+      MODEL_ARG="$2"; shift 2 ;;
     --) shift
         while [ $# -gt 0 ]; do take_positional "$1"; shift; done ;;
     *)
@@ -206,10 +214,10 @@ research_failure_hint() {
   printf '[ask-researcher] recovery guide: %s/README.md#research-troubleshooting\n' "$PLUGIN_ROOT" >&2
 }
 
-# Researcher model — DEV_TRIO_RESEARCHER_MODEL env > config role binding >
-# built-in default (agy). ask-researcher has no CLI model flag, so the flag tier is
-# empty. The legacy RESEARCHER_CLI/AGY_CLI still override the *binary* below.
-RESEARCHER_MODEL="$(dev_trio_resolve_role researcher)"
+# Researcher model — --model > DEV_TRIO_RESEARCHER_MODEL env > config role
+# binding > built-in default (agy). The legacy RESEARCHER_CLI/AGY_CLI still
+# override the *binary* below.
+RESEARCHER_MODEL="$(dev_trio_resolve_role researcher "$MODEL_ARG")"
 registry_model_exists "$RESEARCHER_MODEL" || { echo "ask-researcher: researcher model '$RESEARCHER_MODEL' is not registered (run: agent-team-models list)" >&2; research_failure_hint 2; exit 2; }
 
 # Team namespace — isolates logs per tmux window/session.
