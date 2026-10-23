@@ -3,7 +3,7 @@ name: review
 description: One-shot Codex review. Default scope = uncommitted working-tree changes. Optional --with-research <file>, --with-spec <file> and --with-context <file> for context injection. Streaming output lands in the bottom-right dashboard pane; chat-side surfaces the verdict (SHIP/NEEDS-FIX/DISCUSS) + Blocker/Major counts and handles NEED RESEARCH and NEED CONTEXT blocks.
 disable-model-invocation: true
 allowed-tools: Bash(ask-reviewer.sh:*) Bash(ask-researcher.sh:*) Bash(gh pr view:*) Bash(gh pr diff:*) Bash(gh pr checks:*) Bash(gh issue view:*) Bash(gh run view:*) Bash(git:*) Bash(cat:*) Bash(ls:*) Bash(date:*) Bash(mkdir:*) Bash(echo:*) Bash(sed:*) Read
-argument-hint: [focus] [--with-research <file>] [--with-spec <file>] [--with-context <file>] [--no-memories]
+argument-hint: [focus] [--model <id>] [--with-research <file>] [--with-spec <file>] [--with-context <file>] [--no-memories] [-- <focus>]
 ---
 
 # Review (Codex, one-shot)
@@ -12,11 +12,12 @@ You are the **PM**. Codex is the reviewer (bottom-right pane). You dispatch one 
 
 ## 1 · Parse `$ARGUMENTS` and build the dispatch command
 
-`$ARGUMENTS` is a single string that may interleave five pieces in any order:
+`$ARGUMENTS` is a single string that may interleave six pieces in any order:
 
 - **Optional `--with-research <file>`** — research context from a previous Antigravity call (typically `latest-agy.log` or a curated `research-<TS>.md`).
 - **Optional `--with-spec <file>`** — spec/contract the changes are expected to satisfy.
 - **Optional `--with-context <file>`** — repository facts you fetched (PR commit IDs, issue text, CI output) for a reviewer that may not reach the network.
+- **Optional `--model <id>`** — reviewer model for this call only (`codex`, `claude`, `agy`, or any id from `agent-team-models list`); wins over `DEV_TRIO_REVIEWER_MODEL` and the role binding.
 - **Optional `--no-memories`** — bare flag; Codex runs without its memory summary from earlier sessions.
 - **Optional free-form focus** — review scope, possibly multi-word. Examples:
   - `focus on the new retry logic in src/agent.py — concurrency safety`
@@ -31,10 +32,12 @@ Algorithm:
 2. If a token is `--with-research`, the next token is `<research-file>`; consume both.
 3. If a token is `--with-spec`, the next token is `<spec-file>`; consume both.
    Likewise `--with-context` and `<context-file>`.
-4. If a token is `--no-memories`, pass it through as its own argv slot; consume only it.
-5. Every remaining token belongs to the focus; join them with a single space into one FOCUS string.
-6. If `$ARGUMENTS` is empty, omit the focus entirely (the wrapper falls back to the default working-tree scope).
-7. If FOCUS names a pull request (`pr 55`, `PR #55`, or a PR URL), resolve it before dispatch — see **PR reviews** below. Never send a bare PR reference as the focus: the reviewer may run without network access, and then cannot tell which commits the PR contains (measured: Codex under `workspace-write` failed `gh pr view` and returned `DISCUSS` with zero findings).
+4. If a token is `--model`, the next token is `<model-id>`; consume both.
+5. If a token is `--no-memories`, pass it through as its own argv slot; consume only it.
+6. If a token is `--`, stop: it and nothing after it is an option, so every later token goes to the focus (`--model agy -- --help` reviews the focus `--help`; `-- --model codex` reviews the focus `--model codex`).
+7. Every remaining token belongs to the focus; join them with a single space into one FOCUS string.
+8. If FOCUS is empty, omit it entirely (the wrapper falls back to the default working-tree scope). Otherwise put the options first and pass the focus last as `-- "$FOCUS"`, so a focus that starts with a dash is never read as an option.
+9. If FOCUS names a pull request (`pr 55`, `PR #55`, or a PR URL), resolve it before dispatch — see **PR reviews** below. Never send a bare PR reference as the focus: the reviewer may run without network access, and then cannot tell which commits the PR contains (measured: Codex under `workspace-write` failed `gh pr view` and returned `DISCUSS` with zero findings).
 
 ### PR reviews
 
@@ -51,7 +54,7 @@ git merge-base <baseRefOid> <headRefOid>
 If either commit is missing locally, tell the user which one and ask before fetching (`git fetch <remote> pull/55/head` for the head — it works for fork PRs — and the base branch from the base repository's remote, which is not necessarily `origin`). Do not fetch without asking. Then dispatch with a range focus:
 
 ```bash
-ask-reviewer.sh --with-context "$CFILE" "review <merge-base>..<headRefOid> (PR #55)"
+ask-reviewer.sh --with-context "$CFILE" -- "review <merge-base>..<headRefOid> (PR #55)"
 ```
 
 ## 2 · Dispatch
@@ -61,12 +64,14 @@ Single Bash call (blocking, ~30–120 s depending on diff size). `ask-reviewer.s
 Concrete shapes (these are what you actually invoke):
 
 ```bash
-ask-reviewer.sh                                              # $ARGUMENTS empty → default scope
-ask-reviewer.sh "focus on src/agent.py concurrency"          # focus only
-ask-reviewer.sh --with-research notes.md "concurrency focus" # flag before focus
-ask-reviewer.sh "focus on auth flow" --with-spec docs/auth.md  # flag after focus
-ask-reviewer.sh --with-spec docs/rfcs/0004.md --with-research notes.md "review against the spec"
-ask-reviewer.sh --no-memories "fresh-eyes pass over the branch"   # no Codex memory summary
+ask-reviewer.sh                                                 # $ARGUMENTS empty → default scope
+ask-reviewer.sh -- "focus on src/agent.py concurrency"          # focus only
+ask-reviewer.sh --with-research notes.md -- "concurrency focus" # flag written before the focus
+ask-reviewer.sh --with-spec docs/auth.md -- "focus on auth flow"  # flag written after the focus
+ask-reviewer.sh --with-spec docs/rfcs/0004.md --with-research notes.md -- "review against the spec"
+ask-reviewer.sh --no-memories -- "fresh-eyes pass over the branch"   # no Codex memory summary
+ask-reviewer.sh --model agy -- "second opinion on the parser"   # a different reviewer for this call
+ask-reviewer.sh --model codex                                   # default scope, chosen model
 ```
 
 Worked example — if `$ARGUMENTS = "focus on src/agent.py concurrency --with-spec docs/agent.md"`:
@@ -74,7 +79,7 @@ Worked example — if `$ARGUMENTS = "focus on src/agent.py concurrency --with-sp
 1. Tokens: `focus on src/agent.py concurrency --with-spec docs/agent.md`
 2. `--with-spec` consumes itself + `docs/agent.md` → SPEC = `docs/agent.md`
 3. Remaining tokens joined → FOCUS = `focus on src/agent.py concurrency`
-4. Invoke: `ask-reviewer.sh --with-spec docs/agent.md "focus on src/agent.py concurrency"`
+4. Invoke: `ask-reviewer.sh --with-spec docs/agent.md -- "focus on src/agent.py concurrency"`
 
 **Streaming output is already visible in the bottom-right pane — do not duplicate it in the chat.** Acknowledge that it's running and wait.
 
@@ -147,7 +152,7 @@ A `## NEED CONTEXT` section lists repository facts the reviewer could not fetch,
 
 A retry re-reviews the **same scope**, with more evidence when the review asked for it:
 
-- Same focus, and every flag the original call had: `--with-spec`, `--with-research`, `--with-context`, `--no-memories`.
+- Same focus (still after `--`), and every flag the original call had: `--model`, `--with-spec`, `--with-research`, `--with-context`, `--no-memories`.
 - Attachments are cumulative. The wrapper takes one file per kind, so a second `--with-research` replaces the first — write the previous content plus the new answers into one file and pass that.
 - If the PR's head or base commit moved since the first review (`gh pr view` shows different IDs), that is a new review, not a retry: drop the old context, resolve the PR again, and say so to the user.
 

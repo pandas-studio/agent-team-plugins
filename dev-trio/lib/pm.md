@@ -72,7 +72,7 @@ If Codex's output ends with:
 Do this:
 1. For each question, run `ask-researcher.sh "<question>"` — capture each answer.
 2. Concatenate the answers into a temp file (e.g., `.dev-trio/log/${AGENT_TEAM:-default}/research-<ts>.md`). If the original review already had `--with-research`, copy that file's content in first — the wrapper takes one file per kind, so the new file replaces the old attachment.
-3. Re-invoke Codex **once** with the research, keeping the original focus and every original flag (`--with-spec`, `--with-context`, `--no-memories`). If the second review asks the same thing again, stop and report instead of looping:
+3. Re-invoke Codex **once** with the research, keeping the original focus and every original flag (`--model`, `--with-spec`, `--with-context`, `--no-memories`). If the second review asks the same thing again, stop and report instead of looping:
    ```bash
    ask-reviewer.sh --with-research .dev-trio/log/${AGENT_TEAM:-default}/research-<ts>.md "<original focus>"
    ```

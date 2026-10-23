@@ -13,15 +13,21 @@ model. Never call a raw CLI to bypass its authentication check or logging.
 From the user's workspace:
 
 ```bash
-DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/ask-reviewer.sh" "<focus>" </dev/null
+DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/ask-reviewer.sh" [options] -- "<focus>" </dev/null
 ```
 
-Omit focus for the full working tree, including untracked files. Preserve
-`--with-research <file>`, `--with-spec <file>`, `--with-context <file>`, and
-`--no-memories` as separate quoted argv entries when requested. Paths can contain spaces. Do not split a
+Omit focus (and the `--` before it) for the full working tree, including
+untracked files. Preserve `--model <id>`, `--with-research <file>`,
+`--with-spec <file>`, `--with-context <file>`, and `--no-memories` as separate
+quoted argv entries before `--` when requested. Paths can contain spaces. Do not split a
 raw argument string on whitespace or interpolate it as executable shell text.
-Explicit role settings still win; `--no-memories` is valid only with a Codex
-reviewer, so a Claude reviewer will reject it before inference.
+In the user's request, a `--` ends the options: everything after it is focus,
+even `--help` or `--model x`.
+`--model <id>` picks the reviewer for this call and wins over
+`DEV_TRIO_REVIEWER_MODEL` and the role binding; otherwise explicit role
+settings still win. `--model claude` goes through the Claude login check
+below. `--no-memories` is valid only with a Codex reviewer, so a Claude
+reviewer will reject it before inference.
 
 For a pull request, never pass a bare `pr N` focus: the reviewer may lack
 network access and cannot tell which commits the PR contains. Run
@@ -82,7 +88,7 @@ bullets in Markdown, and do not use `latest` artifacts.
   failure, its `error`, and the artifact paths. There is no verdict. A
   `parse-failed` result with `invocation_rc: 0` is a finished review that broke
   the output format (#125): repeat it once with the same focus, every original
-  flag and the same attachments, and report both runs' artifact paths. If the
+  flag (including `--model`) and the same attachments, and report both runs' artifact paths. If the
   reviewed code changed in between, that is a new review, not a retry; if the
   retry fails to parse too, stop and report both. Never read a verdict or
   counts out of `.final.md`.
@@ -106,7 +112,7 @@ scope. For `NEED CONTEXT`, run only the read-only commands it lists (`gh pr
 view/diff/checks`, `gh issue view`, `gh run view`, `git log/show`; ask before
 `git fetch` or anything that changes state) and append their outputs to the
 context file. Then repeat the review once with the same focus and every
-original flag; attachments are cumulative (one file per kind holding the old
+original flag, including `--model`; attachments are cumulative (one file per kind holding the old
 and new evidence). If the PR's head or base moved meanwhile, start a new review
 instead of a retry. Fix findings only within the authorized task.
 

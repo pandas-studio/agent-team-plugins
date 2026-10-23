@@ -1029,7 +1029,7 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
                 result = self.run_cli("ask-researcher.sh", flag)
                 self.assert_untouched(result, 0)
                 self.assertEqual(result.stdout.splitlines()[0],
-                                 'Usage: ask-researcher.sh "research question"')
+                                 'Usage: ask-researcher.sh [--model ID] "research question"')
 
     def test_researcher_help_does_not_depend_on_setup(self):
         ok = '{"models":{},"roles":{}}'
@@ -1098,6 +1098,87 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         result = self.run_cli(DEV_TRIO_PM_HOST="codex", DEV_TRIO_REVIEWER_MODEL="claude")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_model("claude")
+
+    def assert_ran_model(self, model):
+        """The manifest and run.json both name the model this run used."""
+        self.assert_model(model)
+        runs = list(self.workspace.glob(".dev-trio/log/host-test/*.run.json"))
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(json.loads(runs[0].read_text())["model"], model)
+
+    def test_model_flag_overrides_env_and_config(self):
+        for script, role, env_name, flag_model, other in (
+                ("ask-reviewer.sh", "dev-trio.reviewer", "DEV_TRIO_REVIEWER_MODEL", "claude", "codex"),
+                ("ask-researcher.sh", "dev-trio.researcher", "DEV_TRIO_RESEARCHER_MODEL", "codex", "agy")):
+            for args in (("--model", flag_model, "q"), ("q", "--model", flag_model),
+                         ("--model", "bogus", "--model", flag_model, "q")):
+                with self.subTest(script=script, args=args):
+                    self.reset_run_state(json.dumps({"roles": {role: other}}))
+                    result = self.run_cli(script, *args, **{env_name: other})
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assert_ran_model(flag_model)
+
+    def test_model_flag_skips_codex_host_claude_default(self):
+        result = self.run_cli("ask-reviewer.sh", "--model", "codex", DEV_TRIO_PM_HOST="codex")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.recorded()[0][0], "exec")
+        self.assert_ran_model("codex")
+
+    def test_model_flag_unknown_id_runs_nothing(self):
+        for script in ("ask-reviewer.sh", "ask-researcher.sh"):
+            with self.subTest(script=script):
+                self.reset_run_state()
+                result = self.run_cli(script, "--model", "bogus", "q")
+                self.assert_untouched(result, 2)
+                self.assertIn("model 'bogus' is not registered", result.stderr)
+
+    def test_model_flag_without_an_id_is_a_usage_error(self):
+        for script in ("ask-reviewer.sh", "ask-researcher.sh"):
+            for args in (("--model",), ("--model", ""), ("--model", "--", "q"),
+                         ("--model", "--no-memories", "q"), ("q", "--model", "-x")):
+                with self.subTest(script=script, args=args):
+                    self.reset_run_state()
+                    result = self.run_cli(script, *args)
+                    self.assert_untouched(result, 2)
+                    self.assertEqual(result.stderr.splitlines(),
+                                     ["error: --model requires a model id",
+                                      f"Try '{script} --help'."])
+            with self.subTest(script=script, args="--model=codex"):
+                self.reset_run_state()
+                result = self.run_cli(script, "--model=codex", "q")
+                self.assert_untouched(result, 2)
+                self.assertEqual(result.stderr.splitlines()[0], "error: unknown option: --model=codex")
+
+    def test_model_flag_keeps_the_literal_text_after_double_dash(self):
+        for script, tag in (("ask-reviewer.sh", "review_target"), ("ask-researcher.sh", "user_question")):
+            for args, text in ((("--model", "codex", "--", "--help"), "--help"),
+                               (("--", "--model"), "--model")):
+                with self.subTest(script=script, args=args):
+                    self.reset_run_state()
+                    result = self.run_cli(script, *args)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(self.fenced(self.sent_prompt(), tag), text)
+
+    def test_model_flag_with_no_memories(self):
+        result = self.run_cli("ask-reviewer.sh", "--model", "codex", "--no-memories")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("features.memories=false", self.recorded()[0])
+        self.assert_ran_model("codex-no-memories")
+        self.reset_run_state()
+        self.assert_no_inference(self.run_cli("ask-reviewer.sh", "--model", "claude", "--no-memories"))
+
+    def test_model_flag_does_not_affect_help(self):
+        for script in ("ask-reviewer.sh", "ask-researcher.sh"):
+            with self.subTest(script=script):
+                self.reset_run_state()
+                result = self.run_cli(script, "--model", "bogus", "--help")
+                self.assert_untouched(result, 0)
+                self.assertIn("--model ID", result.stdout)
+
+    def test_researcher_model_flag_still_needs_a_question(self):
+        result = self.run_cli("ask-researcher.sh", "--model", "agy")
+        self.assert_untouched(result, 2)
+        self.assertEqual(result.stderr.splitlines()[0], "error: a research question is required")
 
     def test_unknown_host_fails_before_auth(self):
         self.assert_no_inference(self.run_cli(DEV_TRIO_PM_HOST="invalid"))
