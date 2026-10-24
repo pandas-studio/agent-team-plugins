@@ -227,6 +227,8 @@ claude --plugin-dir ./agent-team-plugins/dev-trio
    /dev-trio:review  [focus] [--with-research <file>] [--with-spec <file>] [--with-context <file>]
    ```
 
+   When calling `ask-reviewer.sh` directly, a long focus can be passed as `--focus-file <file>` instead of an argument. That works where a host refuses a computed `"$(cat angles.txt)"` argument, and it needs no shell quoting. `/dev-trio:review` itself takes the focus as text.
+
    **Reviewers may run without network access** (Codex's sandbox disables it by default), so the PM supplies repository facts. For a PR, resolve the base/head commits with `gh pr view` first and pass them as `--with-context <file>` with a `<merge-base>..<head>` range focus; a bare `"pr 55"` focus leaves a sandboxed reviewer unable to identify the commits. When a reviewer still needs a remote fact it returns a `## NEED CONTEXT` block of read-only commands; the PM runs them, appends the output to the context file, and re-reviews once with every original flag.
 
 ## Research troubleshooting
