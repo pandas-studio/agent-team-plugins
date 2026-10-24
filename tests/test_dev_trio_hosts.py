@@ -1111,7 +1111,10 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
                 ("ask-reviewer.sh", "dev-trio.reviewer", "DEV_TRIO_REVIEWER_MODEL", "claude", "codex"),
                 ("ask-researcher.sh", "dev-trio.researcher", "DEV_TRIO_RESEARCHER_MODEL", "codex", "agy")):
             for args in (("--model", flag_model, "q"), ("q", "--model", flag_model),
-                         ("--model", "bogus", "--model", flag_model, "q")):
+                         ("--model", "bogus", "--model", flag_model, "q"),
+                         ("-m", flag_model, "q"), ("q", "-m", flag_model),
+                         ("-m", "bogus", "--model", flag_model, "q"),
+                         ("--model", "bogus", "-m", flag_model, "q")):
                 with self.subTest(script=script, args=args):
                     self.reset_run_state(json.dumps({"roles": {role: other}}))
                     result = self.run_cli(script, *args, **{env_name: other})
@@ -1126,33 +1129,37 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
 
     def test_model_flag_unknown_id_runs_nothing(self):
         for script in ("ask-reviewer.sh", "ask-researcher.sh"):
-            with self.subTest(script=script):
-                self.reset_run_state()
-                result = self.run_cli(script, "--model", "bogus", "q")
-                self.assert_untouched(result, 2)
-                self.assertIn("model 'bogus' is not registered", result.stderr)
+            for flag in ("--model", "-m"):
+                with self.subTest(script=script, flag=flag):
+                    self.reset_run_state()
+                    result = self.run_cli(script, flag, "bogus", "q")
+                    self.assert_untouched(result, 2)
+                    self.assertIn("model 'bogus' is not registered", result.stderr)
 
     def test_model_flag_without_an_id_is_a_usage_error(self):
         for script in ("ask-reviewer.sh", "ask-researcher.sh"):
-            for args in (("--model",), ("--model", ""), ("--model", "--", "q"),
-                         ("--model", "--no-memories", "q"), ("q", "--model", "-x")):
-                with self.subTest(script=script, args=args):
+            for flag in ("--model", "-m"):
+                for args in ((flag,), (flag, ""), (flag, "--", "q"),
+                             (flag, "--no-memories", "q"), ("q", flag, "-x")):
+                    with self.subTest(script=script, args=args):
+                        self.reset_run_state()
+                        result = self.run_cli(script, *args)
+                        self.assert_untouched(result, 2)
+                        self.assertEqual(result.stderr.splitlines(),
+                                         [f"error: {flag} requires a model id",
+                                          f"Try '{script} --help'."])
+            for attached in ("--model=codex", "-mcodex", "-m=codex"):
+                with self.subTest(script=script, args=attached):
                     self.reset_run_state()
-                    result = self.run_cli(script, *args)
+                    result = self.run_cli(script, attached, "q")
                     self.assert_untouched(result, 2)
-                    self.assertEqual(result.stderr.splitlines(),
-                                     ["error: --model requires a model id",
-                                      f"Try '{script} --help'."])
-            with self.subTest(script=script, args="--model=codex"):
-                self.reset_run_state()
-                result = self.run_cli(script, "--model=codex", "q")
-                self.assert_untouched(result, 2)
-                self.assertEqual(result.stderr.splitlines()[0], "error: unknown option: --model=codex")
+                    self.assertEqual(result.stderr.splitlines()[0], f"error: unknown option: {attached}")
 
     def test_model_flag_keeps_the_literal_text_after_double_dash(self):
         for script, tag in (("ask-reviewer.sh", "review_target"), ("ask-researcher.sh", "user_question")):
             for args, text in ((("--model", "codex", "--", "--help"), "--help"),
-                               (("--", "--model"), "--model")):
+                               (("--", "--model"), "--model"),
+                               (("-m", "codex", "--", "-m"), "-m")):
                 with self.subTest(script=script, args=args):
                     self.reset_run_state()
                     result = self.run_cli(script, *args)
@@ -1173,7 +1180,7 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
                 self.reset_run_state()
                 result = self.run_cli(script, "--model", "bogus", "--help")
                 self.assert_untouched(result, 0)
-                self.assertIn("--model ID", result.stdout)
+                self.assertIn("-m, --model ID", result.stdout)
 
     def test_researcher_model_flag_still_needs_a_question(self):
         result = self.run_cli("ask-researcher.sh", "--model", "agy")

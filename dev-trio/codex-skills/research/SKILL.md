@@ -60,13 +60,18 @@ DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/ask-researcher.sh" [--model <id>] -- "
 
 Extract options from the start of the request only:
 
-1. If it starts with `--model <id>`, remove those two tokens and pass them as
-   two argv entries before `--`; this picks the researcher for this call over
-   `DEV_TRIO_RESEARCHER_MODEL` and the role binding.
+1. While it starts with `--model <id>` or `-m <id>`, remove those two tokens
+   and repeat; pass every pair, in order, as `--model <id>` before `--` (the
+   wrapper rejects any pair whose id is missing or option-shaped, and the last
+   id wins and must be registered). This picks the
+   researcher for this call over `DEV_TRIO_RESEARCHER_MODEL` and the role
+   binding. A leading `--model`/`-m` with no id or with `--` as its id, or a
+   leading `-m=` or `--model=` token, is not dispatched: tell the user
+   the id goes in its own token, and that `--` keeps the question literal.
 2. If what is left starts with a `--` token, remove it: everything after it is
    the question (`--model codex -- --help` researches `--help`).
-3. The rest, verbatim with its whitespace, is the question. A `--model` later
-   in the text is part of it.
+3. The rest, verbatim with its whitespace, is the question. A `--model` or
+   `-m` later in the text is part of it.
 
 `--` before the question keeps a question such as `--help` from being read as
 an option.
