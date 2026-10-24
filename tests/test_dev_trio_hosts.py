@@ -984,7 +984,7 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
                                   "Try 'ask-reviewer.sh --help'."])
 
     def test_reviewer_option_without_value_is_a_usage_error(self):
-        for flag in ("--with-research", "--with-spec", "--with-context"):
+        for flag in ("--with-research", "--with-spec", "--with-context", "--focus-file"):
             for args in ((flag,), (flag, ""), ("focus", flag)):
                 with self.subTest(args=args):
                     self.reset_run_state()
@@ -1013,6 +1013,41 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
                 result = self.run_cli("ask-reviewer.sh", *args)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(self.fenced(self.sent_prompt(), "review_target"), focus)
+
+    def test_reviewer_focus_file_is_the_focus_verbatim(self):
+        focus = 'Angles:\n(1) "quoted" text and $(not a command)\n- a dash bullet'
+        path = self.root / "angles.txt"
+        path.write_text(focus + "\n\n", encoding="utf-8")
+        for args in (("--focus-file", str(path)), ("--no-memories", "--focus-file", str(path))):
+            with self.subTest(args=args):
+                self.reset_run_state()
+                result = self.run_cli("ask-reviewer.sh", *args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.fenced(self.sent_prompt(), "review_target"), focus)
+
+    def test_reviewer_bad_focus_file_is_a_usage_error(self):
+        empty = self.root / "empty.txt"
+        empty.write_text("", encoding="utf-8")
+        blank = self.root / "blank.txt"
+        blank.write_text(" \t\r\n\r\n", encoding="utf-8", newline="")
+        given = self.root / "given.txt"
+        given.write_text("from the file", encoding="utf-8")
+        missing = self.root / "missing.txt"
+        cases = [
+            (("--focus-file", str(missing)), f"error: focus file not found: {missing}"),
+            (("--focus-file", str(empty)), f"error: focus file is empty: {empty}"),
+            (("--focus-file", str(blank)), f"error: focus file is empty: {blank}"),
+            (("--focus-file", str(given), "also a focus"),
+             "error: --focus-file and a focus argument are mutually exclusive"),
+            (("also a focus", "--focus-file", str(given)),
+             "error: --focus-file and a focus argument are mutually exclusive"),
+        ]
+        for args, message in cases:
+            with self.subTest(args=args):
+                self.reset_run_state()
+                result = self.run_cli("ask-reviewer.sh", *args)
+                self.assert_untouched(result, 2)
+                self.assertEqual(result.stderr.splitlines()[0], message)
 
     def test_reviewer_empty_focus_is_the_default_scope(self):
         for args in ((), ("--",), ("",), ("--", "")):

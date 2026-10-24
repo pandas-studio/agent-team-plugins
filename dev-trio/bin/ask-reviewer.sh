@@ -8,7 +8,12 @@
 #   ask-reviewer.sh -- "-literal focus"          # focus that looks like an option
 #   ask-reviewer.sh --model agy "focus"          # pick the reviewer model for this call
 #   ask-reviewer.sh -m agy "focus"               # same, short form
+#   ask-reviewer.sh --focus-file angles.txt      # focus read from a file
 #   ask-reviewer.sh -h | --help                  # usage; runs nothing, exit 0
+#
+# --focus-file exists for callers that cannot pass a computed argument: a
+# sandboxed host that refuses `"$(cat angles.txt)"`, or a focus that quotes
+# itself. The file's text is the focus verbatim (trailing newlines dropped).
 #
 # Arguments are parsed before anything is loaded, so --help and a mistyped
 # option (exit 2) never reach a model. Only a token shaped like an option —
@@ -66,6 +71,7 @@ Options (any order relative to the focus):
   --with-research FILE  research answer to include as untrusted context
   --with-spec FILE      spec/contract the changes are expected to satisfy
   --with-context FILE   repository facts fetched by the PM (PR, issue, CI)
+  --focus-file FILE     read the focus from FILE instead of an argument
   -m, --model ID        reviewer model for this call (see: agent-team-models list)
   --no-memories         run Codex without its memory summary (codex reviewer only)
   --                    end of options: the one argument after it is the
@@ -115,6 +121,7 @@ is_option_shaped() {
 RESEARCH_FILE=""
 SPEC_FILE=""
 CONTEXT_FILE=""
+FOCUS_FILE=""
 FOCUS=""
 MODEL_ARG=""
 NO_MEMORIES=0
@@ -131,12 +138,13 @@ take_positional() {
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
-    --with-research|--with-spec|--with-context)
+    --with-research|--with-spec|--with-context|--focus-file)
       { [ $# -ge 2 ] && [ -n "$2" ]; } || usage_error "$1 requires a file path"
       case "$1" in
         --with-research) RESEARCH_FILE="$2" ;;
         --with-spec)     SPEC_FILE="$2" ;;
-        *)               CONTEXT_FILE="$2" ;;
+        --with-context)  CONTEXT_FILE="$2" ;;
+        *)               FOCUS_FILE="$2" ;;
       esac
       shift 2 ;;
     -m|--model)
@@ -152,6 +160,20 @@ while [ $# -gt 0 ]; do
       take_positional "$1"; shift ;;
   esac
 done
+# Still before anything is loaded: a bad focus file is a usage error that
+# starts nothing, like a bad option. An empty or whitespace-only file is
+# refused rather than read as the default scope, because an empty angles file
+# is a mistake.
+if [ -n "$FOCUS_FILE" ]; then
+  [ "$POSITIONAL_SEEN" -eq 0 ] || usage_error "--focus-file and a focus argument are mutually exclusive"
+  [ -f "$FOCUS_FILE" ] && [ -r "$FOCUS_FILE" ] || usage_error "focus file not found: $FOCUS_FILE"
+  FOCUS="$(cat -- "$FOCUS_FILE")" || usage_error "focus file could not be read: $FOCUS_FILE"
+  case "$FOCUS" in
+    *[![:space:]]*) ;;
+    *) usage_error "focus file is empty: $FOCUS_FILE" ;;
+  esac
+  POSITIONAL_SEEN=1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_TAG=ask-reviewer
