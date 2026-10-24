@@ -62,7 +62,8 @@ Extract options from the start of the request only:
 
 1. While it starts with `--model <id>` or `-m <id>`, remove those two tokens
    and repeat; pass every pair, in order, as `--model <id>` before `--` (the
-   wrapper validates each id and the last one wins). This picks the
+   wrapper rejects any pair whose id is missing or option-shaped, and the last
+   id wins and must be registered). This picks the
    researcher for this call over `DEV_TRIO_RESEARCHER_MODEL` and the role
    binding. A leading `--model`/`-m` with no id or with `--` as its id, or a
    leading `-m=` or `--model=` token, is not dispatched: tell the user
