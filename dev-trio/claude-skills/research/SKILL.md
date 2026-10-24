@@ -3,7 +3,7 @@ name: research
 description: One-shot Antigravity research call. Use when before coding you need library/API behavior, recent changes, spec details, or option comparisons. Streaming output lands in the top-right dashboard pane; chat-side surfaces the lead paragraph + cited URL count.
 disable-model-invocation: true
 allowed-tools: Bash(ask-researcher.sh:*) Bash(dev-trio-doctor.sh:*) Bash(cat:*) Bash(ls:*) Read
-argument-hint: [--model <id>] [--] <research question>
+argument-hint: [-m|--model <id>] [--] <research question>
 ---
 
 # Research (Antigravity, one-shot)
@@ -14,9 +14,9 @@ You are the **PM**. Antigravity is the researcher (top-right pane). You dispatch
 
 `$ARGUMENTS` is the research question, free-form, optionally preceded by options. Look only at its start:
 
-1. If it starts with `--model <id>`, that is the researcher model for this call (`agy`, `codex`, `claude`, or any id from `agent-team-models list`). It wins over `DEV_TRIO_RESEARCHER_MODEL` and the role binding. Remove those two tokens.
+1. While it starts with `--model <id>` or `-m <id>`, remove those two tokens, keep the pair as `--model <id>`, and repeat. Pass every kept pair to `ask-researcher.sh`, in order, before `--`: the wrapper validates each id and the last one wins. The id is the researcher model for this call (`agy`, `codex`, `claude`, or any id from `agent-team-models list`) and wins over `DEV_TRIO_RESEARCHER_MODEL` and the role binding. If a leading `--model`/`-m` has no id after it or its id is `--`, or what is left starts with an attached form (`-m=agy`, `--model=agy`), do not dispatch: tell the user the id goes in its own token, and that `--` before the question keeps it literal.
 2. If what is left starts with a `--` token, remove it. Everything after it is the question, so `-- --model is deprecated?` asks about `--model`.
-3. The rest, with its whitespace kept, is QUESTION. A `--model` later in the text is part of the question.
+3. The rest, with its whitespace kept, is QUESTION. A `--model` or `-m` later in the text is part of the question.
 
 - **QUESTION empty** → ask the user what to research. Do not proceed without a question.
 - **Otherwise** → pass QUESTION verbatim to `ask-researcher.sh` as a single argument after `--`. Do not paraphrase or "improve" it.
@@ -27,7 +27,7 @@ Single Bash call (blocking, ~10–60 s depending on the query). `ask-researcher.
 
 ```bash
 ask-researcher.sh -- "<the user's question, verbatim>"
-ask-researcher.sh --model codex -- "<question>"    # $ARGUMENTS began with --model codex
+ask-researcher.sh --model codex -- "<question>"    # $ARGUMENTS began with --model codex or -m codex
 ```
 
 Always put `--` before the question, so a question such as `--help` is researched instead of being read as an option.

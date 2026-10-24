@@ -3,7 +3,7 @@ name: review
 description: One-shot Codex review. Default scope = uncommitted working-tree changes. Optional --with-research <file>, --with-spec <file> and --with-context <file> for context injection. Streaming output lands in the bottom-right dashboard pane; chat-side surfaces the verdict (SHIP/NEEDS-FIX/DISCUSS) + Blocker/Major counts and handles NEED RESEARCH and NEED CONTEXT blocks.
 disable-model-invocation: true
 allowed-tools: Bash(ask-reviewer.sh:*) Bash(ask-researcher.sh:*) Bash(gh pr view:*) Bash(gh pr diff:*) Bash(gh pr checks:*) Bash(gh issue view:*) Bash(gh run view:*) Bash(git:*) Bash(cat:*) Bash(ls:*) Bash(date:*) Bash(mkdir:*) Bash(echo:*) Bash(sed:*) Read
-argument-hint: [focus] [--model <id>] [--with-research <file>] [--with-spec <file>] [--with-context <file>] [--no-memories] [-- <focus>]
+argument-hint: [focus] [-m|--model <id>] [--with-research <file>] [--with-spec <file>] [--with-context <file>] [--no-memories] [-- <focus>]
 ---
 
 # Review (Codex, one-shot)
@@ -17,7 +17,7 @@ You are the **PM**. Codex is the reviewer (bottom-right pane). You dispatch one 
 - **Optional `--with-research <file>`** — research context from a previous Antigravity call (typically `latest-agy.log` or a curated `research-<TS>.md`).
 - **Optional `--with-spec <file>`** — spec/contract the changes are expected to satisfy.
 - **Optional `--with-context <file>`** — repository facts you fetched (PR commit IDs, issue text, CI output) for a reviewer that may not reach the network.
-- **Optional `--model <id>`** — reviewer model for this call only (`codex`, `claude`, `agy`, or any id from `agent-team-models list`); wins over `DEV_TRIO_REVIEWER_MODEL` and the role binding.
+- **Optional `--model <id>`** (short: `-m <id>`) — reviewer model for this call only (`codex`, `claude`, `agy`, or any id from `agent-team-models list`); wins over `DEV_TRIO_REVIEWER_MODEL` and the role binding.
 - **Optional `--no-memories`** — bare flag; Codex runs without its memory summary from earlier sessions.
 - **Optional free-form focus** — review scope, possibly multi-word. Examples:
   - `focus on the new retry logic in src/agent.py — concurrency safety`
@@ -32,9 +32,9 @@ Algorithm:
 2. If a token is `--with-research`, the next token is `<research-file>`; consume both.
 3. If a token is `--with-spec`, the next token is `<spec-file>`; consume both.
    Likewise `--with-context` and `<context-file>`.
-4. If a token is `--model`, the next token is `<model-id>`; consume both.
+4. If a token is `--model` or `-m`, the next token is `<model-id>`; consume both and dispatch them as `--model <model-id>`. If there is no next token, the next token is `--`, or a token is an attached form (`-m=agy`, `--model=agy`), do not dispatch: tell the user the model id goes in its own token and that focus text containing `-m` belongs after `--`.
 5. If a token is `--no-memories`, pass it through as its own argv slot; consume only it.
-6. If a token is `--`, stop: it and nothing after it is an option, so every later token goes to the focus (`--model agy -- --help` reviews the focus `--help`; `-- --model codex` reviews the focus `--model codex`).
+6. If a token is `--`, stop: it and nothing after it is an option, so every later token goes to the focus (`--model agy -- --help` reviews the focus `--help`; `-- --model codex` reviews the focus `--model codex`). A focus that mentions `-m`, such as `git commit -m`, must come after `--`, or step 4 reads it as a model option.
 7. Every remaining token belongs to the focus; join them with a single space into one FOCUS string.
 8. If FOCUS is empty, omit it entirely (the wrapper falls back to the default working-tree scope). Otherwise put the options first and pass the focus last as `-- "$FOCUS"`, so a focus that starts with a dash is never read as an option.
 9. If FOCUS names a pull request (`pr 55`, `PR #55`, or a PR URL), resolve it before dispatch — see **PR reviews** below. Never send a bare PR reference as the focus: the reviewer may run without network access, and then cannot tell which commits the PR contains (measured: Codex under `workspace-write` failed `gh pr view` and returned `DISCUSS` with zero findings).

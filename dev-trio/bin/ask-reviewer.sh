@@ -7,6 +7,7 @@
 #   ask-reviewer.sh "review HEAD~1..HEAD with focus on security"
 #   ask-reviewer.sh -- "-literal focus"          # focus that looks like an option
 #   ask-reviewer.sh --model agy "focus"          # pick the reviewer model for this call
+#   ask-reviewer.sh -m agy "focus"               # same, short form
 #   ask-reviewer.sh -h | --help                  # usage; runs nothing, exit 0
 #
 # Arguments are parsed before anything is loaded, so --help and a mistyped
@@ -65,7 +66,7 @@ Options (any order relative to the focus):
   --with-research FILE  research answer to include as untrusted context
   --with-spec FILE      spec/contract the changes are expected to satisfy
   --with-context FILE   repository facts fetched by the PM (PR, issue, CI)
-  --model ID            reviewer model for this call (see: agent-team-models list)
+  -m, --model ID        reviewer model for this call (see: agent-team-models list)
   --no-memories         run Codex without its memory summary (codex reviewer only)
   --                    end of options: the one argument after it is the
                         focus, even if it starts with a dash
@@ -138,10 +139,10 @@ while [ $# -gt 0 ]; do
         *)               CONTEXT_FILE="$2" ;;
       esac
       shift 2 ;;
-    --model)
+    -m|--model)
       # `--` and option-shaped values are a forgotten id, not a model name.
       { [ $# -ge 2 ] && [ -n "$2" ] && [ "$2" != -- ] && ! is_option_shaped "$2"; } \
-        || usage_error "--model requires a model id"
+        || usage_error "$1 requires a model id"
       MODEL_ARG="$2"; shift 2 ;;
     --no-memories) NO_MEMORIES=1; shift ;;
     --) shift

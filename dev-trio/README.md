@@ -122,10 +122,10 @@ If `REVIEWER_CLI`, `RESEARCHER_CLI` or `CODEX_CLI` / `CLAUDE_CLI` points at your
 
 | Role | Default | Pick a different model | Override its binary |
 | :--- | :--- | :--- | :--- |
-| `dev-trio.researcher` | `agy` | `--model <id>` (one call), `DEV_TRIO_RESEARCHER_MODEL` env, or `agent-team-models set-role dev-trio.researcher <model>` | `RESEARCHER_CLI` (any model) · `AGY_CLI` (the `agy` model) |
-| `dev-trio.reviewer` | Claude PM: `codex`; Codex PM: `claude` | `--model <id>` (one call), `DEV_TRIO_REVIEWER_MODEL` env, or `agent-team-models set-role dev-trio.reviewer <model>` | `REVIEWER_CLI` (any model) · `CODEX_CLI` (the `codex` model) |
+| `dev-trio.researcher` | `agy` | `--model <id>` or `-m <id>` (one call), `DEV_TRIO_RESEARCHER_MODEL` env, or `agent-team-models set-role dev-trio.researcher <model>` | `RESEARCHER_CLI` (any model) · `AGY_CLI` (the `agy` model) |
+| `dev-trio.reviewer` | Claude PM: `codex`; Codex PM: `claude` | `--model <id>` or `-m <id>` (one call), `DEV_TRIO_REVIEWER_MODEL` env, or `agent-team-models set-role dev-trio.reviewer <model>` | `REVIEWER_CLI` (any model) · `CODEX_CLI` (the `codex` model) |
 
-Precedence is `--model` > the env var > the role binding > the default. `--model` takes any id from `agent-team-models list`; an unknown id exits 2 before any CLI runs. It works the same through the skills: `/dev-trio:review --model agy "focus"`, `/dev-trio:research --model codex what changed in X?` (for research, only a leading `--model` counts).
+Precedence is `--model` > the env var > the role binding > the default. `-m` is its short form. `--model` takes any id from `agent-team-models list`; an unknown id exits 2 before any CLI runs. It works the same through the skills: `/dev-trio:review --model agy "focus"`, `/dev-trio:research --model codex what changed in X?` (for research, only leading `--model`/`-m` options count; in a review focus, put text that mentions `-m` after `--`).
 
 ```bash
 ask-reviewer.sh --model agy "second opinion on the parser"   # this call only

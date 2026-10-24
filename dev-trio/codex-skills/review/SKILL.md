@@ -19,10 +19,14 @@ DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/ask-reviewer.sh" [options] -- "<focus>
 Omit focus (and the `--` before it) for the full working tree, including
 untracked files. Preserve `--model <id>`, `--with-research <file>`,
 `--with-spec <file>`, `--with-context <file>`, and `--no-memories` as separate
-quoted argv entries before `--` when requested. Paths can contain spaces. Do not split a
+quoted argv entries before `--` when requested; pass a requested `-m <id>` as
+`--model <id>`. Paths can contain spaces. Do not split a
 raw argument string on whitespace or interpolate it as executable shell text.
 In the user's request, a `--` ends the options: everything after it is focus,
-even `--help` or `--model x`.
+even `--help`, `-m` or `--model x`. Before that `--`, a `-m`/`--model` with no
+id or with `--` as its id, or an attached form (`-m=agy`, `--model=agy`), is not
+dispatched: tell the user the id goes in its own token and that focus text
+containing `-m` (such as `git commit -m`) belongs after `--`.
 `--model <id>` picks the reviewer for this call and wins over
 `DEV_TRIO_REVIEWER_MODEL` and the role binding; otherwise explicit role
 settings still win. `--model claude` goes through the Claude login check

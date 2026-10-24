@@ -6,6 +6,7 @@
 #   echo "extra context" | ask-researcher.sh "research question"
 #   ask-researcher.sh -- "-literal question"     # question that looks like an option
 #   ask-researcher.sh --model codex "question"   # pick the researcher model for this call
+#   ask-researcher.sh -m codex "question"        # same, short form
 #   ask-researcher.sh -h | --help                # usage; runs nothing, exit 0
 #
 # Arguments are parsed before anything is loaded, so --help and a mistyped
@@ -43,10 +44,10 @@ Usage: ask-researcher.sh [--model ID] "research question"
 Runs the researcher model on one question; stdin, when given, is extra context.
 
 Options:
-  --model ID  researcher model for this call (see: agent-team-models list)
-  --          end of options: the one argument after it is the question, even
-              if it starts with a dash
-  -h, --help  show this help and exit
+  -m, --model ID  researcher model for this call (see: agent-team-models list)
+  --              end of options: the one argument after it is the question,
+                  even if it starts with a dash
+  -h, --help      show this help and exit
 
 A token like -name or --name[=value] is treated as an option; an unknown one
 exits 2. Prose that starts with a dash ("- item", "-What is X?") is a question.
@@ -95,10 +96,10 @@ take_positional() {
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
-    --model)
+    -m|--model)
       # `--` and option-shaped values are a forgotten id, not a model name.
       { [ $# -ge 2 ] && [ -n "$2" ] && [ "$2" != -- ] && ! is_option_shaped "$2"; } \
-        || usage_error "--model requires a model id"
+        || usage_error "$1 requires a model id"
       MODEL_ARG="$2"; shift 2 ;;
     --) shift
         while [ $# -gt 0 ]; do take_positional "$1"; shift; done ;;
