@@ -1,0 +1,12 @@
+{
+  "name": "ralph-trio",
+  "version": "0.5.10",
+  "description": "Antigravity-conducted Ralph loops with selectable planner, coder, reviewer, and researcher models.",
+  "author": {
+    "name": "pandas-studio"
+  },
+  "homepage": "https://github.com/pandas-studio/agent-team-plugins/tree/main/ralph-trio",
+  "repository": "https://github.com/pandas-studio/agent-team-plugins",
+  "license": "MIT",
+  "skills": "./codex-skills/"
+}

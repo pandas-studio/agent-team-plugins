@@ -69,6 +69,7 @@ def _uv_lock_version(name: str) -> Callable[[str], Optional[str]]:
 MANIFESTS: list[tuple[str, Callable[[str], Optional[str]]]] = [
     (".claude-plugin/plugin.json", _json_version),
     (".codex-plugin/plugin.json", _json_version),
+    (".antigravity-plugin/plugin.json", _json_version),
 ]
 
 # Version copies outside the manifests, per plugin directory. Every entry here

@@ -1,4 +1,5 @@
 ---
+name: conduct
 description: Drive the langgraph-conductor durable runtime — start a bounded planner/researcher/coder/reviewer run against a spec, check its status, and approve or reject the ship interrupt. Use when the user asks to run, resume, inspect, or approve an agent-team graph run.
 disable-model-invocation: true
 allowed-tools: Bash(uv:*) Bash(agent-team-graph:*) Read

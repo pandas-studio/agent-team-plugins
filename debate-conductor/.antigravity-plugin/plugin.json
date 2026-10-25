@@ -1,0 +1,12 @@
+{
+  "name": "debate-conductor",
+  "version": "0.5.33",
+  "description": "Antigravity conducts Generator-vs-Critic debates with external CLI adapters and live transcript artifacts.",
+  "author": {
+    "name": "pandas-studio"
+  },
+  "homepage": "https://github.com/pandas-studio/agent-team-plugins/tree/main/debate-conductor",
+  "repository": "https://github.com/pandas-studio/agent-team-plugins",
+  "license": "MIT",
+  "skills": "./codex-skills/"
+}

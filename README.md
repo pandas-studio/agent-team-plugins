@@ -36,6 +36,14 @@ codex plugin add spec-trio@pandas-studio
 codex plugin add eval-trio@pandas-studio
 ```
 
+## Install plugins in Antigravity (`agy`)
+
+```bash
+for p in dev-trio debate-conductor ralph-trio spec-trio eval-trio runtime; do
+  agy plugin install "/absolute/path/to/agent-team-plugins/$p" --scope user
+done
+```
+
 ## Plugins
 
 | Name | Roles | Episode | Status |

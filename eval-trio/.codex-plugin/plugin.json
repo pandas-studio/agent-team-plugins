@@ -1,6 +1,6 @@
 {
   "name": "eval-trio",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Evidence-first evaluation of a local submission with fixed checks, a Challenger, and an independent Judge.",
   "author": {"name": "pandas-studio"},
   "homepage": "https://github.com/pandas-studio/agent-team-plugins/tree/main/eval-trio",

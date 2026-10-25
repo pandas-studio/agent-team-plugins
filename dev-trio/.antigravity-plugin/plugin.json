@@ -1,0 +1,12 @@
+{
+  "name": "dev-trio",
+  "version": "0.8.42",
+  "description": "Antigravity PM and coder coordinates CLI research and authenticated review.",
+  "author": {
+    "name": "pandas-studio"
+  },
+  "homepage": "https://github.com/pandas-studio/agent-team-plugins/tree/main/dev-trio",
+  "repository": "https://github.com/pandas-studio/agent-team-plugins",
+  "license": "MIT",
+  "skills": "./codex-skills/"
+}

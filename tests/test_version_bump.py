@@ -155,6 +155,12 @@ class VersionBumpTests(unittest.TestCase):
         self.git("branch", "-f", "base")
         self.assert_rc(self.run_check(), 1, "alpha: versions disagree")
 
+    def test_antigravity_manifest_must_agree(self):
+        self.manifest("alpha", "1.0.1", "antigravity")
+        self.commit("antigravity only")
+        self.git("branch", "-f", "base")
+        self.assert_rc(self.run_check(), 1, "alpha: versions disagree")
+
     def test_new_plugin_passes(self):
         self.plugin("beta", "0.1.0")
         self.commit("add beta")

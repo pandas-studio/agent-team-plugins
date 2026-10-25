@@ -1,0 +1,12 @@
+{
+  "name": "spec-trio",
+  "version": "0.3.5",
+  "description": "Antigravity-conducted spec-gated planner, coder, and reviewer loops with selectable models.",
+  "author": {
+    "name": "pandas-studio"
+  },
+  "homepage": "https://github.com/pandas-studio/agent-team-plugins/tree/main/spec-trio",
+  "repository": "https://github.com/pandas-studio/agent-team-plugins",
+  "license": "MIT",
+  "skills": "./codex-skills/"
+}
