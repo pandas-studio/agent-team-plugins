@@ -18,6 +18,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAIL="$SCRIPT_DIR/tail-role.sh"
 
+# New preflight modes have their own parser; never mix them with legacy flags.
+for option in "$@"; do
+  case "$option" in
+    --view=*|--view-only|--team=*|--log-base=*|--log-dir=*)
+      exec bash "$SCRIPT_DIR/../lib/prepare-view.sh" "$@" ;;
+  esac
+done
+
 SESSION="debate-conductor"
 ATTACH=1
 
@@ -32,6 +40,10 @@ Options:
                  Used to namespace logs across windows.
   --new-session  Create a new detached tmux session instead of splitting here.
   --no-attach    With --new-session, do not attach.
+  --view=MODE    Prepare auto|tmux|none viewing and emit a private context JSON.
+  --view-only    Prepare a detached two-role view (no PM pane).
+  --team=ID --log-base=ABS  Explicit preflight context (supply both).
+  --log-dir=ABS  Manual-only view of a nonstandard continuation directory.
   -h, --help     Show this help.
 EOF
 }
@@ -66,6 +78,28 @@ trap 'rc=$?; echo "error: tmux command failed (line $LINENO, exit $rc). Session=
 # resolve to the user's workspace.
 apply_3pane_split() {
   local MAIN="$1"
+  if [ "${DEBATE_MANAGED_VIEW:-}" = 1 ]; then
+    # The shared --here guard below is unchanged. Only newly created viewer
+    # panes use this explicit context and direct-command lifecycle.
+    . "$SCRIPT_DIR/../lib/view.sh"
+    local gen crit nonce record base cwd team
+    VIEW_TMUX=$(command -v tmux)
+    VIEW_SOCKET=${TMUX%%,*}
+    cwd=$(pwd -P)
+    team=$AGENT_TEAM
+    base=$DEBATE_LOG_DIR
+    gen=$(view_tmux split-window -h -t "$MAIN" -c "$cwd" -P -F '#{pane_id}' 'exec /bin/sleep 86400')
+    crit=$(view_tmux split-window -h -t "$gen" -c "$cwd" -P -F '#{pane_id}' 'exec /bin/sleep 86400')
+    view_tmux select-layout -t "$MAIN" even-horizontal
+    nonce="$$-$RANDOM-$RANDOM"
+    record=$(view_make_record here "$team" "${base%/}/$team" "$cwd" "$gen" "$crit" "$nonce")
+    view_tmux set-option -w -t "$MAIN" @debate-view "$record"
+    view_start_pane "$gen" gen "$nonce" "$team" "$base" "$cwd" "$TAIL"
+    view_start_pane "$crit" crit "$nonce" "$team" "$base" "$cwd" "$TAIL"
+    view_tmux select-pane -t "$MAIN"
+    SPLIT_PANES="$gen $crit"
+    return
+  fi
   local MID
   MID=$(tmux split-window -h -t "$MAIN" -P -F "#{pane_id}")
   local RIGHT

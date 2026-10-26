@@ -13,11 +13,17 @@ the tests to change a window the way a user would.
 import fcntl
 import json
 import os
+import shlex
 import sys
 import time
 
 
 def main(argv):
+    while argv and argv[0] in ("-S", "-f"):
+        argv = argv[2:]
+    if argv == ["-V"]:
+        print("tmux 3.6")
+        return 0
     path = os.environ["FAKE_TMUX_STATE"]
     # One call at a time, like one tmux server: concurrent runs must not lose
     # each other's writes. "delay" sleeps before a subcommand, outside the lock,
@@ -67,9 +73,11 @@ def opts(args, flags_with_value=("-t", "-F", "-c", "-s", "-n")):
 
 def window_of(state, target):
     pane = target or state["current"]
+    if pane.startswith("="):
+        pane = pane[1:].rstrip(":")
     for wid, win in state["windows"].items():
-        if pane in win["panes"] or (win.get("session") == pane and win["panes"]):
-            return wid, win, win["panes"][0] if win.get("session") == pane else pane
+        if pane in win["panes"] or pane in (wid, win.get("session"), win.get("sid")):
+            return wid, win, pane if pane in win["panes"] else win["panes"][0]
     raise LookupError(pane)
 
 
@@ -77,12 +85,13 @@ def run(state, cmd, args):
     flags, pos = opts(args)
     if cmd == "has-session":
         sessions = {w.get("session") for w in state["windows"].values()}
-        return (0, "") if flags.get("-t") in sessions else (1, "")
+        return (0, "") if flags.get("-t", "").lstrip("=") in sessions else (1, "")
     if cmd == "new-session":
         new = "%%%d" % state["next"]
         state["next"] += 1
         wid = "@%d" % (max([int(w[1:]) for w in state["windows"]] or [-1]) + 1)
-        state["windows"][wid] = {"options": {}, "panes": [new], "session": flags.get("-s")}
+        state["windows"][wid] = {"options": {}, "panes": [new], "session": flags.get("-s"),
+                                 "sid": "$" + wid[1:]}
         return 0, (new + "\n") if "-P" in flags else ""
     try:
         wid, win, pane = window_of(state, flags.get("-t") or flags.get("-s"))
@@ -90,17 +99,22 @@ def run(state, cmd, args):
         return 1, ""
     if cmd == "display-message":
         fmt = pos[0] if pos else ""
-        return 0, {"#{pane_id}": pane, "#S": "fake", "#{window_id}": wid}.get(fmt, fmt) + "\n"
+        return 0, {"#{pane_id}": pane, "#S": "fake", "#{window_id}": wid,
+                   "#{session_name}": win.get("session", "fake"),
+                   "#{session_id}": win.get("sid", "$0"),
+                   "#{pane_dead}": str(state.get("dead", {}).get(pane, 0))}.get(fmt, fmt) + "\n"
     if cmd == "show-options":
-        value = win["options"].get(pos[0])
+        options = state.setdefault("pane_options", {}).setdefault(pane, {}) if "-p" in flags else win["options"]
+        value = options.get(pos[0])
         if value is None:
             return (0, "") if "-q" in flags else (1, "")
         return 0, value + "\n"
     if cmd == "set-option":
+        options = state.setdefault("pane_options", {}).setdefault(pane, {}) if "-p" in flags else win["options"]
         if "-u" in flags:
-            win["options"].pop(pos[0], None)
+            options.pop(pos[0], None)
         else:
-            win["options"][pos[0]] = pos[1]
+            options[pos[0]] = pos[1]
         return 0, ""
     if cmd == "split-window":
         new = "%%%d" % state["next"]
@@ -111,6 +125,23 @@ def run(state, cmd, args):
         return 0, (new + "\n") if "-P" in flags else ""
     if cmd == "list-panes":
         return 0, "".join(p + "\n" for p in win["panes"])
+    if cmd == "list-windows":
+        return 0, "".join(w + "\n" for w, v in state["windows"].items()
+                          if v.get("session") == win.get("session"))
+    if cmd == "list-clients":
+        return 0, state.get("clients", "")
+    if cmd == "respawn-pane":
+        state.setdefault("dead", {})[pane] = 0
+        words = shlex.split(pos[-1])
+        env = dict(word.split("=", 1) for word in words if "=" in word)
+        ready = dict(nonce=env["DEBATE_VIEW_NONCE"], role=words[-1],
+                     team=env["AGENT_TEAM"], log_dir=env["DEBATE_LOG_DIR"].rstrip("/") + "/" + env["AGENT_TEAM"])
+        state.setdefault("pane_options", {}).setdefault(pane, {})["@debate-view-ready"] = json.dumps(ready)
+        return 0, ""
+    if cmd == "kill-session":
+        session = win.get("session")
+        state["windows"] = {w: v for w, v in state["windows"].items() if v.get("session") != session}
+        return 0, ""
     if cmd == "select-pane":
         win["active"] = pane
         return 0, ""

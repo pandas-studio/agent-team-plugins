@@ -49,7 +49,7 @@ esac
 
 TEAM=$(agent_team_detect_team) || exit 2
 LOG_BASE="${DEBATE_LOG_DIR:-$PWD/.debate-conductor/log}"
-LOG_DIR="$LOG_BASE/$TEAM"
+LOG_DIR="${LOG_BASE%/}/$TEAM"
 
 # ANSI color setup
 RESET=$'\033[0m'
@@ -94,6 +94,13 @@ fi
 
 PIPE_PG=""
 cleanup() {
+  if [ -n "${DEBATE_VIEW_NONCE:-}" ] && [ -n "${TMUX_PANE:-}" ]; then
+    # A retiring process must not erase a replacement viewer's readiness.
+    ready=$(tmux show-options -pqv -t "$TMUX_PANE" @debate-view-ready 2>/dev/null || true)
+    if printf '%s' "$ready" | jq -e --arg nonce "$DEBATE_VIEW_NONCE" '.nonce == $nonce' >/dev/null 2>&1; then
+      tmux set-option -pu -t "$TMUX_PANE" @debate-view-ready 2>/dev/null || true
+    fi
+  fi
   if [ -n "$PIPE_PG" ]; then
     # Bash job control can print the whole pipeline (including awk source) to
     # the pane when a signal ends the viewer. We still kill its process group.
@@ -207,6 +214,12 @@ observe_selection() {
     MISSING_NOTED=""
   fi
 }
+
+if [ -n "${DEBATE_VIEW_NONCE:-}" ] && [ -n "${TMUX_PANE:-}" ]; then
+  ready=$(jq -cn --arg nonce "$DEBATE_VIEW_NONCE" --arg role "$ROLE" --arg team "$TEAM" --arg dir "$LOG_DIR" \
+    '{nonce:$nonce,role:$role,team:$team,log_dir:$dir}')
+  tmux set-option -p -t "$TMUX_PANE" @debate-view-ready "$ready"
+fi
 
 while true; do
   observe_selection

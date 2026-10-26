@@ -1,6 +1,8 @@
 # debate-conductor
 
-Claude or Codex conducts a Generator vs Critic adversarial debate over N rounds. Three-pane tmux layout: left = PM, middle = Generator transcript live tail, right = Critic transcript live tail.
+Claude or Codex conducts a Generator vs Critic debate. Run/continue prepare live
+viewing: a verified three-pane layout inside tmux, or a detached two-role view
+outside it. Bootstrap is optional.
 
 Default model assignment:
 
@@ -12,7 +14,7 @@ Default model assignment:
 
 ## Prerequisites
 
-- `tmux`
+- `tmux` >=3.2 for managed live panes (optional; otherwise manual tail commands)
 - `claude` (Claude Code)
 - `agy` (Antigravity CLI) authenticated
 - `codex` (OpenAI Codex CLI) authenticated
@@ -60,6 +62,67 @@ codex plugin add debate-conductor@pandas-studio
 ```
 
 ## Use
+
+### Start directly, with or without tmux
+
+```text
+/debate-conductor:run "FastAPI vs Django" 3
+/debate-conductor:run --open-view "FastAPI vs Django" 3
+/debate-conductor:continue --view=tmux 2
+```
+
+Codex uses the corresponding `$debate-conductor:run` / `:continue` forms.
+
+| Skill control | Behavior |
+| --- | --- |
+| `--view=auto` (default) | Prepare viewers; on failure print the reason and manual tails, then run. |
+| `--view=tmux` | Require ready tmux viewers before starting the debate. |
+| `--view=none` | Print two manual tail commands; create no view. |
+| `--open-view` | Prepare a separate two-role view and try opening a **new** terminal window. |
+| `--terminal=auto`, `ghostty`, or `terminal` | Optional with `--open-view`; local macOS only. |
+
+Controls precede the topic/rounds; `--` ends control parsing. Invalid/duplicate
+controls and `--view=none --open-view` stop before inference. These are skill
+controls, not new raw `debate.sh` flags; Ralph/direct callers are unchanged.
+
+The PM prepares in a separate tool call and **shows viewing instructions before
+the long debate starts**. A detached session alone does not open a window: copy
+the emitted socket-qualified attach command into another tab/window on the same
+machine/user. Names include team and a log-directory checksum, so projects do
+not fight over a global `debate-view`. Repeated preparation reuses two panes.
+`switch-client` applies only to the same server/socket; otherwise use a tab
+outside the current tmux and the attach command.
+
+`--open-view` supports identified Ghostty >=1.3 or Terminal.app. An attached
+client avoids duplicate windows. Window launch and confirmed tmux attachment
+are reported separately. Denied Automation, SSH/unsupported hosts and opening
+failures leave manual instructions. GUI failure is advisory if a strict tmux
+view itself is ready. No permission settings are changed.
+
+Later say **“뷰 열어줘”**: the PM directly opens the saved view without running
+another debate or implicitly invoking bootstrap. Handling can wait for a
+blocking host command to yield; use `--open-view` to watch from the beginning.
+New turns use normal host permissions and may require a narrow approval.
+Explicit `/debate-conductor:bootstrap --open-view` is view-only too.
+
+Default keys: `Ctrl-b d` detaches, `Ctrl-b [` scrolls, `space` pauses one viewer,
+`q` stops it. Next preparation revives owned dead viewers without adding panes.
+Detached sessions remain after the debate for rereading. Their emitted cleanup
+command removes only the view, not the separate PM/debate. Disk transcripts
+outlive pane scrollback. Foreign/incomplete views and stale setup locks remain
+intact with inspection instructions; they are not automatically removed.
+
+Team, absolute log root and viewer cwd are explicit, including `AGENT_TEAM` and
+custom `DEBATE_LOG_DIR`. Continue uses the chosen transcript's parent. Results
+are bound to a private validated dispatch receipt, never mutable `latest-debate`;
+even exit 0 without a receipt is incomplete.
+
+New layouts carry context/readiness metadata. Unverified legacy layouts remain
+intact and use a separate view rather than claiming they are ready. The legacy
+shared `--here` stale-lock takeover is unchanged; new detached locks never
+automatically take over stale ownership.
+
+### Explicit three-pane bootstrap
 
 1. From a workspace dir (any project with — or without — a custom `topics/` folder):
    ```bash

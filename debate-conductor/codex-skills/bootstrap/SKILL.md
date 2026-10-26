@@ -1,26 +1,29 @@
 ---
 name: bootstrap
-description: Set up optional debate-conductor tmux transcript panes for a Codex PM when the user requests the debate layout.
+description: Prepare optional debate live viewers for Codex and optionally open a separate terminal window, without starting a debate.
 ---
 
-# Optional Codex Debate Layout
+# Prepare or open a Codex debate view
 
-Resolve the plugin root two directories above this skill directory. The shared
-entry point is [team-3pane.sh](../../bin/team-3pane.sh). Do not assume the
+Read the [shared viewing contract](../../lib/view-workflow.md). Resolve the
+plugin root two directories above this skill directory and use **absolute**
+`<plugin-root>/bin/team-3pane.sh` and `open-view.sh` paths. Do not assume the
 plugin added its bin directory to PATH.
 
-When already inside tmux and the user requests this window's debate layout, run:
+This is an explicit user view-only entry point. Parse leading
+`--view=auto|tmux|none` (default auto), `--open-view` and optional
+`--terminal=auto|ghostty|terminal`. Prepare via `team-3pane.sh --view=<mode>`,
+adding `--view-only` for an opening request. Read the returned context JSON.
 
-```bash
-DEBATE_CONDUCTOR_PM_HOST=codex "<plugin-root>/bin/team-3pane.sh" --here
-```
+Inside tmux a verified layout is reused or a guarded one-pane window is split.
+Other/legacy unverified windows stay intact and use a detached two-role view.
+Outside tmux preparation creates a background view, **not a visible terminal**.
 
-The script only builds the layout in a one-pane window. "Already present" with
-exit 0 means the layout is in place. Exit 2 means it refused to change this
-window; relay its error message verbatim and stop. Do not unset tmux options or
-kill panes yourself.
+For `--open-view`, call the absolute `open-view.sh --context '<context_file>'`
+with the selected terminal. Report confirmed attachment versus an unconfirmed
+launch honestly. Otherwise show the exact attach command for another local
+terminal tab/window; a manual fallback needs both tail commands and its reason.
+Follow the shared socket/Automation permission rules without changing settings.
 
-Outside tmux, create a detached layout with `--new-session --no-attach` and
-show the emitted attach command. Do not attach a terminal from Codex's command
-tool or replace its session. Debate runs work without tmux; report that option
-if tmux is unavailable. Preserve an explicitly requested team name with `-n`.
+Never dispatch `run-debate.sh`, `debate.sh`, or any model from this skill.
+Preserve user windows and context data; bootstrap is optional before run/continue.
