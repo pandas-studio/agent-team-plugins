@@ -348,6 +348,12 @@ run. See the [official headless guide](https://www.antigravity.google/docs/cli/h
 2. Use agy's `/permissions` or edit `~/.gemini/antigravity-cli/settings.json`
    yourself. Under `permissions.allow`, review only the required
    `command(<target>)`, `read_url(<domain>)`, or `mcp(<server/tool>)` rule.
+   If a denied `command(git ...)` entry contains backticks (`` ` ``), `$()`,
+   pipes, or other shell operators (including backticks or `$` inside double
+   quotes `"..."`), agy's safety monitor (`unquoted_shell_operators`) refused
+   to match a `command(git ...)` prefix rule rather than lacking the base git
+   permission — do not add a one-off rule for that quoted command; re-run with
+   plain git arguments and built-in file reads instead.
    These are placeholders, not a permission bundle to copy wholesale. A Python
    query does not require allowing every Python command, and a documentation
    page does not require allowing all websites. Existing `ask`/`deny` rules may

@@ -277,6 +277,7 @@ while true; do
           n = split(payload, parts, " ")
           m_role  = (parts[2] == "gen") ? "Generator" : "Critic"
           m_model = (n >= 3 && parts[3] !~ /=/) ? parts[3] : ""
+          kimi_env = 0
           printf "\n%s%s%s\n", ROLE_COLOR, BORDER, RESET
           if (m_model != "")
             printf "%s  Round %s · %s · %s%s\n", ROLE_COLOR, parts[1], m_role, m_model, RESET
@@ -287,10 +288,22 @@ while true; do
           next
         }
         is_marker($0) { next }
-        /^Verdict: STRENGTHEN[[:space:]]*$/ { printf "%s%s%s\n", GREEN,  $0, RESET; fflush(); next }
-        /^Verdict: RECONSIDER[[:space:]]*$/ { printf "%s%s%s\n", YELLOW, $0, RESET; fflush(); next }
-        /^Verdict: OVERTURN[[:space:]]*$/   { printf "%s%s%s\n", RED,    $0, RESET; fflush(); next }
-        { print; fflush() }
+        {
+          if ($0 != "") {
+            if ($0 ~ /^• /) { if (kimi_env == 0) kimi_env = 1 }
+            else if (kimi_env == 1 && $0 ~ /^  /) { }
+            else { kimi_env = -1 }
+          }
+          vline = $0
+          if (kimi_env == 1) {
+            if (vline ~ /^• /) sub(/^• [[:space:]]*/, "", vline)
+            else if (vline ~ /^  /) sub(/^  /, "", vline)
+          }
+          if (vline ~ /^Verdict: STRENGTHEN[[:space:]]*$/) { printf "%s%s%s\n", GREEN,  $0, RESET; fflush(); next }
+          if (vline ~ /^Verdict: RECONSIDER[[:space:]]*$/) { printf "%s%s%s\n", YELLOW, $0, RESET; fflush(); next }
+          if (vline ~ /^Verdict: OVERTURN[[:space:]]*$/)   { printf "%s%s%s\n", RED,    $0, RESET; fflush(); next }
+          print; fflush()
+        }
       '
   } &
   PIPE_PG=$!

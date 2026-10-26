@@ -109,10 +109,10 @@ Generator and Critic resolve through the shared model registry (the [marketplace
 
 | Role | Default | Pick a different model | Override its binary |
 | :--- | :--- | :--- | :--- |
-| `debate-conductor.generator` | `agy` | `--primary-gen=<model>`, `DEBATE_GENERATOR_MODEL` env, or `agent-team-models set-role debate-conductor.generator <model>` | `GENERATOR_CLI` · `AGY_CLI` |
-| `debate-conductor.critic` | `codex` from Claude, `claude` from Codex | `--primary-crit=<model>`, `DEBATE_CRITIC_MODEL` env, or `agent-team-models set-role debate-conductor.critic <model>` | `CRITIC_CLI` · `CODEX_CLI` · `CLAUDE_CLI` |
+| `debate-conductor.generator` | `agy` | `--primary-gen=<model>` (`--gen=<model>`), `DEBATE_GENERATOR_MODEL` env, or `agent-team-models set-role debate-conductor.generator <model>` | `GENERATOR_CLI` · `AGY_CLI` |
+| `debate-conductor.critic` | `codex` from Claude, `claude` from Codex | `--primary-crit=<model>` (`--crit=<model>`), `DEBATE_CRITIC_MODEL` env, or `agent-team-models set-role debate-conductor.critic <model>` | `CRITIC_CLI` · `CODEX_CLI` · `CLAUDE_CLI` |
 
-`--primary-gen` / `--primary-crit` accept any registered model id (run `agent-team-models list`); generator and critic must differ. With no critic specified, Claude host still defaults to "the other one" (codex unless gen=codex, then agy). Codex host defaults to Claude unless that would duplicate the generator. The legacy `DEBATE_PRIMARY_GEN` env var also keeps working.
+`--primary-gen` (`--gen` / `--generator`) / `--primary-crit` (`--crit` / `--critic`) accept any registered model id (run `agent-team-models list`; `antigravity` normalizes to `agy`, and `kimi` normalizes to `kimi-code` when the `kimi-code` preset is installed); generator and critic must differ. With no critic specified, Claude host still defaults to "the other one" (codex unless gen=codex, then agy). Codex host defaults to Claude unless that would duplicate the generator. The legacy `DEBATE_PRIMARY_GEN` env var also keeps working. An optional Round-1 Generator context file can be passed either positionally (`debate.sh "topic" context.md`) or via `--context=context.md` (not both).
 
 For models declaring `final_args`, `GENERATOR_CLI` and `CRITIC_CLI` wrappers
 must forward all arguments to the selected CLI (for example, `exec codex "$@"`).

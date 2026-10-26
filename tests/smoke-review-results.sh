@@ -298,6 +298,56 @@ parse
 check 'default vocabulary stays closed' json_is "$TMP/parsed.json" '.exit_code==3 and .verdict==null'
 parse 0 spec
 check 'explicit spec profile permits contract verdict' json_is "$TMP/parsed.json" '.verdict=="OUT-OF-SCOPE" and .exit_code==0'
+
+# Kimi Code 2.3+ print mode (PromptBlockWriter) prefixes the first line of each
+# assistant block with "• " and continuation lines with two spaces, plus an
+# optional "To resume this session: kimi -r <id>" hint on stderr.
+cat > "$TMP/review.md" <<'REVIEW'
+• I will inspect the repository diff first.
+
+• ## Verdict
+  NEEDS-FIX — one major finding in Kimi print mode
+
+  ## Findings
+
+  ### Blocker
+  - None.
+
+  ### Major
+  - `src/app.py:12` — missing check → validate input.
+
+  ### Minor / Nit
+  - 없음.
+
+  ## What I checked
+  - Checked `src/app.py`.
+
+To resume this session: kimi -r 12345678-1234-1234-1234-123456789abc
+REVIEW
+parse
+check 'kimi PromptBlockWriter review parses cleanly' json_is "$TMP/parsed.json" \
+  '.status=="ok" and .exit_code==0 and .verdict=="NEEDS-FIX" and .findings.blocker==[] and .findings.major==["- `src/app.py:12` — missing check → validate input."] and .findings.minor==[]'
+
+cat > "$TMP/review.md" <<'REVIEW'
+• ## Verdict
+  SHIP — indented finding inside Kimi block must still fail
+  ## Findings
+  ### Major
+    - Indented two spaces inside the model response.
+REVIEW
+parse
+check 'kimi PromptBlockWriter preserves fail-closed indentation check' json_is "$TMP/parsed.json" \
+  '.status=="parse-failed" and .exit_code==3 and (.error|contains("noncanonical major"))'
+
+cat > "$TMP/review.md" <<'REVIEW'
+• ## Verdict
+  SHIP — first block
+• ## Verdict
+  NEEDS-FIX — second block
+REVIEW
+parse
+check 'kimi PromptBlockWriter rejects duplicate verdicts across blocks' json_is "$TMP/parsed.json" \
+  '.status=="parse-failed" and .exit_code==3 and .error=="duplicate Verdict headings"'
 fixture 'OUT-OF-SCOPE: contract violation'
 parse
 check 'default vocabulary stays closed with a colon' json_is "$TMP/parsed.json" '.exit_code==3 and .verdict==null'
@@ -1312,6 +1362,7 @@ fi
 if [ -n "$log" ] && [ -n "${TEST_AGY_ID:-}" ]; then
   printf 'I0923 17:51:49.1 1 server.go:1239] Created conversation %s%s\n' "$TEST_AGY_ID" "${TEST_AGY_LOG_SUFFIX:-}" > "$log"
   printf 'I0923 17:51:49.2 1 cli_setting_manager.go:92] permissions=&{Allow:[command(SENTINEL-RULE)]}\n' >> "$log"
+  [ -z "${TEST_AGY_EXTRA_LOG:-}" ] || printf '%s\n' "$TEST_AGY_EXTRA_LOG" >> "$log"
 fi
 [ -z "${TEST_AGY_STDOUT:-}" ] || cat "$TEST_AGY_STDOUT"
 [ "${TEST_AGY_NOTICE:-0}" != 1 ] || printf '%s\n' "$TEST_AGY_NOTICE_TEXT" >&2
@@ -1367,6 +1418,27 @@ check 'a nested run still reports the conversation' json_is "$RESULT" ".status==
 check 'the nested run adds nothing but its role to the parent' json_is "$MANIFEST_TMP" '(.inputs | any(.kind=="agy-conversation") | not) and (.roles|length)==1'
 agy_review 3 TEST_AGY_ID="$AGY_ID" TEST_AGY_LOG_SUFFIX=' (backend=BACKEND_TYPE_UNSPECIFIED)' TEST_AGY_NOTICE=1
 check 'agy 1.4+ trailing backend tag still resolves the conversation and denials' json_is "$RESULT" ".status==\"permission-denied\" and .denied==$AGY_DENIED and .conversation_ids==[\"$AGY_ID\"]"
+
+# agy 1.4+ print-mode soft-denials close the stream before writing a status:ERROR
+# step to transcript_full.jsonl, leaving only the preceding PLANNER_RESPONSE
+# (step 53) and the CLI log's unapproved confirmation at step 54.
+agy_soft_denial_transcript() {
+  local dir="$AGY_HOME/brain/$AGY_ID/.system_generated/logs"
+  rm -rf "$AGY_HOME/brain"
+  mkdir -p "$dir"
+  {
+    jq -cn '{step_index:26,type:"PLANNER_RESPONSE",status:"DONE",tool_calls:[{id:"c1",name:"read_file",args:{Path:"/repo/a.md"}},{id:"c2",name:"run_command",args:{CommandLine:"git status"}}]}'
+    jq -cn '{step_index:27,type:"VIEW_FILE_OUTLINE",status:"DONE"}'
+    jq -cn '{step_index:53,type:"PLANNER_RESPONSE",status:"DONE",tool_calls:[{id:"c3",name:"read_file",args:{Path:"/repo/c.md"}},{id:"c4",name:"run_command",args:{CommandLine:"git log -S \"```mermaid\" --oneline -- slides/src/"}}]}'
+    jq -cn '{step_index:54,type:"VIEW_FILE_OUTLINE",status:"DONE"}'
+  } > "$dir/transcript_full.jsonl"
+}
+agy_soft_denial_transcript
+SOFT_LOG=$(printf 'W1026 12:08:06.8 1 print.go:196] Print mode: soft-denying tool confirmation "RunCommand" at step 55\nI1026 12:08:06.8 1 server.go:2203] Tool confirmation for conversation %s step 55 (type=*gemini_coder_go_proto.Step_Generic approved=false)\nI1026 12:08:06.8 1 server.go:2203] Tool confirmation for conversation 00000000-0000-0000-0000-000000000000 step 28 (type=*gemini_coder_go_proto.Step_Generic approved=false)' "$AGY_ID")
+agy_review 3 TEST_AGY_ID="$AGY_ID" TEST_AGY_LOG_SUFFIX=' (backend=BACKEND_TYPE_UNSPECIFIED)' TEST_AGY_EXTRA_LOG="$SOFT_LOG" TEST_AGY_NOTICE=1
+check 'agy 1.4+ print-mode soft-denial extracts the denied command from PLANNER_RESPONSE' json_is "$RESULT" \
+  ".status==\"permission-denied\" and .denied==[\"command(git log -S \\\"\`\`\`mermaid\\\" --oneline -- slides/src/)\"] and .conversation_ids==[\"$AGY_ID\"]"
+check 'stderr names the soft-denied backtick git command' grep -Fxq '[ask-reviewer] agy denied: command(git log -S "```mermaid" --oneline -- slides/src/)' "$TMP/wrapper.err"
 
 rm -rf "$AGY_HOME/brain"
 agy_review 3 TEST_AGY_NOTICE=1

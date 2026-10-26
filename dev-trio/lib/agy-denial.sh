@@ -33,6 +33,42 @@ agy_denial_conversations() {
   return 0
 }
 
+# _agy_denial_steps CLI_LOG CONVERSATION_ID — JSON array of step numbers the
+# CLI log recorded as unapproved tool confirmations for CONVERSATION_ID.
+# agy 1.4+ print-mode soft-denials close the stream before writing a step N
+# {"status":"ERROR"} entry to transcript_full.jsonl, leaving only the preceding
+# PLANNER_RESPONSE (step N-1) and the CLI log's confirmation lines.
+_agy_denial_steps() {
+  [ -f "$1" ] && [ -r "$1" ] || { printf '[]\n'; return 0; }
+  awk -v id="$2" -v conv_count="${3:-1}" '
+    match($0, /Tool confirmation for conversation [0-9a-f-]+ step [0-9]+ .*approved=false/) {
+      has_conv = 1
+      s = substr($0, RSTART, RLENGTH)
+      sub(/^Tool confirmation for conversation /, "", s)
+      cid = s; sub(/ step .*$/, "", cid)
+      st = s; sub(/^[^ ]+ step /, "", st); sub(/[^0-9].*$/, "", st)
+      if (cid == id && st ~ /^[0-9]+$/) conv_steps[++nc] = st + 0
+      next
+    }
+    match($0, /Print mode: soft-denying tool confirmation "RunCommand" at step [0-9]+/) {
+      s = substr($0, RSTART, RLENGTH)
+      sub(/^.* at step /, "", s)
+      sub(/[^0-9].*$/, "", s)
+      if (s ~ /^[0-9]+$/) soft_steps[++ns] = s + 0
+    }
+    END {
+      printf "["
+      use_soft = (!has_conv && conv_count == 1)
+      n = has_conv ? nc : (use_soft ? ns : 0)
+      for (i = 1; i <= n; i++) {
+        v = has_conv ? conv_steps[i] : soft_steps[i]
+        printf "%s%d", (i > 1 ? "," : ""), v
+      }
+      printf "]\n"
+    }
+  ' "$1" 2>/dev/null || printf '[]\n'
+}
+
 # agy_denial_targets AGY_HOME CLI_LOG — each denied target as the allow-rule it
 # would need, "<kind>(<target>)", unique and in the order agy recorded them.
 # A target that is not valid JSON once unquoted (Go's \x.. and \a escapes are
@@ -40,17 +76,34 @@ agy_denial_conversations() {
 # characters are shown escaped (\n, \t, \u001b), not removed: the target is
 # text the model wrote, and deleting them would name a different command.
 agy_denial_targets() {
-  local home="$1" log="$2" id transcript
-  for id in $(agy_denial_conversations "$log"); do
+  local home="$1" log="$2" id transcript steps convs conv_count=0
+  convs="$(agy_denial_conversations "$log")"
+  for id in $convs; do conv_count=$((conv_count + 1)); done
+  for id in $convs; do
     transcript="$home/brain/$id/.system_generated/logs/transcript_full.jsonl"
     [ -f "$transcript" ] && [ -r "$transcript" ] || continue
-    jq -Rr '
-      fromjson? | select(type == "object") | select(.status == "ERROR")
-      | .error | select(type == "string")
-      | capture("^permission check failed for (?<kind>[A-Za-z_]+) (?<q>\"([^\"\\\\]|\\\\.)*\")")?
-      | .q as $q
-      | "\(.kind)(\($q | try fromjson catch $q))"
-      | gsub("(?<c>[[:cntrl:]])"; .c | tojson | .[1:-1])
+    steps="$(_agy_denial_steps "$log" "$id" "$conv_count")"
+    case "$steps" in \[*\]) ;; *) steps='[]' ;; esac
+    jq -Rrn --argjson steps "$steps" '
+      def clean: gsub("(?<c>[[:cntrl:]])"; .c | tojson | .[1:-1]);
+      def call_target:
+        if (.name == "run_command") and (.args.CommandLine | type == "string") then
+          "command(\(.args.CommandLine))"
+        else empty end;
+      [inputs | fromjson? | select(type == "object")] as $rows
+      | ($rows | map(select((.status == "DONE" or .status == "ERROR") and (.step_index | type == "number")) | .step_index)) as $recorded
+      | (
+          ($rows[] | select(.status == "ERROR") | .error | select(type == "string")
+           | capture("^permission check failed for (?<kind>[A-Za-z_]+) (?<q>\"([^\"\\\\]|\\\\.)*\")")?
+           | .q as $q | "\(.kind)(\($q | try fromjson catch $q))" | clean),
+          ($steps[] as $s
+           | select(($recorded | index($s)) == null)
+           | ([ $rows[] | select(.type == "PLANNER_RESPONSE" and (.step_index | type == "number") and .step_index < $s) ] | last)
+           | select(. != null and (.tool_calls | type == "array"))
+           | ($s - .step_index - 1) as $idx
+           | select($idx >= 0 and $idx < (.tool_calls | length))
+           | .tool_calls[$idx] | select(type == "object") | call_target | clean)
+        )
     ' "$transcript" 2>/dev/null || true
   done | awk '!seen[$0]++'
   return 0

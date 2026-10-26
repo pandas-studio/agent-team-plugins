@@ -370,6 +370,29 @@ assert_eq "$(rd106_outcome)" "max-iter 1|pending=0|verdicts=1|iter 1 UNKNOWN ver
 assert_eq "$(sed -n 's/^  verdict: *//p' "$TMP/rw61/log/smoke/latest-ralph-debate.log")" "UNKNOWN"
 assert_eq "$(cat "$DRV/BACKLOG.md")" "- [x] task 61"
 
+# --gen / --crit aliases and Kimi PromptBlockWriter `• Verdict: STRENGTHEN` parsing.
+cat > "$TMP/worker-cli/kimicrit" <<'STUB'
+#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --output-last-message ]; then
+    printf '• ## Verdict\n  STRENGTHEN — sound\n\n• Verdict: STRENGTHEN\n' > "$2"
+    break
+  fi
+  shift
+done
+printf '• ## Verdict\n  STRENGTHEN — sound\n\n• Verdict: STRENGTHEN\n'
+STUB
+chmod +x "$TMP/worker-cli/kimicrit"
+printf -- '- [ ] task kimi\n' > "$DRV/BACKLOG.md"
+assert_eq "$( (cd "$DRV" && env PATH="$RD/bin:$ROOT/dev-trio/bin:$PATH" \
+  AGENT_TEAM=smoke TMUX="" RALPH_TRIO_WORKSPACE="$TMP/rw61" \
+  DEBATE_LOG_DIR="$RD/log" AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" \
+  GENERATOR_CLI="$TMP/worker-cli/answer" CRITIC_CLI="$TMP/worker-cli/kimicrit" \
+  "$ROOT/ralph-trio/bin/ralph-debate.sh" --backlog BACKLOG.md --max-iter 1 \
+  --gen=agy --crit=codex \
+  >/dev/null 2>"$TMP/rd61kimi.err" </dev/null; echo "rc=$?") )" "rc=0"
+assert_eq "$(sed -n 's/^  verdict: *//p' "$TMP/rw61/log/smoke/latest-ralph-debate.log")" "STRENGTHEN"
+
 # A debate-conductor too old to ship the shared receipt library is refused up
 # front, not once per iteration.
 mkdir -p "$TMP/rd61old/bin" "$TMP/rd61old/lib"

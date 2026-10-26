@@ -9,15 +9,29 @@ Codex is the conductor. Resolve the plugin root two directories above this skill
 directory and use [debate.sh](../../bin/debate.sh). Do not call
 `ask-generator.sh` or `ask-critic.sh` directly.
 
-From the user's workspace, pass the topic as one quoted argument:
+From the user's workspace, pass the topic as one quoted argument (and an optional
+`[context-file.md]` when the topic references repository-specific context):
 
 ```bash
-DEBATE_CONDUCTOR_PM_HOST=codex "<plugin-root>/bin/debate.sh" -n <rounds> "<topic>"
+DEBATE_CONDUCTOR_PM_HOST=codex "<plugin-root>/bin/debate.sh" -n <rounds> [flags] "<topic>" [context-file.md]
 ```
 
 If the user asks for convergence, add `--until-converged`; then `-n` is the
 upper bound and may be omitted to use the default cap. Preserve explicit
-`--rotate`, `--primary-gen=<model>`, and `--primary-crit=<model>` choices.
+`--rotate`, `--primary-gen=<model>` (`--gen=<model>`), and
+`--primary-crit=<model>` (`--crit=<model>`) choices, and translate natural-language
+role requests (e.g. `gen=agy crit=kimi-code`, `claude vs agy`) into those flags
+rather than leaving model labels inside `<topic>`.
+
+Generator and Critic run in **non-interactive headless mode** where unapproved
+shell discovery commands (`rg`, `find`, `grep`, compound commands) are
+auto-denied and abort the round. When a short topic references repository-internal
+entities (e.g. `"Track 4"`, local specs, plans, or module names) without
+self-contained context, read the relevant workspace files first and include the
+essential repository facts directly in `<topic>` (every round — Generator and
+Critic alike — sees `<topic>`), optionally passing longer Round-1 Generator
+background via `[context-file.md]` (`--context=<file>`, written under
+`.debate-conductor/log/` or `$TMPDIR`; read by Round 1's Generator only).
 
 When no topic is supplied, inspect workspace `topics/*.txt` first, then the
 plugin's bundled `topics/*.txt`; ask the user to choose only if the topic is

@@ -21,7 +21,8 @@
 # Usage:
 #   ralph-debate.sh --max-iter N --backlog PATH [--rounds N] [--prompt PATH]
 #                   [--fix-plan PATH] [--max-runtime SPEC] [--worktree]
-#                   [--base-branch BR] [--generator-model ID] [--critic-model ID] [--dry-run]
+#                   [--base-branch BR] [--generator-model|--primary-gen|--gen ID]
+#                   [--critic-model|--primary-crit|--crit ID] [--dry-run]
 #
 # Prerequisites: debate-conductor plugin (debate.sh via DEBATE_CONDUCTOR_BIN, PATH or `claude plugin list`).
 #
@@ -53,7 +54,7 @@ DRY_RUN=0
 GENERATOR_MODEL=""
 CRITIC_MODEL=""
 
-usage() { sed -n '2,29p' "$0" >&2; }
+usage() { sed -n '2,32p' "$0" >&2; }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -68,8 +69,10 @@ while [ "$#" -gt 0 ]; do
     --no-validate)     NO_VALIDATE=1; shift ;;
     --max-diff-lines)  MAX_DIFF_LINES="$2"; shift 2 ;;
     --dry-run)         DRY_RUN=1; shift ;;
-    --generator-model) [ "$#" -ge 2 ] || exit 2; GENERATOR_MODEL="$2"; shift 2 ;;
-    --critic-model)    [ "$#" -ge 2 ] || exit 2; CRITIC_MODEL="$2"; shift 2 ;;
+    --generator-model|--primary-gen|--gen) [ "$#" -ge 2 ] || exit 2; GENERATOR_MODEL="$2"; shift 2 ;;
+    --generator-model=*|--primary-gen=*|--gen=*) GENERATOR_MODEL="${1#*=}"; [ -n "$GENERATOR_MODEL" ] || exit 2; shift ;;
+    --critic-model|--primary-crit|--crit)  [ "$#" -ge 2 ] || exit 2; CRITIC_MODEL="$2"; shift 2 ;;
+    --critic-model=*|--primary-crit=*|--crit=*) CRITIC_MODEL="${1#*=}"; [ -n "$CRITIC_MODEL" ] || exit 2; shift ;;
     -h|--help)         usage; exit 0 ;;
     *)                 echo "unknown arg: $1" >&2; usage; exit 2 ;;
   esac
@@ -187,8 +190,8 @@ parse_critic_verdict() {
   local f="$1"
   awk '
     # Canonical line: matches `Verdict: STRENGTHEN`, `verdict: reconsider`, etc.
-    # Allows leading whitespace and optional surrounding markdown emphasis.
-    tolower($0) ~ /^[[:space:]]*\**[[:space:]]*verdict[[:space:]]*:[[:space:]]*(strengthen|reconsider|overturn)\**[[:space:]]*$/ {
+    # Allows leading whitespace, Kimi PromptBlockWriter `• ` prefix, and optional markdown emphasis.
+    tolower($0) ~ /^[[:space:]]*(•[[:space:]]+)?\**[[:space:]]*verdict[[:space:]]*:[[:space:]]*(strengthen|reconsider|overturn)\**[[:space:]]*$/ {
       v = toupper($0)
       sub(/.*VERDICT[[:space:]]*:[[:space:]]*/, "", v)
       sub(/[^A-Z].*$/, "", v)
@@ -196,8 +199,8 @@ parse_critic_verdict() {
       next
     }
     # Fallback: first token inside `## Verdict` section.
-    /^#+[[:space:]]*Verdict/ { in_v = 1; next }
-    in_v && /^#+[[:space:]]/  { in_v = 0 }
+    /^[[:space:]]*(•[[:space:]]+)?#+[[:space:]]*Verdict/ { in_v = 1; next }
+    in_v && /^[[:space:]]*(•[[:space:]]+)?#+[[:space:]]/  { in_v = 0 }
     in_v && !section_hit && /STRENGTHEN/ { section_hit = "STRENGTHEN" }
     in_v && !section_hit && /RECONSIDER/ { section_hit = "RECONSIDER" }
     in_v && !section_hit && /OVERTURN/   { section_hit = "OVERTURN" }

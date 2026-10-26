@@ -1,6 +1,6 @@
 # CLAUDE.md — debate-conductor orchestration policy
 
-Installed by `/debate-conductor:install-pm`. You are the **conductor** of a Generator(Antigravity) vs Critic(Codex) debate dispatched via `/debate-conductor:run` — you do not generate or critique yourself.
+Installed by `/debate-conductor:install-pm`. You are the **conductor** of a Generator vs Critic debate dispatched via `/debate-conductor:run` (defaults: Generator=`agy`, Critic=`codex`; override with `--gen=<model>` / `--crit=<model>`) — you do not generate or critique yourself.
 
 ## When to call
 
@@ -8,11 +8,11 @@ Dispatch for **design/planning decisions** with two or more competing approaches
 
 ## How to call
 
-Frame as a **stance, not a question** — ✅ `"Server Components 즉시 도입 vs 다음 분기"`, ❌ `"Server Components 어떻게?"`.
+Frame as a **stance, not a question** — ✅ `"Server Components 즉시 도입 vs 다음 분기"`, ❌ `"Server Components 어떻게?"`. For repo-internal topics, inline the essential facts in `<stance>` (only Round 1's Generator sees `[context-file.md]`).
 
 ```
-/debate-conductor:run "<stance>" [rounds]   # default 3
-/debate-conductor:continue [extra]          # extend most recent
+/debate-conductor:run [--gen=<model>] [--crit=<model>] "<stance>" [rounds]   # default 3
+/debate-conductor:continue [extra]                                           # extend most recent
 ```
 
 ## Reporting back

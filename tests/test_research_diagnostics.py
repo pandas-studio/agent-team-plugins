@@ -43,6 +43,7 @@ class ResearchDiagnosticsTests(unittest.TestCase):
             # Like agy, record the conversation in the pinned --log-file.
             'if [ "$1" = --log-file ] && [ -n "${DIAG_CONVERSATION:-}" ]; then\n'
             '  printf "I0923 1 server.go:1239] Created conversation %s%s\\n" "$DIAG_CONVERSATION" "${DIAG_CONVERSATION_SUFFIX:-}" > "$2"\n'
+            '  [ -z "${DIAG_EXTRA_LOG:-}" ] || printf "%s\\n" "$DIAG_EXTRA_LOG" >> "$2"\n'
             'fi\n'
             'if [ -n "${DIAG_READY:-}" ]; then : > "$DIAG_READY"; fi\n'
             # Hold until the test releases it (#195): a handshake, not a timed
@@ -321,6 +322,36 @@ class ResearchDiagnosticsTests(unittest.TestCase):
         self.assertIn(f"[ask-researcher] agy conversation: {self.CONVERSATION}", lines)
         self.assertIn("[ask-researcher] could not create agy's per-run log under", result.stderr)
         self.assertEqual(list(tmp.glob("dev-trio-agy.*")), [])
+
+    def test_soft_denied_tool_confirmation_without_error_step_names_its_target(self):
+        logs = self.agy_home / "brain" / self.CONVERSATION / ".system_generated/logs"
+        logs.mkdir(parents=True)
+        planner = {
+            "step_index": 53,
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "tool_calls": [{
+                "id": "call_1",
+                "name": "run_command",
+                "args": {"CommandLine": 'git log -S "```mermaid" --oneline -- slides/src/'},
+            }],
+        }
+        (logs / "transcript_full.jsonl").write_text(json.dumps(planner) + "\n")
+        extra_log = (
+            'W1026 12:08:06.8 1 print.go:196] Print mode: soft-denying tool confirmation "RunCommand" at step 54\n'
+            f"I1026 12:08:06.8 1 server.go:2203] Tool confirmation for conversation {self.CONVERSATION} "
+            "step 54 (type=*gemini_coder_go_proto.Step_Generic approved=false)"
+        )
+        result = self.run_script(
+            "ask-researcher.sh", "question", DIAG_RC="0", DIAG_ANSWER="",
+            DIAG_STDERR=self.NOTICE, DIAG_CONVERSATION=self.CONVERSATION,
+            DIAG_CONVERSATION_SUFFIX=" (backend=BACKEND_TYPE_UNSPECIFIED)",
+            DIAG_EXTRA_LOG=extra_log,
+        )
+        self.assertEqual(result.returncode, 5, result.stderr)
+        lines = result.stderr.splitlines()
+        self.assertIn('[ask-researcher] agy denied: command(git log -S "```mermaid" --oneline -- slides/src/)', lines)
+        self.assertIn(f"[ask-researcher] agy conversation: {self.CONVERSATION}", lines)
 
     # A hold for shell shims (#195): readiness, then an external waiter that a
     # process-group signal ends at once. A waiter that times out leaves a

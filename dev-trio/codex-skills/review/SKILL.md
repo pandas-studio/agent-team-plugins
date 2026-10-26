@@ -86,8 +86,11 @@ bullets in Markdown, and do not use `latest` artifacts.
   wrote no review. Report each `denied` entry (a target agy recorded as
   denied; agy 1.2.9 ignores `unsandboxed(...)` rules; empty means agy
   recorded none) and `conversation_ids`, and point to the
-  README section "Resolve a confirmed agy permission denial". Do not grant
-  anything yourself.
+  README section "Resolve a confirmed agy permission denial". If a denied
+  `command(git ...)` target contains backticks (`` ` ``), `$()`, or shell
+  operators (even inside `"..."`), agy's `unquoted_shell_operators` check
+  prevented the `command(git ...)` prefix rule from matching rather than missing
+  the base rule. Do not grant anything yourself.
 - `status: "parse-failed"` (exit 3) or `"invocation-failed"`: report the
   failure, its `error`, and the artifact paths. There is no verdict. A
   `parse-failed` result with `invocation_rc: 0` is a finished review that broke

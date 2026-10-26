@@ -1713,6 +1713,81 @@ stream_header() {
                 self.assertNotIn("version: 1\n", text)
                 self.assertNotIn("agent:\n", text)
 
+    def test_workspace_model_prompts_include_headless_exec_note_and_tool_discipline(self):
+        gen = self.run_cli("ask-generator.sh", "-m", "agy", "fixture topic")
+        self.assertEqual(gen.returncode, 0, gen.stderr)
+        crit = self.run_cli("ask-critic.sh", "--model=agy", "fixture focus")
+        self.assertEqual(crit.returncode, 0, crit.stderr)
+        codex_gen = self.run_cli("ask-generator.sh", "--model=codex", "fixture topic")
+        self.assertEqual(codex_gen.returncode, 0, codex_gen.stderr)
+
+        calls = self.recorded()
+        agy_gen_prompt = calls[0][-1]
+        agy_crit_prompt = calls[1][-1]
+        codex_gen_prompt = calls[2][-1]
+
+        for prompt in (agy_gen_prompt, agy_crit_prompt):
+            self.assertIn("## Tool discipline", prompt)
+            self.assertIn("# Execution environment", prompt)
+            self.assertIn("--input-format text --output-format text", prompt)
+            self.assertIn("The selected CLI", prompt)
+            self.assertNotIn("PM (Claude Code)", prompt)
+            self.assertNotIn("routed from the PM (Claude)", prompt)
+        self.assertNotIn("comes from Antigravity in response to your previous NEED RESEARCH block",
+                         agy_crit_prompt)
+        self.assertIn("## Tool discipline", codex_gen_prompt)
+        self.assertNotIn("# Execution environment", codex_gen_prompt)
+
+    def test_role_flag_aliases_model_label_normalization_and_round_headers(self):
+        self.config.write_text(json.dumps({
+            "models": {
+                "kimi-code": {
+                    "command": str(self.stub),
+                    "args": ["-p", "{prompt}"],
+                }
+            },
+            "roles": {},
+        }))
+        ctx = self.root / "ctx.md"
+        ctx.write_text("REPO-CONTEXT-PAYLOAD\n")
+        result = self.run_cli("debate.sh", "-n", "2", "--gen=antigravity", "--crit", "kimi",
+                              "--context", str(ctx), "fixture topic")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Round 1 · Generator · agy", result.stdout)
+        self.assertIn("Round 2 · Critic · kimi-code", result.stdout)
+        metadata = json.loads((self.latest_debate() / "models.json").read_text())
+        self.assertEqual(metadata["generator"], "agy")
+        self.assertEqual(metadata["critic"], "kimi-code")
+        prompts = self.generator_prompts()
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("REPO-CONTEXT-PAYLOAD", prompts[0])
+
+        for bad_args in (("--gen=", "t"), ("--crit=", "t"), ("--context=", "t"),
+                         ("t", str(ctx), "--context", str(ctx))):
+            bad = self.run_cli("debate.sh", *bad_args)
+            self.assertEqual(bad.returncode, 2, bad_args)
+
+    def test_unregistered_kimi_hint_names_preset_command(self):
+        result = self.run_cli("debate.sh", "-n", "2", "--crit=kimi", "fixture topic")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("agent-team-models preset add kimi-code", result.stderr)
+
+    def test_until_converged_parses_kimi_prompt_block_writer_verdicts(self):
+        kimi_verdict = "• ## Verdict\n  STRENGTHEN - sound.\n\n  Verdict: STRENGTHEN\n"
+        result = self.run_cli("debate.sh", "--until-converged", "-n", "6", "fixture topic",
+                              STUB_RESPONSE=kimi_verdict)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Converged at round 2", result.stdout)
+
+        for non_converging in (
+            "## Verdict\nRECONSIDER - not yet.\n\n    Verdict: STRENGTHEN\n",
+            "## Critique\nQuoted example:\n  Verdict: STRENGTHEN\n",
+        ):
+            result2 = self.run_cli("debate.sh", "--until-converged", "-n", "2", "fixture topic 2",
+                                   STUB_RESPONSE=non_converging)
+            self.assertEqual(result2.returncode, 0, result2.stderr)
+            self.assertIn("Reached round cap 2", result2.stdout)
+
 
 class PolicyTests(unittest.TestCase):
     def setUp(self):

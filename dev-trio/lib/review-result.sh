@@ -24,6 +24,7 @@ review_result_parse() {
   fi
   local records
   records=$(awk -v profile="$profile" '
+    BEGIN { bullet = "• " }
     function emit(tag, value) { print tag "\t" value }
     function verdict(line, token, reason) {
       raw = line
@@ -40,24 +41,22 @@ review_result_parse() {
       if (reason !~ /[^[:space:]]/) { problem = "empty verdict reason"; return }
       parsed = token
     }
-    {
-      sub(/\r$/, "")
-      line = $0
+    function parse_line(line, candidate, marks, rest, content) {
       # Fences may be indented up to three spaces. Only a matching closing
       # fence ends the block; quoted and indented examples are never candidates.
       if (fence != "") {
-        if (line ~ /^    / || line ~ /^\t/) next
+        if (line ~ /^    / || line ~ /^\t/) return
         candidate = line; sub(/^ ? ? ?/, "", candidate)
         if (substr(candidate, 1, 1) == fence) {
           marks = candidate; sub(/[^`~].*$/, "", marks)
           rest = substr(candidate, length(marks) + 1)
           if (length(marks) >= fence_len && marks !~ (fence == "`" ? "~" : "`") && rest ~ /^[[:space:]]*$/) fence = ""
         }
-        next
+        return
       }
       if (line ~ /^    / || line ~ /^\t/ || line ~ /^ *> / || line ~ /^ *>$/) {
         if (pending) { pending = 0; problem = "verdict must immediately follow its heading" }
-        next
+        return
       }
       candidate = line; sub(/^ ? ? ?/, "", candidate)
       if (candidate ~ /^```/ || candidate ~ /^~~~/) {
@@ -66,7 +65,7 @@ review_result_parse() {
         marks = candidate; sub(/[^`~].*$/, "", marks)
         fence_len = length(marks)
         if (fence == "`" && substr(candidate, fence_len + 1) ~ /`/) problem = "invalid backtick fence"
-        next
+        return
       }
       # Recognize Markdown-equivalent headings when detecting ambiguity, but
       # require the canonical spelling for a successful result. Otherwise a
@@ -74,29 +73,29 @@ review_result_parse() {
       if (line ~ /^ ? ? ?##[[:blank:]]+Verdict([[:blank:]]+#+)?[[:blank:]]*$/) {
         headings++; pending = 1; in_findings = 0; section = ""
         if (line != "## Verdict") problem = "noncanonical Verdict heading"
-        next
+        return
       }
       if (pending) { pending = 0; verdict(line) }
-      if (line == "## Findings") { in_findings = 1; section = ""; next }
-      if (line ~ /^## /) { in_findings = 0; section = ""; next }
-      if (!in_findings) next
+      if (line == "## Findings") { in_findings = 1; section = ""; return }
+      if (line ~ /^## /) { in_findings = 0; section = ""; return }
+      if (!in_findings) return
       if (line ~ /^### /) {
         section = ""
         if (line == "### Blocker") section = "blocker"
         if (line == "### Major") section = "major"
         if (line == "### Minor" || line == "### Minor / Nit") section = "minor"
         if (section != "") emit("section", section)
-        next
+        return
       }
       if (section != "" && candidate ~ /^([-*+]|[0-9]+[.)])([[:blank:]]|$)/) {
         content = candidate
         sub(/^([-*+]|[0-9]+[.)])[[:blank:]]*/, "", content)
-        if (content !~ /[^[:space:]]/) next
+        if (content !~ /[^[:space:]]/) return
         # Do not silently drop indented findings or count nested detail bullets
         # as independent findings. The structured format requires column 0.
         if (candidate != line || candidate !~ /^- /) {
           problem = "noncanonical " section " finding bullet: use dash-space bullets at column 0"
-          next
+          return
         }
         # Remember each severity across repeated headings: an explicit empty
         # marker cannot coexist with a finding in the aggregated result.
@@ -109,7 +108,37 @@ review_result_parse() {
         if (empty[section] && found[section]) problem = "contradictory " section " findings: empty marker mixed with finding bullets"
       }
     }
+    {
+      sub(/\r$/, "")
+      raw_lines[++nraw] = $0
+    }
     END {
+      # Kimi Code 2.3+ print mode (PromptBlockWriter) prefixes the first line
+      # of each assistant block with "• " and every continuation line with two
+      # spaces, followed by an optional "To resume this session: kimi -r ..."
+      # hint on stderr. Unindent only when the entire transcript matches that
+      # envelope so ordinary indented Markdown still fails closed.
+      for (i = 1; i <= nraw; i++) {
+        r = raw_lines[i]
+        if (index(r, bullet) == 1) {
+          in_kimi_block = 1
+          kimi_blocks++
+          kimi_lines[++nkimi] = substr(r, length(bullet) + 1)
+        } else if (r == "") {
+          if (in_kimi_block) kimi_lines[++nkimi] = ""
+        } else if (in_kimi_block && substr(r, 1, 2) == "  ") {
+          kimi_lines[++nkimi] = substr(r, 3)
+        } else if (r ~ /^(To resume this session: kimi -r [0-9a-f-]+|kimi version [0-9]|Warning: |Session ".*" was updated by another client; reloaded it\.|No sessions to continue under )/) {
+          continue
+        } else {
+          not_kimi = 1
+        }
+      }
+      if (!not_kimi && kimi_blocks > 0) {
+        for (i = 1; i <= nkimi; i++) parse_line(kimi_lines[i])
+      } else {
+        for (i = 1; i <= nraw; i++) parse_line(raw_lines[i])
+      }
       if (fence != "") problem = "unclosed code fence"
       if (headings == 0) problem = "missing Verdict heading"
       else if (headings != 1) problem = "duplicate Verdict headings"

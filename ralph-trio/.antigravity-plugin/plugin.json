@@ -1,6 +1,6 @@
 {
   "name": "ralph-trio",
-  "version": "0.5.10",
+  "version": "0.5.11",
   "description": "Antigravity-conducted Ralph loops with selectable planner, coder, reviewer, and researcher models.",
   "author": {
     "name": "pandas-studio"

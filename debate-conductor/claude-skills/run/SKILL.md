@@ -1,17 +1,28 @@
 ---
 description: Run an N-round Generator vs Critic debate on a chosen topic, then summarise verdict and round-by-round moves. Topic can be a topics/ file reference OR free-form text. Use when the user wants to start, resume, or analyse a debate. Bootstrap must have run first.
 disable-model-invocation: true
-allowed-tools: Bash(debate.sh:*) Bash(ls:*) Bash(cat:*) Read Glob
-argument-hint: "[topic-or-text] [rounds]"
+allowed-tools: Bash(debate.sh:*) Bash(ls:*) Bash(cat:*) Read Glob Grep Write
+argument-hint: "[--gen=<model>] [--crit=<model>] [--rotate] [--until-converged] [topic-or-text] [rounds]"
 ---
 
 # Run a debate
 
 You are the **conductor**. The middle pane live-tails the Generator, and the right pane live-tails the Critic. You orchestrate; you do not generate or critique.
 
-## 1 · Resolve the topic from `$ARGUMENTS`
+## 1 · Parse role/model labels, mode flags, and topic from `$ARGUMENTS`
 
-**Decision tree — apply in order, stop at first match**:
+Strip any explicit CLI flags or natural-language role/model assignments from `$ARGUMENTS` before resolving the topic string:
+
+- **Role / model assignment** (`agy` / `antigravity`, `claude`, `codex`, `kimi-code` / `kimi`, or any registered model id):
+  - Flags: `--primary-gen=<model>` (or `--gen=<model>`), `--primary-crit=<model>` (or `--crit=<model>`).
+  - Natural-language labels in the prompt (e.g. `gen=claude crit=codex`, `Generator: agy, Critic: kimi`, `claude vs codex로`): translate them into `--primary-gen=<model>` and/or `--primary-crit=<model>` flags on `debate.sh` and strip them from the topic text.
+  - Defaults (when not specified): Generator = `agy`, Critic = `codex` (or `agy` if Generator is `codex`). Generator and Critic must differ.
+- **Mode & round flags**:
+  - `--rotate` (or "rotate ON"): alternate Generator and Critic models every two rounds.
+  - `--until-converged` / `-c` (or "합의/수렴할 때까지", "until they agree"): stop early on `Verdict: STRENGTHEN`.
+  - `-n <ROUNDS>` or a trailing bare integer (1–9): round count (default 3, or cap 6 with `--until-converged`).
+
+**Topic decision tree — apply to the remaining argument text in order, stop at first match**:
 
 1. **Empty** → list `$PWD/topics/*.txt` with each filename + first line of body, ask the user to pick (or to type a free-form topic). Do not proceed without a topic.
 
@@ -30,9 +41,12 @@ You are the **conductor**. The middle pane live-tails the Generator, and the rig
 
 **Workspace `topics/` always takes priority** over the plugin's bundled examples (`${CLAUDE_SKILL_DIR}/../../topics/`). Only fall back to bundled if `$PWD/topics/` does not exist or is empty. Do not mix sources.
 
-## 2 · Confirm rounds
+## 2 · Confirm rounds and prepare repository context (when needed)
 
-Default 3. Honour `$ARGUMENTS[1]` if numeric. Ask the user only when the count is non-default and not explicit.
+- **Rounds**: Default 3 (or cap 6 with `--until-converged`). Honour explicit `-n` or trailing integer. Ask the user only when the count is non-default and ambiguous.
+- **Repository context (`<topic>` + optional `context-file.md`)**: Generator and Critic run in **non-interactive headless mode**, where arbitrary shell search commands (`rg`, `find`, `grep`, compound commands) are auto-denied and abort the round.
+  - If the topic is a general/self-contained question (e.g. `"FastAPI vs Django"`, `"찍먹 vs 부먹"`), pass it directly.
+  - If the topic references **repository-internal entities** (e.g. `"Track 4"`, local roadmap/spec docs, module names, or current codebase constraints) that are not self-contained in the user's message, use `Glob` / `Grep` / `Read` to gather the relevant facts first. Put the **essential repository facts and constraints directly into the `<topic>` string** (because every round — both Generator and Critic — receives `Topic: $TOPIC`), and optionally pass a `[context-file.md]` (`--context=<file>`, written under `.debate-conductor/log/` or `$TMPDIR`) when Round 1's Generator needs longer supporting material (note: only Round 1's Generator reads `context-file.md`).
 
 ## 3 · Run the debate
 
@@ -40,23 +54,23 @@ Single Bash call (blocking, ~3–10 min depending on rounds). `debate.sh` is in 
 
 For a **topics/ reference**:
 ```
-debate.sh -n <ROUNDS> "$(cat topics/<file>.txt)"
+debate.sh -n <ROUNDS> [model/mode flags] "$(cat topics/<file>.txt)" [context-file.md]
 ```
 
 For a **free-form topic**:
 ```
-debate.sh -n <ROUNDS> "<the user's topic text, verbatim>"
+debate.sh -n <ROUNDS> [model/mode flags] "<the user's topic text, verbatim>" [context-file.md]
 ```
 
 Either form passes the topic string to `debate.sh` as a single argument — the engine doesn't care whether it came from a file or from chat. **Streaming output is already visible in the middle and right panes — do not duplicate it in the chat.** Just acknowledge that it's running and wait.
 
-For role rotation experiments, add `--rotate` (model alternates each pair of rounds). For non-default model assignments, pass `--primary-gen=<model>` and/or `--primary-crit=<model>`.
+For role rotation experiments, add `--rotate` (model alternates each pair of rounds). For non-default model assignments, pass `--primary-gen=<model>` (`--gen=<model>`) and/or `--primary-crit=<model>` (`--crit=<model>`).
 
 **Run until the debate converges** instead of a fixed count: add `--until-converged`. The debate then stops as soon as a Critic round returns `Verdict: STRENGTHEN`, and `-n` becomes the upper bound (a hard cap; default cap 6 if `-n` is omitted). Use this when the user asks to debate "합의/수렴할 때까지", "until they agree", or "keep going until the critic is satisfied". Reach for it instead of guessing a round count:
 
 ```
-debate.sh --until-converged "<topic>"            # cap 6
-debate.sh --until-converged -n 8 "<topic>"       # cap 8
+debate.sh --until-converged "<topic>" [context-file.md]            # cap 6
+debate.sh --until-converged -n 8 "<topic>" [context-file.md]       # cap 8
 ```
 
 A converged run prints `✓ Converged at round N`; hitting the cap without a STRENGTHEN prints a `⚠ Reached round cap` alert — surface whichever fired when you summarise.
@@ -65,8 +79,8 @@ A converged run prints `✓ Converged at round N`; hitting the cap without a STR
 
 Transcripts live at `$PWD/.debate-conductor/log/<team>/latest-debate/round-*.md`. Use `Glob` to enumerate, `Read` to load each file. Then report:
 
-- **Verdict** — the canonical 3-token line at the bottom of the last *completed* critic round: `Verdict: STRENGTHEN`, `Verdict: RECONSIDER`, or `Verdict: OVERTURN`. Quote it verbatim. A critic round counts as completed only when `index.jsonl` contains an `end` record with `"rc":0` and `"role":"crit"` for it. Read the ledger, choose the highest such round, and read the transcript named by its `"file"` field. Ignore malformed lines and duplicate records. If no critic round completed, say so. Never infer completion from `.done` sidecars or transcript filenames; if the completed round has no unambiguous recorded filename, report that the verdict cannot be determined.
-- **Move-by-move** — one bullet per round: `R1 (Gen, agy): <opening claim in 1 line>` → `R2 (Crit, codex): <main attack>` → `R3 (Gen, agy): <accept/reject/modify of each Blocker/Major>`. Keep each line under 25 words.
+- **Verdict** — the canonical 3-token line at the bottom of the last *completed* critic round: `Verdict: STRENGTHEN`, `Verdict: RECONSIDER`, or `Verdict: OVERTURN` (note: `kimi-code` may prefix lines with `• ` or two spaces; strip the margin when quoting the canonical `Verdict: <TOKEN>`). Quote it verbatim. A critic round counts as completed only when `index.jsonl` contains an `end` record with `"rc":0` and `"role":"crit"` for it. Read the ledger, choose the highest such round, and read the transcript named by its `"file"` field. Ignore malformed lines and duplicate records. If no critic round completed, say so. Never infer completion from `.done` sidecars or transcript filenames; if the completed round has no unambiguous recorded filename, report that the verdict cannot be determined.
+- **Move-by-move** — one bullet per round using the actual model recorded in the round marker / `index.jsonl`: `R1 (Gen, <model>): <opening claim in 1 line>` → `R2 (Crit, <model>): <main attack>` → `R3 (Gen, <model>): <accept/reject/modify of each Blocker/Major>`. Keep each line under 25 words.
 - **Two follow-up questions** worth asking next, e.g. "what if the Critic's Blocker #2 had been about X instead?" — concrete, not generic.
 
 ## 5 · Stay in the conversation

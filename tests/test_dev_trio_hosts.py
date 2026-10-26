@@ -1382,6 +1382,9 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         note = call[9][call[9].index("# Execution environment"):]
         self.assertIn(f"The repository root is `{root}`;", note)
         self.assertIn("no pipes", note)
+        self.assertIn("no backticks", note)
+        self.assertIn("unquoted_shell_operators", note)
+        self.assertIn("git show HEAD:<dir>", note)
         # The reviewer role lists untracked files with git ls-files, which has
         # no allow-rule; the note names the git status form that replaces it.
         self.assertIn("use `git status --short --untracked-files=all` instead of `git ls-files`", note)
@@ -1673,8 +1676,9 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
     def test_custom_argv_reviewer_large_context_skips_snapshot_for_budget(self):
         self.configure_argv_workspace_reviewer()
         self._commit_two()
+        role_bytes = len((self.plugin / "lib/roles/reviewer.md").read_bytes())
         ctx = self.workspace / "context.md"
-        ctx.write_text("a" * 120000)
+        ctx.write_text("a" * (128000 - role_bytes))
         result = self.run_cli("ask-reviewer.sh", "--with-context", str(ctx), "review HEAD~1..HEAD",
                               DEV_TRIO_REVIEWER_MODEL="argv-snapshot", REGISTRY_ARGV_MAX_BYTES="131072")
         self.assertEqual(result.returncode, 0, result.stderr)

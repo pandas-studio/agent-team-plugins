@@ -97,14 +97,16 @@ unset _RESULT_LIB
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [-n ROUNDS] [--rotate] [--until-converged] \\
-         [--primary-gen=MODEL] [--primary-crit=MODEL] \\
-         [--continue-from=DIR] \\
+         [--primary-gen=MODEL | --gen=MODEL | --generator=MODEL] \\
+         [--primary-crit=MODEL | --crit=MODEL | --critic=MODEL] \\
+         [--context=FILE] [--continue-from=DIR] \\
          "topic" [context-file.md]
 
 Run an N-round Generator vs Critic debate. Defaults to 3 rounds with no rotation.
 Claude PM defaults to generator=agy, critic=codex; Codex PM defaults to
 generator=agy, critic=claude. MODEL is any registered model id — run
-'agent-team-models list' to see them. With --rotate, models alternate roles
+'agent-team-models list' to see them (or 'kimi' / 'kimi-code' after
+'agent-team-models preset add kimi-code'). With --rotate, models alternate roles
 every two rounds. With --continue-from=<debate-TS dir>, append N more rounds to
 an existing debate (round numbering continues from last+1) and reuse its model
 pair/rotation unless this invocation explicitly overrides them. A debate whose
@@ -121,10 +123,29 @@ while [ "$#" -gt 0 ]; do
     -n) ROUNDS="$2"; ROUNDS_SET=1; shift 2 ;;
     --rotate) ROTATE=1; ROTATE_SET=1; shift ;;
     --until-converged|-c) UNTIL_CONVERGED=1; shift ;;
-    --primary-gen=*) PRIMARY_GEN_OPT="${1#--primary-gen=}"; shift ;;
-    --primary-gen) PRIMARY_GEN_OPT="${2:?--primary-gen requires a model id}"; shift 2 ;;
-    --primary-crit=*) PRIMARY_CRIT_OPT="${1#--primary-crit=}"; shift ;;
-    --primary-crit) PRIMARY_CRIT_OPT="${2:?--primary-crit requires a model id}"; shift 2 ;;
+    --primary-gen=*|--gen=*|--generator=*)
+      PRIMARY_GEN_OPT="${1#*=}"
+      [ -n "$PRIMARY_GEN_OPT" ] || { echo "${1%%=*} requires a model id" >&2; exit 2; }
+      shift ;;
+    --primary-gen|--gen|--generator)
+      [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "$1 requires a model id" >&2; exit 2; }
+      PRIMARY_GEN_OPT="$2"; shift 2 ;;
+    --primary-crit=*|--crit=*|--critic=*)
+      PRIMARY_CRIT_OPT="${1#*=}"
+      [ -n "$PRIMARY_CRIT_OPT" ] || { echo "${1%%=*} requires a model id" >&2; exit 2; }
+      shift ;;
+    --primary-crit|--crit|--critic)
+      [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "$1 requires a model id" >&2; exit 2; }
+      PRIMARY_CRIT_OPT="$2"; shift 2 ;;
+    --context=*)
+      [ -z "$CONTEXT_FILE" ] || { echo "context file already set: $CONTEXT_FILE" >&2; exit 2; }
+      CONTEXT_FILE="${1#--context=}"
+      [ -n "$CONTEXT_FILE" ] || { echo "--context requires a file path" >&2; exit 2; }
+      shift ;;
+    --context)
+      [ -z "$CONTEXT_FILE" ] || { echo "context file already set: $CONTEXT_FILE" >&2; exit 2; }
+      [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "--context requires a file path" >&2; exit 2; }
+      CONTEXT_FILE="$2"; shift 2 ;;
     --continue-from=*) CONTINUE_FROM="${1#--continue-from=}"; shift ;;
     --continue-from) CONTINUE_FROM="${2:?--continue-from requires a directory}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -551,7 +572,7 @@ else
   PRIMARY_GEN="$(debate_conductor_resolve_role generator "$PRIMARY_GEN_OPT")"
   [ "$GEN_INVOCATION_MODEL" = "1" ] && PRIMARY_GEN_SOURCE="invocation" || PRIMARY_GEN_SOURCE="current-resolution"
 fi
-registry_model_exists "$PRIMARY_GEN" || { echo "primary-gen: unknown model '$PRIMARY_GEN' (run: agent-team-models list)" >&2; exit 2; }
+registry_model_exists "$PRIMARY_GEN" || { echo "primary-gen: unknown model '$PRIMARY_GEN' ($(debate_conductor_unknown_model_hint "$PRIMARY_GEN"))" >&2; exit 2; }
 
 # Critic model: flag > DEBATE_CRITIC_MODEL > persisted continue metadata
 #               > config role binding > host default.
@@ -566,7 +587,7 @@ else
   PRIMARY_CRIT="$(debate_conductor_resolve_role critic "$PRIMARY_CRIT_OPT" "$PRIMARY_GEN")"
   [ "$CRIT_INVOCATION_MODEL" = "1" ] && PRIMARY_CRIT_SOURCE="invocation" || PRIMARY_CRIT_SOURCE="current-resolution"
 fi
-registry_model_exists "$PRIMARY_CRIT" || { echo "primary-crit: unknown model '$PRIMARY_CRIT' (run: agent-team-models list)" >&2; exit 2; }
+registry_model_exists "$PRIMARY_CRIT" || { echo "primary-crit: unknown model '$PRIMARY_CRIT' ($(debate_conductor_unknown_model_hint "$PRIMARY_CRIT"))" >&2; exit 2; }
 [ "$PRIMARY_GEN" = "$PRIMARY_CRIT" ] && { echo "primary-gen and primary-crit must differ (both = $PRIMARY_GEN)" >&2; exit 2; }
 if [ -n "$CONTINUE_FROM" ] && [ "$ROTATE" = "1" ] \
    && { { [ -n "$PERSISTED_GEN" ] && [ "$PRIMARY_GEN" != "$PERSISTED_GEN" ]; } \
@@ -727,8 +748,34 @@ print_marker() {
 # not-converged — the safe default that keeps the debate going on garbage rather
 # than stopping on it. Output already passed through strip_stream_controls.
 critic_verdict() {
-  grep -hE '^Verdict: (STRENGTHEN|RECONSIDER|OVERTURN)[[:space:]]*$' "$1" 2>/dev/null \
-    | tail -1 | awk '{print $2}'
+  awk '
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      if (NR == 1 && line ~ /^<!-- debate-round: /) next
+      lines[++n] = line
+      if (line == "") next
+      if (line ~ /^• /) { has_bullet = 1; next }
+      if (has_bullet && line ~ /^  /) next
+      not_kimi = 1
+    }
+    END {
+      kimi = (has_bullet && !not_kimi)
+      for (i = 1; i <= n; i++) {
+        line = lines[i]
+        if (kimi) {
+          if (line ~ /^• /) sub(/^• [[:space:]]*/, "", line)
+          else if (line ~ /^  /) sub(/^  /, "", line)
+        }
+        if (line ~ /^Verdict: (STRENGTHEN|RECONSIDER|OVERTURN)[[:space:]]*$/) {
+          sub(/^Verdict: /, "", line)
+          sub(/[[:space:]]*$/, "", line)
+          v = line
+        }
+      }
+      if (v != "") print v
+    }
+  ' "$1" 2>/dev/null
 }
 
 # Role wrappers publish answers, not CLI console transcripts. Preserve answer
@@ -1134,7 +1181,7 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
     GEN_MODEL=$(round_model "$r" gen)
     OUT=$(round_file "$r" gen "$GEN_MODEL")
     begin_attempt "$r" gen "$GEN_MODEL" "$OUT"
-    [ "$ROTATE" = "1" ] && print_header "$r" "Generator" "$GEN_MODEL" || print_header "$r" "Generator"
+    print_header "$r" "Generator" "$GEN_MODEL"
     # Each attempt reads /dev/null, not debate.sh's stdin: the wrappers take any
     # non-terminal stdin as context, and an inherited open pipe would hang them.
     # shellcheck disable=SC2046  # word-splitting on gen_args output is intentional
@@ -1181,7 +1228,7 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
     begin_attempt "$r" crit "$CRIT_MODEL" "$OUT"
     PREV_GEN_MODEL=$(round_model "$((r-1))" gen)
     PREV_GEN=$(round_file "$((r-1))" gen "$PREV_GEN_MODEL")
-    [ "$ROTATE" = "1" ] && print_header "$r" "Critic" "$CRIT_MODEL" || print_header "$r" "Critic"
+    print_header "$r" "Critic" "$CRIT_MODEL"
     # shellcheck disable=SC2046
     (
       {

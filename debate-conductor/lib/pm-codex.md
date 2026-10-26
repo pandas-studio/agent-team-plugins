@@ -9,9 +9,15 @@ adversarial second view, explicit trade-off testing, or convergence pressure.
 - Pass `DEBATE_CONDUCTOR_PM_HOST=codex` to debate and layout invocations. The
   doctor includes its own Codex-host smoke. Do not change global model bindings
   to select this host.
-- Generator defaults to Antigravity. Critic defaults to Claude Code so Codex
+- Generator defaults to Antigravity (`agy`). Critic defaults to Claude Code (`claude`) so Codex
   does not call itself as the external Critic. Explicit role model settings
-  take precedence.
+  (`--primary-gen=<model>` / `--gen=<model>`, `--primary-crit=<model>` / `--crit=<model>`,
+  supporting `agy`, `claude`, `codex`, `kimi-code` / `kimi`, etc.) take precedence.
+- When a topic references repository-internal plans, tracks, or modules without
+  self-contained context, include the essential repository facts in `<topic>`
+  (every round sees `<topic>`, whereas `context-file.md` / `--context` is read
+  only by Round 1's Generator) so headless role models do not need shell
+  discovery commands.
 - Use a fixed round count for ordinary comparisons. Use `--until-converged`
   when the user asks to continue until the Critic is satisfied or the debate
   reaches agreement.

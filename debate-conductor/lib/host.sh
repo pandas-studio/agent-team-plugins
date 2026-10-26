@@ -26,23 +26,51 @@ debate_conductor_default_role() {
   esac
 }
 
+debate_conductor_normalize_model() {
+  local m="${1:-}"
+  [ -n "$m" ] || return 0
+  if registry_model_exists "$m" 2>/dev/null; then
+    printf '%s\n' "$m"
+    return 0
+  fi
+  case "$m" in
+    antigravity)
+      printf 'agy\n'; return 0 ;;
+    kimi)
+      if registry_model_exists "kimi-code" 2>/dev/null; then
+        printf 'kimi-code\n'; return 0
+      fi
+      ;;
+  esac
+  printf '%s\n' "$m"
+}
+
+debate_conductor_unknown_model_hint() {
+  case "${1:-}" in
+    kimi|kimi-code)
+      printf 'run: agent-team-models preset add kimi-code, or agent-team-models list' ;;
+    *)
+      printf 'run: agent-team-models list' ;;
+  esac
+}
+
 debate_conductor_resolve_role() {
   local role="$1" cli="${2:-}" gen="${3:-}"
   local key="debate-conductor.$role" cfg
-  if [ -n "$cli" ]; then printf '%s\n' "$cli"; return 0; fi
+  if [ -n "$cli" ]; then debate_conductor_normalize_model "$cli"; return 0; fi
   case "$role" in
     generator)
-      if [ -n "${DEBATE_GENERATOR_MODEL:-}" ]; then printf '%s\n' "$DEBATE_GENERATOR_MODEL"; return 0; fi
-      if [ -n "${DEBATE_PRIMARY_GEN:-}" ]; then printf '%s\n' "$DEBATE_PRIMARY_GEN"; return 0; fi
+      if [ -n "${DEBATE_GENERATOR_MODEL:-}" ]; then debate_conductor_normalize_model "$DEBATE_GENERATOR_MODEL"; return 0; fi
+      if [ -n "${DEBATE_PRIMARY_GEN:-}" ]; then debate_conductor_normalize_model "$DEBATE_PRIMARY_GEN"; return 0; fi
       ;;
     critic)
-      if [ -n "${DEBATE_CRITIC_MODEL:-}" ]; then printf '%s\n' "$DEBATE_CRITIC_MODEL"; return 0; fi
+      if [ -n "${DEBATE_CRITIC_MODEL:-}" ]; then debate_conductor_normalize_model "$DEBATE_CRITIC_MODEL"; return 0; fi
       ;;
     *) echo "debate-conductor: unknown role '$role'" >&2; return 2 ;;
   esac
   # A malformed config is rc 3 here, not "no binding" (#133).
   cfg="$(registry_config_role "$key")" || return 3
-  if [ -n "$cfg" ]; then printf '%s\n' "$cfg"; return 0; fi
+  if [ -n "$cfg" ]; then debate_conductor_normalize_model "$cfg"; return 0; fi
   debate_conductor_default_role "$role" "$gen"
 }
 
@@ -77,4 +105,16 @@ debate_conductor_check_cli() {
     "$seen" "$rc" "${CODEX_SANDBOX:+, CODEX_SANDBOX=$CODEX_SANDBOX}" >&2
   echo 'debate-conductor: a sandbox can hide the login (for example macOS Keychain); rerun this same command once with host approval, or choose a non-Claude model for this role. If an approved run still fails, check claude auth status in your own terminal.' >&2
   return 2
+}
+
+# Prompt note for workspace-aware models (agy) explaining headless execution
+# constraints so the model does not trigger an auto-denied shell command (#213).
+debate_conductor_agy_exec_note() {
+  cat <<'EOF'
+# Execution environment
+You are running in non-interactive headless print mode (`--input-format text --output-format text`). Interactive permission prompts are impossible and any unapproved `run_command` call is **auto-denied**, which aborts the round immediately.
+- Answer directly from `<user_question>` / `<user_context>` (or `<review_target>` / `<research_context>`).
+- Do **not** call `run_command` (`rg`, `grep`, `find`, `ls`, `cat`, `head`, `tail`, pipes `|`, `&&`, `||`, `;`, `2>/dev/null`, `$()`, backticks).
+- If you need to check a file in the current workspace, use `read_file` on a workspace-relative path (at most a few targeted files) and never access paths outside the current workspace.
+EOF
 }
