@@ -6,15 +6,30 @@ description: Run a Generator-vs-Critic debate from Codex and summarize the final
 # Run a Debate from Codex
 
 Codex is the conductor. Resolve the plugin root two directories above this skill
-directory and use [debate.sh](../../bin/debate.sh). Do not call
+directory and use [run-debate.sh](../../bin/run-debate.sh). Do not call
 `ask-generator.sh` or `ask-critic.sh` directly.
 
-From the user's workspace, pass the topic as one quoted argument (and an optional
-`[context-file.md]` when the topic references repository-specific context):
+Read the [shared viewing/dispatch contract](../../lib/view-workflow.md).
+Consume leading `--view=auto|tmux|none`, `--open-view` and optional
+`--terminal=auto|ghostty|terminal`; bootstrap is optional. Use absolute plugin
+paths for all helpers, never assume bin is on PATH. Prepare in one tool call,
+optionally open in another, **show the viewing instructions in chat before
+dispatch**, then pass the topic as one quoted argument:
+
+Copy the actual attach command (`ready-detached`) or **both tail commands**
+(`manual`, even for `--view=none`) into your visible reply before the dispatch
+tool call. Tool output alone does not count. For `present`, confirm the verified
+current-window viewers. Do not skip this reply to save a message.
+Send the latest helper's `user_message` verbatim before dispatch: call the opener
+first if opening was requested; otherwise send preparation's message immediately.
+This includes short runs and `--view=none`.
 
 ```bash
-DEBATE_CONDUCTOR_PM_HOST=codex "<plugin-root>/bin/debate.sh" -n <rounds> [flags] "<topic>" [context-file.md]
+"<plugin-root>/bin/run-debate.sh" --host=codex --context '<exact context_file>' -- -n <rounds> [flags] "<topic>" [context-file.md]
 ```
+
+Ordinary debates default to **4 rounds**: proposal, critique, revision, final
+critique. Use `2` for a quick pass and honor every explicit round count.
 
 If the user asks for convergence, add `--until-converged`; then `-n` is the
 upper bound and may be omitted to use the default cap. Preserve explicit
@@ -51,7 +66,8 @@ approved the run.
   with the host's approval mechanism (for example `require_escalated`, with a
   justification naming Keychain access for the Claude role) because this
   session already saw that line, or, after a sandboxed run printed it, request
-  approval for the same argv once. Never both.
+  approval once. Prepare a fresh context with the same frozen team/base and
+  retry the same engine arguments through the runner. Never both.
 - Before or between attempts, do not run `claude auth status`, the doctor,
   `claude auth login`, a raw `claude`, or `ask-generator.sh`/`ask-critic.sh`
   as a probe or workaround.
@@ -62,13 +78,15 @@ approved the run.
   user to run `claude auth status` in their own terminal and log in there if
   it says so. Do not change authentication yourself.
 - A one-time approval covers that one command. If the host lets you suggest a
-  persistent `prefix_rule`, name only the `debate.sh` path (never `claude`,
+  persistent `prefix_rule`, name only the `run-debate.sh` path (never `claude`,
   never the topic), and tell the user it would allow every future debate
   through that path, and stops matching after a plugin update.
 
-Capture the command exit code and the transcript directory printed by the
-wrapper. On failure, report the incomplete debate and point to the log. On
-success, read the round files in that transcript directory and report only:
+Capture the dispatch exit code. On failure, report the incomplete debate.
+Only after exit 0, run the absolute `run-debate.sh --read-receipt --context
+'<context_file>'` and use its validated `debate_dir`; never bind results by
+parsing stdout or following `latest-debate`. Missing/invalid receipt means
+incomplete. On success, read the files in that directory and report only:
 the canonical latest Critic verdict, one short move per round, and two concrete
 follow-up questions. Do not paste full transcripts. A critic round counts as completed
 only when `index.jsonl` contains an `end` record with `"rc":0` and `"role":"crit"` for
@@ -80,3 +98,7 @@ cannot be determined.
 
 In Codex host mode, the default Critic is Claude Code so Codex does not review
 its own debate output as an external agent. Explicit model settings still win.
+
+For a later **"뷰 열어줘" directly call the absolute `open-view.sh --context
+'<saved-file>'`**, following the shared standing instructions. Never invoke
+bootstrap implicitly or dispatch another debate for that request.

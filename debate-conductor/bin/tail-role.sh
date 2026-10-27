@@ -33,7 +33,7 @@
 #
 # Log location: $DEBATE_LOG_DIR (default: $PWD/.debate-conductor/log) / $TEAM /
 set -euo pipefail
-set -m  # job control: each backgrounded pipeline gets its own process group
+set +m  # no setpgid/job-control requirement in restricted host environments
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../lib/namespace.sh
@@ -49,7 +49,7 @@ esac
 
 TEAM=$(agent_team_detect_team) || exit 2
 LOG_BASE="${DEBATE_LOG_DIR:-$PWD/.debate-conductor/log}"
-LOG_DIR="$LOG_BASE/$TEAM"
+LOG_DIR="${LOG_BASE%/}/$TEAM"
 
 # ANSI color setup
 RESET=$'\033[0m'
@@ -92,20 +92,49 @@ if [ -t 0 ]; then
   STTY_SAVE=$(stty -g </dev/tty 2>/dev/null || true)
 fi
 
-PIPE_PG=""
+TAIL_PID=""
+FILTER_PID=""
+PIPE_STARTING=0
+PENDING_EXIT=0
+
+handle_signal() {
+  # Finish recording both child PIDs if interrupted between fork and $!.
+  if [ "$PIPE_STARTING" = 1 ]; then PENDING_EXIT=$1; return 0; fi
+  exit "$1"
+}
+
+signal_pipeline() {
+  local signal="$1" pid
+  for pid in "$FILTER_PID" "$TAIL_PID"; do
+    [ -z "$pid" ] || kill -s "$signal" -- "$pid" 2>/dev/null || true
+  done
+}
+
+stop_pipeline() {
+  signal_pipeline TERM
+  signal_pipeline CONT  # pending TERM kills paused children before output resumes
+  [ -z "$TAIL_PID" ] || wait "$TAIL_PID" 2>/dev/null || true
+  [ -z "$FILTER_PID" ] || wait "$FILTER_PID" 2>/dev/null || true
+  TAIL_PID="" FILTER_PID=""
+}
+
 cleanup() {
-  if [ -n "$PIPE_PG" ]; then
-    # Bash job control can print the whole pipeline (including awk source) to
-    # the pane when a signal ends the viewer. We still kill its process group.
-    disown "$PIPE_PG" 2>/dev/null || true
-    kill -CONT -- "-$PIPE_PG" 2>/dev/null || true   # in case we exit while paused
-    kill -TERM -- "-$PIPE_PG" 2>/dev/null || true
+  trap '' INT TERM HUP
+  if [ -n "${DEBATE_VIEW_NONCE:-}" ] && [ -n "${TMUX_PANE:-}" ]; then
+    # A retiring process must not erase a replacement viewer's readiness.
+    ready=$(tmux show-options -pqv -t "$TMUX_PANE" @debate-view-ready 2>/dev/null || true)
+    if printf '%s' "$ready" | jq -e --arg nonce "$DEBATE_VIEW_NONCE" '.nonce == $nonce' >/dev/null 2>&1; then
+      tmux set-option -pu -t "$TMUX_PANE" @debate-view-ready 2>/dev/null || true
+    fi
   fi
+  stop_pipeline
   [ -n "$STTY_SAVE" ] && stty "$STTY_SAVE" </dev/tty 2>/dev/null || true
   printf '\033[?25h' 2>/dev/null || true             # cursor visible
 }
-trap 'cleanup; exit 0' EXIT
-trap 'cleanup; exit 130' INT TERM
+trap cleanup EXIT
+trap 'handle_signal 130' INT
+trap 'handle_signal 143' TERM
+trap 'handle_signal 129' HUP
 
 if [ -n "$STTY_SAVE" ]; then
   stty -icanon -echo min 0 time 0 </dev/tty 2>/dev/null || true
@@ -127,14 +156,6 @@ esac
 
 RS_BYTE="$(printf '\036')"
 LEGACY_NOTED=""
-
-stop_pipeline() {
-  [ -n "$PIPE_PG" ] || return 0
-  kill -CONT -- "-$PIPE_PG" 2>/dev/null || true
-  kill -TERM -- "-$PIPE_PG" 2>/dev/null || true
-  wait "$PIPE_PG" 2>/dev/null || true
-  PIPE_PG=""
-}
 
 DIR=""
 SEQUENCE=""
@@ -186,13 +207,13 @@ observe_selection() {
   elif [ "$missed" -gt 0 ]; then
     # Keep the tail's offset on A -> B -> A; restarting with -n +1 would replay
     # A. Suspend output for the notice and preserve a user's paused state.
-    if [ -n "$PIPE_PG" ]; then
-      kill -STOP -- "-$PIPE_PG" 2>/dev/null || true
+    if [ -n "$TAIL_PID" ]; then
+      signal_pipeline STOP
     fi
-    [ -n "$PIPE_PG" ] || action="waiting for current stream"
+    [ -n "$TAIL_PID" ] || action="waiting for current stream"
     printf '\n%s── missed %s intermediate debate %s — %s ──%s\n\n' "$YELLOW" "$missed" "$noun" "$action" "$RESET"
-    if [ -n "$PIPE_PG" ] && [ "$PAUSED" = 0 ]; then
-      kill -CONT -- "-$PIPE_PG" 2>/dev/null || true
+    if [ -n "$TAIL_PID" ] && [ "$PAUSED" = 0 ]; then
+      signal_pipeline CONT
     fi
   fi
   DIR="$SELECTION_DIR"
@@ -207,6 +228,12 @@ observe_selection() {
     MISSING_NOTED=""
   fi
 }
+
+if [ -n "${DEBATE_VIEW_NONCE:-}" ] && [ -n "${TMUX_PANE:-}" ]; then
+  ready=$(jq -cn --arg nonce "$DEBATE_VIEW_NONCE" --arg role "$ROLE" --arg team "$TEAM" --arg dir "$LOG_DIR" \
+    '{nonce:$nonce,role:$role,team:$team,log_dir:$dir}')
+  tmux set-option -p -t "$TMUX_PANE" @debate-view-ready "$ready"
+fi
 
 while true; do
   observe_selection
@@ -225,7 +252,8 @@ while true; do
     continue
   fi
 
-  # tail + awk pipeline backgrounded into its own process group (set -m).
+  # Ordinary pipe, monitor mode disabled: both children keep the assigned
+  # process group. Bash's job table still records each pipeline member.
   # `tail -n +1`: replay the stream from the start; every line in it is
   # displayed exactly once per debate.
   #
@@ -238,9 +266,9 @@ while true; do
   #     copied into the stream, or one quoted by a model) are dropped
   #   - colors `Verdict: STRENGTHEN|RECONSIDER|OVERTURN` lines (critic only)
   #   - fflush() after every line keeps streaming visible
-  {
-    tail -n +1 -F "$STREAM" 2>/dev/null \
-      | "${AWK_STREAM[@]}" \
+  PIPE_STARTING=1
+  tail -n +1 -F "$STREAM" 2>/dev/null \
+    | "${AWK_STREAM[@]}" \
           -v ROLE_COLOR="$ROLE_COLOR" \
           -v RESET="$RESET" \
           -v GREEN="$GREEN" \
@@ -304,13 +332,17 @@ while true; do
           if (vline ~ /^Verdict: OVERTURN[[:space:]]*$/)   { printf "%s%s%s\n", RED,    $0, RESET; fflush(); next }
           print; fflush()
         }
-      '
-  } &
-  PIPE_PG=$!
+      ' &
+  FILTER_PID=$!
+  # %+ selects this one pipeline, not unrelated processes. Unlike process
+  # substitution, both members are waitable even on macOS Bash 3.2.
+  TAIL_PID=$(jobs -p %+ 2>/dev/null) || TAIL_PID=""
+  PIPE_STARTING=0
+  [ "$PENDING_EXIT" = 0 ] || exit "$PENDING_EXIT"
 
   PAUSED=0
   RETARGETED=0
-  while kill -0 "$PIPE_PG" 2>/dev/null; do
+  while kill -0 "$TAIL_PID" 2>/dev/null && kill -0 "$FILTER_PID" 2>/dev/null; do
     KEY=""
     if [ -n "$STTY_SAVE" ]; then
       # NOTE: integer timeout — macOS default bash 3.2 doesn't support
@@ -335,11 +367,11 @@ while true; do
         ;;
       ' ')
         if [ "$PAUSED" = "0" ]; then
-          kill -STOP -- "-$PIPE_PG" 2>/dev/null || true
+          signal_pipeline STOP
           PAUSED=1
           printf '\n%s[paused — press space to resume]%s\n' "$YELLOW" "$RESET"
         else
-          kill -CONT -- "-$PIPE_PG" 2>/dev/null || true
+          signal_pipeline CONT
           PAUSED=0
           printf '\n%s[resumed]%s\n' "$DIM" "$RESET"
         fi
@@ -349,7 +381,7 @@ while true; do
     # A new debate: stop following this one before saying so, so nothing from
     # the old pipeline can print after the notice.
     observe_selection
-    if [ -z "$PIPE_PG" ]; then
+    if [ -z "$TAIL_PID" ]; then
       RETARGETED=1
       break
     fi

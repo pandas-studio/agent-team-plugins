@@ -6,7 +6,8 @@ adversarial second view, explicit trade-off testing, or convergence pressure.
 
 - Resolve scripts from the currently loaded skill's location, not a saved
   plugin-cache path or an assumed PATH entry.
-- Pass `DEBATE_CONDUCTOR_PM_HOST=codex` to debate and layout invocations. The
+- Use the skill runner's `--host=codex` for dispatch; it sets the PM host
+  internally. Prepare the view and show its instructions before dispatch. The
   doctor includes its own Codex-host smoke. Do not change global model bindings
   to select this host.
 - Generator defaults to Antigravity (`agy`). Critic defaults to Claude Code (`claude`) so Codex
@@ -18,9 +19,10 @@ adversarial second view, explicit trade-off testing, or convergence pressure.
   (every round sees `<topic>`, whereas `context-file.md` / `--context` is read
   only by Round 1's Generator) so headless role models do not need shell
   discovery commands.
-- Use a fixed round count for ordinary comparisons. Use `--until-converged`
-  when the user asks to continue until the Critic is satisfied or the debate
-  reaches agreement.
+- Default ordinary comparisons to 4 rounds (proposal, critique, revision,
+  final critique); honor an explicit count, including 2 for a quick pass.
+  Use `--until-converged` when the user asks to continue until the Critic is
+  satisfied or the debate reaches agreement.
 - Keep external CLI dispatch in the main session. The Generator and Critic
   produce artifacts; they do not invoke one another or recursively orchestrate.
 - Report the actual models, exit status, convergence status, latest Critic
@@ -32,6 +34,8 @@ adversarial second view, explicit trade-off testing, or convergence pressure.
   Its existing subscription, API, or provider configuration controls
   authentication and billing. If the login check fails, report it without
   changing credentials or switching providers.
-- tmux is optional. Bootstrap changes pane layout only when requested. Plugin
+- tmux is optional. Run/continue verify or prepare a view unless `--view=none`;
+  bootstrap is an optional view-only entry point. `--open-view` or a later
+  "뷰 열어줘" opens only the prepared separate view. Plugin
   installation does not authorize installing this policy, changing
   authentication, committing, pushing, or merging.

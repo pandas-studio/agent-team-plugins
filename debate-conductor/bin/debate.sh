@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # debate.sh — orchestrate N-round adversarial debate (Generator vs Critic).
 #
-# Round pattern: odd = Generator, even = Critic. Default 3 rounds:
+# Round pattern: odd = Generator, even = Critic. Default 4 rounds:
 #   Round 1: Generator produces initial draft
 #   Round 2: Critic attacks it
 #   Round 3: Generator revises, addressing the critique
+#   Round 4: Critic re-evaluates the revision and gives the final verdict
 #
 # Usage:
-#   debate.sh "topic"                          # 3 rounds (gen → crit → gen)
+#   debate.sh "topic"                          # 4 rounds (gen → crit → gen → crit)
 #   debate.sh -n 5 "topic"                     # 5 rounds
 #   debate.sh "topic" context.md               # extra context file → round 1 gen
 #   debate.sh --primary-gen=claude "topic"     # claude as generator
@@ -52,7 +53,7 @@
 # Log location: $DEBATE_LOG_DIR (default: $PWD/.debate-conductor/log) / $TEAM /
 set -euo pipefail
 
-DEFAULT_ROUNDS=3
+DEFAULT_ROUNDS=4
 # Converge-mode cap when -n is not given. Even so a non-converging debate ends
 # on a Critic round (final verdict present) rather than a dangling Generator one.
 CONVERGE_DEFAULT_ROUNDS=6
@@ -102,7 +103,7 @@ Usage: $(basename "$0") [-n ROUNDS] [--rotate] [--until-converged] \\
          [--context=FILE] [--continue-from=DIR] \\
          "topic" [context-file.md]
 
-Run an N-round Generator vs Critic debate. Defaults to 3 rounds with no rotation.
+Run an N-round Generator vs Critic debate. Defaults to 4 rounds with no rotation.
 Claude PM defaults to generator=agy, critic=codex; Codex PM defaults to
 generator=agy, critic=claude. MODEL is any registered model id — run
 'agent-team-models list' to see them (or 'kimi' / 'kimi-code' after
@@ -165,7 +166,7 @@ case "$ROUNDS" in
 esac
 [ "$ROUNDS" -lt 1 ] && { echo "ROUNDS must be >= 1" >&2; exit 2; }
 
-# In converge mode without an explicit -n, raise the cap from the 3-round
+# In converge mode without an explicit -n, raise the cap from the 4-round
 # default to an even cap so the loop has several Critic checkpoints and ends
 # on a Critic verdict if it never converges.
 if [ "$UNTIL_CONVERGED" = "1" ] && [ "$ROUNDS_SET" = "0" ]; then
