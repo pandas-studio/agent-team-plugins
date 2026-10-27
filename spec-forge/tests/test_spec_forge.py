@@ -83,6 +83,69 @@ class GateTest(SpecForgeCase):
         self.assertEqual((first.returncode, second.returncode), (0, 0))
         self.assertNotEqual(first.stdout, second.stdout)
 
+    def test_existing_workspace_and_runs_permissions_are_unchanged(self):
+        workspace = self.tmp / "shared"
+        runs = workspace / "runs"
+        runs.mkdir(parents=True)
+        workspace.chmod(0o755)
+        runs.chmod(0o775)
+        result = self.run_cli("gate", "--decision", str(self.decision),
+                              "--workspace", str(workspace))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(stat.S_IMODE(workspace.stat().st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE(runs.stat().st_mode), 0o775)
+        self.assertEqual(stat.S_IMODE(Path(result.stdout.strip()).stat().st_mode), 0o700)
+
+    def test_workspace_dot_does_not_change_cwd_permissions(self):
+        self.tmp.chmod(0o755)
+        result = self.run_cli("gate", "--decision", str(self.decision), "--workspace", ".")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(stat.S_IMODE(self.tmp.stat().st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE(Path(result.stdout.strip()).stat().st_mode), 0o700)
+
+    def decision_mutating_tool(self, name, replacement):
+        tools = self.tmp / "tools"
+        tools.mkdir(exist_ok=True)
+        source = self.tmp / "replacement.md"
+        source.write_text(replacement)
+        tool = tools / name
+        real_tool = shutil.which(name, path=self.env["PATH"])
+        self.assertIsNotNone(real_tool)
+        tool.write_text(f'#!/bin/sh\ncp "$GATE_REPLACEMENT" "$GATE_SOURCE"\nexec "{real_tool}" "$@"\n')
+        tool.chmod(0o755)
+        return {"PATH": str(tools) + os.pathsep + self.env["PATH"],
+                "GATE_REPLACEMENT": str(source), "GATE_SOURCE": str(self.decision)}
+
+    def test_source_change_after_validation_does_not_change_published_snapshot(self):
+        original = self.decision.read_bytes()
+        invalid = original.decode().replace("상태: 확정", "상태: 미결정")
+        # od is invoked after validation and before publication; its stub
+        # changes the original at that precise boundary.
+        env = self.decision_mutating_tool("od", invalid)
+        result = self.run_cli("gate", "--decision", str(self.decision),
+                              "--workspace", str(self.tmp / "ws"), env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.decision.read_text(), invalid)
+        run = Path(result.stdout.strip())
+        self.assertEqual((run / "decision.md").read_bytes(), original)
+        metadata = json.loads((run / "run.json").read_text())
+        self.assertEqual(metadata["decision"]["sha256"], hashlib.sha256(original).hexdigest())
+        self.assertFalse(list(self.tmp.glob("spec-forge-gate.*")))
+
+    def test_source_change_before_validation_cannot_make_invalid_snapshot_valid(self):
+        valid = self.decision.read_text()
+        self.decision.write_text(valid.replace("상태: 확정", "상태: 미결정"))
+        # The placeholder scan is the first validation command; swap the
+        # source immediately before it while leaving the captured bytes alone.
+        env = self.decision_mutating_tool("grep", valid)
+        result = self.run_cli("gate", "--decision", str(self.decision),
+                              "--workspace", str(self.tmp / "ws"), env=env)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("must start with 확정", result.stderr)
+        self.assertEqual(self.decision.read_text(), valid)
+        self.assertFalse((self.tmp / "ws/runs").exists())
+        self.assertFalse(list(self.tmp.glob("spec-forge-gate.*")))
+
     def assert_refused(self, needle, *extra):
         result = self.gate(*extra)
         self.assertEqual(result.returncode, 2, result.stdout)
@@ -273,6 +336,26 @@ class LintTest(SpecForgeCase):
     def test_B1_fenced_task(self):
         self.backlog("- [x] (§4)", "```\n- [ ] (§5.1) example\n```\n- [x] (§4)")
         self.assertEqual(self.rules(), {"B1"})
+
+    def test_commented_tasks_are_rejected_and_do_not_cover_criteria(self):
+        backlog = self.run_dir / "BACKLOG.md"
+        backlog.write_text("# Backlog\n<!-- example\n- [ ] (§5.1) example\n"
+                           "```\n- [ ] (§5.2) example -->\n")
+        result = self.lint()
+        self.assertEqual(result.returncode, 5, result.stderr)
+        violations = json.loads((self.run_dir / "lint.json").read_text())["violations"]
+        self.assertEqual({v["rule"] for v in violations}, {"B1", "B4"})
+        commented = [v for v in violations if "inside an HTML comment" in v["message"]]
+        self.assertEqual([v["line"] for v in commented], [3, 5])
+        self.assertEqual(len([v for v in violations if v["rule"] == "B4"]), 2)
+
+    def test_inline_commented_citation_does_not_cover_a_criterion(self):
+        self.backlog("(§3.2, §5.2)", "(§3.2) <!-- (§5.2) -->")
+        self.assertEqual(self.rules(), {"B4"})
+
+    def test_closed_comment_does_not_hide_later_real_task(self):
+        self.backlog("- [x] (§4)", "<!-- example\nignored\n-->\n- [ ] (§5.1) real\n- [x] (§4)")
+        self.assertEqual(self.rules(), set())
 
     def test_B1_no_pending_task(self):
         path = self.run_dir / "BACKLOG.md"

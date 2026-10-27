@@ -99,9 +99,25 @@ sf_lint_scan_spec() {
 # Records from BACKLOG.md:
 #   TASK  line cites   a pending task spec-trio would pick (cites: space-separated §ids)
 #   FENCED line        a pending-task line inside a code fence
+#   COMMENTED line     a pending-task line inside an HTML comment
 #   NEAR  line         a line that looks like a task but spec-trio skips it
 sf_lint_scan_backlog() {
   LC_ALL=C awk '
+    function strip_comments(s,    out, i, j) {
+      out = ""
+      while (s != "") {
+        if (in_comment) {
+          j = index(s, "-->")
+          if (j == 0) return out
+          s = substr(s, j + 3); in_comment = 0
+        } else {
+          i = index(s, "<!--")
+          if (i == 0) return out s
+          out = out substr(s, 1, i - 1); s = substr(s, i + 4); in_comment = 1
+        }
+      }
+      return out
+    }
     {
       line = $0
       sub(/\r$/, "", line)
@@ -113,14 +129,19 @@ sf_lint_scan_backlog() {
         else if (pending) print "FENCED\t" NR
         next
       }
+      commented = in_comment
+      text = strip_comments(line)
+      if (pending && commented) { print "COMMENTED\t" NR; next }
+      trimmed = text
+      sub(/^[ \t]+/, "", trimmed)
       if (substr(trimmed, 1, 3) == "```" || substr(trimmed, 1, 3) == "~~~") {
         in_fence = 1; fence = substr(trimmed, 1, 3); next
       }
       if (!pending) {
-        if (line ~ /^[[:space:]]*[-*+][[:space:]]*\[[[:space:]]*\]/) print "NEAR\t" NR
+        if (text ~ /^[[:space:]]*[-*+][[:space:]]*\[[[:space:]]*\]/) print "NEAR\t" NR
         next
       }
-      cites = ""; rest = line
+      cites = ""; rest = text
       while (match(rest, /\([^()]*\)/)) {
         group = substr(rest, RSTART, RLENGTH)
         rest = substr(rest, RSTART + RLENGTH)
@@ -225,6 +246,8 @@ sf_lint_judge() {
         }
       } else if ($1 == "FENCED") {
         v("BACKLOG.md", $2, "B1", "task line inside a code fence; spec-trio would still pick it up")
+      } else if ($1 == "COMMENTED") {
+        v("BACKLOG.md", $2, "B1", "task line inside an HTML comment; spec-trio would still pick it up")
       } else if ($1 == "NEAR") {
         v("BACKLOG.md", $2, "B1", "looks like a task but spec-trio skips it; write \"- [ ] (§N.M) ...\"")
       }

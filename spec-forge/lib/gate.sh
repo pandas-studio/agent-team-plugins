@@ -53,7 +53,7 @@ sf_decision_fields() {
   ' "$SPEC_FORGE_ROOT/lib/decision-fields.tsv" "$1"
 }
 
-sf_gate() {
+sf_gate() (
   local decision="" receipt="" workspace=""
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -80,8 +80,19 @@ sf_gate() {
     return "$SF_RC_USAGE"
   fi
 
+  # Validate exactly the bytes that will be published, even if the source
+  # changes while the gate is running. The private temporary directory belongs
+  # to this subshell and is removed on every return or exit.
+  local snapshot_dir snapshot
+  snapshot_dir=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/spec-forge-gate.XXXXXX") || {
+    sf_err "gate: cannot create a private decision snapshot"; return "$SF_RC_IO"; }
+  trap 'rm -rf -- "$snapshot_dir"' EXIT
+  snapshot="$snapshot_dir/decision.md"
+  ( umask 077 && sf_write_atomic "$snapshot" < "$decision" ) || {
+    sf_err "gate: cannot snapshot the decision record"; return "$SF_RC_IO"; }
+
   local refusals=0 fields placeholders row line key label filled first
-  placeholders=$(LC_ALL=C grep -n -o -E '__[A-Z][A-Z0-9_]*__' "$decision") || true
+  placeholders=$(LC_ALL=C grep -n -o -E '__[A-Z][A-Z0-9_]*__' "$snapshot") || true
   if [ -n "$placeholders" ]; then
     while IFS= read -r row; do
       sf_err "gate: $decision:${row%%:*}: placeholder ${row#*:} is not filled"
@@ -89,7 +100,7 @@ sf_gate() {
     refusals=1
   fi
 
-  fields=$(sf_decision_fields "$decision") || { sf_err "gate: cannot read $decision"; return "$SF_RC_IO"; }
+  fields=$(sf_decision_fields "$snapshot") || { sf_err "gate: cannot read snapshot of $decision"; return "$SF_RC_IO"; }
   local status_seen=0 required_key required_label
   while IFS="$(printf '\t')" read -r required_key required_label _ ; do
     [ "$required_key" = key ] && continue
@@ -149,7 +160,6 @@ sf_gate() {
   workspace="${workspace:-$PWD/.spec-forge}"
   runs="$workspace/runs"
   ( umask 077 && mkdir -p -- "$runs" ) || { sf_err "gate: cannot create $runs"; return "$SF_RC_IO"; }
-  chmod 700 -- "$workspace" "$runs" 2>/dev/null || true
   rand=$(LC_ALL=C od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') || rand=""
   run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$-${rand:-0}"
   run_dir="$runs/$run_id"
@@ -157,7 +167,7 @@ sf_gate() {
   run_dir=$(sf_abs "$run_dir") || return "$SF_RC_IO"
   decision_abs=$(sf_abs "$decision") || return "$SF_RC_IO"
 
-  ( umask 077 && sf_write_atomic "$run_dir/decision.md" < "$decision" ) || {
+  ( umask 077 && sf_write_atomic "$run_dir/decision.md" < "$snapshot" ) || {
     sf_err "gate: cannot snapshot the decision record"; return "$SF_RC_IO"; }
   sha=$(sf_sha256 "$run_dir/decision.md") || return "$SF_RC_IO"
   jq -n --arg run_id "$run_id" --arg created_at "$(sf_now)" --arg path "$decision_abs" \
@@ -167,4 +177,4 @@ sf_gate() {
     | ( umask 077 && sf_write_atomic "$run_dir/run.json" ) || {
       sf_err "gate: cannot write run.json"; return "$SF_RC_IO"; }
   printf '%s\n' "$run_dir"
-}
+)
