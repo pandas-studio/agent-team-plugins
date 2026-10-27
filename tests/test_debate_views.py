@@ -429,6 +429,38 @@ view_select_terminal "$2"
 
 
 class OpenViewTests(ViewFixture):
+    def test_ghostty_login_wrapper_reaches_tmux_without_double_exec(self):
+        # Replay Ghostty v1.3.1's macOS shell-command wrapper without opening
+        # an app. Paths include spaces/apostrophes from ViewFixture.
+        ctx = self.prepare('--view=tmux')
+        self.tool('uname', 'echo Darwin\n')
+        with (self.plugin / 'lib/view.sh').open('a') as f:
+            f.write('\nview_ghostty_supported() { return 0; }\n')
+        calls = self.launcher(attach=True)
+        result = self.cli('open-view.sh', '--context', ctx['context_file'], '--terminal=ghostty')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        script, command, cwd = json.loads(calls.read_text().splitlines()[0])
+        self.assertTrue(script.endswith('open-ghostty.applescript'))
+        recorded = self.root / 'wrapped-attach.json'
+        fake = ROOT / 'tests/fake_tmux.py'
+        tmux = self.tools / 'tmux'
+        tmux.write_text(f'#!{sys.executable}\n' + f'''
+import json,os,pathlib,sys
+args=sys.argv[1:]
+if len(args)>2 and args[2]=='attach-session':
+ pathlib.Path({str(recorded)!r}).write_text(json.dumps(dict(args=args,tmux=os.environ.get('TMUX'),pane=os.environ.get('TMUX_PANE'))))
+else:
+ os.execv(sys.executable,[sys.executable,{str(fake)!r},*args])
+''')
+        tmux.chmod(0o755)
+        wrapped = subprocess.run(['/bin/bash', '--noprofile', '--norc', '-c', 'exec -l ' + command],
+                                 cwd=cwd, env=self.env | dict(TMUX='outer-session', TMUX_PANE='%999'),
+                                 text=True, capture_output=True, timeout=5)
+        self.assertEqual(wrapped.returncode, 0, wrapped.stderr)
+        self.assertEqual(json.loads(recorded.read_text()), dict(
+            args=['-S', ctx['socket'], 'attach-session', '-t', '=' + ctx['session']],
+            tmux=None, pane=None))
+
     def launcher(self, *, attach=False, delay=0, error='', rc=0):
         calls = self.root / 'launcher-calls.jsonl'
         path = self.tools / 'osascript'
@@ -485,6 +517,7 @@ sys.exit({rc!r})
         script, command, cwd = json.loads(calls.read_text())
         self.assertTrue(script.endswith("open-terminal.applescript"))
         self.assertEqual(cwd, str(self.workspace))
+        self.assertEqual(shlex.split(command)[0], 'exec')
         self.assertEqual(shlex.split(command)[-1], "=" + ctx["session"])
         self.assertIn("-u TMUX -u TMUX_PANE", command)
 

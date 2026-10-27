@@ -57,7 +57,10 @@ else
   SCRIPT="$SCRIPT_DIR/../lib/open-terminal.applescript"
 fi
 command -v osascript >/dev/null || fail 'osascript is unavailable.' unsupported-host
-CMD="exec /usr/bin/env -u TMUX -u TMUX_PANE $(view_quote "$VIEW_TMUX") -S $(view_quote "$VIEW_SOCKET") attach-session -t $(view_quote "$TARGET")"
+CMD="/usr/bin/env -u TMUX -u TMUX_PANE $(view_quote "$VIEW_TMUX") -S $(view_quote "$VIEW_SOCKET") attach-session -t $(view_quote "$TARGET")"
+# Ghostty's macOS .shell launcher already prepends `exec -l` (v1.3.1
+# src/termio/Exec.zig). It needs an executable, not another exec builtin.
+[ "$TERMINAL" = ghostty ] || CMD="exec $CMD"
 umask 077
 ERR=$(mktemp "${CONTEXT%/*}/open-error.XXXXXX")
 OUT=$(mktemp "${CONTEXT%/*}/open-output.XXXXXX")
