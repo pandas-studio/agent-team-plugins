@@ -177,6 +177,17 @@ class GateTest(SpecForgeCase):
                   "- 허용할 인터페이스 변경·호환성 요구:\n  `GET /reports/{id}` 응답 형식 유지.")
         self.assertEqual(self.gate().returncode, 0)
 
+    def test_indented_status_uses_first_nonempty_value(self):
+        self.edit(self.decision, "- 상태: 확정 — 2026-10-06 사용자 확인",
+                  "- 상태:\n  확정 — 2026-10-06 사용자 확인\n  추가 설명")
+        result = self.gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_indented_unconfirmed_status_is_refused(self):
+        self.edit(self.decision, "- 상태: 확정 — 2026-10-06 사용자 확인",
+                  "- 상태:\n  미결정\n  확정 예정")
+        self.assert_refused("must start with 확정")
+
     def test_duplicate_field_is_refused(self):
         self.decision.write_text(self.decision.read_text() + "- 수용 기준과 실제 검사 명령: `true`\n")
         self.assert_refused("appears 2 times")
@@ -316,6 +327,35 @@ class LintTest(SpecForgeCase):
         self.assertEqual(self.rules(), {"S2"})
         self.assertIn("spec-trio does not see §5.2", self.lint().stdout)
 
+    def test_S2_commented_duplicate_is_reported_at_its_own_line(self):
+        self.spec("### §5.1 Cache hit",
+                  "<!--\n### §5.1 Old example\n-->\n### §5.1 Cache hit")
+        result = self.lint()
+        self.assertEqual(result.returncode, 5, result.stderr)
+        violations = json.loads((self.run_dir / "lint.json").read_text())["violations"]
+        self.assertEqual({v["rule"] for v in violations}, {"S2"})
+        commented_line = (self.run_dir / "spec.md").read_text().splitlines().index("### §5.1 Old example") + 1
+        self.assertEqual([(v["line"], v["rule"]) for v in violations], [(commented_line, "S2")])
+
+    def test_S2_fenced_duplicate_is_not_confused_with_real_criterion(self):
+        self.spec("python3 -m unittest tests.test_reports.RefreshTest -v\n",
+                  "python3 -m unittest tests.test_reports.RefreshTest -v\n### §5.1 example\n")
+        self.assertEqual(self.rules(), {"S2"})
+        self.assertIn("spec-trio counts §5.1", self.lint().stdout)
+
+    def test_S2_commented_h2_hides_real_criteria_even_with_matching_id(self):
+        self.spec("### §5.1 Cache hit",
+                  "<!--\n### §5.1 Old\n## §6 Old\n-->\n### §5.1 Cache hit")
+        self.assertEqual(self.rules(), {"S2"})
+        output = self.lint().stdout
+        self.assertIn("spec-trio counts §5.1", output)
+        self.assertIn("spec-trio does not see §5.1", output)
+        self.assertIn("spec-trio does not see §5.2", output)
+
+    def test_raw_criterion_before_section_five_does_not_shift_line_matching(self):
+        self.spec("## §2 Interfaces", "<!--\n### §5.1 old note\n-->\n## §2 Interfaces")
+        self.assertEqual(self.rules(), set())
+
     def test_S3_duplicate_criterion(self):
         self.spec("## §6 Non-goals", "### §5.1 Cache hit again\n\n- `true`\n\n## §6 Non-goals")
         self.assertEqual(self.rules(), {"S3"})
@@ -412,6 +452,45 @@ class LintTest(SpecForgeCase):
         result = self.lint(env={"SPEC_TRIO_BIN": str(self.tmp / "nowhere")})
         self.assertEqual(result.returncode, 2)
         self.assertIn("SPEC_TRIO_BIN", result.stderr)
+
+    def test_spec_forge_host_overrides_other_plugins_host_environment(self):
+        tools = self.tmp / "host-tools"
+        tools.mkdir()
+        calls = self.tmp / "plugin-list-calls"
+        for host in ("claude", "codex"):
+            tool = tools / host
+            tool.write_text(f'#!/bin/sh\nprintf "{host}\\n" >> "$PLUGIN_CALLS"\n'
+                            f'printf "%s\\n" "$PLUGIN_{host.upper()}_LIST"\n')
+            tool.chmod(0o755)
+        codex_plugin = self.tmp / "home/.codex/plugins/cache/pandas-studio/spec-trio/0.1.0"
+        codex_plugin.parent.mkdir(parents=True)
+        shutil.copytree(ROOT / "spec-trio", codex_plugin)
+        claude_list = json.dumps([{"id": "spec-trio@pandas-studio", "enabled": True,
+                                   "scope": "user", "installPath": str(ROOT / "spec-trio")}])
+        codex_list = json.dumps({"installed": [{"pluginId": "spec-trio@pandas-studio",
+                                                "installed": True, "enabled": True,
+                                                "version": "0.1.0"}]})
+        for host, conflicting in (("claude", "codex"), ("codex", "claude")):
+            with self.subTest(host=host):
+                calls.unlink(missing_ok=True)
+                overrides = {"PATH": str(tools) + os.pathsep + self.env["PATH"],
+                             "SPEC_TRIO_BIN": "", "SPEC_FORGE_PM_HOST": host,
+                             "SPEC_TRIO_PM_HOST": conflicting, "RALPH_TRIO_PM_HOST": conflicting,
+                             "PLUGIN_CALLS": str(calls), "PLUGIN_CLAUDE_LIST": claude_list,
+                             "PLUGIN_CODEX_LIST": codex_list}
+                result = self.lint(env=overrides)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(calls.read_text().splitlines(), [host])
+                # Sourcing the helpers in a longer-lived shell must not leak
+                # spec-forge's temporary host choice into the caller.
+                script = ('. "$1/lib/common.sh"; . "$1/lib/plugin-deps.sh"; '
+                          'sf_resolve SPEC_TRIO_BIN spec-trio@pandas-studio spec-coverage.sh || exit; '
+                          'printf "%s|%s\\n" "$SPEC_TRIO_PM_HOST" "$RALPH_TRIO_PM_HOST"')
+                resolved = subprocess.run(["/bin/bash", "-c", script, "_", str(PLUGIN)],
+                                          cwd=self.tmp, env=self.env | overrides, text=True,
+                                          capture_output=True, timeout=60)
+                self.assertEqual(resolved.returncode, 0, resolved.stderr)
+                self.assertEqual(resolved.stdout.strip(), f"{conflicting}|{conflicting}")
 
 
 class SpecTrioCompatibilityTest(SpecForgeCase):

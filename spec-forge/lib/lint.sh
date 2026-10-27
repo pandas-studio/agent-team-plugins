@@ -28,7 +28,7 @@ EOF
 #   H2   line N            "## §N" heading outside fences and comments
 #   H3   line id parent    "### §N.M" heading; parent is the enclosing §N or ""
 #   CMD  line id           a command (inline code or fenced block) in §5.N body
-#   RAW3 line id           every "### §5." line, as spec-trio's parser sees it
+#   RAW3 line id           "### §5." lines in spec-trio's raw §5 block
 sf_lint_scan_spec() {
   LC_ALL=C awk '
     function strip_comments(s,    out, i, j) {
@@ -49,7 +49,11 @@ sf_lint_scan_spec() {
     {
       line = $0
       sub(/\r$/, "", line)
-      if (line ~ /^###[[:space:]]+§5\./) {
+      # Mirror the raw H2 boundaries of parse_test_criteria, even in a comment or
+      # fence. Its output and RAW3 then have the same order and occurrences.
+      if (line ~ /^##[[:space:]]/) {
+        raw_in_5 = (line ~ /^##[[:space:]]+§5([[:space:].]|$)/)
+      } else if (raw_in_5 && line ~ /^###[[:space:]]+§5\./) {
         raw = line
         sub(/^###[[:space:]]+/, "", raw)
         k = match(raw, /[[:space:]]/)
@@ -226,7 +230,7 @@ sf_lint_judge() {
         if (!(("§" $3) in specline)) specline["§" $3] = $2
       } else if ($1 == "H3") {
         if (!($3 in specline)) specline[$3] = $2
-        if ($4 == "5" && $3 ~ /^§5\./) { f5n++; f5id[f5n] = $3; f5line[f5n] = $2; infence5[$3] = 1 }
+        if ($4 == "5" && $3 ~ /^§5\./) { f5n++; f5id[f5n] = $3; f5line[f5n] = $2; visible5[$2] = 1 }
       } else if ($1 == "CMD") {
         hascmd[$3] = 1
       } else if ($1 == "RAW3") {
@@ -234,7 +238,7 @@ sf_lint_judge() {
       }
       next
     }
-    FILENAME == ARGV[3] { pn++; pid[pn] = $1; inparser[$1] = 1; next }
+    FILENAME == ARGV[3] { pn++; pid[pn] = $1; next }
     FILENAME == ARGV[4] {
       if ($1 == "TASK") {
         tasks++
@@ -278,16 +282,19 @@ sf_lint_judge() {
       line5 = ("§5" in specline) ? specline["§5"] : 1
       if (pn == 0) v("spec.md", line5, "S2", "spec-trio finds no ### §5.N test criteria")
       for (i = 1; i <= pn; i++) {
-        id = pid[i]; ln = line5
-        for (j = 1; j <= rawn; j++) if (rawid[j] == id && !rawused[j]) { rawused[j] = 1; ln = rawline[j]; break }
+        id = pid[i]; ln = rawline[i]
+        if (i > rawn || rawid[i] != id) {
+          v("spec.md", line5, "S2", "cannot match spec-trio criterion " id " to its source line"); continue
+        }
+        inparserline[ln] = 1
         if (id !~ /^§5\.[0-9]+$/) { v("spec.md", ln, "S2", "malformed criterion id \"" id "\"; use ### §5.N"); continue }
-        if (!(id in infence5)) { v("spec.md", ln, "S2", "spec-trio counts " id ", but it is inside a code fence or comment"); continue }
+        if (!(ln in visible5)) { v("spec.md", ln, "S2", "spec-trio counts " id ", but it is inside a code fence or comment"); continue }
         pseen[id]++
         if (pseen[id] > 1) v("spec.md", ln, "S3", "duplicate criterion " id)
       }
       for (i = 1; i <= f5n; i++) {
         id = f5id[i]
-        if (!(id in inparser)) { v("spec.md", f5line[i], "S2", "spec-trio does not see " id "; a fenced or commented ## heading ends its §5 block"); continue }
+        if (!(f5line[i] in inparserline)) { v("spec.md", f5line[i], "S2", "spec-trio does not see " id "; a fenced or commented ## heading ends its §5 block"); continue }
         if (!(id in hascmd)) v("spec.md", f5line[i], "S4", id " has no command; quote at least one check in backticks")
         if (!(id in cited) && !(id in b4done)) { b4done[id] = 1; v("spec.md", f5line[i], "B4", id " is not cited by any pending task in BACKLOG.md") }
       }

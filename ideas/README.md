@@ -165,7 +165,7 @@ discovery·council·spec-forge·eval·ship 노드를 추가하는 방안을 먼�
 | 1 | discovery-trio | 질문에 답하고, 미측정 값을 측정한다. |
 | 2 | council-conductor → debate-conductor | 후보를 둘로 좁힌 결과를 보고 깊게 검증할 쌍을 고른다. |
 | 3 | (사람) | `design-decision.md`의 상태를 확정으로 바꾼다. |
-| 4 | spec-forge | `NEEDS-HUMAN` 항목에 답하고 명세를 승인한다. |
+| 4 | spec-forge | `사람 결정 필요` 항목에 답하고 명세를 승인한다. |
 | 5 | spec-trio | 상한과 검사 명령을 정한다. |
 | 6 | eval-trio `spec` preset | report를 읽고, 실패 시 `export-backlog` 결과를 반영해 5로 돌아간다. |
 | 7 | ship-scribe | 초안을 고쳐 PR을 연다. |

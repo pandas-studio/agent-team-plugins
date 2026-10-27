@@ -64,7 +64,8 @@ sf_write_atomic() {
 # On failure prints the standard message and returns SF_RC_USAGE.
 sf_resolve() {
   local rc=0
-  SPEC_TRIO_PM_HOST="${SPEC_FORGE_PM_HOST:-${SPEC_TRIO_PM_HOST:-claude}}"
+  local SPEC_TRIO_PM_HOST="${SPEC_FORGE_PM_HOST:-${SPEC_TRIO_PM_HOST:-claude}}"
+  local RALPH_TRIO_PM_HOST=""
   resolve_plugin_script "$1" "$2" "$3" || rc=$?
   if [ "$rc" -ne 0 ]; then
     plugin_deps_error spec-forge "${2%@*}" "$3" "$1" "$rc"

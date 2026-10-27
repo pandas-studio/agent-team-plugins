@@ -46,7 +46,13 @@ sf_decision_fields() {
         }
         next
       }
-      if (cur != "" && line ~ /^[ \t]+[^ \t]/) { filled = 1; next }
+      if (cur != "" && line ~ /^[ \t]+[^ \t]/) {
+        if (first == "") {
+          first = line
+          sub(/^[ \t]+/, "", first); sub(/[ \t]+$/, "", first)
+        }
+        filled = 1; next
+      }
       flush()
     }
     END { flush() }
