@@ -1,6 +1,12 @@
 ---
 description: Extend the most recent debate by N more rounds in the same `debate-<TS>/` dir. Round numbering continues; tail panes pick up new rounds without retarget. Reads topic from prior debate's topic.txt.
 disable-model-invocation: true
+hooks:
+  PreToolUse:
+    - matcher: Bash
+      hooks:
+        - type: command
+          command: '"${CLAUDE_PLUGIN_ROOT}/bin/announce-view.sh"'
 allowed-tools: Bash(team-3pane.sh:*) Bash(run-debate.sh:*) Bash(open-view.sh:*) Bash(ls:*) Bash(cat:*) Read Glob
 argument-hint: "[--view=auto|tmux|none] [--open-view] [--terminal=auto|ghostty|terminal] [extra-rounds]"
 ---
@@ -47,8 +53,8 @@ chat before dispatch** in a separate tool call. Use the returned context file.
 Copy the actual attach command or both manual tail commands into that visible
 reply; tool output does not count, including for `--view=none`. Only `present`
 permits confirming current-window viewers. Do not dispatch before this reply.
-Send the returned `user_message` verbatim immediately after preparation, before
-another tool call, including for `--view=none` or a short run.
+Send the latest helper's `user_message` verbatim before dispatch: use the opener's
+message if opening was requested, otherwise preparation's, even for `--view=none`.
 It reuses the debate directory's saved model pair and any saved rotation unless
 this invocation passes explicit model flags/env vars. Start a fresh debate to
 change model pairs inside rotation or to change whether rotation is enabled.

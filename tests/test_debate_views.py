@@ -63,6 +63,45 @@ class ViewFixture(unittest.TestCase):
 
 
 class ViewPreparationTests(ViewFixture):
+    def test_released_lock_eexist_race_is_retried(self):
+        mkdir = shutil.which('mkdir')
+        marker = self.root / 'mkdir-raced'
+        self.tool('mkdir', 'case "$1" in */debate-view-lock.*) if [ ! -f "$RACE_MARKER" ]; then\n' +
+                  'touch "$RACE_MARKER"; echo "mkdir: File exists" >&2; exit 1; fi;; esac\n' +
+                  f'exec {shlex.quote(mkdir)} "$@"\n')
+        ctx = self.prepare('--view=tmux', RACE_MARKER=str(marker))
+        self.assertEqual(ctx['status'], 'ready-detached')
+        self.assertTrue(marker.exists())
+
+    def test_dead_private_lock_owner_has_exact_advisory_cleanup(self):
+        ctx = self.prepare('--view=tmux')
+        key = subprocess.run(['cksum'], input=ctx['socket'] + '\n' + ctx['session'],
+                             text=True, capture_output=True, check=True).stdout.split()[0]
+        lock = Path('/tmp').resolve() / f'debate-view-lock.{os.getuid()}.{key}'
+        lock.mkdir(mode=0o700)
+        owner = lock / 'owner'
+        owner.write_text('2147483647-123-456')
+        owner.chmod(0o600)
+        self.addCleanup(lambda: lock.rmdir())
+        self.addCleanup(owner.unlink)
+        result = self.cli('team-3pane.sh', '--view=tmux')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('no longer exists', result.stderr)
+        cleanup = next(line.removeprefix('debate-view: ') for line in result.stderr.splitlines()
+                       if line.startswith('debate-view: rm -f -- '))
+        self.assertEqual(shlex.split(cleanup), ['rm', '-f', '--', str(owner), '&&', 'rmdir', '--', str(lock)])
+        self.assertEqual(owner.read_text(), '2147483647-123-456')
+
+    def test_lock_creation_permission_denial_is_not_busy_lock(self):
+        mkdir = shutil.which('mkdir')
+        self.tool('mkdir', 'case "$1" in */debate-view-lock.*) echo "mkdir: Operation not permitted" >&2; exit 1;; esac\n' +
+                  f'exec {shlex.quote(mkdir)} "$@"\n')
+        ctx = self.prepare('--view=auto')
+        self.assertEqual(ctx['status'], 'manual')
+        self.assertEqual(ctx['reason_code'], 'sandbox-denied')
+        self.assertNotIn('busy', ctx['reason'])
+        self.assertIn(ctx['reason'], ctx['user_message'])
+
     def test_manual_context_and_posix_quoting(self):
         ctx = self.prepare(DEBATE_LOG_DIR="logs ' ; $(no-command)", AGENT_TEAM="custom")
         self.assertEqual(ctx["status"], "manual")
@@ -164,6 +203,37 @@ class ViewPreparationTests(ViewFixture):
         self.assertEqual(ctx["status"], "manual")
         self.assertEqual(list(self.read_state()["windows"]), ["@0"])
 
+    def test_interrupted_unstamped_view_is_preserved_with_cleanup_instructions(self):
+        ctx = self.prepare("--view=tmux")
+        state = self.read_state()
+        win = next(v for v in state["windows"].values() if v.get("session") == ctx["session"])
+        win["options"].pop("@debate-view-complete")
+        before = list(win["panes"])
+        state["pane_options"] = {}
+        calls_before = len(state["calls"])
+        self.state.write_text(json.dumps(state))
+        result = self.cli("team-3pane.sh", "--view=tmux")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("kill-session", result.stderr)
+        self.assertIn(ctx["session"], result.stderr)
+        state = self.read_state()
+        self.assertFalse(any(c[0] in ("respawn-pane", "kill-session", "split-window") for c in state["calls"][calls_before:]))
+        self.assertEqual(next(v for v in state["windows"].values() if v.get("session") == ctx["session"])["panes"], before)
+
+    def test_existing_lock_is_not_taken_over_and_reports_exact_path(self):
+        ctx = self.prepare("--view=tmux")
+        key = subprocess.run(["cksum"], input=ctx["socket"] + "\n" + ctx["session"],
+                             text=True, capture_output=True, check=True).stdout.split()[0]
+        lock = Path('/tmp').resolve() / f'debate-view-lock.{os.getuid()}.{key}'
+        lock.mkdir()
+        (lock / 'owner').write_text('stale-test-owner')
+        self.addCleanup(lambda: lock.rmdir())
+        self.addCleanup(lambda: (lock / 'owner').unlink())
+        result = self.cli('team-3pane.sh', '--view=tmux')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(str(lock), result.stderr)
+        self.assertEqual((lock / 'owner').read_text(), 'stale-test-owner')
+
     def test_false_success_socket_denial_falls_back_and_strict_fails(self):
         self.tool("tmux", 'if [ "$1" = -V ]; then echo "tmux 3.6"; else echo "Operation not permitted" >&2; fi\n')
         ctx = self.prepare("--view=auto")
@@ -215,11 +285,13 @@ else:
 target.mkdir(parents=True, exist_ok=True)
 pathlib.Path(os.environ["DEBATE_RECEIPT"]).write_text(json.dumps(dict(
     schema_version=1, debate_dir=str(target), last_round=1, critic_round=None, critic_file=None)))
+pathlib.Path(os.environ["DEBATE_RECEIPT"]).chmod(0o600)
 ''')
         engine.chmod(0o755)
 
     def run_context(self, ctx, *args, **env):
-        return self.cli("run-debate.sh", "--context", ctx["context_file"], *args, **env)
+        host = [] if "--read-receipt" in args else ["--host=claude"]
+        return self.cli("run-debate.sh", *host, "--context", ctx["context_file"], *args, **env)
 
     def test_receipt_binding_and_private_context_paths(self):
         ctx = self.prepare()
@@ -284,26 +356,96 @@ pathlib.Path(os.environ["DEBATE_RECEIPT"]).write_text(json.dumps(dict(
         path.symlink_to(other)
         self.assertEqual(self.run_context(ctx, "--", "topic").returncode, 2)
 
-    def test_interrupt_waits_for_engine_cleanup_and_leaves_no_success_status(self):
+    def test_signals_wait_for_engine_cleanup_and_leave_no_success_status(self):
+        for sig, expected in ((signal.SIGINT, 130), (signal.SIGTERM, 143), (signal.SIGHUP, 129)):
+            with self.subTest(signal=sig):
+                self.assert_signal_cleanup(sig, expected)
+
+    def assert_signal_cleanup(self, sig, expected):
         ctx = self.prepare()
-        run = subprocess.Popen([str(self.plugin / "bin/run-debate.sh"), "--context", ctx["context_file"],
+        pid_file = Path(str(self.calls) + ".pid")
+        pid_file.unlink(missing_ok=True)
+        run = subprocess.Popen([str(self.plugin / "bin/run-debate.sh"), "--host=claude", "--context", ctx["context_file"],
                                 "--", "topic"], cwd=self.workspace, env=self.env | {"ENGINE_WAIT": "1"},
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        pid_file = Path(str(self.calls) + ".pid")
         deadline = time.monotonic() + 4
         while not pid_file.exists() and time.monotonic() < deadline:
             time.sleep(0.02)
         self.assertTrue(pid_file.exists())
         child = int(pid_file.read_text())
-        run.send_signal(signal.SIGINT)
+        run.send_signal(sig)
         out, err = run.communicate(timeout=5)
-        self.assertEqual(run.returncode, 130, out + err)
+        self.assertEqual(run.returncode, expected, out + err)
         with self.assertRaises(ProcessLookupError):
             os.kill(child, 0)
         self.assertFalse(Path(ctx["context_file"]).with_name("dispatch-status.json").exists())
 
+    def test_host_is_required_before_marking_dispatch(self):
+        ctx = self.prepare()
+        result = self.cli('run-debate.sh', '--context', ctx['context_file'], '--', 'topic')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('--host', result.stderr)
+        self.assertFalse(Path(ctx['context_file']).with_name('dispatch.started').exists())
+
+    def test_private_markers_do_not_change_engine_umask(self):
+        ctx = self.prepare()
+        result = subprocess.run([str(self.plugin / 'bin/run-debate.sh'), '--host=claude',
+                                 '--context', ctx['context_file'], '--', 'topic'],
+                                cwd=self.workspace, env=self.env, capture_output=True,
+                                text=True, umask=0o022, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((Path(ctx['log_dir']) / 'debate-fixture').stat().st_mode & 0o777, 0o755)
+        self.assertEqual(Path(ctx['receipt']).stat().st_mode & 0o777, 0o600)
+        self.assertEqual(Path(ctx['context_file']).with_name('dispatch-status.json').stat().st_mode & 0o777, 0o600)
+
+
+class TerminalDetectionTests(ViewFixture):
+    def test_terminal_capability_and_outer_client_selection(self):
+        # Test the production selector with capability/client dependencies;
+        # no installed terminal, app permission, or native GUI is needed.
+        script = r'''
+. "$1/lib/view.sh"
+view_ghostty_supported() { [ "$GHOSTTY_AVAILABLE" = 1 ]; }
+view_tmux() { printf '%s\n' "$CLIENT_TERMS"; }
+view_select_terminal "$2"
+'''
+        cases = [
+            ('auto', 'ghostty', '', '', '1', 'ghostty', 0),
+            ('auto', 'ghostty', '', '', '0', 'terminal', 0),
+            ('auto', 'tmux', 'fake', 'xterm-ghostty truecolor', '1', 'ghostty', 0),
+            ('auto', 'tmux', 'fake', 'xterm-ghostty truecolor\nxterm-256color truecolor', '1', 'terminal', 0),
+            ('auto', 'ghostty', 'fake', 'xterm-256color truecolor', '1', 'terminal', 0),
+            ('ghostty', 'ghostty', '', '', '0', '', 1),
+            ('terminal', 'ghostty', '', '', '1', 'terminal', 0),
+        ]
+        for requested, outer, tmux, clients, available, expected, rc in cases:
+            with self.subTest(requested=requested, outer=outer, clients=clients, available=available):
+                result = subprocess.run(['bash', '-c', script, 'bash', str(self.plugin), requested],
+                                        env=self.env | dict(TERM_PROGRAM=outer, TMUX=tmux,
+                                                            CLIENT_TERMS=clients, GHOSTTY_AVAILABLE=available),
+                                        capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, rc, result.stderr)
+                self.assertEqual(result.stdout.strip(), expected)
+
 
 class OpenViewTests(ViewFixture):
+    def launcher(self, *, attach=False, delay=0, error='', rc=0):
+        calls = self.root / 'launcher-calls.jsonl'
+        path = self.tools / 'osascript'
+        path.write_text(f'#!{sys.executable}\n' + f'''
+import json,os,pathlib,sys,time
+with open({str(calls)!r},'a') as f:f.write(json.dumps(sys.argv[1:])+'\\n')
+time.sleep({delay!r})
+if {attach!r}:
+ path=pathlib.Path(os.environ['FAKE_TMUX_STATE']);state=json.loads(path.read_text());state['clients']='new-client\\n'
+ temporary=path.with_suffix('.launch');temporary.write_text(json.dumps(state));os.replace(temporary,path)
+print('test-owned-window')
+print({error!r},file=sys.stderr)
+sys.exit({rc!r})
+''')
+        path.chmod(0o755)
+        return calls
+
     def test_manual_context_never_launches_terminal(self):
         self.tool("osascript", 'echo unexpected >&2; exit 99\n')
         ctx = self.prepare()
@@ -345,6 +487,55 @@ class OpenViewTests(ViewFixture):
         self.assertEqual(cwd, str(self.workspace))
         self.assertEqual(shlex.split(command)[-1], "=" + ctx["session"])
         self.assertIn("-u TMUX -u TMUX_PANE", command)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS terminal availability')
+    def test_launch_success_requires_attachment_and_avoids_reopening(self):
+        calls = self.launcher(attach=True)
+        ctx = self.prepare('--view=tmux')
+        result = self.cli('open-view.sh', '--context', ctx['context_file'], '--terminal=terminal')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['status'], 'attached')
+        self.cli('open-view.sh', '--context', ctx['context_file'], '--terminal=terminal')
+        self.assertEqual(len(calls.read_text().splitlines()), 1)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS terminal availability')
+    def test_successful_launch_without_client_is_unconfirmed(self):
+        self.launcher()
+        ctx = self.prepare('--view=tmux')
+        result = self.cli('open-view.sh', '--context', ctx['context_file'], '--terminal=terminal')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['status'], 'launch-requested')
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS terminal availability')
+    def test_sandbox_denial_keeps_ready_view_and_reports_attach(self):
+        self.launcher(error='Connection Invalid: com.apple.hiservices-xpcservice', rc=1)
+        ctx = self.prepare('--view=tmux')
+        result = self.cli('open-view.sh', '--context', ctx['context_file'], '--terminal=terminal')
+        self.assertEqual(result.returncode, 2)
+        data = json.loads(result.stdout)
+        self.assertEqual(data['status'], 'open-failed')
+        self.assertEqual(data['reason_code'], 'sandbox-denied')
+        self.assertEqual(data['attach_command'], ctx['attach_command'])
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS terminal availability')
+    def test_native_event_timeout_is_pending_not_failed_or_duplicate(self):
+        calls = self.launcher(error='AppleEvent timed out. (-1712)', rc=1)
+        ctx = self.prepare('--view=tmux')
+        result = self.cli('open-view.sh', '--context', ctx['context_file'], '--terminal=terminal')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data['status'], 'launch-requested')
+        self.assertEqual(data['reason_code'], 'automation-timeout')
+        self.assertIn('consent', data['reason'].lower())
+        self.assertEqual(len(calls.read_text().splitlines()), 1)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS terminal availability')
+    def test_slow_consent_is_not_killed_at_five_seconds(self):
+        self.launcher(attach=True, delay=6)
+        ctx = self.prepare('--view=tmux')
+        result = self.cli('open-view.sh', '--context', ctx['context_file'], '--terminal=terminal')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['status'], 'attached')
 
 
 class RealEngineDispatchTests(ViewFixture):

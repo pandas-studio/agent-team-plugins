@@ -20,8 +20,9 @@ Copy the actual attach command (`ready-detached`) or **both tail commands**
 (`manual`, even for `--view=none`) into your visible reply before the dispatch
 tool call. Tool output alone does not count. For `present`, confirm the verified
 current-window viewers. Do not skip this reply to save a message.
-Send the helper's ready-to-send `user_message` verbatim immediately after setup,
-before any further tool call, including for short runs and `--view=none`.
+Send the latest helper's `user_message` verbatim before dispatch: call the opener
+first if opening was requested; otherwise send preparation's message immediately.
+This includes short runs and `--view=none`.
 
 ```bash
 "<plugin-root>/bin/run-debate.sh" --host=codex --context '<exact context_file>' -- -n <rounds> [flags] "<topic>" [context-file.md]

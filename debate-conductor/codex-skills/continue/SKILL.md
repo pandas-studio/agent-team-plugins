@@ -21,7 +21,8 @@ Prepare, optionally open, **show viewing instructions in chat before dispatch**,
 then dispatch in a separate long-running tool call:
 Copy the actual attach command or both manual tail commands into the visible
 reply first (even for `--view=none`); tool output alone does not count.
-Send `user_message` verbatim immediately after preparation, before another tool.
+Send the latest helper's `user_message` verbatim before dispatch, after the
+optional opener step if requested.
 
 Read `<debate-dir>/topic.txt` and run:
 

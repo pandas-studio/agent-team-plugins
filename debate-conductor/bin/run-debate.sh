@@ -9,7 +9,7 @@ usage() {
   echo 'Usage: run-debate.sh --host=claude|codex --context FILE [--continue-from ABS] -- ENGINE_ARGS...'
   echo '       run-debate.sh --read-receipt --context FILE'
 }
-HOST=claude CONTEXT="" CONTINUE="" READ=0
+HOST="" CONTEXT="" CONTINUE="" READ=0
 seen=" "
 while [ "$#" -gt 0 ]; do
   key=${1%%=*}
@@ -28,7 +28,9 @@ while [ "$#" -gt 0 ]; do
     *) usage >&2; exit 2 ;;
   esac
 done
-case "$HOST" in claude|codex) ;; *) view_error 'invalid PM host'; exit 2 ;; esac
+if [ "$READ" = 0 ]; then
+  case "$HOST" in claude|codex) ;; *) view_error 'dispatch requires --host=claude or --host=codex'; exit 2 ;; esac
+fi
 DATA=$(view_context_read "$CONTEXT") || exit 2
 DIR=${CONTEXT%/*}
 RECEIPT="$DIR/receipt.json"
@@ -61,8 +63,7 @@ if [ -n "$CONTINUE" ]; then
 elif [ "$KIND" = log-dir ]; then
   view_error 'raw log-directory contexts are continuation-only'; exit 2
 fi
-umask 077
-mkdir "$DIR/dispatch.started" 2>/dev/null || { view_error 'context has already been dispatched; prepare a fresh context for a retry'; exit 2; }
+(umask 077; mkdir "$DIR/dispatch.started") 2>/dev/null || { view_error 'context has already been dispatched; prepare a fresh context for a retry'; exit 2; }
 if [ "$KIND" = team ]; then
   AGENT_TEAM=$(printf '%s' "$DATA" | jq -r .team)
   DEBATE_LOG_DIR=$(printf '%s' "$DATA" | jq -r .log_base)
@@ -73,7 +74,7 @@ cd "$(printf '%s' "$DATA" | jq -r .cwd)"
 child=""
 stop_dispatch() {
   local status="$1"
-  trap '' INT TERM
+  trap '' INT TERM HUP
   # Asynchronous children can inherit ignored SIGINT. TERM reaches debate.sh's
   # own cleanup path; wait so a cancelled PM tool does not orphan a paid round.
   if [ -n "$child" ]; then
@@ -84,12 +85,16 @@ stop_dispatch() {
 }
 trap 'stop_dispatch 143' TERM
 trap 'stop_dispatch 130' INT
+trap 'stop_dispatch 129' HUP
 "$SCRIPT_DIR/debate.sh" "${ARGS[@]}" <&0 &
 child=$!
 rc=0
 wait "$child" || rc=$?
 child=""
-tmp=$(mktemp "$DIR/dispatch-status.XXXXXX")
-jq -cn --argjson rc "$rc" '{exit_code:$rc}' > "$tmp"
-mv "$tmp" "$DIR/dispatch-status.json"
+(
+  umask 077
+  tmp=$(mktemp "$DIR/dispatch-status.XXXXXX")
+  jq -cn --argjson rc "$rc" '{exit_code:$rc}' > "$tmp"
+  mv "$tmp" "$DIR/dispatch-status.json"
+)
 exit "$rc"

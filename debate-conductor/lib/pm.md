@@ -17,9 +17,9 @@ Frame as a **stance, not a question** — ✅ `"Server Components 즉시 도입 
 
 ## Reporting back
 
-Quote the canonical verdict line verbatim (`Verdict: STRENGTHEN / RECONSIDER / OVERTURN`), then one line per round. Don't dump full transcripts — they're in the panes and at `.debate-conductor/log/<team>/latest-debate/`.
+Quote the canonical verdict line verbatim (`Verdict: STRENGTHEN / RECONSIDER / OVERTURN`), then one line per round. Don't dump full transcripts. Use the skill's validated dispatch receipt for the exact transcript directory; live viewing is optional and must be verified, not assumed.
 
 ## Don't
 
-- Don't call `ask-generator.sh` / `ask-critic.sh` directly; `debate.sh` (via the skill) is the only entry point.
+- Don't call `ask-generator.sh` / `ask-critic.sh` directly; use the skill's view preparation and `run-debate.sh` dispatch/receipt flow.
 - Don't dispatch from inside a subagent. Don't paste full round transcripts back to the chat.

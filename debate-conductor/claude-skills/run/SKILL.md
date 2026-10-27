@@ -1,6 +1,12 @@
 ---
 description: Run a Generator vs Critic debate, prepare optional live viewers, and summarize verdict and round moves. Accept a topics/ reference or free-form text; bootstrap is optional.
 disable-model-invocation: true
+hooks:
+  PreToolUse:
+    - matcher: Bash
+      hooks:
+        - type: command
+          command: '"${CLAUDE_PLUGIN_ROOT}/bin/announce-view.sh"'
 allowed-tools: Bash(team-3pane.sh:*) Bash(run-debate.sh:*) Bash(open-view.sh:*) Bash(ls:*) Bash(cat:*) Read Glob Grep Write
 argument-hint: "[--view=auto|tmux|none] [--open-view] [--terminal=auto|ghostty|terminal] [--gen=<model>] [--crit=<model>] [--rotate] [--until-converged] [topic-or-text] [rounds]"
 ---
@@ -63,9 +69,10 @@ command (`ready-detached`) or **both actual tail commands** (`manual`, including
 `--view=none`) into your chat reply, with the state. Tool output alone does not
 count. Do not issue the dispatch Bash call before this reply. For `present`,
 explicitly confirm the verified current-window viewers.
-The helper's `user_message` is already formatted: send it verbatim immediately
-after the setup result, before issuing any further tool call. This is required
-even with `--view=none` and even if you expect the fixture/run to finish quickly.
+The helper's `user_message` is already formatted: if opening was requested,
+call the opener first and send its message; otherwise send preparation's message
+immediately. Never dispatch before that reply, even with `--view=none` or a
+short run.
 
 For a **topics/ reference**:
 ```

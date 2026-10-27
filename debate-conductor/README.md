@@ -92,12 +92,21 @@ machine/user. Names include team and a log-directory checksum, so projects do
 not fight over a global `debate-view`. Repeated preparation reuses two panes.
 `switch-client` applies only to the same server/socket; otherwise use a tab
 outside the current tmux and the attach command.
+Claude run/continue also display the latest viewing instructions as a host
+notice immediately before dispatch, including hosts that render progress as
+narration. The skill hook grants no permissions and changes no global settings.
+Unreadable or damaged transcript records skip that redundant notice and never
+block the debate; the PM's ordinary viewing reply still applies.
 
 `--open-view` supports identified Ghostty >=1.3 or Terminal.app. An attached
 client avoids duplicate windows. Window launch and confirmed tmux attachment
 are reported separately. Denied Automation, SSH/unsupported hosts and opening
 failures leave manual instructions. GUI failure is advisory if a strict tmux
 view itself is ready. No permission settings are changed.
+Terminal.app receives a new-window command without targeting existing tabs;
+macOS may separately restore windows when launching the app cold. Native
+Automation consent can delay opening, so an unconfirmed launch is reported
+as pending and retains the attach command.
 
 Later say **“뷰 열어줘”**: the PM directly opens the saved view without running
 another debate or implicitly invoking bootstrap. Handling can wait for a
@@ -106,7 +115,7 @@ New turns use normal host permissions and may require a narrow approval.
 Explicit `/debate-conductor:bootstrap --open-view` is view-only too.
 
 Default keys: `Ctrl-b d` detaches, `Ctrl-b [` scrolls, `space` pauses one viewer,
-`q` stops it. Next preparation revives owned dead viewers without adding panes.
+`q` stops it. Next preparation revives owned dead detached viewers without adding panes.
 Detached sessions remain after the debate for rereading. Their emitted cleanup
 command removes only the view, not the separate PM/debate. Disk transcripts
 outlive pane scrollback. Foreign/incomplete views and stale setup locks remain

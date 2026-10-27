@@ -76,6 +76,13 @@ view_tmux() { "$VIEW_TMUX" -S "$VIEW_SOCKET" "$@"; }
 
 view_record() { view_tmux show-options -wqv -t "$1" @debate-view; }
 
+view_complete() {
+  local complete nonce
+  complete=$(view_tmux show-options -wqv -t "$1" @debate-view-complete) || return 1
+  nonce=$(printf '%s' "$2" | jq -r .nonce) || return 1
+  [ -n "$complete" ] && [ "$complete" = "$nonce" ]
+}
+
 view_record_matches() {
   local record="$1" team="$2" dir="$3"
   printf '%s' "$record" | jq -e --arg team "$team" --arg dir "$dir" '
@@ -145,4 +152,39 @@ view_geometry_matches() {
   want=$(printf '%s' "$record" | jq -r '.gen,.crit' | sort)
   live=$(view_tmux list-panes -t "$target" -F '#{pane_id}' | sort) || return 1
   [ "$want" = "$live" ]
+}
+
+view_ghostty_supported() {
+  local app version major minor
+  for app in /Applications/Ghostty.app "$HOME/Applications/Ghostty.app"; do
+    [ -d "$app" ] || continue
+    version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist" 2>/dev/null) || continue
+    if [[ "$version" =~ ^([0-9]+)\.([0-9]+) ]]; then
+      major=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]}
+      if [ "$major" -gt 1 ] || { [ "$major" = 1 ] && [ "$minor" -ge 3 ]; }; then return 0; fi
+    fi
+  done
+  return 1
+}
+
+# Kept separate from native automation so capability/terminal detection can be
+# checked with recording dependencies on every platform, without opening apps.
+view_select_terminal() {
+  local requested="$1" term
+  case "$requested" in
+    ghostty) view_ghostty_supported || return 1; printf 'ghostty\n'; return ;;
+    terminal) printf 'terminal\n'; return ;;
+    auto) ;;
+    *) return 1 ;;
+  esac
+  term=${TERM_PROGRAM:-}
+  if [ -n "${TMUX:-}" ]; then
+    term=$(view_tmux list-clients -F '#{client_termname} #{client_termtype}' 2>/dev/null | sort -u) || term=""
+    [ "$(printf '%s\n' "$term" | wc -l | tr -d ' ')" = 1 ] || term=""
+  fi
+  case "$term" in
+    ghostty|Ghostty|xterm-ghostty|xterm-ghostty\ *|ghostty\ *)
+      if view_ghostty_supported; then printf 'ghostty\n'; return; fi ;;
+  esac
+  printf 'terminal\n'
 }

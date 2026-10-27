@@ -12,9 +12,9 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --view=*) MODE=${1#*=} ;;
     --view-only) FORCE=1 ;;
-    --team=*) TEAM_OPT=${1#*=}; [ -n "$TEAM_OPT" ] || exit 2 ;;
-    --log-base=*) BASE_OPT=${1#*=}; [ -n "$BASE_OPT" ] || exit 2 ;;
-    --log-dir=*) RAW=${1#*=}; [ -n "$RAW" ] || exit 2 ;;
+    --team=*) TEAM_OPT=${1#*=}; [ -n "$TEAM_OPT" ] || { view_error '--team must not be empty'; exit 2; } ;;
+    --log-base=*) BASE_OPT=${1#*=}; [ -n "$BASE_OPT" ] || { view_error '--log-base must not be empty'; exit 2; } ;;
+    --log-dir=*) RAW=${1#*=}; [ -n "$RAW" ] || { view_error '--log-dir must not be empty'; exit 2; } ;;
     *) view_error "invalid or mixed layout option: $1"; exit 2 ;;
   esac
   shift
@@ -66,14 +66,16 @@ release_view_lock() {
   fi
 }
 cleanup_view() {
-  local panes want clients owner windows
+  local panes want clients owner windows complete
   if [ -n "$CREATED" ]; then
     owner=$(view_tmux show-options -qv -t "$CREATED" @debate-view-owner 2>/dev/null || true)
     clients=$(view_tmux list-clients -t "$CREATED" -F '#{client_name}' 2>/dev/null || true)
     windows=$(view_tmux list-windows -t "$CREATED" -F '#{window_id}' 2>/dev/null || true)
     panes=$(view_tmux list-panes -t "$CREATED" -F '#{pane_id}' 2>/dev/null | sort || true)
     want=$(printf '%s\n' "$GEN" "$CRIT" | sed '/^$/d' | sort)
+    complete=$(view_tmux show-options -wqv -t "$GEN" @debate-view-complete 2>/dev/null || true)
     if [ "$owner" = "$OWNER" ] && [ -z "$clients" ] &&
+       [ -z "$complete" ] &&
        [ "$(printf '%s\n' "$windows" | wc -l | tr -d ' ')" = 1 ] && [ "$panes" = "$want" ]; then
       view_tmux kill-session -t "$CREATED" 2>/dev/null || true
     fi
@@ -83,15 +85,37 @@ cleanup_view() {
 trap cleanup_view EXIT
 
 acquire_view_lock() {
-  local key i=0 root
+  local key i=0 root mkdir_error owner pid probe
   root=$(cd /tmp && pwd -P)
   key=$(printf '%s\n%s' "$VIEW_SOCKET" "$SESSION" | cksum | cut -d' ' -f1)
   LOCK="$root/debate-view-lock.$(id -u).$key"
-  until mkdir "$LOCK" 2>/dev/null; do
+  until mkdir_error=$(LC_ALL=C mkdir "$LOCK" 2>&1); do
+    # EEXIST can race with the old owner releasing the directory. Retain the
+    # bounded retry even if it has disappeared by this check.
+    if [[ $mkdir_error != *'File exists'* ]] && [ ! -d "$LOCK" ]; then
+      view_error "$mkdir_error"
+      LOCK=""
+      return 1
+    fi
     i=$((i + 1))
     if [ "$i" -ge 50 ]; then
       view_error "view setup lock is busy or incomplete: $LOCK"
       view_error 'Inspect its owner and verify no process is using it before removing it; no automatic stale takeover.'
+      if [ ! -L "$LOCK" ] && [ "$(view_private_stat "$LOCK")" = "$(id -u):700" ] &&
+          view_private_file "$LOCK/owner"; then
+        owner=$(cat "$LOCK/owner")
+        if [[ $owner =~ ^([1-9][0-9]*)-[0-9]+-[0-9]+$ ]]; then
+          pid=${BASH_REMATCH[1]}
+          if probe=$(LC_ALL=C kill -0 "$pid" 2>&1); then
+            view_error "owner PID $pid is still running; leave the lock intact."
+          elif [[ $probe == *'No such process'* ]]; then
+            view_error "owner PID $pid no longer exists. After verifying this lock is unused, cleanup with:"
+            view_error "rm -f -- $(view_quote "$LOCK/owner") && rmdir -- $(view_quote "$LOCK")"
+          else
+            view_error "owner PID $pid cannot be verified; leave the lock intact."
+          fi
+        fi
+      fi
       LOCK=""
       return 1
     fi
@@ -109,12 +133,18 @@ prepare_detached() {
   target="=$SESSION"
   if view_tmux has-session -t "$target" 2>/dev/null; then
     owner=$(view_tmux show-options -qv -t "$target:" @debate-view-owner) || return 1
-    case "$owner" in debate-conductor-v1:*) ;; *) view_error "foreign session: $SESSION"; return 1 ;; esac
+    case "$owner" in debate-conductor-v1:*) ;; *)
+      view_error "foreign or untagged session: $SESSION"
+      view_error "Inspect with: $(view_quote "$VIEW_TMUX") -S $(view_quote "$VIEW_SOCKET") list-panes -t $(view_quote "$target:")"
+      view_error "Only after verifying this is an abandoned view, remove with: $(view_quote "$VIEW_TMUX") -S $(view_quote "$VIEW_SOCKET") kill-session -t $(view_quote "$target")"
+      return 1 ;;
+    esac
     count=$(view_tmux list-windows -t "$target" -F '#{window_id}' | wc -l | tr -d ' ') || return 1
     [ "$count" = 1 ] || { view_error "modified session: $SESSION"; return 1; }
     record=$(view_record "$target:") || return 1
     view_record_matches "$record" "$TEAM" "$LOG_DIR" &&
       [ "$(printf '%s' "$record" | jq -r .type)" = detached ] &&
+      view_complete "$target:" "$record" &&
       view_geometry_matches "$target:" "$record" || {
       view_error "incomplete, conflicting or modified view: $SESSION"
       view_error "Inspect first; cleanup only this view with: $(view_quote "$VIEW_TMUX") -S $(view_quote "$VIEW_SOCKET") kill-session -t $(view_quote "$target")"
@@ -146,6 +176,8 @@ prepare_detached() {
     view_start_pane "$GEN" gen "$nonce" "$TEAM" "$BASE" "$CWD" "$SCRIPT_DIR/../bin/tail-role.sh" || return 1
     view_start_pane "$CRIT" crit "$nonce" "$TEAM" "$BASE" "$CWD" "$SCRIPT_DIR/../bin/tail-role.sh" || return 1
     view_wait_ready "$record" || return 1
+    view_geometry_matches "$GEN" "$record" || return 1
+    view_tmux set-option -w -t "$GEN" @debate-view-complete "$nonce" || return 1
     CREATED=""
   fi
   RECORD=$record
@@ -244,7 +276,7 @@ jq -cn --arg kind "$KIND" --arg status "$STATUS" --arg team "$TEAM" --arg base "
      elif $status == "ready-detached" then
      "Live view prepared in the background. In another terminal tab/window on this machine and user, run:\n" + $attach +
      "\nDetach with Ctrl-b d. You can also request: 뷰 열어줘."
-     else "Manual live viewing: run these in separate terminals:\n" + $gen + "\n" + $crit end)}
+     else "Manual live viewing.\nReason: " + $reason + "\nRun in separate terminals:\n" + $gen + "\n" + $crit end)}
 ' > "$CONTEXT"
 cat "$CONTEXT"
 [ "$MODE" != tmux ] || [ "$STATUS" != manual ] || exit 2

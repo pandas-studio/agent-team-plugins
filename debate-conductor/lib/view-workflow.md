@@ -5,6 +5,14 @@ Read this for `run`, `continue`, or explicit `bootstrap`. Claude uses bare
 absolute `<plugin-root>/bin/…` paths. No leading shell environment assignments,
 `eval`, raw model CLIs, or implicit invocation of another skill are needed.
 
+Claude run/continue register a narrow `PreToolUse` announcement hook. Claude
+keeps skill hooks for the session; this hook ignores other commands and receipt
+reads. Before runner dispatch it also displays the latest helper's instructions
+as a host notice, covering hosts that render progress replies as narration.
+This does not grant tool permissions or alter global settings.
+Unreadable, compacted or malformed transcript records skip the redundant host
+notice and never block dispatch; the ordinary assistant reply remains required.
+
 ## 1. Parse controls and resolve the task
 
 Consume leading `--view=auto|tmux|none` (default `auto`), `--open-view`, and
@@ -49,7 +57,12 @@ open-view.sh --context '<exact context_file>' --terminal=auto
 ```
 
 Use the chosen terminal. Local macOS supports Ghostty >=1.3 and Terminal.app;
-other/SSH hosts return instructions. A native Automation denial is distinct
+other/SSH hosts return instructions. Allow at least 180 seconds for this tool
+call (or background it and poll), so
+native Automation consent/Apple Event timeout can finish before the host timeout.
+On a host timeout do not immediately launch again: a window may still attach;
+check the existing client first using the same saved opener context.
+A native Automation denial is distinct
 from sandbox denial: no retry/alternate-app permission cascade for TCC denial.
 A sandbox-denied opener may get one narrow host-approved retry. GUI failure
 is advisory when the tmux view is ready, including in strict tmux mode.
@@ -57,8 +70,9 @@ is advisory when the tmux view is ready, including in strict tmux mode.
 **Send a chat message BEFORE starting the long-running dispatch tool call:**
 Copy the actual commands below into assistant text. Tool output alone is not
 the viewing instruction, and `--view=none` does not waive this step.
-The helper supplies a ready-to-send `user_message`: **send that text verbatim
-as your assistant reply immediately after preparation, before another tool call**.
+The most recent helper supplies a ready-to-send `user_message` (use the opener's
+message if opening was requested): **send that text verbatim as your assistant
+reply after setup/optional opening and before the dispatch tool call**.
 
 - `present`: verified Generator/Critic viewers are in this tmux window.
 - `ready-detached`: a background view is prepared, **no terminal is visible
@@ -75,7 +89,8 @@ otherwise open a tab outside that tmux and use `attach_command`.
 
 Default tmux keys: `Ctrl-b d` detaches, `Ctrl-b [` scrolls; `space` pauses one
 viewer and `q` stops it. Neither stops the debate in its separate PM. A later
-preparation revives owned dead viewers. Detached sessions remain after a run;
+preparation revives owned dead viewers in a detached view; an incomplete current
+PM layout stays intact and gets a separate view instead. Detached sessions remain after a run;
 their `cleanup_command` removes only that view. Never kill the PM's session.
 Full transcripts on disk remain the record beyond limited pane scrollback.
 
