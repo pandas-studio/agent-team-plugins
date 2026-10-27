@@ -28,6 +28,9 @@ This includes short runs and `--view=none`.
 "<plugin-root>/bin/run-debate.sh" --host=codex --context '<exact context_file>' -- -n <rounds> [flags] "<topic>" [context-file.md]
 ```
 
+Ordinary debates default to **4 rounds**: proposal, critique, revision, final
+critique. Use `2` for a quick pass and honor every explicit round count.
+
 If the user asks for convergence, add `--until-converged`; then `-n` is the
 upper bound and may be omitted to use the default cap. Preserve explicit
 `--rotate`, `--primary-gen=<model>` (`--gen=<model>`), and

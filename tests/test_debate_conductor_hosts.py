@@ -79,6 +79,36 @@ class DebateHostTests(unittest.TestCase):
     def latest_debate(self):
         return (self.workspace / ".debate-conductor/log/host-test/latest-debate").resolve()
 
+    def test_default_debate_ends_with_a_second_critic_round_for_both_hosts(self):
+        for host in ('claude', 'codex'):
+            with self.subTest(host=host):
+                receipt = self.root / f'default-{host}.json'
+                result = self.run_cli('debate.sh', 'default rounds fixture',
+                                      DEBATE_CONDUCTOR_PM_HOST=host, DEBATE_RECEIPT=str(receipt))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                data = json.loads(receipt.read_text())
+                self.assertEqual((data['last_round'], data['critic_round'], data['critic_file']),
+                                 (4, 4, 'round-4-crit.md'))
+                ledger = Path(data['debate_dir']) / 'index.jsonl'
+                ended = [e for line in ledger.read_text().splitlines()
+                         if (e := json.loads(line)).get('t') == 'end' and e['rc'] == 0]
+                self.assertEqual([(e['round'], e['role']) for e in ended],
+                                 [(1, 'gen'), (2, 'crit'), (3, 'gen'), (4, 'crit')])
+
+    def test_explicit_quick_rounds_and_convergence_cap_override_normal_default(self):
+        for args, expected, response in (
+            (('-n', '2'), 2, VERDICT),
+            (('--until-converged',), 6, 'Verdict: RECONSIDER\n'),
+        ):
+            with self.subTest(args=args):
+                receipt = self.root / f'override-{expected}.json'
+                result = self.run_cli('debate.sh', *args, 'round override fixture',
+                                      DEBATE_RECEIPT=str(receipt), STUB_RESPONSE=response)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                data = json.loads(receipt.read_text())
+                self.assertEqual(data['last_round'], expected)
+                self.assertEqual(data['critic_round'], expected)
+
     def test_legacy_critic_default_uses_codex_without_claude_auth(self):
         result = self.run_cli("debate.sh", "-n", "2", "fixture topic")
         self.assertEqual(result.returncode, 0, result.stderr)

@@ -97,7 +97,7 @@ Full transcripts on disk remain the record beyond limited pane scrollback.
 ## 4. Dispatch in a SEPARATE long-running tool call
 
 ```sh
-run-debate.sh --host=claude --context '<exact context_file>' -- -n 3 '<topic>'
+run-debate.sh --host=claude --context '<exact context_file>' -- -n 4 '<topic>'
 ```
 
 Codex uses `--host=codex` and absolute script paths. Preserve model/mode/context

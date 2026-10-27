@@ -19,9 +19,10 @@ adversarial second view, explicit trade-off testing, or convergence pressure.
   (every round sees `<topic>`, whereas `context-file.md` / `--context` is read
   only by Round 1's Generator) so headless role models do not need shell
   discovery commands.
-- Use a fixed round count for ordinary comparisons. Use `--until-converged`
-  when the user asks to continue until the Critic is satisfied or the debate
-  reaches agreement.
+- Default ordinary comparisons to 4 rounds (proposal, critique, revision,
+  final critique); honor an explicit count, including 2 for a quick pass.
+  Use `--until-converged` when the user asks to continue until the Critic is
+  satisfied or the debate reaches agreement.
 - Keep external CLI dispatch in the main session. The Generator and Critic
   produce artifacts; they do not invoke one another or recursively orchestrate.
 - Report the actual models, exit status, convergence status, latest Critic

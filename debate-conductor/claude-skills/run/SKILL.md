@@ -28,7 +28,7 @@ Strip any explicit CLI flags or natural-language role/model assignments from `$A
 - **Mode & round flags**:
   - `--rotate` (or "rotate ON"): alternate Generator and Critic models every two rounds.
   - `--until-converged` / `-c` (or "합의/수렴할 때까지", "until they agree"): stop early on `Verdict: STRENGTHEN`.
-  - `-n <ROUNDS>` or a trailing bare integer (1–9): round count (default 3, or cap 6 with `--until-converged`).
+  - `-n <ROUNDS>` or a trailing bare integer (1–9): round count (default 4, or cap 6 with `--until-converged`).
 
 **Topic decision tree — apply to the remaining argument text in order, stop at first match**:
 
@@ -41,17 +41,17 @@ Strip any explicit CLI flags or natural-language role/model assignments from `$A
 4. **Anything else (contains a space OR longer than 15 chars)** → **free-form topic**. Use `$ARGUMENTS` (or its leading portion, minus any trailing rounds integer) **verbatim** as the topic. Pass the string directly to `debate.sh`. **Do NOT** look it up in `topics/`. **Do NOT** ask the user "should I create a topic file?". **Do NOT** suggest existing topics. Just run the debate.
 
    Examples that go straight to free-form (no questions asked):
-   - `/debate-conductor:run 찍먹 vs 부먹` → topic = `"찍먹 vs 부먹"`, default 3 rounds
+   - `/debate-conductor:run 찍먹 vs 부먹` → topic = `"찍먹 vs 부먹"`, default 4 rounds
    - `/debate-conductor:run "FastAPI vs Django for new project" 5` → topic = `"FastAPI vs Django for new project"`, 5 rounds
    - `/debate-conductor:run Server Components 도입 시점` → topic = `"Server Components 도입 시점"`, default rounds
 
-**Optional rounds**: if `$ARGUMENTS` ends with a bare integer (1–9) separated by space, use it as the round count and strip it from the topic. Default 3.
+**Optional rounds**: if `$ARGUMENTS` ends with a bare integer (1–9) separated by space, use it as the round count and strip it from the topic. Default 4: proposal, critique, revision, final critique. Use `2` for a quick pass.
 
 **Workspace `topics/` always takes priority** over the plugin's bundled examples (`${CLAUDE_SKILL_DIR}/../../topics/`). Only fall back to bundled if `$PWD/topics/` does not exist or is empty. Do not mix sources.
 
 ## 2 · Confirm rounds and prepare repository context (when needed)
 
-- **Rounds**: Default 3 (or cap 6 with `--until-converged`). Honour explicit `-n` or trailing integer. Ask the user only when the count is non-default and ambiguous.
+- **Rounds**: Default 4 (or cap 6 with `--until-converged`). Honour explicit `-n` or trailing integer. Ask the user only when the count is non-default and ambiguous.
 - **Repository context (`<topic>` + optional `context-file.md`)**: Generator and Critic run in **non-interactive headless mode**, where arbitrary shell search commands (`rg`, `find`, `grep`, compound commands) are auto-denied and abort the round.
   - If the topic is a general/self-contained question (e.g. `"FastAPI vs Django"`, `"찍먹 vs 부먹"`), pass it directly.
   - If the topic references **repository-internal entities** (e.g. `"Track 4"`, local roadmap/spec docs, module names, or current codebase constraints) that are not self-contained in the user's message, use `Glob` / `Grep` / `Read` to gather the relevant facts first. Put the **essential repository facts and constraints directly into the `<topic>` string** (because every round — both Generator and Critic — receives `Topic: $TOPIC`), and optionally pass a `[context-file.md]` (`--context=<file>`, written under `.debate-conductor/log/` or `$TMPDIR`) when Round 1's Generator needs longer supporting material (note: only Round 1's Generator reads `context-file.md`).

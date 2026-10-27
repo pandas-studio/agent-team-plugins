@@ -11,7 +11,7 @@ Dispatch for **design/planning decisions** with two or more competing approaches
 Frame as a **stance, not a question** — ✅ `"Server Components 즉시 도입 vs 다음 분기"`, ❌ `"Server Components 어떻게?"`. For repo-internal topics, inline the essential facts in `<stance>` (only Round 1's Generator sees `[context-file.md]`).
 
 ```
-/debate-conductor:run [--gen=<model>] [--crit=<model>] "<stance>" [rounds]   # default 3
+/debate-conductor:run [--gen=<model>] [--crit=<model>] "<stance>" [rounds]   # default 4
 /debate-conductor:continue [extra]                                           # extend most recent
 ```
 

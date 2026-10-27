@@ -156,7 +156,9 @@ automatically take over stale ownership.
    ```
    /debate-conductor:run 1
    ```
-   Resolves topic 1 from `topics/`, runs the default 3-round debate (Antigravity gen → Codex crit → Antigravity gen), and afterwards Claude reads the round files and surfaces verdict + move-by-move.
+   Resolves topic 1 from `topics/`, runs the default 4-round debate (Antigravity gen → Codex crit → Antigravity revision → Codex final critique), and afterwards Claude reads the round files and surfaces verdict + move-by-move. This gives the revised proposal its own final verdict. Pass `2` for a quick proposal/critique pair; explicit round counts take precedence.
+
+   If you previously installed a PM policy with the old default, explicitly rerun `install-pm` in that workspace to refresh its wording to four rounds.
 
 5. Follow up in natural language: "round 3 결정타?", "5라운드로 다시 돌려줘", "rotate ON으로 토픽 2", etc.
 
@@ -294,8 +296,8 @@ Claude skills have `disable-model-invocation: true`; Codex skill metadata sets
 Example:
 
 ```
-/debate-conductor:run "여름 vs 겨울" 3   # rounds 1·2·3
-/debate-conductor:continue 2             # rounds 4·5 appended to same dir
+/debate-conductor:run "여름 vs 겨울" 2   # rounds 1·2
+/debate-conductor:continue 2             # rounds 3·4 appended to same dir
 ```
 
 ## Architecture
