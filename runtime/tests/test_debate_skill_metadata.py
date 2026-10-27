@@ -11,7 +11,7 @@ SKILLS = sorted(PLUGIN.glob("*-skills/*/SKILL.md"))
 
 def test_debate_skills_are_discoverable():
     assert SKILLS, f"No shipped skills found under {PLUGIN}"
-    for host in ("claude", "codex"):
+    for host in ("claude", "codex", "agy"):
         assert any(skill.parent.parent.name == f"{host}-skills" for skill in SKILLS)
 
 
@@ -25,5 +25,5 @@ def test_debate_skill_frontmatter(skill):
     for field in ("argument-hint", "allowed-tools"):
         if field in metadata:
             assert isinstance(metadata[field], str), (skill, field)
-    if skill.parent.parent.name == "codex-skills":
+    if skill.parent.parent.name in ("codex-skills", "agy-skills"):
         assert metadata["name"] == skill.parent.name

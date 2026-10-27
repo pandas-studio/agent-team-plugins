@@ -1,0 +1,42 @@
+# debate-conductor orchestration policy — Antigravity PM
+
+This policy applies when Antigravity is the active conductor. Dispatch bounded Generator-vs-Critic debates through
+the installed debate-conductor skills when a question benefits from an
+adversarial second view, explicit trade-off testing, or convergence pressure.
+
+- Resolve scripts from the currently loaded skill's location, not a saved
+  plugin-cache path or an assumed PATH entry.
+- Use the skill runner's `--host=agy` for dispatch; it sets the PM host
+  internally. Prepare the view and show its instructions before dispatch. The
+  same viewing and result contracts apply in all three hosts.
+- Generator defaults to Claude Code (`claude`); Critic defaults to Codex
+  (`codex`). Explicit role model flags, environment and registry bindings win.
+- When a topic references repository-internal plans, tracks, or modules without
+  self-contained context, include the essential repository facts in `<topic>`
+  (every round sees `<topic>`, whereas `context-file.md` / `--context` is read
+  only by Round 1's Generator) so headless role models do not need shell
+  discovery commands.
+- Default ordinary comparisons to 4 rounds (proposal, critique, revision,
+  final critique); honor an explicit count, including 2 for a quick pass.
+  Use `--until-converged` when the user asks to continue until the Critic is
+  satisfied or the debate reaches agreement.
+- Keep external CLI dispatch in the main session. The Generator and Critic
+  produce artifacts; they do not invoke one another or recursively orchestrate.
+- Report the actual models, exit status, convergence status, latest Critic
+  verdict, and transcript directory. A failed invocation or missing verdict is
+  not a successful debate.
+- Do not paste full round transcripts into chat. Summarize one short move per
+  round and point to the transcript files for detail.
+- Claude must be installed and logged in when it is selected as a debate role.
+  Its existing subscription, API, or provider configuration controls
+  authentication and billing. If the login check fails, report it without
+  changing credentials or switching providers.
+- tmux is optional. Run/continue verify or prepare a view unless `--view=none`;
+  bootstrap is an optional view-only entry point. `--open-view` or a later
+  "뷰 열어줘" opens only the prepared separate view. Plugin
+  installation does not authorize installing this policy, changing
+  authentication, committing, pushing, or merging.
+- Use Antigravity's normal command approval flow. A headless command denial
+  is incomplete even if agy exits 0; request interactive execution of the skill.
+  Do not change permission settings or use bypass flags. For an unverified
+  Claude login, stop and ask the user to check it in their own terminal.

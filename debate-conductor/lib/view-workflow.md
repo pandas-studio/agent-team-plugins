@@ -1,7 +1,7 @@
 # Skill viewing and dispatch contract
 
 Read this for `run`, `continue`, or explicit `bootstrap`. Claude uses bare
-`bin/` script names on the plugin PATH; Codex resolves the plugin root and uses
+`bin/` script names on the plugin PATH; Codex and Antigravity resolve the plugin root and use
 absolute `<plugin-root>/bin/…` paths. No leading shell environment assignments,
 `eval`, raw model CLIs, or implicit invocation of another skill are needed.
 
@@ -100,7 +100,7 @@ Full transcripts on disk remain the record beyond limited pane scrollback.
 run-debate.sh --host=claude --context '<exact context_file>' -- -n 4 '<topic>'
 ```
 
-Codex uses `--host=codex` and absolute script paths. Preserve model/mode/context
+Codex uses `--host=codex`; Antigravity uses `--host=agy`. Both use absolute script paths. Preserve model/mode/context
 engine arguments after `--`. For continuation, use the RUNNER's option:
 
 ```sh

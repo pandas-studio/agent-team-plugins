@@ -1,6 +1,6 @@
 # debate-conductor orchestration policy — Codex PM
 
-Codex is the conductor. Dispatch bounded Generator-vs-Critic debates through
+This policy applies when Codex is the active conductor. Dispatch bounded Generator-vs-Critic debates through
 the installed debate-conductor skills when a question benefits from an
 adversarial second view, explicit trade-off testing, or convergence pressure.
 

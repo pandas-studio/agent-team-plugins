@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/../lib/debate-result.sh"
 
 usage() {
-  echo 'Usage: run-debate.sh --host=claude|codex --context FILE [--continue-from ABS] -- ENGINE_ARGS...'
+  echo 'Usage: run-debate.sh --host=claude|codex|agy --context FILE [--continue-from ABS] -- ENGINE_ARGS...'
   echo '       run-debate.sh --read-receipt --context FILE'
 }
 HOST="" CONTEXT="" CONTINUE="" READ=0
@@ -29,7 +29,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 if [ "$READ" = 0 ]; then
-  case "$HOST" in claude|codex) ;; *) view_error 'dispatch requires --host=claude or --host=codex'; exit 2 ;; esac
+  case "$HOST" in claude|codex|agy) ;; *) view_error 'dispatch requires --host=claude, --host=codex or --host=agy'; exit 2 ;; esac
 fi
 DATA=$(view_context_read "$CONTEXT") || exit 2
 DIR=${CONTEXT%/*}

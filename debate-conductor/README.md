@@ -1,6 +1,6 @@
 # debate-conductor
 
-Claude or Codex conducts a Generator vs Critic debate. Run/continue prepare live
+Claude, Codex or Antigravity conducts a Generator vs Critic debate. Run/continue prepare live
 viewing: a verified three-pane layout inside tmux, or a detached two-role view
 outside it. Bootstrap is optional.
 
@@ -8,9 +8,9 @@ Default model assignment:
 
 | Pane | Role | CLI |
 | :--- | :--- | :--- |
-| Left | Conductor / PM | Claude Code or Codex (this session) |
-| Middle | Generator | `agy` |
-| Right | Critic | `codex` from Claude PM, `claude` from Codex PM |
+| Left | Conductor / PM | Claude Code, Codex or Antigravity (this session) |
+| Middle | Generator | `agy` from Claude/Codex PM, `claude` from agy PM |
+| Right | Critic | `codex` from Claude/agy PM, `claude` from Codex PM |
 
 ## Prerequisites
 
@@ -36,7 +36,7 @@ Via the Claude Code marketplace:
 Codex can load the same engine through the repo's Codex marketplace:
 
 ```bash
-codex plugin marketplace add /absolute/path/to/agent-team-plugins
+codex plugin marketplace add pandas-studio/agent-team-plugins --ref main
 codex plugin add debate-conductor@pandas-studio
 ```
 
@@ -47,6 +47,26 @@ it does not change `CLAUDE.md`.
 
 In Codex host mode, the default Critic is Claude Code so Codex does not call
 itself as the external critic. Explicit model settings still win.
+
+### Antigravity PM
+
+Install from a current checkout of this repository:
+
+```bash
+agy plugin install /absolute/path/to/agent-team-plugins/debate-conductor --scope user
+```
+
+Use `/debate-conductor:run`, `:continue`, `:bootstrap`, or `:install-pm` in
+interactive agy. The agy-specific skills dispatch with `--host=agy` and default
+to Claude Generator plus Codex Critic. Persistent policy goes into `GEMINI.md`,
+preserving `AGENTS.md` and `CLAUDE.md`. The policy applies only to its host.
+
+Approve the helper commands in the interactive session when requested. Print
+mode cannot ask for command approval and may soft-deny a command while exiting
+0; an actual successful dispatch and validated receipt are required. The skill
+reports the denied command and asks for interactive execution. It never changes
+permission settings or authentication. See the official
+[headless permissions](https://antigravity.google/docs/cli/headless/#permissions-in-headless-mode).
 
 For local development on this plugin:
 
@@ -179,14 +199,14 @@ Place topic files at `<workspace>/topics/0N-*.txt`. Each file is a stance-driven
 
 ## Model configuration
 
-Generator and Critic resolve through the shared model registry (the [marketplace README](../README.md#shared-model-configuration) covers it in full). Claude host defaults: `agy` (generator), `codex` (critic). Codex host defaults: `agy` (generator), `claude` (critic).
+Generator and Critic resolve through the shared model registry (the [marketplace README](../README.md#shared-model-configuration) covers it in full). Claude host defaults: `agy` (generator), `codex` (critic). Codex host defaults: `agy` (generator), `claude` (critic). Antigravity host defaults: `claude` (generator), `codex` (critic).
 
 | Role | Default | Pick a different model | Override its binary |
 | :--- | :--- | :--- | :--- |
-| `debate-conductor.generator` | `agy` | `--primary-gen=<model>` (`--gen=<model>`), `DEBATE_GENERATOR_MODEL` env, or `agent-team-models set-role debate-conductor.generator <model>` | `GENERATOR_CLI` · `AGY_CLI` |
-| `debate-conductor.critic` | `codex` from Claude, `claude` from Codex | `--primary-crit=<model>` (`--crit=<model>`), `DEBATE_CRITIC_MODEL` env, or `agent-team-models set-role debate-conductor.critic <model>` | `CRITIC_CLI` · `CODEX_CLI` · `CLAUDE_CLI` |
+| `debate-conductor.generator` | `agy` from Claude/Codex, `claude` from agy | `--primary-gen=<model>` (`--gen=<model>`), `DEBATE_GENERATOR_MODEL` env, or `agent-team-models set-role debate-conductor.generator <model>` | `GENERATOR_CLI` · `AGY_CLI` |
+| `debate-conductor.critic` | `codex` from Claude/agy, `claude` from Codex | `--primary-crit=<model>` (`--crit=<model>`), `DEBATE_CRITIC_MODEL` env, or `agent-team-models set-role debate-conductor.critic <model>` | `CRITIC_CLI` · `CODEX_CLI` · `CLAUDE_CLI` |
 
-`--primary-gen` (`--gen` / `--generator`) / `--primary-crit` (`--crit` / `--critic`) accept any registered model id (run `agent-team-models list`; `antigravity` normalizes to `agy`, and `kimi` normalizes to `kimi-code` when the `kimi-code` preset is installed); generator and critic must differ. With no critic specified, Claude host still defaults to "the other one" (codex unless gen=codex, then agy). Codex host defaults to Claude unless that would duplicate the generator. The legacy `DEBATE_PRIMARY_GEN` env var also keeps working. An optional Round-1 Generator context file can be passed either positionally (`debate.sh "topic" context.md`) or via `--context=context.md` (not both).
+`--primary-gen` (`--gen` / `--generator`) / `--primary-crit` (`--crit` / `--critic`) accept any registered model id (run `agent-team-models list`; `antigravity` normalizes to `agy`, and `kimi` normalizes to `kimi-code` when the `kimi-code` preset is installed); generator and critic must differ. With no critic specified, Claude host still defaults to "the other one" (codex unless gen=codex, then agy). Codex host defaults to Claude unless that would duplicate the generator. Antigravity defaults to Codex unless gen=codex, then Claude. The legacy `DEBATE_PRIMARY_GEN` env var also keeps working. An optional Round-1 Generator context file can be passed either positionally (`debate.sh "topic" context.md`) or via `--context=context.md` (not both).
 
 For models declaring `final_args`, `GENERATOR_CLI` and `CRITIC_CLI` wrappers
 must forward all arguments to the selected CLI (for example, `exec codex "$@"`).
@@ -198,7 +218,7 @@ a native final-answer file fails with rc=5 and an explicit capture diagnostic.
 There is no fallback to console output.
 
 When a `GENERATOR_CLI` or `CRITIC_CLI` wrapper is used with the `claude` model,
-it must handle `auth status --json`; Codex host mode probes that command before
+it must handle `auth status --json`; Codex and Antigravity host modes probe that command before
 creating or retargeting a debate log.
 
 Inside Codex's workspace sandbox that probe cannot read Keychain, and a
@@ -288,10 +308,13 @@ Publication uses a separate, brief team lock with a five-second wait limit; it d
 | `/debate-conductor:bootstrap` | One-time per session: splits the current tmux pane into 3 and starts role tails. |
 | `/debate-conductor:run [N] [rounds]` | Resolves topic N, runs `debate.sh`, summarises verdict + moves. |
 | `/debate-conductor:continue [extra-rounds]` | Append N more rounds (default 2) to the most recent debate in the same `debate-<TS>/`. Round numbering continues; the saved model pair and rotation are reused unless explicitly overridden; tail panes show every attempt, retries included, from the per-role streams. A debate whose round 1 failed restarts at round 1 with its saved context. |
-| `/debate-conductor:install-pm` | Writes/upgrades the PM orchestration policy in the workspace's `CLAUDE.md` from Claude or `AGENTS.md` from Codex (idempotent, marker-guarded). Tells the PM when to dispatch a debate vs answer directly. |
+| `/debate-conductor:install-pm` | Writes/upgrades the PM orchestration policy in the workspace's `CLAUDE.md` from Claude or `AGENTS.md` from Codex or `GEMINI.md` from Antigravity (idempotent, marker-guarded). Tells the PM when to dispatch a debate vs answer directly. |
 
 Claude skills have `disable-model-invocation: true`; Codex skill metadata sets
-`allow_implicit_invocation: false`. Invoke the skills explicitly.
+`allow_implicit_invocation: false`. Antigravity supports automatic skill
+discovery; its published frontmatter documents only name and description, so
+no automatic-invocation guard is promised there. Use the explicit slash commands
+for these debate workflows.
 
 Example:
 
@@ -306,11 +329,13 @@ Example:
 debate-conductor/
 ├── .claude-plugin/plugin.json
 ├── .codex-plugin/plugin.json
+├── .antigravity-plugin/plugin.json
 ├── claude-skills/
 │   ├── bootstrap/SKILL.md
 │   ├── run/SKILL.md
 │   ├── continue/SKILL.md
 │   └── install-pm/SKILL.md
+├── agy-skills/               # Antigravity bootstrap/run/continue/install-pm
 ├── codex-skills/
 │   ├── bootstrap/SKILL.md
 │   ├── run/SKILL.md
@@ -327,13 +352,14 @@ debate-conductor/
 │   ├── ask-critic.sh          # Critic wrapper (any registered model)
 │   ├── answer.sh              # answer capture, validation, and opt-in diagnostics
 │   ├── registry.sh            # shared model registry + runner (vendored)
-│   ├── host.sh                # Claude/Codex PM defaults and CLI checks
+│   ├── host.sh                # Claude/Codex/agy PM defaults and CLI checks
 │   ├── namespace.sh           # shared team namespace resolution
 │   ├── index.sh               # attempt-ledger and completion queries
 │   ├── debate-result.sh       # per-invocation receipt writer and reader
 │   ├── selection.sh           # atomic team selection snapshots and sequence
 │   ├── pm.md                  # Claude PM orchestration policy
 │   ├── pm-codex.md            # Codex PM orchestration policy
+│   ├── pm-agy.md              # Antigravity PM orchestration policy
 │   └── roles/
 │       ├── generator.md       # Generator role prompt
 │       └── critic.md          # Critic role prompt
@@ -381,3 +407,6 @@ There is no automatic recovery of a lock left behind, deliberately: a dead pid d
 ## License
 
 [MIT](../LICENSE).
+
+Native-host validation and remaining authentication boundaries are recorded in
+[three-host acceptance](docs/three-host-acceptance.md).

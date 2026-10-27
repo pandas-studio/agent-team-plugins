@@ -591,7 +591,7 @@ print(response)
         config.write_text('{"models":{},"roles":{}}')
         self.env.update(AGY_CLI=str(stub), CODEX_CLI=str(stub), CLAUDE_CLI=str(stub),
                         AGENT_TEAM_MODELS_CONFIG=str(config))
-        for host in ("claude", "codex"):
+        for host in ("claude", "codex", "agy"):
             with self.subTest(host=host):
                 base = self.root / (host + " custom logs")
                 ctx = self.prepare("--view=none", "--team=" + host, "--log-base=" + str(base))

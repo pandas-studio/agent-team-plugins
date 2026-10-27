@@ -79,8 +79,8 @@ class DebateHostTests(unittest.TestCase):
     def latest_debate(self):
         return (self.workspace / ".debate-conductor/log/host-test/latest-debate").resolve()
 
-    def test_default_debate_ends_with_a_second_critic_round_for_both_hosts(self):
-        for host in ('claude', 'codex'):
+    def test_default_debate_ends_with_a_second_critic_round_for_all_hosts(self):
+        for host in ('claude', 'codex', 'agy'):
             with self.subTest(host=host):
                 receipt = self.root / f'default-{host}.json'
                 result = self.run_cli('debate.sh', 'default rounds fixture',
@@ -148,6 +148,51 @@ class DebateHostTests(unittest.TestCase):
         self.assertEqual(self.recorded()[1][0], "exec")
         critic = self.workspace / ".debate-conductor/log/host-test/latest-debate/round-2-crit.md"
         self.assertIn("crit codex", critic.read_text())
+
+    def test_agy_pm_dispatch_and_continue_keep_external_roles(self):
+        prepared = self.run_cli("team-3pane.sh", "--view=none")
+        self.assertEqual(prepared.returncode, 0, prepared.stderr)
+        context = json.loads(prepared.stdout)["context_file"]
+        result = self.run_cli("run-debate.sh", "--host=agy", "--context", context,
+                              "--", "external roles fixture")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PM host: Antigravity", result.stdout)
+        read = self.run_cli("run-debate.sh", "--read-receipt", "--context", context)
+        self.assertEqual(read.returncode, 0, read.stderr)
+        receipt = json.loads(read.stdout)
+        debate = Path(receipt["debate_dir"])
+        metadata = json.loads((debate / "models.json").read_text())
+        self.assertEqual((metadata["pm_host"], metadata["generator"], metadata["critic"]),
+                         ("agy", "claude", "codex"))
+        self.assertEqual(receipt["critic_round"], 4)
+        calls = self.recorded()
+        self.assertEqual(calls[0], ["auth", "status", "--json"])
+        self.assertEqual([c[0] for c in calls if c[:2] != ["auth", "status"]],
+                         ["-p", "exec", "-p", "exec"])
+        # Host changes must not silently change a saved pair on continuation.
+        result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "2",
+                              "external roles fixture", DEBATE_CONDUCTOR_PM_HOST="codex")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("gen claude", (debate / "round-5-gen.md").read_text())
+        self.assertIn("crit codex", (debate / "round-6-crit.md").read_text())
+
+    def test_agy_pm_unverified_login_does_not_start_or_move_selection(self):
+        result = self.run_cli("debate.sh", "unverified login fixture",
+                              DEBATE_CONDUCTOR_PM_HOST="agy", STUB_AUTH='{"loggedIn":false}',
+                              STUB_AUTH_RC="1")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("Claude login unverified", result.stderr)
+        self.assertIn("stop and check claude auth status in your own terminal", result.stderr)
+        self.assertNotIn("rerun this same command once with host approval", result.stderr)
+        self.assertEqual(self.recorded(), [["auth", "status", "--json"]])
+        self.assertFalse((self.workspace / ".debate-conductor/log/host-test/latest-debate").exists())
+
+    def test_agy_role_overrides_preserve_distinct_defaults(self):
+        result = self.run_cli("debate.sh", "-n", "2", "--gen=codex", "role override",
+                              DEBATE_CONDUCTOR_PM_HOST="agy")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        metadata = json.loads((self.latest_debate() / "models.json").read_text())
+        self.assertEqual((metadata["generator"], metadata["critic"]), ("codex", "claude"))
 
     def test_doctor_smoke_ignores_user_model_config_and_env(self):
         self.config.write_text('{"roles":{"debate-conductor.critic":"codex"}}')
@@ -1724,13 +1769,13 @@ stream_header() {
 
     def test_disjoint_skill_trees(self):
         paths = []
-        for host in ("claude", "codex"):
+        for host in ("claude", "codex", "antigravity"):
             manifest = json.loads((self.plugin / f".{host}-plugin/plugin.json").read_text())
             tree = self.plugin / manifest["skills"]
             self.assertEqual({p.parent.name for p in tree.glob("*/SKILL.md")},
                              {"bootstrap", "run", "continue", "install-pm"})
             paths.append(tree.resolve())
-        self.assertNotEqual(*paths)
+        self.assertEqual(len(set(paths)), 3)
         self.assertFalse((self.plugin / "skills").exists(), "default scan would leak host-specific skills")
 
     def test_codex_skill_agents_disable_implicit_invocation(self):
@@ -1851,6 +1896,17 @@ class PolicyTests(unittest.TestCase):
         self.assertTrue(agents.read_text().startswith("existing rules\n\n"))
         self.module.install(self.root, "claude")
         self.assertTrue((self.root / "CLAUDE.md").exists())
+
+    def test_agy_policy_preserves_other_hosts_and_is_idempotent(self):
+        agents = self.root / "AGENTS.md"
+        agents.write_text("Codex project rules")
+        self.module.install(self.root, "agy")
+        target = self.root / "GEMINI.md"
+        first = target.read_bytes()
+        self.module.install(self.root, "agy")
+        self.assertEqual(target.read_bytes(), first)
+        self.assertEqual(agents.read_text(), "Codex project rules")
+        self.assertFalse((self.root / "CLAUDE.md").exists())
 
     def test_malformed_markers_leave_file_unchanged(self):
         begin = "<!-- BEGIN debate-conductor PM policy -->"

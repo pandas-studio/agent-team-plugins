@@ -4,8 +4,8 @@
 
 debate_conductor_host() {
   case "${DEBATE_CONDUCTOR_PM_HOST:-claude}" in
-    claude|codex) printf '%s\n' "${DEBATE_CONDUCTOR_PM_HOST:-claude}" ;;
-    *) echo 'debate-conductor: DEBATE_CONDUCTOR_PM_HOST must be claude or codex' >&2; return 2 ;;
+    claude|codex|agy) printf '%s\n' "${DEBATE_CONDUCTOR_PM_HOST:-claude}" ;;
+    *) echo 'debate-conductor: DEBATE_CONDUCTOR_PM_HOST must be claude, codex or agy' >&2; return 2 ;;
   esac
 }
 
@@ -13,7 +13,12 @@ debate_conductor_default_role() {
   local role="$1" gen="${2:-}" host
   host="$(debate_conductor_host)" || return $?
   case "$role:$host" in
+    generator:agy) printf 'claude\n' ;;
     generator:*) printf 'agy\n' ;;
+    critic:agy)
+      if [ "$gen" = "codex" ]; then printf 'claude\n'
+      else printf 'codex\n'; fi
+      ;;
     critic:claude)
       if [ "$gen" = "codex" ]; then printf 'agy\n'
       else printf 'codex\n'; fi
@@ -74,7 +79,7 @@ debate_conductor_resolve_role() {
   debate_conductor_default_role "$role" "$gen"
 }
 
-# Check availability and, for Claude under Codex PM, login. Authentication and
+# Check availability and, for Claude under a non-Claude PM, login. Authentication and
 # billing stay under Claude Code's own configuration.
 debate_conductor_check_cli() {
   local model="$1" bin host out rc=0 seen
@@ -84,7 +89,7 @@ debate_conductor_check_cli() {
     echo "debate-conductor: CLI not found: $bin (model=$model)" >&2
     return 2
   fi
-  [ "$host" = codex ] || return 0
+  [ "$host" != claude ] || return 0
   case "$model:${bin##*/}" in
     claude:*|claude-write:*|*:claude|*:claude.exe) ;;
     *) return 0 ;;
@@ -103,7 +108,11 @@ debate_conductor_check_cli() {
   [ -n "$seen" ] || seen="no login status"
   printf 'debate-conductor: Claude login unverified in this environment (auth status: %s, rc=%s%s); no invocation started\n' \
     "$seen" "$rc" "${CODEX_SANDBOX:+, CODEX_SANDBOX=$CODEX_SANDBOX}" >&2
-  echo 'debate-conductor: a sandbox can hide the login (for example macOS Keychain); rerun this same command once with host approval, or choose a non-Claude model for this role. If an approved run still fails, check claude auth status in your own terminal.' >&2
+  if [ "$host" = agy ]; then
+    echo 'debate-conductor: a sandbox can hide the login (for example macOS Keychain); stop and check claude auth status in your own terminal, or explicitly choose a non-Claude model for this role. Do not change credentials or retry auth probes automatically.' >&2
+  else
+    echo 'debate-conductor: a sandbox can hide the login (for example macOS Keychain); rerun this same command once with host approval, or choose a non-Claude model for this role. If an approved run still fails, check claude auth status in your own terminal.' >&2
+  fi
   return 2
 }
 
