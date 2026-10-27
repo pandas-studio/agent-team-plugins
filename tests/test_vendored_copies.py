@@ -112,15 +112,17 @@ KNOWN_DIFF = {
         "dev-trio/lib/roles/reviewer.md", "spec-trio/lib/roles/reviewer.md", whole,
         "72da0033193939bcafb460febb496799d3919e610a8b381d02fb43fae36d6b2d",
     ),
+    # Debate adds the agy host and a separate GEMINI.md policy target.
     "install-pm.py": (
         "dev-trio/bin/install-pm.py", "debate-conductor/bin/install-pm.py", plugin_neutral,
-        "26dc9408c85bd42358bb3e58d7fe71f2514a4530e496c180e300a6f92a88f57c",
+        "d7b81a2a801792a2a0adecccc5ca651b68f53e1cab0e7d2b6b9cf0cddad4b9e8",
     ),
     # Only HOST_SHARED_FUNCTIONS were written once and pasted into both host.sh
     # files: *_host, and the *_check_cli login preflight (#127, #155).
+    # Debate also accepts agy and gives its Claude-role failures native guidance.
     "host.sh shared functions": (
         "dev-trio/lib/host.sh", "debate-conductor/lib/host.sh", host_shared_sections,
-        "ab85a07c672dd7cea318999149faa8e5bb52122de822b1978161ee2b018070e1",
+        "98b328852f1a9e2544f8a1f71431e762ce019a288ce4352f00be1d903f01f4af",
     ),
 }
 

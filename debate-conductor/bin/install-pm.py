@@ -10,8 +10,10 @@ import tempfile
 
 def install(workspace: Path, host: str) -> Path:
     plugin = Path(__file__).resolve().parent.parent
-    source = plugin / "lib" / ("pm-codex.md" if host == "codex" else "pm.md")
-    target = workspace / ("AGENTS.md" if host == "codex" else "CLAUDE.md")
+    sources = {"claude": "pm.md", "codex": "pm-codex.md", "agy": "pm-agy.md"}
+    targets = {"claude": "CLAUDE.md", "codex": "AGENTS.md", "agy": "GEMINI.md"}
+    source = plugin / "lib" / sources[host]
+    target = workspace / targets[host]
     if target.is_symlink():
         raise ValueError(f"refusing to replace a symlink: {target}")
     begin = "<!-- BEGIN debate-conductor PM policy -->"
@@ -46,7 +48,7 @@ def install(workspace: Path, host: str) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--host", choices=("claude", "codex"), required=True)
+    parser.add_argument("--host", choices=("claude", "codex", "agy"), required=True)
     args = parser.parse_args()
     try:
         target = install(Path.cwd(), args.host)

@@ -64,7 +64,8 @@ done
 case "${DEBATE_CONDUCTOR_PM_HOST:-claude}" in
   claude) PM_LABEL="Claude"; RUN_HINT="/debate-conductor:run" ;;
   codex)  PM_LABEL="Codex";  RUN_HINT="\$debate-conductor:run" ;;
-  *) echo "error: DEBATE_CONDUCTOR_PM_HOST must be claude or codex" >&2; exit 2 ;;
+  agy) PM_LABEL="Antigravity"; RUN_HINT="/debate-conductor:run" ;;
+  *) echo "error: DEBATE_CONDUCTOR_PM_HOST must be claude, codex or agy" >&2; exit 2 ;;
 esac
 
 command -v tmux >/dev/null 2>&1 || { echo "error: tmux not installed" >&2; exit 2; }

@@ -6,6 +6,7 @@ Claude Code and Codex plugin marketplace from pandas-studio's YouTube series on 
 is shared; each host loads its own skills and PM policy. See
 [dev-trio Codex usage](./dev-trio/README.md#codex-pm) and
 [debate-conductor Codex usage](./debate-conductor/README.md#codex-pm).
+Debate Conductor also supports [Antigravity as PM](./debate-conductor/README.md#antigravity-pm).
 
 ## Install the marketplace in Claude Code
 
@@ -49,7 +50,7 @@ done
 | Name | Roles | Episode | Status |
 | :--- | :--- | :--- | :--- |
 | [dev-trio](./dev-trio) | Claude or Codex=PM/Coder · configurable research/review CLIs | EP A | shipped |
-| [debate-conductor](./debate-conductor) | Claude or Codex=PM · configurable generator/critic CLIs | EP B | shipped |
+| [debate-conductor](./debate-conductor) | Claude, Codex or Antigravity=PM · configurable generator/critic CLIs | EP B | shipped |
 | [ralph-trio](./ralph-trio) | Claude or Codex=Planner/Coder · configurable research/review CLIs | EP C | shipped |
 | [spec-trio](./spec-trio) | Claude or Codex=Planner/Coder · spec-gated review loop | EP D | shipped |
 | [eval-trio](./eval-trio) | Fixed checks · Challenger · Judge | EP E | preview |
@@ -85,8 +86,8 @@ Config lives at `$AGENT_TEAM_MODELS_CONFIG`, else `${XDG_CONFIG_HOME:-~/.config}
 | :--- | :--- | :--- |
 | `dev-trio.researcher` | `agy` | `DEV_TRIO_RESEARCHER_MODEL` |
 | `dev-trio.reviewer` | `codex` | `DEV_TRIO_REVIEWER_MODEL` |
-| `debate-conductor.generator` | `agy` | `DEBATE_GENERATOR_MODEL` |
-| `debate-conductor.critic` | `codex` from Claude, `claude` from Codex | `DEBATE_CRITIC_MODEL` |
+| `debate-conductor.generator` | `agy` from Claude/Codex, `claude` from agy | `DEBATE_GENERATOR_MODEL` |
+| `debate-conductor.critic` | `codex` from Claude/agy, `claude` from Codex | `DEBATE_CRITIC_MODEL` |
 | `langgraph-conductor.planner` | `claude` | `LANGGRAPH_CONDUCTOR_PLANNER_MODEL` |
 | `langgraph-conductor.coder` | `claude-write` | `LANGGRAPH_CONDUCTOR_CODER_MODEL` |
 | `langgraph-conductor.researcher` | `agy` | `LANGGRAPH_CONDUCTOR_RESEARCHER_MODEL` |

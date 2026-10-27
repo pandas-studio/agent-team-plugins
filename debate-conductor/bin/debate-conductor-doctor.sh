@@ -57,7 +57,7 @@ for t in agy codex claude; do
     case "$t" in
       agy)   env_hint="GENERATOR_CLI or AGY_CLI" ;;
       codex) env_hint="CRITIC_CLI or CODEX_CLI" ;;
-      claude) env_hint="CRITIC_CLI or CLAUDE_CLI (when DEBATE_CONDUCTOR_PM_HOST=codex)" ;;
+      claude) env_hint="GENERATOR_CLI, CRITIC_CLI or CLAUDE_CLI (Codex/agy PM)" ;;
       *)     env_hint="(no documented override)" ;;
     esac
     warn "$t — missing (override via $env_hint; convergence smoke below does not need it)"
@@ -72,16 +72,18 @@ codex-skills/run/agents/openai.yaml
 codex-skills/continue/agents/openai.yaml
 codex-skills/install-pm/agents/openai.yaml
 "
-for rel in .claude-plugin/plugin.json .codex-plugin/plugin.json \
+for rel in .claude-plugin/plugin.json .codex-plugin/plugin.json .antigravity-plugin/plugin.json \
            bin/debate.sh bin/tail-role.sh bin/team-3pane.sh \
            bin/install-pm.py \
            lib/ask-generator.sh lib/ask-critic.sh lib/pm.md \
-           lib/host.sh lib/namespace.sh lib/answer.sh lib/index.sh lib/debate-result.sh lib/selection.sh lib/pm-codex.md \
+           lib/host.sh lib/namespace.sh lib/answer.sh lib/index.sh lib/debate-result.sh lib/selection.sh lib/pm-codex.md lib/pm-agy.md \
            lib/roles/generator.md lib/roles/critic.md \
            claude-skills/bootstrap/SKILL.md claude-skills/run/SKILL.md \
            claude-skills/continue/SKILL.md claude-skills/install-pm/SKILL.md \
            codex-skills/bootstrap/SKILL.md codex-skills/run/SKILL.md \
            codex-skills/continue/SKILL.md codex-skills/install-pm/SKILL.md \
+           agy-skills/bootstrap/SKILL.md agy-skills/run/SKILL.md \
+           agy-skills/continue/SKILL.md agy-skills/install-pm/SKILL.md \
            $CODEX_AGENT_METADATA; do
   p="$PLUGIN_ROOT/$rel"
   if [ -f "$p" ]; then ok "$rel"
@@ -111,9 +113,13 @@ else
   STUB_GEN="$TMPDIR_SMOKE/stub-gen.sh"
   cat > "$STUB_GEN" <<'STUB'
 #!/usr/bin/env bash
-if [ "$#" -lt 4 ] ||
+if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ] && [ "${3:-}" = "--json" ]; then
+  echo '{"loggedIn": true, "authMethod": "fixture"}'
+  exit 0
+fi
+if ! { [ "$#" -eq 1 ] && [ "${1:-}" = "-p" ]; } && { [ "$#" -lt 4 ] ||
    [ "${@: -4:1}" != "--input-format" ] || [ "${@: -3:1}" != "text" ] ||
-   [ "${@: -2:1}" != "--output-format" ] || [ "${@: -1:1}" != "text" ]; then
+   [ "${@: -2:1}" != "--output-format" ] || [ "${@: -1:1}" != "text" ]; }; then
   echo "stub-gen: expected stdin text flags, got: $*" >&2; exit 2
 fi
 prompt="$(cat)"
@@ -184,23 +190,24 @@ STUB
     [ "$rc" -eq 0 ] || note "stderr: $(head -3 "$TMPDIR_SMOKE/$team.err" 2>/dev/null)"
   }
 
-  run_codex_host_smoke() {
-    out="$TMPDIR_SMOKE/codex-host.out"
+  run_external_host_smoke() {
+    local host="$1"
+    out="$TMPDIR_SMOKE/$host-host.out"
     env -u DEBATE_GENERATOR_MODEL -u DEBATE_CRITIC_MODEL \
       -u DEBATE_PRIMARY_GEN \
-      AGENT_TEAM="codex-host" \
+      AGENT_TEAM="$host-host" \
       AGENT_TEAM_MODELS_CONFIG="$SMOKE_MODELS_CONFIG" \
       DEBATE_LOG_DIR="$TMPDIR_SMOKE/.debate-conductor/log" \
-      DEBATE_CONDUCTOR_PM_HOST=codex \
+      DEBATE_CONDUCTOR_PM_HOST="$host" \
       GENERATOR_CLI="$STUB_GEN" \
       CRITIC_CLI="$STUB_CRIT" \
       STUB_VERDICT=STRENGTHEN \
       TMUX="" \
-      "$PLUGIN_ROOT/bin/debate.sh" -n 2 "smoke: codex host defaults" \
-      >"$out" 2>"$TMPDIR_SMOKE/codex-host.err" </dev/null
+      "$PLUGIN_ROOT/bin/debate.sh" -n 2 "smoke: $host host defaults" \
+      >"$out" 2>"$TMPDIR_SMOKE/$host-host.err" </dev/null
     rc=$?
     echo "rc=$rc"
-    [ "$rc" -eq 0 ] || note "stderr: $(head -3 "$TMPDIR_SMOKE/codex-host.err" 2>/dev/null)"
+    [ "$rc" -eq 0 ] || note "stderr: $(head -3 "$TMPDIR_SMOKE/$host-host.err" 2>/dev/null)"
   }
 
   # Highest completed round, from the same ledger the driver uses.
@@ -239,12 +246,20 @@ STUB
   else fail "placeholder leaked as convergence: stopped at round '${LAST_C:-none}' (expected 4)"; fi
 
   # --- 3d. Codex PM host defaults Critic to Claude, not Codex itself ---
-  run_codex_host_smoke >/dev/null
+  run_external_host_smoke codex >/dev/null
   DIR_D="$TMPDIR_SMOKE/.debate-conductor/log/codex-host/latest-debate"
   if grep -q '<!-- debate-round: 2 crit claude -->' "$DIR_D/round-2-crit.md" 2>/dev/null; then
     ok "Codex PM host → default critic model is claude"
   else
     fail "Codex PM host → expected round-2 critic marker to resolve model=claude"
+  fi
+  run_external_host_smoke agy >/dev/null
+  DIR_E="$TMPDIR_SMOKE/.debate-conductor/log/agy-host/latest-debate"
+  if grep -q '<!-- debate-round: 1 gen claude -->' "$DIR_E/round-1-gen.md" 2>/dev/null \
+      && grep -q '<!-- debate-round: 2 crit codex -->' "$DIR_E/round-2-crit.md" 2>/dev/null; then
+    ok "Antigravity PM host → default generator claude, critic codex"
+  else
+    fail "Antigravity PM host → expected claude generator and codex critic"
   fi
 fi
 

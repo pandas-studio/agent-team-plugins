@@ -808,6 +808,7 @@ else
   echo "Rotation: OFF (gen=$PRIMARY_GEN, crit=$PRIMARY_CRIT)"
 fi
 [ "$PM_HOST" = "codex" ] && echo "PM host: Codex"
+[ "$PM_HOST" = "agy" ] && echo "PM host: Antigravity"
 [ "$UNTIL_CONVERGED" = "1" ] && echo "Mode: until-converged (stop on 'Verdict: STRENGTHEN', cap round $END_ROUND)"
 echo "Transcript dir: $DEBATE_DIR"
 
