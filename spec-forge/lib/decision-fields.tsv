@@ -1,0 +1,10 @@
+key	label	required
+status	상태	yes
+debate_evidence	정확한 토론 디렉터리·완료 Critic 라운드	no
+verdict	Critic 판정과 추천 근거	no
+open_questions	남은 불확실성과 확인 결과	no
+user_decision	사용자 선택과 확인 날짜	no
+selected	채택 대안·기각 대안과 이유	yes
+contract	허용할 인터페이스 변경·호환성 요구	yes
+acceptance	수용 기준과 실제 검사 명령	yes
+rollback	적용 후 확인할 지표와 되돌림 조건	no
