@@ -117,7 +117,7 @@ if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ] && [ "${3:-}" = "--json" ]; 
   echo '{"loggedIn": true, "authMethod": "fixture"}'
   exit 0
 fi
-if [ "${1:-}" != "-p" ] && { [ "$#" -lt 4 ] ||
+if ! { [ "$#" -eq 1 ] && [ "${1:-}" = "-p" ]; } && { [ "$#" -lt 4 ] ||
    [ "${@: -4:1}" != "--input-format" ] || [ "${@: -3:1}" != "text" ] ||
    [ "${@: -2:1}" != "--output-format" ] || [ "${@: -1:1}" != "text" ]; }; then
   echo "stub-gen: expected stdin text flags, got: $*" >&2; exit 2

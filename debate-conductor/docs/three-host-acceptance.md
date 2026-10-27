@@ -30,10 +30,16 @@ plugin installation.
   dispatch, receipt validation, saved-pair continuation across hosts, explicit
   role selection and auth failure before debate creation. The doctor checks
   the default Claude/Codex pair.
-- A fresh real Antigravity PM attempt stopped at Antigravity's own login
-  requirement and exited 1 before loading/executing the debate. No role calls
-  or receipt were produced. Native PM orchestration and interactive command
-  approval remain unverified until the user authenticates Antigravity.
+- Real Antigravity PM after local login: loaded the installed agy run skill
+  and shared viewing contract, then requested the absolute preparation helper
+  with `--view=none`. Headless policy auto-denied that command, returned CLI
+  exit 0 with an empty response, and produced no role calls or receipt. This
+  is incomplete. Interactive approval and four-round completion remain pending
+  user validation. No permission settings or credentials were changed.
+- The initial harness used a synthetic SSH marker to prevent GUI access. That
+  selected Antigravity's remote OAuth flow despite a valid local login. Removing
+  the marker allowed local Keychain login. Subsequent agy validation uses
+  `--view=none` and explicitly forbids GUI instead of impersonating SSH.
 
 These fixture checks establish orchestration, not provider answer quality.
 An agy exit code of zero alone is insufficient: command approval can be

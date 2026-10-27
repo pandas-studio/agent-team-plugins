@@ -60,6 +60,8 @@ Use `/debate-conductor:run`, `:continue`, `:bootstrap`, or `:install-pm` in
 interactive agy. The agy-specific skills dispatch with `--host=agy` and default
 to Claude Generator plus Codex Critic. Persistent policy goes into `GEMINI.md`,
 preserving `AGENTS.md` and `CLAUDE.md`. The policy applies only to its host.
+If this workspace already has an older Codex PM policy in `AGENTS.md`, run
+Codex's `$debate-conductor:install-pm` once after updating to add its host guard.
 
 Approve the helper commands in the interactive session when requested. Print
 mode cannot ask for command approval and may soft-deny a command while exiting

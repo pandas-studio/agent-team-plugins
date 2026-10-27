@@ -109,9 +109,10 @@ run-debate.sh --host=claude --context '<exact context_file>' --continue-from '<p
 
 Never forward `--continue-from` after `--`: the runner rejects it before a
 dispatch is marked or a model is called. Contexts are single-dispatch; use a
-fresh preparation for another invocation or an authorized authentication retry
-(same frozen team/base and engine arguments). Keep the existing one-approved-
-attempt Claude login policy; do not change auth, probe raw CLIs, or switch models.
+fresh preparation for another invocation or a host-authorized authentication retry
+(same frozen team/base and engine arguments). Follow the active host skill's
+permission rules: Codex permits one approved login retry; agy stops on unverified
+login. Do not change auth, probe raw CLIs, or switch models.
 
 Choose a host timeout/background-and-poll mechanism sufficient for a 3–10 minute
 debate. A tool timeout is not debate success. Relay failure and preserve logs.
