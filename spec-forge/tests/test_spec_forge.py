@@ -435,6 +435,88 @@ class LintTest(SpecForgeCase):
         self.report("## Provenance", "## Origins")
         self.assertEqual(self.rules(), {"P1"})
 
+    def test_P1_commented_report_does_not_count(self):
+        path = self.run_dir / "report.md"
+        path.write_text("<!--\n" + path.read_text() + "-->\n")
+        self.assertEqual(self.rules(), {"P1"})
+
+    def test_P1_commented_heading_hides_the_table(self):
+        self.report("## Provenance", "<!-- ## Provenance -->")
+        self.assertEqual(self.rules(), {"P1"})
+
+    def test_P1_commented_row_does_not_cover_a_section(self):
+        row = "| §3.2 | 허용할 인터페이스 변경·호환성 요구 |"
+        self.report(row, "<!-- " + row + " -->")
+        self.assertEqual(self.rules(), {"P1"})
+        self.report("<!-- " + row + " -->", "<!--\n" + row + "\n-->")
+        self.assertEqual(self.rules(), {"P1"})
+
+    def test_P1_comment_inside_a_row_is_not_a_label(self):
+        self.report("| §5.2 | acceptance |", "| §5.2 | acceptance <!-- , the user said so --> |")
+        self.assertEqual(self.rules(), set())
+
+    def test_P1_closed_comment_does_not_hide_later_rows(self):
+        self.report("## Provenance", "<!-- drafting notes -->\n\n## Provenance")
+        self.assertEqual(self.rules(), set())
+
+    def test_draft_change_during_lint_does_not_change_checked_digest(self):
+        spec = self.run_dir / "spec.md"
+        original = spec.read_bytes()
+        invalid = original.decode().replace("## §6 Non-goals", "## Non-goals")
+        replacement = self.tmp / "replacement.md"
+        replacement.write_text(invalid)
+        # sort first runs after every draft has been scanned and before the
+        # digests are taken; its stub replaces spec.md at that boundary.
+        tools = self.tmp / "tools"
+        tools.mkdir()
+        real_sort = shutil.which("sort", path=self.env["PATH"])
+        self.assertIsNotNone(real_sort)
+        (tools / "sort").write_text(f'#!/bin/sh\ncp "{replacement}" "{spec}"\nexec "{real_sort}" "$@"\n')
+        (tools / "sort").chmod(0o755)
+
+        result = self.lint(env={"PATH": str(tools) + os.pathsep + self.env["PATH"]})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(spec.read_text(), invalid)
+        report = json.loads((self.run_dir / "lint.json").read_text())
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["files"]["spec.md"], hashlib.sha256(original).hexdigest())
+        # A rerun reads the replacement: §6 is gone, and so is the target of its row.
+        self.assertEqual(self.rules(), {"S1", "P1"})
+
+    def test_lint_json_directory_is_not_written_into(self):
+        target = self.run_dir / "lint.json"
+        target.mkdir()
+        result = self.lint()
+        self.assertEqual(result.returncode, 6, result.stdout + result.stderr)
+        self.assertIn("is a directory or a symbolic link", result.stderr)
+        self.assertEqual(list(target.iterdir()), [])
+        self.assertEqual(list(self.run_dir.glob("lint.json.tmp.*")), [])
+
+    def test_lint_json_directory_created_during_write_is_cleaned_up(self):
+        target = self.run_dir / "lint.json"
+        tools = self.tmp / "tools"
+        tools.mkdir()
+        real_mv = shutil.which("mv", path=self.env["PATH"])
+        self.assertIsNotNone(real_mv)
+        # The stub makes lint.json a directory between the check and the rename.
+        (tools / "mv").write_text(f'#!/bin/sh\nmkdir "{target}"\nexec "{real_mv}" "$@"\n')
+        (tools / "mv").chmod(0o755)
+        result = self.lint(env={"PATH": str(tools) + os.pathsep + self.env["PATH"]})
+        self.assertEqual(result.returncode, 6, result.stdout + result.stderr)
+        self.assertIn("became a directory or a symbolic link", result.stderr)
+        self.assertEqual(list(target.iterdir()), [])
+
+    def test_lint_json_symlink_is_not_followed(self):
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        target = self.run_dir / "lint.json"
+        target.symlink_to(outside)
+        result = self.lint()
+        self.assertEqual(result.returncode, 6, result.stdout + result.stderr)
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertTrue(target.is_symlink())
+        self.assertEqual(list(self.run_dir.glob("lint.json.tmp.*")), [])
+
     def test_P2_template_placeholder(self):
         self.spec("- Background job processing (alternative B, rejected).",
                   "- Background job processing (alternative B, rejected).\n- <thing this spec does not address>")

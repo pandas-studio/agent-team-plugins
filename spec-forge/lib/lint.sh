@@ -160,26 +160,42 @@ sf_lint_scan_backlog() {
 }
 
 # Records from report.md:
-#   PROVSEC line             the "## Provenance" heading
-#   PROV    line id labels   a table row; labels joined by \037
+#   PROVSEC line             the "## Provenance" heading outside fences and comments
+#   PROV    line id labels   a table row outside comments; labels joined by \037
 sf_lint_scan_report() {
   LC_ALL=C awk '
+    function strip_comments(s,    out, i, j) {
+      out = ""
+      while (s != "") {
+        if (in_comment) {
+          j = index(s, "-->")
+          if (j == 0) return out
+          s = substr(s, j + 3); in_comment = 0
+        } else {
+          i = index(s, "<!--")
+          if (i == 0) return out s
+          out = out substr(s, 1, i - 1); s = substr(s, i + 4); in_comment = 1
+        }
+      }
+      return out
+    }
     {
       line = $0
       sub(/\r$/, "", line)
       trimmed = line
       sub(/^[ \t]+/, "", trimmed)
       if (in_fence) { if (substr(trimmed, 1, 3) == fence) in_fence = 0; next }
-      if (substr(trimmed, 1, 3) == "```" || substr(trimmed, 1, 3) == "~~~") {
+      if (!in_comment && (substr(trimmed, 1, 3) == "```" || substr(trimmed, 1, 3) == "~~~")) {
         in_fence = 1; fence = substr(trimmed, 1, 3); next
       }
-      if (line ~ /^##[[:space:]]/) {
-        in_prov = (line ~ /^##[[:space:]]+Provenance[[:space:]]*$/)
+      text = strip_comments(line)
+      if (text ~ /^##[[:space:]]/) {
+        in_prov = (text ~ /^##[[:space:]]+Provenance[[:space:]]*$/)
         if (in_prov) print "PROVSEC\t" NR
         next
       }
-      if (!in_prov || line !~ /^[[:space:]]*\|/) next
-      n = split(line, cell, "|")
+      if (!in_prov || text !~ /^[[:space:]]*\|/) next
+      n = split(text, cell, "|")
       if (n < 4) next
       id = cell[2]; gsub(/^[ \t]+|[ \t]+$/, "", id)
       if (id !~ /^§/) next
@@ -353,27 +369,32 @@ sf_lint() {
 
 # sf_lint_run RUN SPEC_TRIO_ROOT WORK — the checks proper.
 sf_lint_run() {
-  local run="$1" spec_trio_root="$2" work="$3" f missing=0
+  local run="$1" spec_trio_root="$2" work="$3" f missing=0 in="$3/in"
   : > "$work/violations.tsv" || return "$SF_RC_IO"
+  mkdir -- "$in" || return "$SF_RC_IO"
+  # Read each draft once. Every check below and the digests in lint.json use
+  # this copy, so lint.json describes the bytes that were checked even if the
+  # run directory changes while lint runs.
   for f in $SF_LINT_FILES; do
-    if [ ! -f "$run/$f" ] || [ -L "$run/$f" ]; then
+    if [ ! -f "$run/$f" ] || [ -L "$run/$f" ] || ! cat < "$run/$f" > "$in/$f" 2>/dev/null; then
+      rm -f -- "$in/$f"
       printf '%s\t1\tF1\tmissing %s (a regular file)\n' "$f" "$f" >> "$work/violations.tsv"
       missing=1
     fi
   done
 
   if [ "$missing" = 0 ]; then
-    sf_lint_scan_spec "$run/spec.md" > "$work/spec.rec" &&
-      parse_test_criteria "$run/spec.md" | cut -f1 > "$work/parser.rec" &&
-      sf_lint_scan_backlog "$run/BACKLOG.md" > "$work/backlog.rec" &&
-      sf_lint_scan_report "$run/report.md" > "$work/report.rec" &&
+    sf_lint_scan_spec "$in/spec.md" > "$work/spec.rec" &&
+      parse_test_criteria "$in/spec.md" | cut -f1 > "$work/parser.rec" &&
+      sf_lint_scan_backlog "$in/BACKLOG.md" > "$work/backlog.rec" &&
+      sf_lint_scan_report "$in/report.md" > "$work/report.rec" &&
       sf_lint_judge "$work" >> "$work/violations.tsv" || return "$SF_RC_IO"
 
     sf_lint_placeholders "$spec_trio_root/prompts/spec.md.template" > "$work/placeholders" || return "$SF_RC_IO"
     printf '%s\n' '(replace this)' >> "$work/placeholders"
     for f in $SF_LINT_FILES; do
-      { LC_ALL=C grep -n -o -E '__[A-Z][A-Z0-9_]*__' "$run/$f" || true
-        LC_ALL=C grep -n -o -F -f "$work/placeholders" "$run/$f" || true
+      { LC_ALL=C grep -n -o -E '__[A-Z][A-Z0-9_]*__' "$in/$f" || true
+        LC_ALL=C grep -n -o -F -f "$work/placeholders" "$in/$f" || true
       } | while IFS= read -r hit; do
         printf '%s\t%s\tP2\tunfilled placeholder %s\n' "$f" "${hit%%:*}" "${hit#*:}"
       done >> "$work/violations.tsv" || return "$SF_RC_IO"
@@ -385,8 +406,8 @@ sf_lint_run() {
 
   local hashes="{}" sha
   for f in $SF_LINT_FILES; do
-    if [ -f "$run/$f" ] && [ ! -L "$run/$f" ]; then
-      sha=$(sf_sha256 "$run/$f") || return "$SF_RC_IO"
+    if [ -f "$in/$f" ]; then
+      sha=$(sf_sha256 "$in/$f") || return "$SF_RC_IO"
       hashes=$(jq -c --arg f "$f" --arg s "$sha" '. + {($f): $s}' <<<"$hashes") || return "$SF_RC_IO"
     fi
   done

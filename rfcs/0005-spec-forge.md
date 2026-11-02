@@ -110,7 +110,7 @@ PM 정책 문서 `lib/pm.md`와 `lib/pm-codex.md`에서는 Drafter가 다음을 
 | `report.md` | PM | 출처 표, 사람 결정 필요 목록, audit 라운드별 finding과 처리 |
 | `decision.md` | `gate` | 결정 기록 스냅샷. 이후 단계는 원본이 아니라 이 사본을 기준으로 한다. |
 | `run.json` | `gate` | `schema_version`, `run_id`, `created_at`, `decision{path, sha256}`, `debate`(receipt 정보 또는 null) |
-| `lint.json` | `lint` | `ok`, `checked_at`, 세 파일의 sha256, `violations[{file, line, rule, message}]` |
+| `lint.json` | `lint` | `ok`, `checked_at`, 세 파일의 sha256(검사한 바로 그 내용), `violations[{file, line, rule, message}]` |
 
 ### 6.1 출처 표
 
@@ -155,7 +155,7 @@ PM 정책 문서 `lib/pm.md`와 `lib/pm-codex.md`에서는 Drafter가 다음을 
 | B2 | 미완료 작업마다 괄호 안에 § 인용이 하나 이상 있다. `(§2, §3.1)`, `(spec §3.2)`, `(spec coverage gap §5.1)` 형식을 모두 인정한다. | 시나리오 3 backlog 형식, `planner.md:11` |
 | B3 | 인용한 § 번호가 spec에 실제로 있다. | — |
 | B4 | 모든 §5.N이 적어도 한 작업에서 인용된다. | spec-trio의 reviewer verdict rollup이 작업 본문의 §5.N만 집계 |
-| P1 | 출처 표가 spec의 모든 § 제목을 덮고, 원천 라벨이 `decision-fields.tsv`에 있다. | 목표 2 |
+| P1 | 출처 표가 spec의 모든 § 제목을 덮고, 원천 라벨이 `decision-fields.tsv`에 있다. 코드 펜스와 HTML 주석 안의 제목과 행은 세지 않는다. | 목표 2 |
 | P2 | 세 출력 파일에 `__UPPER_SNAKE__` 자리표시자, spec-trio 템플릿의 주석 밖 `<…>` 자리표시자, `(replace this)`가 남지 않는다. | 자리표시자 목록은 해석한 spec-trio 설치본의 `prompts/spec.md.template`에서 읽는다. |
 
 `spec-trio.sh --dry-run`은 lint에 쓰지 않는다. 섹션 구조를 읽지 않으면서
