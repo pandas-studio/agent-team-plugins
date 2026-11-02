@@ -376,10 +376,12 @@ sf_lint_run() {
   # this copy, so lint.json describes the bytes that were checked even if the
   # run directory changes while lint runs.
   for f in $SF_LINT_FILES; do
-    if [ ! -f "$run/$f" ] || [ -L "$run/$f" ] || ! cat < "$run/$f" > "$in/$f" 2>/dev/null; then
-      rm -f -- "$in/$f"
+    if [ ! -f "$run/$f" ] || [ -L "$run/$f" ]; then
       printf '%s\t1\tF1\tmissing %s (a regular file)\n' "$f" "$f" >> "$work/violations.tsv"
       missing=1
+    elif ! cat < "$run/$f" > "$in/$f"; then
+      sf_err "lint: cannot read $run/$f"
+      return "$SF_RC_IO"
     fi
   done
 

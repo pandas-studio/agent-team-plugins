@@ -483,6 +483,17 @@ class LintTest(SpecForgeCase):
         # A rerun reads the replacement: §6 is gone, and so is the target of its row.
         self.assertEqual(self.rules(), {"S1", "P1"})
 
+    @unittest.skipIf(os.geteuid() == 0, "root reads a mode-000 file")
+    def test_unreadable_draft_is_an_io_failure(self):
+        spec = self.run_dir / "spec.md"
+        spec.chmod(0)
+        self.addCleanup(spec.chmod, 0o600)
+        result = self.lint()
+        self.assertEqual(result.returncode, 6, result.stdout + result.stderr)
+        self.assertIn("cannot read", result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertFalse((self.run_dir / "lint.json").exists())
+
     def test_lint_json_directory_is_not_written_into(self):
         target = self.run_dir / "lint.json"
         target.mkdir()
