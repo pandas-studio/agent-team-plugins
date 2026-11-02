@@ -190,21 +190,25 @@ class GateTest(SpecForgeCase):
 
     def test_commented_status_is_not_read(self):
         self.edit(self.decision, "- 상태: 확정 — 2026-10-06 사용자 확인\n", "<!--\n- 상태: 확정 — 2026-10-06 사용자 확인\n-->\n")
+        self.assert_refused("4: field '상태' " + "is inside an HTML comment or a code fence")
         self.assert_refused("required field '상태' is missing")
 
     def test_fenced_status_is_not_read(self):
         self.edit(self.decision, "- 상태: 확정 — 2026-10-06 사용자 확인\n", "```\n- 상태: 확정 — 2026-10-06 사용자 확인\n```\n")
-        self.assert_refused("required field '상태' is missing")
+        self.assert_refused("4: field '상태' " + "is inside an HTML comment or a code fence")
 
-    def test_inline_comment_does_not_confirm_a_status(self):
+    def test_field_with_a_comment_marker_is_refused(self):
         self.edit(self.decision, "- 상태: 확정 — 2026-10-06 사용자 확인", "- 상태: <!-- 확정 --> 미결정")
-        self.assert_refused("must start with 확정")
+        self.assert_refused("3: field '상태' " + "is inside an HTML comment or a code fence")
+        self.decision.write_text(self.decision.read_text().replace(
+            "- 상태: <!-- 확정 --> 미결정", "- 상태: 확정 <!-- 2026-10-06 -->"))
+        self.assert_refused("3: field '상태' " + "is inside an HTML comment or a code fence")
 
     def test_commented_value_does_not_fill_a_field(self):
         self.edit(self.decision,
                   "- 허용할 인터페이스 변경·호환성 요구: `GET /reports/{id}` 응답 형식 유지. `?refresh=1` 추가 허용.",
                   "- 허용할 인터페이스 변경·호환성 요구: <!-- 나중에\n  `GET /reports/{id}` 유지 -->")
-        self.assert_refused("'허용할 인터페이스 변경·호환성 요구' is empty")
+        self.assert_refused("field '허용할 인터페이스 변경·호환성 요구' " + "is inside an HTML comment or a code fence")
 
     def test_comment_line_inside_a_value_keeps_the_field_open(self):
         self.edit(self.decision, "- 상태: 확정 — 2026-10-06 사용자 확인", "- 상태:\n<!-- 검토 메모 -->\n  확정 — 2026-10-06 사용자 확인")
@@ -216,6 +220,14 @@ class GateTest(SpecForgeCase):
                   "- 수용 기준과 실제 검사 명령:\n  ```\n  python3 -m unittest tests.test_reports -v\n  ```")
         result = self.gate()
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_code_span_comment_marker_cannot_hide_a_visible_field(self):
+        self.decision.write_text("`<!--`\n- 상태: 미결정\n`-->`\n\n" + self.decision.read_text())
+        self.assert_refused("2: field '상태' is inside an HTML comment or a code fence")
+
+    def test_field_in_an_indented_fence_is_refused(self):
+        self.edit(self.decision, "- 상태: 확정 — 2026-10-06 사용자 확인\n", " ```\n- 상태: 확정 — 2026-10-06 사용자 확인\n ```\n")
+        self.assert_refused("4: field '상태' is inside an HTML comment or a code fence")
 
     def test_duplicate_field_is_refused(self):
         self.decision.write_text(self.decision.read_text() + "- 수용 기준과 실제 검사 명령: `true`\n")

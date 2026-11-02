@@ -21,10 +21,17 @@ EOF
 
 # sf_decision_fields FILE — one line per known field found in FILE:
 #   <line>\t<key>\t<label>\t<filled 0|1>\t<first value line>
+# and one per known field that is not plainly visible:
+#   <line>\tHIDDEN\t<label>\t0\t
 # A field is a column-0 bullet "- <label>: <value>". Its value is the rest of
 # that line plus any following indented, non-blank lines; an indented code
-# fence there is part of the value. HTML comments and column-0 fences are not
-# read (SF_AWK_MD), so hidden text can neither add a field nor fill one.
+# fence there is part of the value and never starts a field.
+#
+# Hidden text is refused rather than interpreted. A "- <label>:" for a known
+# label inside a code fence, on a line that begins inside an HTML comment, or on
+# a line with a comment marker is HIDDEN, and gate refuses the record. Reading
+# Markdown exactly (code spans, list items, HTML blocks) would need a CommonMark
+# parser; a confirmed record has no reason to hide or comment out a field.
 sf_decision_fields() {
   LC_ALL=C awk -F'\t' "$SF_AWK_MD"'
     FNR == NR { if (FNR > 1) key[$2] = $1; next }
@@ -32,19 +39,34 @@ sf_decision_fields() {
       if (cur != "") print cur_line "\t" key[cur] "\t" cur "\t" (filled ? 1 : 0) "\t" first
       cur = ""
     }
+    function names_field(s,    l, i) {
+      for (l in key) {
+        i = index(s, l)
+        if (i && substr(s, 1, i - 1) ~ /-[ \t]+$/ && substr(s, i + length(l)) ~ /^[ \t]*:/) {
+          found = l; return 1
+        }
+      }
+      return 0
+    }
     {
       raw = $0
       sub(/\r$/, "", raw)
       md_line(raw)
-      if (md_kind == "fence") {
-        if (md_fence_indent == 0) { flush(); next }
-        line = raw
-      } else {
-        line = md_text
-        # A line that was all comment is not there: it neither ends a field
-        # nor continues one.
-        if (line ~ /^[ \t]*$/ && raw !~ /^[ \t]*$/) next
+      if ((md_kind == "fence" || md_was_comment || index(raw, "<!--") || index(raw, "-->")) && names_field(raw)) {
+        flush(); print FNR "\tHIDDEN\t" found "\t0\t"; next
       }
+      if (md_kind == "fence") {
+        if (md_fence_indent > 0 && cur != "") {
+          if (first == "" && raw ~ /[^ \t]/) { first = raw; sub(/^[ \t]+/, "", first); sub(/[ \t]+$/, "", first) }
+          if (raw ~ /[^ \t]/) filled = 1
+          next
+        }
+        flush(); next
+      }
+      line = md_text
+      # A line that was all comment is not there: it neither ends a field nor
+      # continues one.
+      if (line ~ /^[ \t]*$/ && raw !~ /^[ \t]*$/) next
       if (line ~ /^-[ \t]+[^:]+:/) {
         flush()
         label = line
@@ -119,6 +141,14 @@ sf_gate() (
   fi
 
   fields=$(sf_decision_fields "$snapshot") || { sf_err "gate: cannot read snapshot of $decision"; return "$SF_RC_IO"; }
+  local hidden
+  hidden=$(printf '%s\n' "$fields" | LC_ALL=C awk -F'\t' '$2 == "HIDDEN" { print $1 "\t" $3 }')
+  if [ -n "$hidden" ]; then
+    while IFS="$(printf '\t')" read -r line label; do
+      sf_err "gate: $decision:$line: field '$label' is inside an HTML comment or a code fence; delete it or make it plain text"
+    done <<<"$hidden"
+    refusals=1
+  fi
   local status_seen=0 required_key required_label
   while IFS="$(printf '\t')" read -r required_key required_label _ ; do
     [ "$required_key" = key ] && continue
