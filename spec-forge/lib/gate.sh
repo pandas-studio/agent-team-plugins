@@ -32,6 +32,8 @@ EOF
 # a line with a comment marker is HIDDEN, and gate refuses the record. Reading
 # Markdown exactly (code spans, list items, HTML blocks) would need a CommonMark
 # parser; a confirmed record has no reason to hide or comment out a field.
+# Gate checks the source text, not the rendered page: a value wrapped in raw
+# HTML that a renderer would not show still counts (RFC 0005 §5.1).
 sf_decision_fields() {
   LC_ALL=C awk -F'\t' "$SF_AWK_MD"'
     FNR == NR { if (FNR > 1) key[$2] = $1; next }
@@ -39,11 +41,16 @@ sf_decision_fields() {
       if (cur != "") print cur_line "\t" key[cur] "\t" cur "\t" (filled ? 1 : 0) "\t" first
       cur = ""
     }
-    function names_field(s,    l, i) {
+    # names_field(s) — 1 if s holds "- <label>:" for a known label at any of
+    # that label'"'"'s occurrences; sets found.
+    function names_field(s,    l, i, seen, rest) {
       for (l in key) {
-        i = index(s, l)
-        if (i && substr(s, 1, i - 1) ~ /-[ \t]+$/ && substr(s, i + length(l)) ~ /^[ \t]*:/) {
-          found = l; return 1
+        seen = ""; rest = s
+        while ((i = index(rest, l)) > 0) {
+          if ((seen substr(rest, 1, i - 1)) ~ /-[ \t]+$/ && substr(rest, i + length(l)) ~ /^[ \t]*:/) {
+            found = l; return 1
+          }
+          seen = seen substr(rest, 1, i - 1 + length(l)); rest = substr(rest, i + length(l))
         }
       }
       return 0
@@ -57,8 +64,11 @@ sf_decision_fields() {
       }
       if (md_kind == "fence") {
         if (md_fence_indent > 0 && cur != "") {
-          if (first == "" && raw ~ /[^ \t]/) { first = raw; sub(/^[ \t]+/, "", first); sub(/[ \t]+$/, "", first) }
-          if (raw ~ /[^ \t]/) filled = 1
+          # The delimiters are not a value; only a non-blank line between them is.
+          if (!md_delim && raw ~ /[^ \t]/) {
+            if (first == "") { first = raw; sub(/^[ \t]+/, "", first); sub(/[ \t]+$/, "", first) }
+            filled = 1
+          }
           next
         }
         flush(); next

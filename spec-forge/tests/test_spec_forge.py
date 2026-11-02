@@ -229,6 +229,18 @@ class GateTest(SpecForgeCase):
         self.edit(self.decision, "- 상태: 확정 — 2026-10-06 사용자 확인\n", " ```\n- 상태: 확정 — 2026-10-06 사용자 확인\n ```\n")
         self.assert_refused("4: field '상태' is inside an HTML comment or a code fence")
 
+    def test_hidden_field_after_an_earlier_mention_of_its_label_is_refused(self):
+        self.decision.write_text(self.decision.read_text() + "<!-- 상태 메모: - 상태: 미결정 -->\n")
+        self.assert_refused("field '상태' is inside an HTML comment or a code fence")
+
+    def test_empty_indented_fence_does_not_fill_a_field(self):
+        self.edit(self.decision, "- 수용 기준과 실제 검사 명령: `python3 -m unittest tests.test_reports -v`", "- 수용 기준과 실제 검사 명령:\n  ```\n  ```")
+        self.assert_refused("'수용 기준과 실제 검사 명령' is empty")
+
+    def test_blank_indented_fence_does_not_fill_a_field(self):
+        self.edit(self.decision, "- 수용 기준과 실제 검사 명령: `python3 -m unittest tests.test_reports -v`", "- 수용 기준과 실제 검사 명령:\n  ```\n    \n  ```")
+        self.assert_refused("'수용 기준과 실제 검사 명령' is empty")
+
     def test_duplicate_field_is_refused(self):
         self.decision.write_text(self.decision.read_text() + "- 수용 기준과 실제 검사 명령: `true`\n")
         self.assert_refused("appears 2 times")
