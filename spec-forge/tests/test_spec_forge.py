@@ -188,6 +188,35 @@ class GateTest(SpecForgeCase):
                   "- 상태:\n  미결정\n  확정 예정")
         self.assert_refused("must start with 확정")
 
+    def test_commented_status_is_not_read(self):
+        self.edit(self.decision, "- 상태: 확정 — 2026-10-06 사용자 확인\n", "<!--\n- 상태: 확정 — 2026-10-06 사용자 확인\n-->\n")
+        self.assert_refused("required field '상태' is missing")
+
+    def test_fenced_status_is_not_read(self):
+        self.edit(self.decision, "- 상태: 확정 — 2026-10-06 사용자 확인\n", "```\n- 상태: 확정 — 2026-10-06 사용자 확인\n```\n")
+        self.assert_refused("required field '상태' is missing")
+
+    def test_inline_comment_does_not_confirm_a_status(self):
+        self.edit(self.decision, "- 상태: 확정 — 2026-10-06 사용자 확인", "- 상태: <!-- 확정 --> 미결정")
+        self.assert_refused("must start with 확정")
+
+    def test_commented_value_does_not_fill_a_field(self):
+        self.edit(self.decision,
+                  "- 허용할 인터페이스 변경·호환성 요구: `GET /reports/{id}` 응답 형식 유지. `?refresh=1` 추가 허용.",
+                  "- 허용할 인터페이스 변경·호환성 요구: <!-- 나중에\n  `GET /reports/{id}` 유지 -->")
+        self.assert_refused("'허용할 인터페이스 변경·호환성 요구' is empty")
+
+    def test_comment_line_inside_a_value_keeps_the_field_open(self):
+        self.edit(self.decision, "- 상태: 확정 — 2026-10-06 사용자 확인", "- 상태:\n<!-- 검토 메모 -->\n  확정 — 2026-10-06 사용자 확인")
+        result = self.gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_indented_fence_fills_a_field(self):
+        self.edit(self.decision, "- 수용 기준과 실제 검사 명령: `python3 -m unittest tests.test_reports -v`",
+                  "- 수용 기준과 실제 검사 명령:\n  ```\n  python3 -m unittest tests.test_reports -v\n  ```")
+        result = self.gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_duplicate_field_is_refused(self):
         self.decision.write_text(self.decision.read_text() + "- 수용 기준과 실제 검사 명령: `true`\n")
         self.assert_refused("appears 2 times")
@@ -356,6 +385,11 @@ class LintTest(SpecForgeCase):
         self.spec("## §2 Interfaces", "<!--\n### §5.1 old note\n-->\n## §2 Interfaces")
         self.assertEqual(self.rules(), set())
 
+    def test_S1_heading_in_a_longer_fence_does_not_count(self):
+        self.spec("## §6 Non-goals", "````\n```\n## §6 Non-goals")
+        (self.run_dir / "spec.md").write_text((self.run_dir / "spec.md").read_text() + "````\n")
+        self.assertEqual(self.rules(), {"S1", "P1"})
+
     def test_S3_duplicate_criterion(self):
         self.spec("## §6 Non-goals", "### §5.1 Cache hit again\n\n- `true`\n\n## §6 Non-goals")
         self.assertEqual(self.rules(), {"S3"})
@@ -396,6 +430,23 @@ class LintTest(SpecForgeCase):
     def test_closed_comment_does_not_hide_later_real_task(self):
         self.backlog("- [x] (§4)", "<!-- example\nignored\n-->\n- [ ] (§5.1) real\n- [x] (§4)")
         self.assertEqual(self.rules(), set())
+
+    def test_longer_fence_is_not_closed_by_a_shorter_one(self):
+        path = self.run_dir / "BACKLOG.md"
+        path.write_text("````\n```\n" + path.read_text() + "````\n")
+        self.assertEqual(self.rules(), {"B1", "B4"})
+
+    def test_tilde_fence_is_not_closed_by_backticks(self):
+        self.backlog("- [x] (§4)", "~~~\n```\n- [ ] (§5.1) example\n~~~\n- [x] (§4)")
+        self.assertEqual(self.rules(), {"B1"})
+
+    def test_longer_closing_fence_closes(self):
+        self.backlog("- [x] (§4)", "```\nexample\n`````\n- [ ] (§5.1) real\n- [x] (§4)")
+        self.assertEqual(self.rules(), set())
+
+    def test_fence_closer_with_text_does_not_close(self):
+        self.backlog("- [x] (§4)", "```\n``` not a closer\n- [ ] (§5.1) example\n```\n- [x] (§4)")
+        self.assertEqual(self.rules(), {"B1"})
 
     def test_B1_no_pending_task(self):
         path = self.run_dir / "BACKLOG.md"
@@ -438,6 +489,11 @@ class LintTest(SpecForgeCase):
     def test_P1_commented_report_does_not_count(self):
         path = self.run_dir / "report.md"
         path.write_text("<!--\n" + path.read_text() + "-->\n")
+        self.assertEqual(self.rules(), {"P1"})
+
+    def test_P1_report_in_a_longer_fence_does_not_count(self):
+        path = self.run_dir / "report.md"
+        path.write_text("````\n```\n" + path.read_text() + "````\n")
         self.assertEqual(self.rules(), {"P1"})
 
     def test_P1_commented_heading_hides_the_table(self):

@@ -22,17 +22,29 @@ EOF
 # sf_decision_fields FILE — one line per known field found in FILE:
 #   <line>\t<key>\t<label>\t<filled 0|1>\t<first value line>
 # A field is a column-0 bullet "- <label>: <value>". Its value is the rest of
-# that line plus any following indented, non-blank lines.
+# that line plus any following indented, non-blank lines; an indented code
+# fence there is part of the value. HTML comments and column-0 fences are not
+# read (SF_AWK_MD), so hidden text can neither add a field nor fill one.
 sf_decision_fields() {
-  LC_ALL=C awk -F'\t' '
+  LC_ALL=C awk -F'\t' "$SF_AWK_MD"'
     FNR == NR { if (FNR > 1) key[$2] = $1; next }
     function flush() {
       if (cur != "") print cur_line "\t" key[cur] "\t" cur "\t" (filled ? 1 : 0) "\t" first
       cur = ""
     }
     {
-      line = $0
-      sub(/\r$/, "", line)
+      raw = $0
+      sub(/\r$/, "", raw)
+      md_line(raw)
+      if (md_kind == "fence") {
+        if (md_fence_indent == 0) { flush(); next }
+        line = raw
+      } else {
+        line = md_text
+        # A line that was all comment is not there: it neither ends a field
+        # nor continues one.
+        if (line ~ /^[ \t]*$/ && raw !~ /^[ \t]*$/) next
+      }
       if (line ~ /^-[ \t]+[^:]+:/) {
         flush()
         label = line

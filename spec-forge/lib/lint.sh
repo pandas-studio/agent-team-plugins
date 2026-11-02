@@ -5,8 +5,9 @@
 #
 # §5 criteria are read with spec-trio's own parse_test_criteria, sourced from
 # the resolved spec-trio install, so lint and the spec-trio loop agree on them.
-# Everything else is read by the fence- and comment-aware scanners below; the
-# S2 rule reports any criterion on which the two readings disagree.
+# Everything else is read by the scanners below, which see a line through
+# SF_AWK_MD (common.sh) as gate does; the S2 rule reports any criterion on
+# which spec-trio's reading and theirs disagree.
 
 SF_LINT_FILES="spec.md BACKLOG.md report.md"
 
@@ -30,22 +31,7 @@ EOF
 #   CMD  line id           a command (inline code or fenced block) in §5.N body
 #   RAW3 line id           "### §5." lines in spec-trio's raw §5 block
 sf_lint_scan_spec() {
-  LC_ALL=C awk '
-    function strip_comments(s,    out, i, j) {
-      out = ""
-      while (s != "") {
-        if (in_comment) {
-          j = index(s, "-->")
-          if (j == 0) return out
-          s = substr(s, j + 3); in_comment = 0
-        } else {
-          i = index(s, "<!--")
-          if (i == 0) return out s
-          out = out substr(s, 1, i - 1); s = substr(s, i + 4); in_comment = 1
-        }
-      }
-      return out
-    }
+  LC_ALL=C awk "$SF_AWK_MD"'
     {
       line = $0
       sub(/\r$/, "", line)
@@ -61,17 +47,12 @@ sf_lint_scan_spec() {
         sub(/\.$/, "", raw)
         print "RAW3\t" NR "\t" raw
       }
-      trimmed = line
-      sub(/^[ \t]+/, "", trimmed)
-      if (in_fence) {
-        if (substr(trimmed, 1, 3) == fence) { in_fence = 0; next }
-        if (sec5 != "" && trimmed != "") print "CMD\t" NR "\t" sec5
+      md_line(line)
+      if (md_kind == "fence") {
+        if (!md_delim && sec5 != "" && line ~ /[^ \t]/) print "CMD\t" NR "\t" sec5
         next
       }
-      if (!in_comment && (substr(trimmed, 1, 3) == "```" || substr(trimmed, 1, 3) == "~~~")) {
-        in_fence = 1; fence = substr(trimmed, 1, 3); next
-      }
-      text = strip_comments(line)
+      text = md_text
       if (text ~ /^##[[:space:]]/) {
         h2 = ""; sec5 = ""
         if (text ~ /^##[[:space:]]+§[0-9]+([[:space:].]|$)/) {
@@ -106,41 +87,18 @@ sf_lint_scan_spec() {
 #   COMMENTED line     a pending-task line inside an HTML comment
 #   NEAR  line         a line that looks like a task but spec-trio skips it
 sf_lint_scan_backlog() {
-  LC_ALL=C awk '
-    function strip_comments(s,    out, i, j) {
-      out = ""
-      while (s != "") {
-        if (in_comment) {
-          j = index(s, "-->")
-          if (j == 0) return out
-          s = substr(s, j + 3); in_comment = 0
-        } else {
-          i = index(s, "<!--")
-          if (i == 0) return out s
-          out = out substr(s, 1, i - 1); s = substr(s, i + 4); in_comment = 1
-        }
-      }
-      return out
-    }
+  LC_ALL=C awk "$SF_AWK_MD"'
     {
       line = $0
       sub(/\r$/, "", line)
-      trimmed = line
-      sub(/^[ \t]+/, "", trimmed)
       pending = (line ~ /^[[:space:]]*-[[:space:]]*\[ \][[:space:]]+/)
-      if (in_fence) {
-        if (substr(trimmed, 1, 3) == fence) in_fence = 0
-        else if (pending) print "FENCED\t" NR
+      md_line(line)
+      if (md_kind == "fence") {
+        if (!md_delim && pending) print "FENCED\t" NR
         next
       }
-      commented = in_comment
-      text = strip_comments(line)
-      if (pending && commented) { print "COMMENTED\t" NR; next }
-      trimmed = text
-      sub(/^[ \t]+/, "", trimmed)
-      if (substr(trimmed, 1, 3) == "```" || substr(trimmed, 1, 3) == "~~~") {
-        in_fence = 1; fence = substr(trimmed, 1, 3); next
-      }
+      text = md_text
+      if (pending && md_was_comment) { print "COMMENTED\t" NR; next }
       if (!pending) {
         if (text ~ /^[[:space:]]*[-*+][[:space:]]*\[[[:space:]]*\]/) print "NEAR\t" NR
         next
@@ -163,32 +121,13 @@ sf_lint_scan_backlog() {
 #   PROVSEC line             the "## Provenance" heading outside fences and comments
 #   PROV    line id labels   a table row outside comments; labels joined by \037
 sf_lint_scan_report() {
-  LC_ALL=C awk '
-    function strip_comments(s,    out, i, j) {
-      out = ""
-      while (s != "") {
-        if (in_comment) {
-          j = index(s, "-->")
-          if (j == 0) return out
-          s = substr(s, j + 3); in_comment = 0
-        } else {
-          i = index(s, "<!--")
-          if (i == 0) return out s
-          out = out substr(s, 1, i - 1); s = substr(s, i + 4); in_comment = 1
-        }
-      }
-      return out
-    }
+  LC_ALL=C awk "$SF_AWK_MD"'
     {
       line = $0
       sub(/\r$/, "", line)
-      trimmed = line
-      sub(/^[ \t]+/, "", trimmed)
-      if (in_fence) { if (substr(trimmed, 1, 3) == fence) in_fence = 0; next }
-      if (!in_comment && (substr(trimmed, 1, 3) == "```" || substr(trimmed, 1, 3) == "~~~")) {
-        in_fence = 1; fence = substr(trimmed, 1, 3); next
-      }
-      text = strip_comments(line)
+      md_line(line)
+      if (md_kind == "fence") next
+      text = md_text
       if (text ~ /^##[[:space:]]/) {
         in_prov = (text ~ /^##[[:space:]]+Provenance[[:space:]]*$/)
         if (in_prov) print "PROVSEC\t" NR
@@ -213,18 +152,9 @@ sf_lint_scan_report() {
 # sf_lint_placeholders TEMPLATE — the "<…>" placeholders a spec-trio template
 # carries outside its HTML comments, one per line.
 sf_lint_placeholders() {
-  LC_ALL=C awk '
+  LC_ALL=C awk "$SF_AWK_MD"'
     {
-      s = $0; out = ""
-      while (s != "") {
-        if (in_comment) {
-          j = index(s, "-->"); if (j == 0) { s = ""; break }
-          s = substr(s, j + 3); in_comment = 0
-        } else {
-          i = index(s, "<!--"); if (i == 0) { out = out s; break }
-          out = out substr(s, 1, i - 1); s = substr(s, i + 4); in_comment = 1
-        }
-      }
+      out = md_strip_comments($0)
       while (match(out, /<[^<>!]+>/)) {
         print substr(out, RSTART, RLENGTH)
         out = substr(out, RSTART + RLENGTH)

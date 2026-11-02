@@ -81,6 +81,62 @@ sf_resolve() {
   fi
 }
 
+# SF_AWK_MD — awk functions that decide which parts of a Markdown line are
+# visible: not inside an HTML comment and not inside a code fence. Every reader
+# of drafts and decision records prepends this to its program, so they agree.
+#
+#   md_strip_comments(s)  s without HTML comments; md_in_comment carries an
+#                         unclosed comment to the next line.
+#   md_line(raw)          classify one line (CR already removed). Sets
+#     md_kind         "fence" (a fence delimiter or a line inside a fence) or "text"
+#     md_delim        1 for an opening or closing fence delimiter
+#     md_text         "text": the line without comments; "fence": the raw line
+#     md_was_comment  1 if the line began inside an HTML comment
+#     md_fence_indent indentation of the open fence's delimiter
+#
+# A fence opens with a run of three or more backticks or tildes outside a
+# comment, and closes only with a run of the same character, at least as long,
+# followed by nothing but blanks (CommonMark).
+SF_AWK_MD='
+function md_strip_comments(s,    out, i, j) {
+  out = ""
+  while (s != "") {
+    if (md_in_comment) {
+      j = index(s, "-->")
+      if (j == 0) return out
+      s = substr(s, j + 3); md_in_comment = 0
+    } else {
+      i = index(s, "<!--")
+      if (i == 0) return out s
+      out = out substr(s, 1, i - 1); s = substr(s, i + 4); md_in_comment = 1
+    }
+  }
+  return out
+}
+function md_line(raw,    t) {
+  md_was_comment = md_in_comment
+  t = raw
+  sub(/^[ \t]+/, "", t)
+  md_delim = 0
+  if (md_fence_len) {
+    md_kind = "fence"; md_text = raw
+    if (substr(t, 1, 1) == md_fence_char && match(t, md_fence_char == "`" ? "^`+" : "^~+") &&
+        RLENGTH >= md_fence_len && substr(t, RLENGTH + 1) ~ /^[ \t]*$/) {
+      md_fence_len = 0; md_delim = 1
+    }
+    return
+  }
+  if (!md_in_comment && match(t, "^(```+|~~~+)") && RLENGTH >= 3) {
+    md_fence_char = substr(t, 1, 1); md_fence_len = RLENGTH
+    md_fence_indent = length(raw) - length(t)
+    md_kind = "fence"; md_delim = 1; md_text = raw
+    return
+  }
+  md_kind = "text"
+  md_text = md_strip_comments(raw)
+}
+'
+
 sf_require_jq() {
   command -v jq >/dev/null 2>&1 && return 0
   sf_err "jq is required"
