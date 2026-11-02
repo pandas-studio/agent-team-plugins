@@ -16,3 +16,7 @@ runtime/.venv/
 # Python test and lint artifacts
 __pycache__/
 .ruff_cache/
+
+# memtomem local artifacts (ADR-0011 project_local tier)
+.memtomem/*.local/
+.memtomem/.staging/
