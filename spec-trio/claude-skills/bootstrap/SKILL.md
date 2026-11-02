@@ -18,23 +18,24 @@ It is **non-destructive**: if any of the three already exists in `$PWD`, this sk
 
 ### 1 · Confirm `$PWD` is the workspace root
 
-`$CLAUDE_PLUGIN_ROOT` resolves to the plugin install dir. `$PWD` is the workspace. Confirm to the user where the seed will land:
+`${CLAUDE_PLUGIN_ROOT}` is the plugin install dir. Claude Code replaces the braced form with the absolute path when it loads this skill; the Bash tool's shell has no `CLAUDE_PLUGIN_ROOT` variable, so keep the braces in every command below. `$PWD` is the workspace. Confirm to the user where the seed will land:
 
 ```bash
 echo "Workspace: $PWD"
-echo "Plugin root: $CLAUDE_PLUGIN_ROOT"
+echo "Plugin root: ${CLAUDE_PLUGIN_ROOT}"
+test -f "${CLAUDE_PLUGIN_ROOT}/prompts/spec.md.template"
 ```
 
-If `$PWD` looks wrong (e.g. it's the plugin install dir itself), tell the user to `cd` into their repo first.
+If the `test` fails, surface this error to the user verbatim and stop: `spec-trio plugin install appears broken — prompts/spec.md.template missing under the plugin root; reinstall via /plugin install spec-trio@pandas-studio.` If `$PWD` looks wrong (e.g. it's the plugin install dir itself), tell the user to `cd` into their repo first.
 
 ### 2 · Copy each template (refuse to overwrite)
 
 For each of the three files, run:
 
 ```bash
-test -e "$PWD/spec.md"     || cp "$CLAUDE_PLUGIN_ROOT/prompts/spec.md.template"     "$PWD/spec.md"
-test -e "$PWD/BACKLOG.md"  || cp "$CLAUDE_PLUGIN_ROOT/prompts/BACKLOG.md.template"  "$PWD/BACKLOG.md"
-test -e "$PWD/fix_plan.md" || cp "$CLAUDE_PLUGIN_ROOT/prompts/fix_plan.md.template" "$PWD/fix_plan.md"
+test -e "$PWD/spec.md"     || cp "${CLAUDE_PLUGIN_ROOT}/prompts/spec.md.template"     "$PWD/spec.md"
+test -e "$PWD/BACKLOG.md"  || cp "${CLAUDE_PLUGIN_ROOT}/prompts/BACKLOG.md.template"  "$PWD/BACKLOG.md"
+test -e "$PWD/fix_plan.md" || cp "${CLAUDE_PLUGIN_ROOT}/prompts/fix_plan.md.template" "$PWD/fix_plan.md"
 ```
 
 After each, report whether the file was created or already existed (the `test` short-circuits the `cp`).
