@@ -216,7 +216,8 @@ class DebateHostTests(unittest.TestCase):
             input="",
             text=True,
             capture_output=True,
-            timeout=20,
+            # The doctor runs five stub debates: ~16 s alone, more under a full suite.
+            timeout=120,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Codex PM host", result.stdout)
