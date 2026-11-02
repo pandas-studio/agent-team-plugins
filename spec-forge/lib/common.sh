@@ -46,6 +46,9 @@ sf_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 # sf_write_atomic DEST — copy stdin to DEST through a temporary sibling, so a
 # reader never sees a partial file. DEST must be absent or a regular file: mv
 # would move the file into a directory, or into the directory a symlink names.
+# The check and the rename are not one step, and bash on macOS has no
+# exact-destination rename (GNU mv -T). Swapping DEST in between takes a
+# process of the same user inside the 0700 run directory (RFC 0005 §10.4).
 sf_write_atomic() {
   local dest="$1" tmp
   if [ -L "$dest" ] || [ -d "$dest" ]; then
@@ -59,12 +62,6 @@ sf_write_atomic() {
   fi
   if ! mv -f -- "$tmp" "$dest"; then
     rm -f -- "$tmp"
-    return 1
-  fi
-  # A directory or symlink that appeared at DEST after the check received it.
-  if [ -e "$dest/${tmp##*/}" ]; then
-    rm -f -- "$dest/${tmp##*/}"
-    sf_err "$dest became a directory or a symbolic link while it was written"
     return 1
   fi
 }

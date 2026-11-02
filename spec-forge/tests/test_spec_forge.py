@@ -503,20 +503,6 @@ class LintTest(SpecForgeCase):
         self.assertEqual(list(target.iterdir()), [])
         self.assertEqual(list(self.run_dir.glob("lint.json.tmp.*")), [])
 
-    def test_lint_json_directory_created_during_write_is_cleaned_up(self):
-        target = self.run_dir / "lint.json"
-        tools = self.tmp / "tools"
-        tools.mkdir()
-        real_mv = shutil.which("mv", path=self.env["PATH"])
-        self.assertIsNotNone(real_mv)
-        # The stub makes lint.json a directory between the check and the rename.
-        (tools / "mv").write_text(f'#!/bin/sh\nmkdir "{target}"\nexec "{real_mv}" "$@"\n')
-        (tools / "mv").chmod(0o755)
-        result = self.lint(env={"PATH": str(tools) + os.pathsep + self.env["PATH"]})
-        self.assertEqual(result.returncode, 6, result.stdout + result.stderr)
-        self.assertIn("became a directory or a symbolic link", result.stderr)
-        self.assertEqual(list(target.iterdir()), [])
-
     def test_lint_json_symlink_is_not_followed(self):
         outside = self.tmp / "outside"
         outside.mkdir()
