@@ -36,6 +36,7 @@ fi
 
 python3 -m unittest discover -s "$ROOT/tests" -p 'test_*.py'
 python3 -m unittest discover -s "$ROOT/eval-trio/tests" -p 'test_*.py'
+python3 -m unittest discover -s "$ROOT/spec-forge/tests" -p 'test_*.py'
 
 # One part at a time, in order; each runs on its own and prints its count.
 for part in "$ROOT"/tests/smoke-hardening/[0-9]*.sh; do

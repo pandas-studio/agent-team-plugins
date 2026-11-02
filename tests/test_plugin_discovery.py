@@ -17,7 +17,8 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-HELPERS = [ROOT / "ralph-trio/lib/plugin-deps.sh", ROOT / "spec-trio/lib/plugin-deps.sh"]
+HELPERS = [ROOT / "ralph-trio/lib/plugin-deps.sh", ROOT / "spec-trio/lib/plugin-deps.sh",
+           ROOT / "spec-forge/lib/plugin-deps.sh"]
 SIBLINGS = ("ask-reviewer.sh", "ask-researcher.sh", "debate.sh")
 BARE_CALL = re.compile(r'(?:^|[;&|({]|\bthen\b|\bdo\b|\bspec_run_stage\b)\s*'
                        r'(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|\S+)\s+)*'
