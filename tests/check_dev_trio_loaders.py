@@ -5,6 +5,7 @@ No user prompts are submitted and no model inference is requested.
 Requires local codex and claude executables; intentionally separate from CI.
 """
 
+import html
 import json
 import os
 from pathlib import Path
@@ -120,7 +121,10 @@ def check_claude(root, plugin):
                 text = (root / plugin / "claude-skills" / name / "SKILL.md").read_text()
                 description = next(line.removeprefix("description: ") for line in text.splitlines()
                                    if line.startswith("description: "))
-                assert description in command["description"], command
+                # The CLI returns descriptions HTML-escaped (`<file>` arrives as
+                # `&lt;file&gt;`, measured on Claude Code 2.1.322-2.1.325); the
+                # argument hint beside it is not escaped.
+                assert description in html.unescape(command["description"]), command
             print(f"Claude: {plugin} loaded only its Claude skills")
             return
     finally:
