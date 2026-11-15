@@ -516,6 +516,47 @@ EOF_NOTE
   fi
 }
 
+# dev_trio_agy_inlined_note GIT_OUTSIDE TAG PATH [TAG PATH ...]: for each input
+# file the wrapper copied into the prompt, tell a workspace-aware model which block
+# holds it. A focus that names the file's path ("review the plan at
+# /tmp/.../plan.md") otherwise sends agy to read_file it, and a path outside
+# --add-dir is denied in headless mode, which ends the run with no answer.
+# Whether a path is inside the workspace is left to the model, which the
+# execution note told the root: the note says outside paths cannot be opened
+# and keeps inspection of files inside: with git commands, or with the file
+# viewer when GIT_OUTSIDE (dev_trio_git_outside_root, the exec note's third
+# argument) is set and the exec note forbids git. Pairs with an empty PATH are
+# skipped; prints nothing when none remain. A relative PATH is also shown
+# resolved against $PWD, the wrapper's directory, since a focus may name it
+# either way. A PATH holding a backtick, LF or CR is not printed: the note
+# sits outside the untrusted tags.
+dev_trio_agy_inlined_note() {
+  local items="" tag path shown inside
+  if [ -n "$1" ]; then
+    inside="A file inside the workspace may still be read with your file viewer when the task needs it."
+  else
+    inside="A file inside the workspace may still be inspected with the git commands above when the task needs its diff or history."
+  fi
+  shift
+  while [ "$#" -ge 2 ]; do
+    tag="$1"; path="$2"; shift 2
+    [ -n "$path" ] || continue
+    case "$path" in
+      *'`'*|*"
+"*|*$'\r'*) shown="a file" ;;
+      /*) shown="\`$path\`" ;;
+      *) shown="\`$path\` (\`$PWD/$path\`)" ;;
+    esac
+    items="$items
+- \`<$tag>\` holds the full content of $shown."
+  done
+  [ -n "$items" ] || return 0
+  cat <<EOF_NOTE
+These input files are already copied into this prompt, each in full inside its own block:$items
+Read their content from those blocks rather than opening these paths, even when the focus names one. A path outside the workspace cannot be opened here: the read is denied and ends this run with no answer. $inside
+EOF_NOTE
+}
+
 # Scan focus string for an explicit revision range A..B or A...B.
 # Verifies both endpoints as commits in git before accepting. Returns 0 with the
 # range, 1 when there is no single verified range, 124 when a probe timed out,

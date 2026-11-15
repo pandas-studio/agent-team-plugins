@@ -1456,6 +1456,71 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         self.assertEqual(result.returncode, 0, result.stderr)
         self.agy_argv(self.recorded()[0], "review")
         self.assert_model("agy")
+        self.assertNotIn("These input files", self.sent_prompt())
+
+    def test_agy_reviewer_is_told_input_files_are_inlined(self):
+        # A focus naming the --with-spec path sent agy to read_file a path
+        # outside --add-dir; headless agy denied it and the run ended with
+        # no verdict (rc 3, 2026-11-15). The note maps each path to its block.
+        outside = self.root / "scratch"
+        outside.mkdir()
+        spec = outside / "plan.md"
+        spec.write_text("the plan")
+        (outside / "pr ctx.md").write_text("pr facts")
+        (self.workspace / "notes.md").write_text("in-repo research")
+        result = self.run_cli("ask-reviewer.sh", "--with-spec", str(spec),
+                              "--with-context", "../scratch/pr ctx.md",
+                              "--with-research", "notes.md", f"Review the PLAN at {spec}",
+                              DEV_TRIO_REVIEWER_MODEL="agy")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        call = self.recorded()[0]
+        self.agy_argv(call, "review")
+        prompt = call[-1]
+        self.assertEqual(self.fenced(prompt, "spec"), "the plan")
+        ws = os.path.realpath(self.workspace)
+        lines = prompt[prompt.index("These input files"):].splitlines()
+        self.assertEqual(lines[1:4], [
+            f"- `<research_context>` holds the full content of `notes.md` (`{ws}/notes.md`).",
+            f"- `<spec>` holds the full content of `{spec}`.",
+            f"- `<remote_context>` holds the full content of `../scratch/pr ctx.md` (`{ws}/../scratch/pr ctx.md`).",
+        ])
+        rule = lines[4]
+        self.assertTrue(rule.startswith("Read their content from those blocks rather than opening these paths"), rule)
+        self.assertIn("A path outside the workspace cannot be opened here", rule)
+        # An in-repo input stays open to the git inspection a review may need.
+        self.assertIn("A file inside the workspace may still be inspected with the git commands above", rule)
+        # After the execution note, outside every untrusted block.
+        self.assertGreater(prompt.index("These input files"), prompt.index("# Execution environment"))
+        self.assertGreater(prompt.index("These input files"), prompt.index("\n</remote_context>"))
+
+    def inlined_note(self, *pairs):
+        result = subprocess.run(
+            ["bash", "-c", '. "$P/lib/host.sh"; dev_trio_agy_inlined_note "" "$@"', "_", *pairs],
+            env=self.env | {"P": str(self.plugin)}, text=True, capture_output=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def test_agy_inlined_note_hides_a_path_that_could_break_out(self):
+        for name, path in (("backtick", "/tmp/a`b.md"), ("LF", "/tmp/a\nb.md"), ("CR", "/tmp/a\rb.md")):
+            with self.subTest(name):
+                out = self.inlined_note("spec", path, "remote_context", "")
+                self.assertEqual(out.splitlines()[1], "- `<spec>` holds the full content of a file.")
+                self.assertNotIn("/tmp/a", out)
+                self.assertNotIn("remote_context", out)
+        # The same guard leaves an ordinary path printed.
+        self.assertIn("`/tmp/plan.md`", self.inlined_note("spec", "/tmp/plan.md"))
+        self.assertEqual(self.inlined_note("spec", "", "remote_context", ""), "")
+
+    def test_non_agy_reviewer_gets_no_inlined_note(self):
+        outside = self.root / "scratch"
+        outside.mkdir()
+        spec = outside / "plan.md"
+        spec.write_text("the plan")
+        result = self.run_cli("ask-reviewer.sh", "--with-spec", str(spec), f"review the plan at {spec}",
+                              DEV_TRIO_PM_HOST="codex")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("These input files", self.recorded()[-1][-1])
 
     def _linked_worktree(self):
         self._init_git_workspace()
@@ -1504,6 +1569,19 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
                     snap = [i["value"] for i in inputs if i.get("kind") == "workspace-snapshot"]
                     self.assertEqual(len(snap), 1, inputs)
                     self.assertTrue(snap[0].startswith("working-tree:262144:"), snap)
+
+    def test_agy_inlined_note_in_a_linked_worktree_does_not_offer_git(self):
+        # There the exec note says "Do not run any git command"; the inlined
+        # note must not then offer git for an in-workspace input.
+        worktree = self._linked_worktree()
+        result = self._run_in(worktree, "ask-reviewer.sh", "--with-spec", "tracked.txt",
+                              "review tracked.txt against the spec", DEV_TRIO_REVIEWER_MODEL="agy")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        prompt = self.recorded()[0][9]
+        self.assertIn("Do not run any git command.", prompt)
+        note = prompt[prompt.index("These input files"):]
+        self.assertIn("A file inside the workspace may still be read with your file viewer", note)
+        self.assertNotIn("git", note)
 
     def test_snapshot_text_never_sends_agy_to_git_in_a_linked_worktree(self):
         # The no-git paragraph must not be contradicted by later prompt text.
@@ -1789,7 +1867,11 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         self._commit_two()
         role_bytes = len((self.plugin / "lib/roles/reviewer.md").read_bytes())
         ctx = self.workspace / "context.md"
-        ctx.write_text("a" * (128000 - role_bytes))
+        # The prompt must leave under 5120 bytes for the snapshot (base over
+        # 131072 - 8192 - 5120 = 117760) yet still fit the 131072 argv cap. The
+        # role, the agy notes and the temp paths they name add ~3 KB on top of
+        # this context, so aim near the window's middle, ~4 KB under the cap.
+        ctx.write_text("a" * (124000 - role_bytes))
         result = self.run_cli("ask-reviewer.sh", "--with-context", str(ctx), "review HEAD~1..HEAD",
                               DEV_TRIO_REVIEWER_MODEL="argv-snapshot", REGISTRY_ARGV_MAX_BYTES="131072")
         self.assertEqual(result.returncode, 0, result.stderr)
