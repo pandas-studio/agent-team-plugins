@@ -50,9 +50,10 @@
 # The reviewer model is resolved via the shared registry (--model >
 # DEV_TRIO_REVIEWER_MODEL env > config role binding > host default); see lib/host.sh.
 #
-# Output goes to stdout AND $PWD/.dev-trio/log/<team>/codex-<TS>.log (the full
-# streamed transcript). The reviewer's final structured review is ALSO captured
-# verbatim to codex-<TS>.final.md — natively via `--output-last-message` for
+# Output goes to stdout AND $PWD/.dev-trio/log/<team>/reviewer-<TS>-<PID>.log
+# (the full streamed transcript), named by role whichever model runs. The
+# reviewer's final structured review is ALSO captured verbatim to
+# reviewer-<TS>-<PID>.final.md — natively via `--output-last-message` for
 # models that support it (codex), otherwise synthesized from the streamed
 # transcript — so the verdict and findings can be parsed from a clean file even
 # when the streamed stdout duplicates or drops the closing block.
@@ -519,8 +520,8 @@ esac
 # captured verbatim and independent of stdout streaming/flush — the
 # authoritative artifact this wrapper parses into the shared review result. See
 # `--output-last-message` below.
-run_paths codex review "$AGY_WORKSPACE"
-RESULT="$LOG_DIR/codex-$TS.review.json"
+run_paths reviewer review "$AGY_WORKSPACE"
+RESULT="${LOG%.log}.review.json"
 RUNSTATE_LOG=""
 REVIEW_PUBLISHED=0
 run_cleanup_files() {
@@ -580,9 +581,9 @@ RUNSTATE_ARGS=(result_path="$RESULT" "input=focus:$FOCUS")
 [ -z "$RESEARCH_FILE" ] || RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" "inputpath=research:$RESEARCH_FILE")
 [ -z "$SPEC_FILE" ]     || RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" "inputpath=spec:$SPEC_FILE")
 [ -z "$CONTEXT_FILE" ]  || RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" "inputpath=context:$CONTEXT_FILE")
-run_begin_metadata codex dev-trio-review reviewer "$REVIEWER_MODEL" "${RUNSTATE_ARGS[@]}"
+run_begin_metadata reviewer dev-trio-review reviewer "$REVIEWER_MODEL" "${RUNSTATE_ARGS[@]}"
 
-run_publish_latest codex "$REVIEWER_MODEL"
+run_publish_latest reviewer "$REVIEWER_MODEL" codex
 RC=0
 # For models with native final-message capture (codex's --output-last-message),
 # the registry's final_args template writes the structured review to $FINAL

@@ -111,8 +111,8 @@ class HostTests(unittest.TestCase):
         self.assertEqual(json.loads(manifests[0].read_text())["roles"][0]["model"], model)
 
     def test_raw_logs_and_manifests_are_private_under_permissive_umask(self):
-        for wrapper, stem in (("ask-researcher.sh", "agy"),
-                              ("ask-reviewer.sh", "codex")):
+        for wrapper, stem in (("ask-researcher.sh", "researcher"),
+                              ("ask-reviewer.sh", "reviewer")):
             with self.subTest(wrapper=wrapper):
                 result = subprocess.run(
                     ["bash", "-c", 'umask 000; exec "$@"', "_",
@@ -140,8 +140,8 @@ class HostTests(unittest.TestCase):
             "else exec /bin/date \"$@\"; fi\n"
         )
         shim.chmod(0o755)
-        for wrapper, stem in (("ask-reviewer.sh", "codex"),
-                              ("ask-researcher.sh", "agy")):
+        for wrapper, stem in (("ask-reviewer.sh", "reviewer"),
+                              ("ask-researcher.sh", "researcher")):
             for kind in ("symlink", "fifo"):
                 with self.subTest(wrapper=wrapper, kind=kind):
                     ready = self.root / "date ready"
@@ -569,14 +569,14 @@ _dev_trio_check_log_ancestors "$CHECK_PATH" '' "$CHECK_UID" -1
                 self.assertEqual(prepared.returncode, 0, prepared.stderr)
 
     def test_path_replacement_during_model_keeps_original_log_inode(self):
-        for wrapper, channel in (("ask-reviewer.sh", "codex"),
-                                 ("ask-researcher.sh", "agy")):
+        for wrapper, channel in (("ask-reviewer.sh", "reviewer"),
+                                 ("ask-researcher.sh", "researcher")):
             with self.subTest(wrapper=wrapper):
                 logdir = self.workspace / ".dev-trio/log/host-test"
                 result = self.run_cli(
                     wrapper, "private input", STUB_SWAP_LOG_DIR=str(logdir),
                     STUB_SWAP_CHANNEL=channel,
-                    DEV_TRIO_REVIEWER_MODEL="claude" if channel == "codex" else "codex",
+                    DEV_TRIO_REVIEWER_MODEL="claude" if channel == "reviewer" else "codex",
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 log = logdir / os.readlink(logdir / f"latest-{channel}.log")
@@ -595,8 +595,8 @@ _dev_trio_check_log_ancestors "$CHECK_PATH" '' "$CHECK_UID" -1
             "#!/bin/sh\n"
             "/bin/mv \"$@\" || exit $?\n"
             "for destination do :; done\n"
-            "if [ \"$destination\" = \"$SWAP_ROOT/latest-agy.final.md\" ]; then\n"
-            "  target=\"$SWAP_ROOT/$(readlink \"$SWAP_ROOT/latest-agy.log\")\"\n"
+            "if [ \"$destination\" = \"$SWAP_ROOT/latest-researcher.final.md\" ]; then\n"
+            "  target=\"$SWAP_ROOT/$(readlink \"$SWAP_ROOT/latest-researcher.log\")\"\n"
             "  /bin/mv \"$target\" \"$target.saved\" && mkdir \"$target\"\n"
             "fi\n"
         )
@@ -606,7 +606,7 @@ _dev_trio_check_log_ancestors "$CHECK_PATH" '' "$CHECK_UID" -1
             "ask-researcher.sh", "private input", SWAP_ROOT=str(logdir),
             PATH=f"{shim_dir}:{self.env['PATH']}")
         self.assertEqual(result.returncode, 0, result.stderr)
-        log = logdir / os.readlink(logdir / "latest-agy.log")
+        log = logdir / os.readlink(logdir / "latest-researcher.log")
         original = Path(str(log) + ".saved")
         try:
             self.assertTrue(log.is_dir())
@@ -786,7 +786,7 @@ _dev_trio_check_log_ancestors "$CHECK_PATH" '' "$CHECK_UID" -1
         self.assertFalse((self.workspace / "BAD").exists())
         self.assertFalse((self.workspace / "BAD2").exists())
         self.assert_model("claude")
-        final = self.workspace / ".dev-trio/log/host-test/latest-codex.final.md"
+        final = self.workspace / ".dev-trio/log/host-test/latest-reviewer.final.md"
         self.assertEqual(final.read_text().strip(), REVIEW.strip())
 
     def test_with_context_is_fenced_and_recorded(self):
@@ -875,9 +875,9 @@ manifest_init test "$R/helper.log"
 manifest_add_input kind=a value=$'a\n\n'
 manifest_add_input kind=b value=x
 manifest_add_input kind=big value="$big"
-runstate_begin "$R/helper.log" channel=codex wrapper=w \
+runstate_begin "$R/helper.log" channel=reviewer wrapper=w \
   "input=a:"$'a\n\n' "inputpath=p:/x y" "input=big:$big" "inputdigest=d:"$'é\n'
-runstate_begin "$R/empty.log" channel=codex wrapper=w
+runstate_begin "$R/empty.log" channel=reviewer wrapper=w
 """
         result = subprocess.run(
             ["bash", "-c", script], env=self.env | dict(
@@ -905,7 +905,7 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         # No pipefail here: the helper itself must notice the failure.
         result = subprocess.run(
             ["bash", "-c", 'set -u; . "$P/lib/runstate.sh"; '
-             'runstate_begin "$R/hash.log" channel=codex wrapper=w "inputdigest=d:text"'],
+             'runstate_begin "$R/hash.log" channel=reviewer wrapper=w "inputdigest=d:text"'],
             env=self.env | dict(P=str(self.plugin), R=str(self.root),
                                 PATH=f"{broken}{os.pathsep}{self.env['PATH']}"),
             text=True, capture_output=True, timeout=10)
@@ -913,8 +913,8 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         self.assertFalse((self.root / "hash.run.json").exists())
 
     def test_reader_checks_digest_fields(self):
-        name = "codex-20260918-090000-22222.log"
-        run_path = self.logdir() / "codex-20260918-090000-22222.run.json"
+        name = "reviewer-20260918-090000-22222.log"
+        run_path = self.logdir() / "reviewer-20260918-090000-22222.run.json"
         good = "0123456789abcdef" * 4
         accepted = ({"bytes": 0, "sha256": good}, {"bytes": 5}, {"sha256": good}, {})
         rejected = ({"bytes": None}, {"bytes": -1}, {"bytes": 1.5}, {"bytes": "5"},
@@ -1366,7 +1366,7 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
     def test_provider_failure_is_returned_even_with_ship_text(self):
         result = self.run_cli(DEV_TRIO_PM_HOST="codex", STUB_RC="7")
         self.assertEqual(result.returncode, 7, result.stderr)
-        log = self.workspace / ".dev-trio/log/host-test/latest-codex.log"
+        log = self.workspace / ".dev-trio/log/host-test/latest-reviewer.log"
         self.assertIn("=== END (rc=7) ===", log.read_text())
 
     def agy_argv(self, call, log_stem):
@@ -3318,7 +3318,7 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         self.assertIn("Run 'codex'", result.stdout)
         calls = json.loads(state.read_text())["calls"]
         sent = [shlex.split(call[-2]) for call in calls if call[0] == "send-keys"]
-        self.assertEqual(sent, [[str(self.plugin / "bin/dashboard.sh"), role] for role in ("agy", "codex")])
+        self.assertEqual(sent, [[str(self.plugin / "bin/dashboard.sh"), role] for role in ("researcher", "reviewer")])
 
     def dashboard(self, role, *extra, expect_rc=0, timeout=10, **env):
         """One dashboard frame, rendered headlessly."""
@@ -3395,7 +3395,7 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         """The run.json the wrapper would have written, for hand-built fixtures."""
         stem = log_name[: -len(".log")]
         doc = dict(
-            schema_version=1, channel="codex", wrapper="ask-reviewer.sh",
+            schema_version=1, channel="reviewer", wrapper="ask-reviewer.sh",
             variant="dev-trio-review", team="host-test", run_stem=stem,
             started_at="2026-09-19T12:00:00+09:00", started_display=stem.split("-", 1)[1],
             pid=11111, role="reviewer", model="claude", pm_host="claude", nested=False,
@@ -3407,7 +3407,7 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         return doc
 
     def test_dashboard_displays_the_model_that_actually_ran(self):
-        """The channel is named `codex`; the model is whatever filled the role.
+        """The channel is named `reviewer`; the model is whatever filled the role.
 
         Any CLI can be bound to the reviewer role, so the rendered model has to
         come from the run's own metadata rather than from the log channel.
@@ -3418,7 +3418,7 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
                 result = self.run_cli("ask-reviewer.sh", "fixture focus",
                                       DEV_TRIO_REVIEWER_MODEL=model)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                out = self.dashboard("codex")
+                out = self.dashboard("reviewer")
                 self.assertIn(f"Reviewer · {model}", out)
 
     def test_dashboard_renders_authoritative_fields_not_quoted_ones(self):
@@ -3437,8 +3437,8 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         )
         result = self.run_cli("ask-reviewer.sh", forged, DEV_TRIO_REVIEWER_MODEL="claude")
         self.assertEqual(result.returncode, 0, result.stderr)
-        run = json.loads(next(self.logdir().glob("codex-*.run.json")).read_text())
-        out = self.dashboard("codex")
+        run = json.loads(next(self.logdir().glob("reviewer-*.run.json")).read_text())
+        out = self.dashboard("reviewer")
 
         self.assertEqual(self.rendered_field(out, "Started:"), run["started_display"])
         self.assertIn("Reviewer · claude", out)
@@ -3459,7 +3459,7 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         result = self.run_cli("ask-reviewer.sh", f"start{payload}FORGED",
                               DEV_TRIO_REVIEWER_MODEL="claude")
         self.assertEqual(result.returncode, 0, result.stderr)
-        out = self.dashboard("codex")
+        out = self.dashboard("reviewer")
         # Drop the dashboard's own SGR sequences; nothing else may be a control.
         plain = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out)
         body = "".join(line for line in plain.splitlines() if "FORGED" in line)
@@ -3476,15 +3476,15 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         """
         outside = self.root / "elsewhere"
         outside.mkdir()
-        name = "codex-20260918-090000-33333.log"
+        name = "reviewer-20260918-090000-33333.log"
         (outside / name).write_text("=== ask-reviewer.sh @ x ===\n")
         doc = self.run_json(name)
         doc["log_path"] = str(outside / name)
-        doc["final_path"] = str(outside / "codex-20260918-090000-33333.final.md")
-        doc["result_path"] = str(outside / "codex-20260918-090000-33333.review.json")
-        (outside / "codex-20260918-090000-33333.run.json").write_text(json.dumps(doc))
-        (self.logdir() / "latest-codex.log").symlink_to(outside / name)
-        out = self.dashboard("codex")
+        doc["final_path"] = str(outside / "reviewer-20260918-090000-33333.final.md")
+        doc["result_path"] = str(outside / "reviewer-20260918-090000-33333.review.json")
+        (outside / "reviewer-20260918-090000-33333.run.json").write_text(json.dumps(doc))
+        (self.logdir() / "latest-reviewer.log").symlink_to(outside / name)
+        out = self.dashboard("reviewer")
         self.assertIn("outside the team directory", out)
         self.assertNotIn("Status:", out)
 
@@ -3516,11 +3516,11 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         try:
             deadline = time.monotonic() + 10
-            while not list(self.logdir().glob("codex-*.run.json")):
+            while not list(self.logdir().glob("reviewer-*.run.json")):
                 self.assertIsNone(wrapper.poll(), "wrapper exited before publishing metadata")
                 self.assertLess(time.monotonic(), deadline, "wrapper never published metadata")
                 time.sleep(0.05)
-            out = self.dashboard("codex")
+            out = self.dashboard("reviewer")
             self.assertIn("running", self.rendered_field(out, "Status:"))
             self.assertNotIn("Verdict:", out)
             gate.write_text("## Verdict\nNEEDS-FIX — real one\n")
@@ -3528,21 +3528,21 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         finally:
             wrapper.kill()
             wrapper.stderr.close()
-        out = self.dashboard("codex")
+        out = self.dashboard("reviewer")
         self.assertIn("done", self.rendered_field(out, "Status:"))
         self.assertIn("NEEDS-FIX — real one", out)
 
     def test_dashboard_contains_environment_derived_values(self):
         """The rendered log root is contained; nothing validates it upstream."""
         root = self.root / "logs\x1b[31mPWNED"
-        out = self.dashboard("codex", DEV_TRIO_LOG_DIR=str(root))
+        out = self.dashboard("reviewer", DEV_TRIO_LOG_DIR=str(root))
         self.assertIn("PWNED", out)
         self.assertNotIn("\x1b[31m", out)
 
     def test_a_multiline_team_name_is_refused_outright(self):
         """It used to pass validation: grep matched one line of it."""
         result = subprocess.run(
-            [str(self.plugin / "bin/dashboard.sh"), "codex", "--once"],
+            [str(self.plugin / "bin/dashboard.sh"), "reviewer", "--once"],
             cwd=self.workspace, env=self.env | dict(AGENT_TEAM="good\nEVIL"),
             input="", text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 2)
@@ -3553,17 +3553,17 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
 
     def bounded_case(self, body):
         """Render one frame against a run.json holding exactly `body` bytes."""
-        name = "codex-20260918-090000-22222.log"
+        name = "reviewer-20260918-090000-22222.log"
         logdir = self.logdir()
         (logdir / name).write_text("=== ask-reviewer.sh @ x ===\n")
-        link = logdir / "latest-codex.log"
+        link = logdir / "latest-reviewer.log"
         if not link.is_symlink():
             link.symlink_to(name)
-        (logdir / "codex-20260918-090000-22222.run.json").write_bytes(body)
-        return self.dashboard("codex")
+        (logdir / "reviewer-20260918-090000-22222.run.json").write_bytes(body)
+        return self.dashboard("reviewer")
 
     def valid_doc(self):
-        doc = self.run_json("codex-20260918-090000-22222.log")
+        doc = self.run_json("reviewer-20260918-090000-22222.log")
         doc["completion"] = dict(ended_at="2026-09-18T09:00:01+09:00", exit_code=0,
                                  verdict="SHIP", reason="ok")
         return json.dumps(doc).encode()
@@ -3600,10 +3600,10 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         under another run's heading.
         """
         logdir = self.logdir()
-        first = "agy-20260918-090000-11111"
+        first = "researcher-20260918-090000-11111"
         (logdir / f"{first}.log").write_text("=== ask-researcher.sh @ x ===\n")
         (logdir / f"{first}.final.md").write_text("THE FIRST RUN ANSWER\n")
-        doc = dict(self.run_json(f"{first}.log"), channel="agy",
+        doc = dict(self.run_json(f"{first}.log"), channel="researcher",
                    wrapper="ask-researcher.sh", variant="dev-trio-research",
                    role="researcher", result_path=None,
                    final_path=str(logdir / f"{first}.final.md"),
@@ -3611,23 +3611,23 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
                    completion=dict(ended_at="2026-09-18T09:00:01+09:00",
                                    exit_code=0, verdict=None, reason="ok"))
         (logdir / f"{first}.run.json").write_text(json.dumps(doc))
-        (logdir / "latest-agy.log").symlink_to(f"{first}.log")
+        (logdir / "latest-researcher.log").symlink_to(f"{first}.log")
 
         # One pane across both runs: a fresh process per frame would start with
         # an empty snapshot, which is the state this guards against.
-        pane = self.open_pane("agy")
+        pane = self.open_pane("researcher")
         self.pane_wait(pane, "THE FIRST RUN ANSWER")
 
         # A second run whose answer file is not readable as a regular file.
-        second = "agy-20260918-100000-22222"
+        second = "researcher-20260918-100000-22222"
         (logdir / f"{second}.log").write_text("=== ask-researcher.sh @ x ===\n")
         os.mkfifo(logdir / f"{second}.final.md")
         doc2 = dict(doc, run_stem=second, started_display="20260918-100000-22222",
                     log_path=str(logdir / f"{second}.log"),
                     final_path=str(logdir / f"{second}.final.md"))
         (logdir / f"{second}.run.json").write_text(json.dumps(doc2))
-        (logdir / "latest-agy.log").unlink()
-        (logdir / "latest-agy.log").symlink_to(f"{second}.log")
+        (logdir / "latest-researcher.log").unlink()
+        (logdir / "latest-researcher.log").symlink_to(f"{second}.log")
         self.pane_wait(pane, "20260918-100000-22222")
         frame = self.pane_quit(pane)
         self.assertIn("No answer captured", frame)
@@ -3649,7 +3649,7 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         self.assertFalse((self.workspace / "late-logs").exists())
         env = dict(DEV_TRIO_LOG_DIR=logroot)
 
-        pane = self.open_pane("agy", **env)
+        pane = self.open_pane("researcher", **env)
         # The pane must be up, and have rendered the empty state, before
         # anything creates the directory.
         self.pane_wait(pane, "no runs yet")
@@ -3679,13 +3679,13 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
 
     def test_dashboard_marks_a_legacy_log(self):
         """A log with no run metadata is named legacy, never parsed for values."""
-        name = "codex-20260918-090000-22222.log"
+        name = "reviewer-20260918-090000-22222.log"
         (self.logdir() / name).write_text(
             "=== ask-codex.sh @ 20260918-090000-22222 ===\n"
             "=== FOCUS ===\nfixture\n=== MODEL: claude ===\n=== RESPONSE ===\n"
             + REVIEW + "=== END (rc=0) ===\n")
-        (self.logdir() / "latest-codex.log").symlink_to(name)
-        out = self.dashboard("codex")
+        (self.logdir() / "latest-reviewer.log").symlink_to(name)
+        out = self.dashboard("reviewer")
         self.assertEqual(self.rendered_field(out, "Started:"), "20260918-090000-22222")
         self.assertIn("legacy log", out)
         self.assertNotIn("Reviewer · ", out)
@@ -3694,28 +3694,28 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
 
     def test_dashboard_rejects_foreign_metadata(self):
         """Valid metadata that describes a different run is a mismatch, not a frame."""
-        name = "codex-20260918-090000-22222.log"
+        name = "reviewer-20260918-090000-22222.log"
         (self.logdir() / name).write_text("=== ask-reviewer.sh @ x ===\n")
-        (self.logdir() / "latest-codex.log").symlink_to(name)
-        run_path = self.logdir() / "codex-20260918-090000-22222.run.json"
+        (self.logdir() / "latest-reviewer.log").symlink_to(name)
+        run_path = self.logdir() / "reviewer-20260918-090000-22222.run.json"
         cases = (
-            ("channel", self.run_json(name, channel="agy")),
+            ("channel", self.run_json(name, channel="researcher")),
             ("team", self.run_json(name, team="another-team")),
-            ("log_path", self.run_json(name, log_path=str(self.logdir() / "codex-other.log"))),
+            ("log_path", self.run_json(name, log_path=str(self.logdir() / "reviewer-other.log"))),
         )
         for label, doc in cases:
             with self.subTest(field=label):
                 run_path.write_text(json.dumps(doc))
-                out = self.dashboard("codex")
+                out = self.dashboard("reviewer")
                 self.assertIn("does not describe this log", out)
                 self.assertNotIn("Status:", out)
 
     def test_dashboard_survives_malformed_metadata(self):
         """Unparseable or wrong-version metadata renders as unavailable."""
-        name = "codex-20260918-090000-22222.log"
+        name = "reviewer-20260918-090000-22222.log"
         (self.logdir() / name).write_text("=== ask-reviewer.sh @ x ===\n")
-        (self.logdir() / "latest-codex.log").symlink_to(name)
-        run_path = self.logdir() / "codex-20260918-090000-22222.run.json"
+        (self.logdir() / "latest-reviewer.log").symlink_to(name)
+        run_path = self.logdir() / "reviewer-20260918-090000-22222.run.json"
         valid = json.dumps(self.run_json(name))
         for label, text in (("truncated", '{"schema_version": 1, "chan'),
                             ("wrong version", json.dumps(self.run_json(name, schema_version=2))),
@@ -3728,9 +3728,249 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
                              json.dumps(self.run_json(name, inputs=[7])))):
             with self.subTest(case=label):
                 run_path.write_text(text)
-                out = self.dashboard("codex")
+                out = self.dashboard("reviewer")
                 self.assertIn("run metadata unreadable", out)
                 self.assertNotIn("Status:", out)
+
+    # ── role-named channels and their legacy aliases ─────────────────────────
+    # (script, channel, legacy channel, model env, swapped model, frame title)
+    ROLES = (
+        ("ask-reviewer.sh", "reviewer", "codex", "DEV_TRIO_REVIEWER_MODEL", "agy", "Reviewer"),
+        ("ask-researcher.sh", "researcher", "agy", "DEV_TRIO_RESEARCHER_MODEL", "codex", "Researcher"),
+    )
+
+    def only_run(self, role):
+        """The stem of the single run of `role` in the team directory."""
+        logs = sorted(p.name for p in self.logdir().glob(f"{role}-*.log") if not p.is_symlink())
+        self.assertEqual(len(logs), 1, logs)
+        return logs[0][: -len(".log")]
+
+    def temporaries(self):
+        return sorted(p.name for p in self.logdir().iterdir() if p.name.startswith(".latest-"))
+
+    def test_artifacts_are_named_by_role_whatever_model_runs(self):
+        """A swapped model keeps the role's names; run.json records the real model."""
+        for script, role, legacy, env_name, model, _ in self.ROLES:
+            with self.subTest(script=script, model=model):
+                shutil.rmtree(self.workspace / ".dev-trio", ignore_errors=True)
+                self.calls.unlink(missing_ok=True)
+                result = self.run_cli(script, "fixture input", **{env_name: model})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                stem = self.only_run(role)
+                self.assertRegex(stem, rf"^{role}-[0-9]{{8}}-[0-9]{{6}}-[0-9]+$")
+                logdir = self.logdir()
+                self.assertEqual(sorted(p.name for p in logdir.glob(f"{legacy}-*")), [])
+                run = json.loads((logdir / f"{stem}.run.json").read_text())
+                self.assertEqual(
+                    (run["channel"], run["role"], run["model"], run["run_stem"], run["log_path"]),
+                    (role, role, model, stem, str(logdir / f"{stem}.log")))
+                manifest = json.loads((logdir / f"{stem}.manifest.json").read_text())
+                self.assertEqual(manifest["roles"][0]["model"], model)
+                if role == "reviewer":
+                    self.assertEqual(run["result_path"], str(logdir / f"{stem}.review.json"))
+                    self.assertTrue((logdir / f"{stem}.review.json").is_file())
+                    # agy's own per-run log keeps its CLI tag; it is not a channel.
+                    agy_call = [c for c in self.recorded() if c[:1] == ["--log-file"]]
+                    self.assertEqual(len(agy_call), 1, self.recorded())
+                    self.assertEqual(Path(agy_call[0][1]).name,
+                                     f"cli-dev-trio-review-{stem[len(role) + 1:]}.log")
+                self.assertIn(f"monitor: dashboard.sh {role}  (raw: tail -F {logdir}/latest-{role}.log)",
+                              result.stderr)
+
+    def test_canonical_and_legacy_links_name_the_same_run(self):
+        for script, role, legacy, *_ in self.ROLES:
+            for run in (1, 2):
+                with self.subTest(script=script, run=run):
+                    if run == 1:
+                        shutil.rmtree(self.workspace / ".dev-trio", ignore_errors=True)
+                    result = self.run_cli(script, f"run {run}")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    logdir = self.logdir()
+                    newest = sorted(p.name for p in logdir.glob(f"{role}-*.log"))[-1][: -len(".log")]
+                    for suffix in (".log", ".final.md"):
+                        self.assertEqual(os.readlink(logdir / f"latest-{role}{suffix}"), f"{newest}{suffix}")
+                        self.assertEqual(os.readlink(logdir / f"latest-{legacy}{suffix}"), f"{newest}{suffix}")
+                    self.assertEqual(self.temporaries(), [])
+
+    def test_no_temporary_link_survives_a_failed_or_interrupted_publish(self):
+        """The alias reuses LATEST_TMP, so the EXIT trap removes either temporary."""
+        shims = self.root / "publish shims"
+        shims.mkdir()
+        (shims / "mv").write_text(
+            "#!/bin/sh\n"
+            "for destination do :; done\n"
+            "case \"$destination\" in */\"$FAIL_LINK\")\n"
+            "  [ -L \"$2\" ] && : > \"$MARK\"\n"
+            "  exit 1 ;;\n"
+            "esac\n"
+            "exec /bin/mv \"$@\"\n")
+        (shims / "ln").write_text(
+            "#!/bin/sh\n"
+            "/bin/ln \"$@\" || exit $?\n"
+            "for destination do :; done\n"
+            "case \"$destination\" in */.latest-\"$TERM_LINK\"-*)\n"
+            "  [ -L \"$destination\" ] && : > \"$MARK\"\n"
+            "  kill -TERM \"$PPID\" ;;\n"
+            "esac\n"
+            "exit 0\n")
+        for shim in ("mv", "ln"):
+            (shims / shim).chmod(0o755)
+        mark = self.root / "temporary existed"
+        path = f"{shims}{os.pathsep}{self.env['PATH']}"
+        for script, role, legacy, *_ in self.ROLES:
+            for link in (role, legacy):
+                for how in ("rename fails", "TERM"):
+                    with self.subTest(script=script, link=link, how=how):
+                        shutil.rmtree(self.workspace / ".dev-trio", ignore_errors=True)
+                        mark.unlink(missing_ok=True)
+                        env = dict(PATH=path, MARK=str(mark), FAIL_LINK="-", TERM_LINK="-")
+                        if how == "TERM":
+                            env["TERM_LINK"] = link
+                        else:
+                            env["FAIL_LINK"] = f"latest-{link}.final.md"
+                        result = self.run_cli(script, "fixture input", **env)
+                        self.assertTrue(mark.exists(), "the temporary link was never in place")
+                        self.assertEqual(result.returncode, 143 if how == "TERM" else 1, result.stderr)
+                        self.assertEqual(self.temporaries(), [])
+
+    def pre_rename(self, role, legacy):
+        """Rewrite this team directory as a wrapper from before the role names left it."""
+        logdir = self.logdir()
+        stem = self.only_run(role)
+        old = legacy + stem[len(role):]
+        for link in logdir.glob("latest-*"):
+            link.unlink()
+        for artifact in logdir.glob(f"{stem}.*"):
+            artifact.rename(logdir / (old + artifact.name[len(stem):]))
+        run_path = logdir / f"{old}.run.json"
+        doc = json.loads(run_path.read_text())
+        doc.update(channel=legacy, run_stem=old, log_path=str(logdir / f"{old}.log"))
+        for key in ("final_path", "result_path"):
+            if doc[key] is not None:
+                doc[key] = doc[key].replace(f"/{stem}.", f"/{old}.")
+        run_path.write_text(json.dumps(doc))
+        for suffix in (".log", ".final.md"):
+            (logdir / f"latest-{legacy}{suffix}").symlink_to(f"{old}{suffix}")
+        return doc
+
+    def test_dashboard_aliases_render_the_canonical_frame(self):
+        for script, role, legacy, *_, title in self.ROLES:
+            with self.subTest(script=script):
+                shutil.rmtree(self.workspace / ".dev-trio", ignore_errors=True)
+                result = self.run_cli(script, "fixture input")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                canonical = self.dashboard(role)
+                self.assertEqual(self.rendered_field(canonical, "Status:"), "✓ done")
+                self.assertIn(f"{title} · ", canonical)
+                self.assertEqual(self.dashboard(legacy), canonical)
+
+    def test_dashboard_renders_a_directory_from_before_the_role_names(self):
+        """Only legacy links, old file names and old channel values: still a frame."""
+        for script, role, legacy, *_, title in self.ROLES:
+            with self.subTest(script=script):
+                shutil.rmtree(self.workspace / ".dev-trio", ignore_errors=True)
+                result = self.run_cli(script, "fixture input")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                stem = self.only_run(role)
+                before = self.dashboard(role)
+                doc = self.pre_rename(role, legacy)
+                # The frame names its log; that is the only thing that moved.
+                self.assertEqual(before.count(f"log: {stem}.log"), 1, before)
+                before = before.replace(f"log: {stem}.log", f"log: {doc['run_stem']}.log")
+                self.assertEqual(sorted(p.name for p in self.logdir().glob(f"{role}-*")), [])
+                self.assertEqual(sorted(p.name for p in self.logdir().glob(f"latest-{role}*")), [])
+                for argument in (role, legacy):
+                    out = self.dashboard(argument)
+                    self.assertEqual(self.rendered_field(out, "Started:"), doc["started_display"])
+                    self.assertEqual(self.rendered_field(out, "Status:"), "✓ done")
+                    self.assertEqual(out, before)
+
+    def test_dashboard_legacy_frame_parses_either_prefix(self):
+        """No run.json: the start time comes from a role- or a legacy-named log."""
+        for _, role, legacy, *_ in self.ROLES:
+            for prefix in (role, legacy):
+                with self.subTest(role=role, prefix=prefix):
+                    shutil.rmtree(self.workspace / ".dev-trio", ignore_errors=True)
+                    name = f"{prefix}-20260918-090000-22222.log"
+                    (self.logdir() / name).write_text("=== RESPONSE ===\n")
+                    (self.logdir() / f"latest-{prefix}.log").symlink_to(name)
+                    for argument in (role, legacy):
+                        out = self.dashboard(argument)
+                        self.assertEqual(self.rendered_field(out, "Started:"), "20260918-090000-22222")
+                        self.assertIn("legacy log", out)
+
+    def test_dashboard_accepts_old_and_new_channel_of_its_own_role_only(self):
+        research = dict(wrapper="ask-researcher.sh", variant="dev-trio-research",
+                        role="researcher", result_path=None,
+                        inputs=[dict(kind="question", value="q")])
+        done = dict(ended_at="2026-09-18T09:00:01+09:00", exit_code=0, verdict=None, reason="ok")
+        for _, role, legacy, *_ in self.ROLES:
+            opposite = [(r, l) for _, r, l, *_ in self.ROLES if r != role][0]
+            name = f"{role}-20260918-090000-22222.log"
+            for channel, accepted in ((role, True), (legacy, True),
+                                      (opposite[0], False), (opposite[1], False)):
+                with self.subTest(role=role, channel=channel):
+                    shutil.rmtree(self.workspace / ".dev-trio", ignore_errors=True)
+                    (self.logdir() / name).write_text("=== RESPONSE ===\n")
+                    (self.logdir() / f"latest-{role}.log").symlink_to(name)
+                    doc = self.run_json(name, channel=channel, completion=done)
+                    if role == "researcher":
+                        doc.update(research)
+                    (self.logdir() / f"{name[: -len('.log')]}.run.json").write_text(json.dumps(doc))
+                    out = self.dashboard(role)
+                    if accepted:
+                        self.assertEqual(self.rendered_field(out, "Status:"), "✓ done")
+                    else:
+                        self.assertIn("does not describe this log", out)
+                        self.assertEqual(self.rendered_field(out, "channel "), f"{channel} != {role}")
+                        self.assertNotIn("Status:", out)
+
+    def test_a_pane_on_a_legacy_link_moves_to_the_canonical_one(self):
+        """A pane opened on a pre-upgrade directory follows the first new run.
+
+        Live pane for the switch; --once frames for which link wins once both
+        exist, because an unchanged frame is not redrawn and so cannot show
+        that a later poll happened.
+        """
+        for script, role, legacy, *_ in self.ROLES:
+            with self.subTest(script=script):
+                shutil.rmtree(self.workspace / ".dev-trio", ignore_errors=True)
+                result = self.run_cli(script, "the old run")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                old = self.pre_rename(role, legacy)
+                pane = self.open_pane(role)
+                self.pane_wait(pane, old["started_display"])
+                result = self.run_cli(script, "the new run")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                new = json.loads((self.logdir() / f"{self.only_run(role)}.run.json").read_text())
+                self.assertNotEqual(new["started_display"], old["started_display"])
+                self.pane_wait(pane, new["started_display"])
+                frame = self.pane_quit(pane)
+                self.assertEqual(self.rendered_field(frame, "Started:"), new["started_display"])
+                # An older wrapper retargets only the legacy link; the canonical
+                # link still wins, under either dashboard argument.
+                for suffix in (".log", ".final.md"):
+                    (self.logdir() / f"latest-{legacy}{suffix}").unlink()
+                    (self.logdir() / f"latest-{legacy}{suffix}").symlink_to(f"{old['run_stem']}{suffix}")
+                for argument in (role, legacy):
+                    out = self.dashboard(argument)
+                    self.assertEqual(self.rendered_field(out, "Started:"), new["started_display"])
+
+    def test_a_dangling_canonical_link_hides_the_legacy_run(self):
+        # The canonical link names the newest run; once it exists, an older
+        # run behind the legacy link is stale even if that link still resolves.
+        for script, role, legacy, *_ in self.ROLES:
+            with self.subTest(script=script):
+                shutil.rmtree(self.workspace / ".dev-trio", ignore_errors=True)
+                result = self.run_cli(script, "the old run")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                old = self.pre_rename(role, legacy)
+                for suffix in (".log", ".final.md"):
+                    (self.logdir() / f"latest-{role}{suffix}").symlink_to(f"{role}-20990101-000000-1{suffix}")
+                for argument in (role, legacy):
+                    out = self.dashboard(argument)
+                    self.assertIn("latest link points at a missing log", out)
+                    self.assertNotIn(old["started_display"], out)
 
     def test_disjoint_skill_trees(self):
         paths = []

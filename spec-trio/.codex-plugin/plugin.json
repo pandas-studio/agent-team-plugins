@@ -1,6 +1,6 @@
 {
   "name": "spec-trio",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "description": "Codex-conducted spec-gated planner, coder, and reviewer loops with selectable models.",
   "author": {"name": "pandas-studio"},
   "homepage": "https://github.com/pandas-studio/agent-team-plugins/tree/main/spec-trio",

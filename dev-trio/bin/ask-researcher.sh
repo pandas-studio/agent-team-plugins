@@ -14,13 +14,15 @@
 # -name or --name[=value], name = letter then [A-Za-z0-9_-] — is one; a
 # NEED RESEARCH body that starts with "- " is still a question.
 #
-# Output goes to stdout AND $PWD/.dev-trio/log/<team>/agy-<TS>-<PID>.log.
-# The answer alone is also written to the sibling agy-<TS>-<PID>.final.md by
+# Output goes to stdout AND $PWD/.dev-trio/log/<team>/researcher-<TS>-<PID>.log,
+# named by role whichever model runs. The answer alone is also written to the
+# sibling researcher-<TS>-<PID>.final.md by
 # registry_run_answer — natively via the model's own last-message capture when
 # it has one, otherwise from this run's stdout, never its diagnostics. This
 # wrapper's own stdout is that answer; the transcript goes to the log. The
 # dashboard reads the answer from the file; it never parses the transcript.
-# Each invocation also publishes agy-<TS>-<PID>.run.json (see lib/runstate.sh).
+# Each invocation also publishes researcher-<TS>-<PID>.run.json (see
+# lib/runstate.sh).
 # Override log root via DEV_TRIO_LOG_DIR=/abs/path.
 #
 # Exit: the model's own code, which an artifact never promotes; 5 when it exits
@@ -276,7 +278,7 @@ fi
 
 LOG_DIR=$(dev_trio_prepare_log_dir "$LOG_DIR") || exit 2
 # The dashboard reads the answer's lead and its cited URLs from $FINAL.
-run_paths agy research "$AGY_WORKSPACE"
+run_paths researcher research "$AGY_WORKSPACE"
 LATEST_TMP=""
 RUNSTATE_LOG=""
 run_cleanup_files() {
@@ -308,9 +310,9 @@ run_write_header "$RESEARCHER_MODEL"
 # which, decided per model from the registry, never per channel.
 RUNSTATE_ARGS=("input=question:$QUERY")
 [ -z "$STDIN_CONTEXT" ] || RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" "inputdigest=context:$STDIN_CONTEXT")
-run_begin_metadata agy dev-trio-research researcher "$RESEARCHER_MODEL" "${RUNSTATE_ARGS[@]}"
+run_begin_metadata researcher dev-trio-research researcher "$RESEARCHER_MODEL" "${RUNSTATE_ARGS[@]}"
 
-run_publish_latest agy "$RESEARCHER_MODEL"
+run_publish_latest researcher "$RESEARCHER_MODEL" agy
 RC=0
 ORIGINAL_LOG_FD=8
 # Legacy RESEARCHER_CLI still wins as a per-role binary override; otherwise the

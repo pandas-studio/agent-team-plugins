@@ -45,8 +45,8 @@ echo "<context bullets>" | ask-researcher.sh -- "<question>"
 The wrapper writes:
 
 ```
-$PWD/.dev-trio/log/<team>/agy-<TS>-<PID>.log
-$PWD/.dev-trio/log/<team>/latest-agy.log   → symlink
+$PWD/.dev-trio/log/<team>/researcher-<TS>-<PID>.log
+$PWD/.dev-trio/log/<team>/latest-researcher.log   → symlink
 ```
 
 Capture the exit code and exact log/final paths printed on stderr. On failure,

@@ -2,10 +2,10 @@
 # team-layout.sh — set up the 3-agent team layout in tmux.
 #
 #   ┌─────────────────┬──────────────────┐
-#   │                 │  antigravity     │
+#   │                 │  researcher      │
 #   │  Claude (PM)    │  dashboard       │
 #   │  shell —        ├──────────────────┤
-#   │  run 'claude'   │  codex           │
+#   │  run 'claude'   │  reviewer        │
 #   │  yourself       │  dashboard       │
 #   └─────────────────┴──────────────────┘
 #
@@ -19,8 +19,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/../lib/host.sh"
 PM_HOST="$(dev_trio_host)" || exit $?
 DASH="$SCRIPT_DIR/dashboard.sh"
-printf -v DASH_AGY_CMD '%q agy' "$DASH"
-printf -v DASH_CODEX_CMD '%q codex' "$DASH"
+printf -v DASH_RESEARCHER_CMD '%q researcher' "$DASH"
+printf -v DASH_REVIEWER_CMD '%q reviewer' "$DASH"
 # Panes inherit the user's workspace cwd ($PWD at invocation), not the plugin
 # install directory. Logs land in $PWD/.dev-trio/log/... that way.
 REPO_DIR="${PWD}"
@@ -173,9 +173,9 @@ if [ "$HERE" = "1" ]; then
   tmux set-option -w -t "$HERE_PANE" '@team-name' "$SESSION"
   tmux rename-window -t "$HERE_PANE" "$SESSION"
   AGY_P=$(tmux split-window -h -t "$HERE_PANE" -c "$REPO_DIR" -P -F "#{pane_id}")
-  tmux send-keys -t "$AGY_P" "$DASH_AGY_CMD" Enter
+  tmux send-keys -t "$AGY_P" "$DASH_RESEARCHER_CMD" Enter
   CODEX_P=$(tmux split-window -v -t "$AGY_P" -c "$REPO_DIR" -P -F "#{pane_id}")
-  tmux send-keys -t "$CODEX_P" "$DASH_CODEX_CMD" Enter
+  tmux send-keys -t "$CODEX_P" "$DASH_REVIEWER_CMD" Enter
   tmux select-pane -t "$HERE_PANE"
   here_stamp dev-trio-layout "$HERE_PANE" "$AGY_P" "$CODEX_P" || exit $?
   echo "✓ Layout applied to current window (team: ${SESSION}). Run '$PM_HOST' in the left pane."
@@ -188,9 +188,9 @@ else
   MAIN_P=$(tmux new-session -d -s "$SESSION" -n "$SESSION" -c "$REPO_DIR" -P -F "#{pane_id}")
   tmux set-option -w -t "$SESSION" '@team-name' "$SESSION"
   AGY_P=$(tmux split-window -h -t "$MAIN_P" -c "$REPO_DIR" -P -F "#{pane_id}")
-  tmux send-keys -t "$AGY_P" "$DASH_AGY_CMD" Enter
+  tmux send-keys -t "$AGY_P" "$DASH_RESEARCHER_CMD" Enter
   CODEX_P=$(tmux split-window -v -t "$AGY_P" -c "$REPO_DIR" -P -F "#{pane_id}")
-  tmux send-keys -t "$CODEX_P" "$DASH_CODEX_CMD" Enter
+  tmux send-keys -t "$CODEX_P" "$DASH_REVIEWER_CMD" Enter
   tmux select-pane -t "$MAIN_P"
   # Recorded like a --here layout, so a later --here in it is a no-op (#100).
   HERE_PANE="$MAIN_P"

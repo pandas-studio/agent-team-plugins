@@ -28,7 +28,7 @@ json_is() { jq -e "$2" "$1" >/dev/null; }
 no_receipt_result() { ! review_result_from_receipt "$1" "$2" >/dev/null; }
 no_match() { ! grep -q "$1" "$2"; }
 no_match_tree() { ! grep -rq "$1" "$2"; }
-no_runstate_begin() { ! runstate_begin "$1" channel=codex wrapper=ask-reviewer.sh 2>/dev/null; }
+no_runstate_begin() { ! runstate_begin "$1" channel=reviewer wrapper=ask-reviewer.sh 2>/dev/null; }
 no_runstate_complete() { ! runstate_complete "$1" exit_code=0 2>/dev/null; }
 no_runstate_read() { ! runstate_read "$1" >/dev/null 2>&1; }
 fixture() {
@@ -398,7 +398,7 @@ run_review() {
   local expected="$1" rc=0; shift
   invoke "$@" > "$TMP/wrapper.out" 2> "$TMP/wrapper.err" || rc=$?
   check "wrapper rc=$expected (actual $rc)" test "$rc" -eq "$expected"
-  LOG="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-codex.log")"
+  LOG="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-reviewer.log")"
   RESULT="${LOG%.log}.review.json"
   MANIFEST="${LOG%.log}.manifest.json"
   FINAL="${LOG%.log}.final.md"
@@ -408,14 +408,14 @@ run_review() {
 }
 dashboard() {
   printf q | env AGENT_TEAM=review-test TMUX='' TERM=dumb DEV_TRIO_LOG_DIR="$TMP/log" \
-    "$@" bash "$ROOT/dev-trio/bin/dashboard.sh" codex > "$TMP/dashboard.out"
+    "$@" bash "$ROOT/dev-trio/bin/dashboard.sh" reviewer > "$TMP/dashboard.out"
 }
 research_dashboard() {
   env AGENT_TEAM=review-test TMUX='' TERM=dumb DEV_TRIO_LOG_DIR="$TMP/log" \
-    "$@" bash "$ROOT/dev-trio/bin/dashboard.sh" agy --once < /dev/null > "$TMP/dashboard.out"
+    "$@" bash "$ROOT/dev-trio/bin/dashboard.sh" researcher --once < /dev/null > "$TMP/dashboard.out"
 }
 # #83: a resolved explanation after None must not become Major findings.
-# Both model adapters use the fixed reviewer channel named codex; this loop
+# Both model adapters write the one reviewer channel; this loop
 # exercises native-final versus stdout capture, not different log channels.
 cat > "$TMP/resolved-review.md" <<'REVIEW'
 ## Verdict
@@ -497,7 +497,7 @@ check 'failed output is not displayed as verdict' no_match 'Verdict:' "$TMP/dash
 # run selected by latest-log, and never use stdout when native final is absent.
 OLD_FINAL="$FINAL"
 run_review 3 TEST_MISSING_FINAL=1
-ln -sfn "$OLD_FINAL" "$TMP/log/review-test/latest-codex.final.md"
+ln -sfn "$OLD_FINAL" "$TMP/log/review-test/latest-reviewer.final.md"
 check 'missing native final leaves manifest null' json_is "$MANIFEST" '.verdict==null'
 dashboard
 check 'old final and plausible stdout ignored' no_match 'Verdict:' "$TMP/dashboard.out"
@@ -541,7 +541,7 @@ PINNED_LOG="$LOG"
 fixture 'NEEDS-FIX — retargeted invocation'
 run_review 0
 RETARGET_LOG="$LOG"
-ln -sfn "$PINNED_LOG" "$TMP/log/review-test/latest-codex.log"
+ln -sfn "$PINNED_LOG" "$TMP/log/review-test/latest-reviewer.log"
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/readlink" <<'STUB'
 #!/usr/bin/env bash
@@ -577,7 +577,7 @@ for invocation_rc in 0 7; do
   actual_rc=0
   invoke DEV_TRIO_REVIEW_RECEIPT="$TMP/missing/receipt" TEST_REVIEW_RC="$invocation_rc" > "$TMP/io.out" 2> "$TMP/io.err" || actual_rc=$?
   check 'artifact failure preserves failed invocation rc' test "$actual_rc" -eq "$expected_rc"
-  failed_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-codex.log")"
+  failed_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-reviewer.log")"
   check 'artifact failure completes the log' grep -q "=== END (rc=$expected_rc) ===" "$failed_log"
   check 'artifact failure has an explicit diagnostic' grep -q 'result write failed' "$TMP/io.err"
   check 'artifact failure leaves no successful result' test ! -f "${failed_log%.log}.review.json"
@@ -649,7 +649,7 @@ for invocation_rc in 0 7; do
   rm -f "$TMP/end-write-fired"
   invoke "${END_FAILURE_ENV[@]}" DEV_TRIO_REVIEW_RECEIPT="$TMP/missing/receipt" \
     TEST_REVIEW_RC="$invocation_rc" > "$TMP/io.out" 2> "$TMP/io.err" || actual_rc=$?
-  failed_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-codex.log")"
+  failed_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-reviewer.log")"
   check 'artifact failure also exercises the END fault' test -f "$TMP/end-write-fired"
   check 'logging cannot mask an artifact failure' test "$actual_rc" -eq "$expected_rc"
   check 'failed publication leaves no successful result' test ! -f "${failed_log%.log}.review.json"
@@ -740,7 +740,7 @@ leak_review() {
     > "$TMP/leak.out" 2> "$TMP/leak.err" || leak_rc=$?
   leak_returned_first=0
   [ -e "$TMP/leak-done" ] || leak_returned_first=1
-  leak_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-codex.log")"
+  leak_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-reviewer.log")"
   leak_release
 }
 for leak_model in codex claude; do
@@ -823,7 +823,7 @@ invoke CODEX_CLI="$TMP/leaky-reviewer" CLAUDE_CLI="$TMP/leaky-reviewer" \
 check 'the closed-stdout descendant really held' test ! -e "$TMP/closed-done"
 : > "$TMP/closed-release"
 check 'a closed stdout does not fail the review' test "$closed_rc" -eq 0
-closed_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-codex.log")"
+closed_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-reviewer.log")"
 check 'a closed stdout still publishes the result' \
   json_is "${closed_log%.log}.review.json" '.verdict=="SHIP" and .exit_code==0'
 # A snapshot that came up short must not be published as a review. Injected with
@@ -846,7 +846,7 @@ invoke CODEX_CLI="$TMP/leaky-reviewer" CLAUDE_CLI="$TMP/leaky-reviewer" \
 : > "$TMP/short-release"
 check 'a short transcript capture is not a review' test "$short_rc" -eq 3
 check 'a short capture is reported' grep -q 'could not be captured in full' "$TMP/short.err"
-short_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-codex.log")"
+short_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-reviewer.log")"
 check 'a short capture publishes no verdict' \
   json_is "${short_log%.log}.review.json" '.verdict==null and .exit_code==3'
 check 'a short capture leaves no partial final' test ! -s "${short_log%.log}.final.md"
@@ -860,8 +860,8 @@ cat > "$TMP/swapshim/mv" <<'SHIM'
 #!/bin/sh
 /bin/mv "$@" || exit $?
 for destination do :; done
-if [ "$destination" = "$SWAP_SHIM_DIR/latest-codex.final.md" ]; then
-  target="$SWAP_SHIM_DIR/$(readlink "$SWAP_SHIM_DIR/latest-codex.log")"
+if [ "$destination" = "$SWAP_SHIM_DIR/latest-reviewer.final.md" ]; then
+  target="$SWAP_SHIM_DIR/$(readlink "$SWAP_SHIM_DIR/latest-reviewer.log")"
   if [ ! -e "$SWAP_SHIM_FIRED" ]; then
     : > "$SWAP_SHIM_FIRED"
     /bin/mv "$target" "$target.saved" && mkdir "$target"
@@ -878,7 +878,7 @@ invoke CODEX_CLI="$TMP/leaky-reviewer" CLAUDE_CLI="$TMP/leaky-reviewer" \
   SWAP_SHIM_DIR="$TMP/log/review-test" SWAP_SHIM_FIRED="$TMP/swap-fired" \
   > "$TMP/oob.out" 2> "$TMP/oob.err" || oob_rc=$?
 : > "$TMP/oob-release"
-oob_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-codex.log")"
+oob_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-reviewer.log")"
 check 'out-of-band swap was exercised' test -d "$oob_log"
 rmdir "$oob_log"
 mv "$oob_log.saved" "$oob_log"
@@ -938,7 +938,7 @@ interrupt_review() {
   interrupted_rc=0
   wait "$interrupted_pid" || interrupted_rc=$?
   set +m
-  interrupted_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-codex.log")"
+  interrupted_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-reviewer.log")"
 }
 # ralph-meta.sh's own extraction, verbatim from `:248` and `:256`: the log path
 # out of this wrapper's stderr, then the response body out of that log. An
@@ -1007,7 +1007,7 @@ check 'the retained transcript exists' test -s "$OOB2_KEPT"
 check 'the retained transcript holds what the CLI produced' \
   grep -q 'SHIP — nowhere else to go' "$OOB2_KEPT"
 rm -f "$OOB2_KEPT"
-oob2_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-codex.log")"
+oob2_log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-reviewer.log")"
 check 'interrupted swap was exercised' test -d "$oob2_log"
 rmdir "$oob2_log"
 mv "$oob2_log.saved" "$oob2_log"
@@ -1052,7 +1052,7 @@ wait "$pid1" || rc1=$?
 wait "$pid2" || rc2=$?
 check 'first concurrent invocation succeeds' test "$rc1" -eq 0
 check 'second concurrent invocation succeeds' test "$rc2" -eq 0
-results=( "$TMP/log/review-test"/codex-20000101-000000-*.review.json )
+results=( "$TMP/log/review-test"/reviewer-20000101-000000-*.review.json )
 check 'concurrent invocations have distinct results' test "${#results[@]}" -eq 2
 for result in "${results[@]}"; do
   check 'concurrent result complete' json_is "$result" '.verdict=="SHIP" and .exit_code==0'
@@ -1068,7 +1068,7 @@ run_review 0 DEV_TRIO_REVIEWER_MODEL=claude
 RUN="${LOG%.log}.run.json"
 check 'wrapper publishes run metadata' test -f "$RUN"
 check 'metadata names channel, role and resolved model' json_is "$RUN" \
-  '.channel=="codex" and .role=="reviewer" and .model=="claude" and .team=="review-test"'
+  '.channel=="reviewer" and .role=="reviewer" and .model=="claude" and .team=="review-test"'
 check 'metadata binds its own artifacts' json_is "$RUN" \
   ".log_path==\"$LOG\" and .result_path==\"$RESULT\" and .final_path==\"$FINAL\""
 check 'metadata records completion once the run ends' json_is "$RUN" \
@@ -1093,8 +1093,8 @@ manifest_finalize
 # shellcheck source=../dev-trio/lib/runstate.sh
 . "$ROOT/dev-trio/lib/runstate.sh"
 check 'begin into a missing directory fails' \
-  no_runstate_begin "$TMP/nonexistent-dir/codex-1.log"
-check 'failed begin leaves no metadata' test ! -e "$TMP/nonexistent-dir/codex-1.run.json"
+  no_runstate_begin "$TMP/nonexistent-dir/reviewer-1.log"
+check 'failed begin leaves no metadata' test ! -e "$TMP/nonexistent-dir/reviewer-1.run.json"
 : > "$TMP/log/review-test/orphan-20000101-000000-1.log"
 check 'completing a run with no metadata fails' \
   no_runstate_complete "$TMP/log/review-test/orphan-20000101-000000-1.log"
@@ -1123,7 +1123,7 @@ research() {
     AGY_CLI="$TMP/researcher" "$@" \
     "$ROOT/dev-trio/bin/ask-researcher.sh" 'fixture question' \
     < /dev/null > "$TMP/research.out" 2> "$TMP/research.err" || AGY_RC=$?
-  AGY_LOG="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-agy.log")"
+  AGY_LOG="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-researcher.log")"
   AGY_FINAL="${AGY_LOG%.log}.final.md"
   AGY_RUN="${AGY_LOG%.log}.run.json"
 }
@@ -1145,7 +1145,7 @@ check 'log still carries the diagnostics' grep -q 'Ripgrep not found' "$AGY_LOG"
 check 'callers receive the answer on stdout' grep -q 'loader resolves the role' "$TMP/research.out"
 check 'callers do not receive diagnostics as an answer' no_match 'Ripgrep not found' "$TMP/research.out"
 check 'research metadata describes the channel' json_is "$AGY_RUN" \
-  '.channel=="agy" and .role=="researcher" and .completion.exit_code==0'
+  '.channel=="researcher" and .role=="researcher" and .completion.exit_code==0'
 check 'research metadata has no review result' json_is "$AGY_RUN" '.result_path==null'
 research_dashboard
 check 'research dashboard shows the lead' grep -q 'loader resolves the role' "$TMP/dashboard.out"
@@ -1214,7 +1214,7 @@ while [ ! -f "$TMP/started" ] && [ "$waited" -lt 100 ]; do sleep 0.1; waited=$((
 check 'slow researcher started' test -f "$TMP/started"
 kill -TERM "$slow_pid" 2>/dev/null || true
 wait "$slow_pid" 2>/dev/null || true
-ABORTED_RUN="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-agy.log")"
+ABORTED_RUN="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-researcher.log")"
 ABORTED_RUN="${ABORTED_RUN%.log}.run.json"
 check 'aborted run publishes a completion' json_is "$ABORTED_RUN" '.completion != null'
 check 'aborted run is recorded as aborted' json_is "$ABORTED_RUN" '.completion.reason=="aborted"'
@@ -1253,7 +1253,7 @@ native_research() {
     NATIVE_RESEARCHER_CLI="$TMP/native-researcher" "$@" \
     "$ROOT/dev-trio/bin/ask-researcher.sh" 'native question' \
     < /dev/null > "$TMP/native.out" 2> "$TMP/native.err" || NATIVE_RC=$?
-  NATIVE_LOG="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-agy.log")"
+  NATIVE_LOG="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-researcher.log")"
   NATIVE_RUN="${NATIVE_LOG%.log}.run.json"
 }
 native_research
@@ -1295,7 +1295,7 @@ env -u DEV_TRIO_RESEARCHER_MODEL -u RESEARCHER_CLI -u AGY_CLI \
   "$ROOT/dev-trio/bin/ask-researcher.sh" 'failing question' \
   < /dev/null > "$TMP/native-fail.out" 2>&1 || NATIVE_RC=$?
 check 'a failed invocation with an answer file still fails' test "$NATIVE_RC" -eq 5
-FAIL_RUN="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-agy.log")"
+FAIL_RUN="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-researcher.log")"
 check 'the failure is recorded, not the file' json_is "${FAIL_RUN%.log}.run.json" '.completion.exit_code==5'
 
 # #71: a pipeline ends when every process holding its write end closes it, not
@@ -1324,7 +1324,7 @@ LEAK_ELAPSED=$((SECONDS - LEAK_START))
 check 'an inherited stderr does not hold the wrapper open' test "$LEAK_ELAPSED" -lt 5
 check 'the leaky run still succeeds' test "$leak_rc" -eq 0
 check 'the leaky run still answers' grep -q 'arrived promptly' "$TMP/leak.out"
-LEAK_RUN="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-agy.log")"
+LEAK_RUN="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-researcher.log")"
 check 'the leaky run records a completion' json_is "${LEAK_RUN%.log}.run.json" '.completion != null'
 check 'the transcript reached the log' grep -q 'arrived promptly' "$LEAK_RUN"
 
@@ -1397,7 +1397,16 @@ agy_transcript
 agy_review 3 TEST_AGY_ID="$AGY_ID" TEST_AGY_NOTICE=1
 check 'agy argv pins its log and the workspace without a prompt' test "$(sed -n '1p;3p;5p;6p;7p;8p' "$TMP/agy-argv" | tr '\n' ' ')" = '--log-file --add-dir --input-format text --output-format text '
 check 'agy workspace is the repository root' test "$(sed -n 4p "$TMP/agy-argv")" = "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-check 'agy log lives in agy home' test "$(sed -n 2p "$TMP/agy-argv")" = "$AGY_HOME/log/cli-dev-trio-review-${LOG##*/codex-}"
+check 'agy log lives in agy home' test "$(sed -n 2p "$TMP/agy-argv")" = "$AGY_HOME/log/cli-dev-trio-review-${LOG##*/reviewer-}"
+# The channel is the role: an agy reviewer still writes reviewer-* and links
+# both latest names to this run; the model is in the run metadata.
+check 'agy reviewer log is on the reviewer channel' eval 'case "${LOG##*/}" in reviewer-[0-9]*.log) true ;; *) false ;; esac'
+check 'agy reviewer metadata records the real model' json_is "${LOG%.log}.run.json" \
+  ".channel==\"reviewer\" and .role==\"reviewer\" and .model==\"agy\" and .run_stem==\"$(basename "${LOG%.log}")\""
+for latest in latest-reviewer latest-codex; do
+  check "$latest.log names this run" test "$(readlink "$TMP/log/review-test/$latest.log")" = "${LOG##*/}"
+  check "$latest.final.md names this run" test "$(readlink "$TMP/log/review-test/$latest.final.md")" = "${FINAL##*/}"
+done
 check 'denial is its own status with the targets' json_is "$RESULT" ".status==\"permission-denied\" and .exit_code==3 and .invocation_rc==0 and .verdict==null and .denied==$AGY_DENIED and .conversation_ids==[\"$AGY_ID\"]"
 check 'denial keeps the parse error' json_is "$RESULT" '.error | startswith("agy denied a tool in headless mode: command(lsof") and endswith("(parse: missing Verdict heading)")'
 check 'stderr names the denied command' grep -Fxq '[ask-reviewer] agy denied: command(lsof -p $$ || pwd)' "$TMP/wrapper.err"

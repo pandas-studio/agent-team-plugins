@@ -9,8 +9,8 @@ Default model assignment:
 | Pane | Role | CLI |
 | :--- | :--- | :--- |
 | Left | PM / Coder | Claude Code (this session) |
-| Top-right | Researcher dashboard | tails `agy` output |
-| Bottom-right | Reviewer dashboard | tails `codex` output |
+| Top-right | Researcher dashboard | renders the latest `researcher` run |
+| Bottom-right | Reviewer dashboard | renders the latest `reviewer` run |
 
 ## Codex PM
 
@@ -49,11 +49,11 @@ the loaded skill path instead of assuming automatic `bin/` PATH registration.
 When piping research context, replace `</dev/null` with that input pipe.
 
 `ask-reviewer.sh` runs whichever model the **reviewer** role resolves to; the
-filename names the role, not the CLI. Log and receipt names keep their legacy
-spelling (`codex-*.log`, `latest-codex.final.md`), and RFC 0004 manifests remain
-compatible with consumers. The run header and dashboard identify the actual
-model. `--no-memories` still requires an explicitly selected Codex reviewer; it
-is rejected for Claude.
+filename names the role, not the CLI, and so do its logs (`reviewer-*.log`,
+`latest-reviewer.final.md`; see [Logs](#logs)). RFC 0004 manifests remain
+compatible with consumers. The run header, the run metadata and the dashboard
+identify the actual model. `--no-memories` still requires an explicitly
+selected Codex reviewer; it is rejected for Claude.
 
 Claude's `auth status --json` must report `loggedIn: true` before a Claude
 invocation from the Codex host. Inside Codex's workspace sandbox Keychain is
@@ -137,7 +137,7 @@ agent-team-models doctor                                  # verify binding + bin
 
 The reviewer's final structured review is written to `<TS>.final.md` natively when the model supports it (codex's `--output-last-message`), and otherwise synthesised from the streamed transcript — so `/dev-trio:review` verdict parsing works regardless of which model fills the role.
 
-**Review results.** Each invocation writes an atomic `codex-<TS>-<PID>.review.json` beside its unchanged `.final.md` and raw `.log`. The wrapper prints all three exact paths. The dashboard and review skill consume this result; the standalone manifest stores its normalized verdict and a hashed `review-result` input reference. Use the reported paths for automation: `latest` links can move during another invocation.
+**Review results.** Each invocation writes an atomic `reviewer-<TS>-<PID>.review.json` beside its unchanged `.final.md` and raw `.log`. The wrapper prints all three exact paths. The dashboard and review skill consume this result; the standalone manifest stores its normalized verdict and a hashed `review-result` input reference. Use the reported paths for automation: `latest` links can move during another invocation.
 
 The result contains `schema_version: 1`, `profile`, `status`, `invocation_rc`, `exit_code`, `error`, `verdict`, `verdict_line`, and `findings` (`blocker`, `major`, `minor` arrays). Missing findings sections are `null` (unknown); empty sections are empty arrays. A successful review accepts one unfenced `## Verdict` immediately followed by `TOKEN — reason`, `TOKEN. reason` or `TOKEN: reason`, with `TOKEN` in `SHIP`, `NEEDS-FIX`, `DISCUSS`. Duplicate headings, unclosed/unsupported code fences, missing/empty native finals, and unknown verdicts fail parsing. Raw logs and earlier runs never supply a fallback verdict.
 
@@ -177,10 +177,16 @@ does not reach it. In every workspace that has the block, re-run
 `/dev-trio:install-pm` and start a fresh session, or the PM keeps dispatching the
 removed command names.
 
-Log, receipt and environment names are deliberately unchanged: `codex-*.log`,
-`latest-codex.final.md`, `agy-*.log`, `latest-agy.log`, `dashboard.sh agy|codex`,
-`CODEX_CLI`, `AGY_CLI`, and the `codex` / `agy` model ids. Those name the vendor
-CLI or the log channel, not the wrapper.
+Log channels are named by role too: the reviewer writes `reviewer-*.log` and
+`latest-reviewer.*`, the researcher `researcher-*.log` and `latest-researcher.*`,
+whichever model fills the role, and the dashboard is `dashboard.sh
+reviewer|researcher`. Before this they were `codex-*` / `agy-*`, which named the
+wrong CLI whenever another model ran. For a transition period the wrappers keep
+updating the old `latest-codex.*` / `latest-agy.*` links as aliases of the same
+run, `dashboard.sh codex|agy` still works, and the dashboard renders a directory
+holding only old names. See [Logs](#logs) for the details. `CODEX_CLI`,
+`AGY_CLI` and the `codex` / `agy` model ids keep their names: they name the
+vendor CLI, not the role.
 
 ## Install in Claude Code
 
@@ -378,7 +384,7 @@ stub checks are not evidence of a successful live research call.
 
 | Skill | What it does |
 | :--- | :--- |
-| `/dev-trio:bootstrap` | One-time per session: splits the current tmux pane into 3 and starts the agy/codex dashboards. |
+| `/dev-trio:bootstrap` | One-time per session: splits the current tmux pane into 3 and starts the researcher/reviewer dashboards. |
 | `/dev-trio:research <question>` | One-shot Antigravity lookup. Streaming output lands in the top-right pane; chat-side surfaces the lead + cited URLs. |
 | `/dev-trio:review [focus] [--with-research <file>] [--with-spec <file>] [--with-context <file>]` | One-shot Codex review (default = git-uncommitted scope). Chat-side surfaces verdict (`SHIP / NEEDS-FIX / DISCUSS`) + Blocker/Major counts. Handles `## NEED RESEARCH` (via Antigravity) and `## NEED CONTEXT` (via the PM's read-only `gh`/`git`) blocks. |
 | `/dev-trio:install-pm` | Writes/upgrades the PM orchestration policy in the workspace's `CLAUDE.md` (idempotent, marker-guarded). |
@@ -394,17 +400,32 @@ Per-team log namespace. Each invocation writes to:
 
 ```
 $PWD/.dev-trio/log/<team>/
-├── agy-<TS>-<PID>.log      # raw researcher output + framing
-├── agy-<TS>-<PID>.final.md      # the answer alone
-├── codex-<TS>-<PID>.log    # raw reviewer output + framing
-├── codex-<TS>-<PID>.final.md    # unchanged final response
-├── codex-<TS>-<PID>.review.json # common parsed review result
-├── <name>-<TS>-<PID>.run.json   # per-invocation run metadata (dashboard)
-├── latest-agy.log          # symlink to most recent agy run
-├── latest-agy.final.md     # symlink to its answer
-├── latest-codex.log        # symlink to most recent codex run
-└── <name>-<TS>.manifest.json   # RFC 0004 typed run manifest
+├── researcher-<TS>-<PID>.log          # raw researcher output + framing
+├── researcher-<TS>-<PID>.final.md     # the answer alone
+├── reviewer-<TS>-<PID>.log            # raw reviewer output + framing
+├── reviewer-<TS>-<PID>.final.md       # unchanged final response
+├── reviewer-<TS>-<PID>.review.json    # common parsed review result
+├── <name>-<TS>-<PID>.run.json         # per-invocation run metadata (dashboard)
+├── latest-researcher.log              # symlink to most recent researcher run
+├── latest-researcher.final.md         # symlink to its answer
+├── latest-reviewer.log                # symlink to most recent reviewer run
+├── latest-reviewer.final.md           # symlink to its final response
+├── latest-agy.*, latest-codex.*       # legacy aliases of the two links above
+└── <name>-<TS>-<PID>.manifest.json    # RFC 0004 typed run manifest
 ```
+
+The channel is the role, never the model: a reviewer run on agy still writes
+`reviewer-*`, and its run metadata records `model: "agy"`. Directories written
+before the role names hold `codex-*` / `agy-*` files and `latest-codex.*` /
+`latest-agy.*` links; nothing renames them. For a transition period each new run
+also points the legacy links at itself, so `tail -F …/latest-codex.log` and any
+script reading an old link keep following the current run instead of a stale
+one. A later release removes these aliases. Each link is replaced atomically
+and always names a complete run, but the links are replaced one at a time and
+before the model runs: under concurrent runs, or with an older wrapper writing
+the same directory, the canonical and legacy links can name different runs,
+ordered by start, not completion. Automation should use the paths the wrapper
+prints, never a link.
 
 New raw researcher and reviewer logs, and new RFC 0004 manifests in dev-trio,
 ralph-trio, and spec-trio, are created with mode `0600`. Existing artifacts are
@@ -412,8 +433,9 @@ not changed. Manifest updates use private temporary files in the same directory
 and are published only after the complete JSON has been written.
 
 **Run metadata.** Every invocation publishes `<stem>.run.json` (`lib/runstate.sh`)
-atomically beside its log: `channel` (`agy`/`codex` — the log stream, never a
-model), `role`, the resolved `model`, `team`, `started_at`, `pid`, `pm_host`,
+atomically beside its log: `channel` (`researcher`/`reviewer` — the log stream,
+never a model; metadata written before the role names says `agy`/`codex` and is
+still read), `role`, the resolved `model`, `team`, `started_at`, `pid`, `pm_host`,
 `nested`, the absolute artifact paths, and the `inputs` the wrapper was given.
 A research stdin context is recorded there only as its `bytes` and `sha256`,
 so a large context cannot push the file past the dashboard's size bound; the
@@ -448,7 +470,7 @@ failed END append as a logging failure: a successful model run becomes rc=6,
 while an already nonzero model exit code is preserved.
 
 **Reviewer transcript.** The reviewer CLI writes straight into
-`codex-<TS>-<PID>.log` on a descriptor, which `tail -F` follows as the review is
+`reviewer-<TS>-<PID>.log` on a descriptor, which `tail -F` follows as the review is
 produced. The dashboard does not read it — it renders from the run's `*.run.json`
 (above), so what it shows is the run's status and verdict, not the console text.
 `ask-reviewer.sh` replays the transcript on its own stdout once, after the review
@@ -472,7 +494,7 @@ log path out of it and recovers the partial transcript from the log itself, so
 naming the artifacts serves it better than replaying bytes onto a stdout it may
 not have captured. `result:` is absent because no review exists.
 
-**Researcher answer.** `agy-<TS>-<PID>.final.md` holds the answer on its own,
+**Researcher answer.** `researcher-<TS>-<PID>.final.md` holds the answer on its own,
 captured by `registry_run_answer`: the model's own last message when it defines
 `final_args`, otherwise that function's existing copy of stdout — stdout alone,
 so a caller's `2>&1` merge never reaches it. The wrapper's stdout is that
@@ -530,15 +552,20 @@ the run is no longer active.
 
 Two side panes run a flicker-free dashboard showing **distilled key points only** — the full raw output stays in the Claude (PM) pane and on disk. Each side pane shows:
 
-- **Antigravity**: query, status, *answer lead* (first paragraph of the answer artifact), distinct cited URLs
-- **Codex**: focus, status, **verdict box** (color-coded), findings counts, **Blocker/Major text** (when present)
+- **Researcher**: query, status, *answer lead* (first paragraph of the answer artifact), distinct cited URLs
+- **Reviewer**: focus, status, **verdict box** (color-coded), findings counts, **Blocker/Major text** (when present)
 
 ```bash
-dashboard.sh agy      # in one side pane
-dashboard.sh codex    # in another side pane
+dashboard.sh researcher   # in one side pane
+dashboard.sh reviewer     # in another side pane
 ```
 
-Color legend (codex verdict):
+`dashboard.sh agy` and `dashboard.sh codex` are accepted as aliases. A pane
+follows `latest-<role>.log`; while only the legacy `latest-agy.log` /
+`latest-codex.log` exists it follows that one, and it moves to the canonical
+link on the first frame after a new run publishes it.
+
+Color legend (reviewer verdict):
 
 - 🟢 **SHIP** — green bar
 - 🔴 **NEEDS-FIX** — red bar
@@ -573,8 +600,8 @@ and tests rather than a pane.
 **Raw fallback** (when the dashboard misbehaves or you want unfiltered output):
 
 ```bash
-tail -F .dev-trio/log/${AGENT_TEAM:-default}/latest-agy.log
-tail -F .dev-trio/log/${AGENT_TEAM:-default}/latest-codex.log
+tail -F .dev-trio/log/${AGENT_TEAM:-default}/latest-researcher.log
+tail -F .dev-trio/log/${AGENT_TEAM:-default}/latest-reviewer.log
 ```
 
 The wrapper scripts print both the dashboard command and the raw `tail -F` hint to stderr when they start.
@@ -619,7 +646,7 @@ dev-trio/
 │   ├── ask-researcher.sh             # Researcher wrapper
 │   ├── ask-reviewer.sh           # Reviewer wrapper
 │   ├── agent-team-models.sh   # shared model-registry CLI (vendored)
-│   ├── dashboard.sh           # live dashboard (agy|codex)
+│   ├── dashboard.sh           # live dashboard (researcher|reviewer)
 │   ├── team-layout.sh         # tmux 3-pane splitter
 │   └── dev-trio-doctor.sh     # env probe + stub-CLI smoke
 ├── lib/                       # internal

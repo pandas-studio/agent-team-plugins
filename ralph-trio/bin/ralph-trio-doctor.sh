@@ -188,10 +188,10 @@ else
 fi
 
 echo
-echo "6. Stub-CLI smoke (ralph-trio Stage 3 — verdict from codex .final.md)"
+echo "6. Stub-CLI smoke (ralph-trio Stage 3 — verdict from reviewer .final.md)"
 # This is the real-logic regression guard for the forward-port: the trio
 # reviewer's verdict MUST come from ask-reviewer.sh's --output-last-message file
-# (codex-<TS>.final.md), NOT the streamed stdout the dev-trio contract declares
+# (reviewer-<TS>.final.md), NOT the streamed stdout the dev-trio contract declares
 # unreliable; and that file MUST land in ralph's durable log tree (pinned
 # DEV_TRIO_LOG_DIR) so it survives worktree teardown. We stub ask-reviewer.sh to
 # emit a clean SHIP in the .final.md while streaming a DECOY NEEDS-FIX on stdout
@@ -228,10 +228,10 @@ TEAM="${AGENT_TEAM:-default}"
 LOG_DIR="${DEV_TRIO_LOG_DIR:-$PWD/.dev-trio/log}/$TEAM"
 mkdir -p "$LOG_DIR"
 TS=$(date +%Y%m%d-%H%M%S)
-LOG="$LOG_DIR/codex-$TS.log"
-FINAL="$LOG_DIR/codex-$TS.final.md"
-ln -sfn "codex-$TS.log" "$LOG_DIR/latest-codex.log"
-ln -sfn "codex-$TS.final.md" "$LOG_DIR/latest-codex.final.md"
+LOG="$LOG_DIR/reviewer-$TS.log"
+FINAL="$LOG_DIR/reviewer-$TS.final.md"
+ln -sfn "reviewer-$TS.log" "$LOG_DIR/latest-reviewer.log"
+ln -sfn "reviewer-$TS.final.md" "$LOG_DIR/latest-reviewer.final.md"
 case "${STUB_MODE:-final-ship}" in
   final-ship)
     # Authoritative final = clean SHIP in codex's native `## Verdict` format
@@ -330,16 +330,16 @@ STUB
   fi
   VA=$(review_verdict "$CASE_A")
   if [ "$VA" = "SHIP" ]; then
-    ok "verdict=SHIP parsed from codex .final.md (decoy stdout NEEDS-FIX ignored)"
+    ok "verdict=SHIP parsed from reviewer .final.md (decoy stdout NEEDS-FIX ignored)"
   else
     fail "expected verdict=SHIP from .final.md, got: ${VA:-<no manifest>} (regression: parsing streamed stdout?)"
   fi
   # Durability: the .final.md must land under ralph's pinned workspace dir, and
   # NOT in a stray .dev-trio under the run cwd (which a worktree would tear down).
-  if [ -e "$CASE_A/.ralph-trio/log/doctor-trio/codex/doctor-trio/latest-codex.final.md" ]; then
-    ok "codex .final.md pinned under ralph workspace (survives worktree teardown)"
+  if [ -e "$CASE_A/.ralph-trio/log/doctor-trio/codex/doctor-trio/latest-reviewer.final.md" ]; then
+    ok "reviewer .final.md pinned under ralph workspace (survives worktree teardown)"
   else
-    fail "codex .final.md not found under ralph workspace — DEV_TRIO_LOG_DIR not pinned?"
+    fail "reviewer .final.md not found under ralph workspace — DEV_TRIO_LOG_DIR not pinned?"
   fi
   if [ -e "$CASE_A/.dev-trio" ]; then
     fail "stray .dev-trio created in run cwd — DEV_TRIO_LOG_DIR redirect leaked"
