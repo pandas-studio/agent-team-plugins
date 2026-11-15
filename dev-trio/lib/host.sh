@@ -365,6 +365,36 @@ dev_trio_workspace_root() {
   fi
 }
 
+# Where this root's Git metadata lives when it is outside the root, or nothing.
+# agy's terminal sandbox exposes only its workspace directories, so in a linked
+# worktree (whose .git is a file naming <common>/worktrees/<name>), a
+# --separate-git-dir checkout or a submodule every git command fails with
+# "fatal: not a git repository: (null)" (agy 1.5.9, measured 2026-11-15).
+# Granting that directory with a second --add-dir was tried and rejected: the
+# grant is writable, and agy runs shell commands by default in the
+# lexicographically smallest workspace directory, so `<main>/.git` could become
+# the working directory and plain `git log` would read the main checkout's
+# HEAD (measured 3/3 with a worktree named zz-wt). Instead the wrappers tell
+# agy not to use git and give the snapshot more room. Prints the common
+# directory if it is outside the root, else the git directory if that is.
+# Best effort: any failure prints nothing and returns 0.
+dev_trio_git_outside_root() {
+  local root="$1" dirs=""
+  dirs="$(dev_trio_git_bounded "$root" rev-parse --absolute-git-dir --git-common-dir)" || return 0
+  python3 -c '
+import os, sys
+root, out = sys.argv[1], sys.argv[2].split("\n")
+if len(out) != 2 or not all(out):
+    sys.exit(0)
+git_dir, common = (os.path.realpath(os.path.join(root, p)) for p in out)
+real_root = os.path.realpath(root)
+for d in (common, git_dir):
+    if os.path.commonpath([d, real_root]) != real_root:
+        print(d)
+        break
+' "$root" "$dirs" 2>/dev/null || true
+}
+
 dev_trio_agy_home() {
   printf '%s\n' "${DEV_TRIO_AGY_HOME:-$HOME/.gemini/antigravity-cli}"
 }
@@ -469,6 +499,13 @@ EOF_NOTE
   cat <<'EOF_NOTE'
 Tool commands run in headless mode, where a command that no allow-rule matches is denied and ends this run with no answer at all. Keep shell commands to these read-only git forms, one simple command per tool call: `git status`, `git diff`, `git log` and `git show`, with arguments as needed. When the task requires untracked files, use `git status --short --untracked-files=all` instead of `git ls-files` to list them (plain `git status --short` folds an untracked directory into one line); for a tracked directory tree, use `git show HEAD:<dir>`. Read files relevant to the requested scope with your built-in file viewer. No `cd`, no `&&`, `||` or `;`, no pipes, no redirections such as `2>/dev/null`, and no backticks (`` ` ``), `$()` or `$` (even inside `"..."`, which triggers `unquoted_shell_operators`); do not pass code/fences to `git log -S`/`-G`. Read and search files with your built-in file viewer and search tools, not with shell commands such as `cat`, `grep`, `git grep` or `find`. A test runner, build, interpreter such as `python3` or `node`, or script counts as a command you cannot run here: if confirming something would need one, name the command and record the gap in your answer instead. If a command is denied, do not retry a variant of it.
 EOF_NOTE
+  # Git metadata outside the workspace (dev_trio_git_outside_root): git cannot
+  # run, and a denied or failing retry loop costs the answer.
+  if [ -n "${3:-}" ]; then
+    cat <<EOF_NOTE
+Git cannot run in this workspace: its metadata is at \`$3\`, outside the directories your terminal can reach, so every git command fails with \`fatal: not a git repository\`. Do not run any git command. Use the workspace snapshot below, when there is one, for status and diffs, and read files with your built-in file viewer. Where the snapshot or the checklist says to run git, read the named files with your file viewer instead; if something can only be settled with git (history, a file's previous content), record the gap in your answer.
+EOF_NOTE
+  fi
   # Default reviews already have the full working-tree checklist in their role
   # and focus. A named target should not inherit a whole-tree sweep, while a
   # targetless reviewer focus still uses the role's default checklist.

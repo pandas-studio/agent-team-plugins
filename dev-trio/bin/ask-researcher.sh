@@ -152,6 +152,7 @@ DEV_TRIO_LOGIN_CHECK=
 PM_HOST="$(dev_trio_host)" || exit $?
 LOG=""
 AGY_WORKSPACE=""
+AGY_GIT_OUTSIDE=""
 AGY_CLI_LOG=""
 LOG_OFFSET=""
 LOG_END=""
@@ -259,9 +260,11 @@ fi
 # hashes below.
 if registry_has_workspace "$RESEARCHER_MODEL"; then
   AGY_WORKSPACE="$(dev_trio_workspace_root)"
+  # Git metadata outside the workspace: agy's sandbox cannot run git there.
+  AGY_GIT_OUTSIDE="$(dev_trio_git_outside_root "$AGY_WORKSPACE")"
   PROMPT="$PROMPT
 
-$(dev_trio_agy_exec_note "$AGY_WORKSPACE" 0)"
+$(dev_trio_agy_exec_note "$AGY_WORKSPACE" 0 "$AGY_GIT_OUTSIDE")"
 fi
 
 CHECK_RC=0
@@ -286,6 +289,7 @@ manifest_init dev-trio-research "$LOG"
 manifest_add_role researcher "$RESEARCHER_MODEL" "$ROLE_FILE" "$(manifest_sha256_string "$PROMPT")"
 manifest_add_input kind=question value="$QUERY"
 [ -n "$STDIN_CONTEXT" ] && manifest_add_input kind=context value="$STDIN_CONTEXT"
+[ -z "$AGY_GIT_OUTSIDE" ] || manifest_add_input kind=workspace-git-outside value="$AGY_GIT_OUTSIDE"
 
 run_open_log
 run_header_body() {
