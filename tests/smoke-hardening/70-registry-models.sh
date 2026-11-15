@@ -230,6 +230,42 @@ printf '%s\n' '{"models":{
   "mine":{"command":"x","env_command":"CLAUDE_CLI","prompt_via":"stdin","args":["--print"]}}}' > "$REG_TMP/via.json"
 REG_CALL='registry_run leaky P; echo "rc=$?"; registry_run odd P; echo "rc=$?"; registry_run mine P'
 assert_eq "$(count_argv AGENT_TEAM_MODELS_CONFIG="$REG_TMP/via.json" 2>/dev/null)" "$(printf 'rc=3\nrc=3\n[--print] stdin=2')"
+# Which stdbuf line-buffers the CLI. uutils' stdbuf (Ubuntu 26.04's default)
+# leaves an empty .tmpXXXXXX directory in $TMPDIR per call, so it is skipped:
+# gnustdbuf first, then any stdbuf whose --version is not uutils, else none.
+# PATH is a private tools dir, so the host's own stdbuf/gnustdbuf cannot leak in.
+SB=$REG_TMP/stdbuf-cases
+mkdir -p "$SB/tools"
+for t in jq bash sh cat wc tr sed head mktemp rm dirname basename printf env; do
+  p=$(command -v "$t" 2>/dev/null) && [ -x "$p" ] && ln -s "$p" "$SB/tools/$t"
+done
+fake_stdbuf() {  # $1 = dir, $2 = name, $3 = --version text
+  mkdir -p "$1"
+  printf '#!/bin/sh\nif [ "$1" = --version ]; then echo "%s"; exit 0; fi\necho "%s $1" >> "$SB_LOG"\nshift\nexec "$@"\n' "$3" "$2" > "$1/$2"
+  chmod +x "$1/$2"
+}
+fake_stdbuf "$SB/uutils" stdbuf 'stdbuf (uutils coreutils) 0.10.0'
+fake_stdbuf "$SB/gnu" stdbuf 'stdbuf (GNU coreutils) 9.7'
+fake_stdbuf "$SB/gnualt" gnustdbuf 'stdbuf (GNU coreutils) 9.7'
+stdbuf_case() {  # $1 = PATH prefix ("" for none); prints recorder output, then the stdbuf log
+  : > "$SB/log"
+  env -u REGISTRY_WORKSPACE -u REGISTRY_CLI_LOG -u REGISTRY_CMD_OVERRIDE \
+    AGENT_TEAM_MODELS_CONFIG="$REG_TMP/none.json" AGY_CLI="$REG_TMP/rec" CODEX_CLI="$REG_TMP/rec" \
+    SB_LOG="$SB/log" PATH="${1:+$1:}$SB/tools" \
+    "$SB/tools/bash" -c '. "$1/dev-trio/lib/registry.sh"; registry_run agy P; registry_run agy Q' _ "$ROOT"
+  printf 'log:'; tr '\n' ',' < "$SB/log"
+}
+REC='[--input-format][text][--output-format][text] stdin=2'
+assert_eq "$(stdbuf_case "$SB/uutils")" "$(printf '%s\n%s\nlog:' "$REC" "$REC")"
+assert_eq "$(stdbuf_case "$SB/gnualt:$SB/uutils")" "$(printf '%s\n%s\nlog:gnustdbuf -oL,gnustdbuf -oL,' "$REC" "$REC")"
+assert_eq "$(stdbuf_case "$SB/gnu")" "$(printf '%s\n%s\nlog:stdbuf -oL,stdbuf -oL,' "$REC" "$REC")"
+assert_eq "$(stdbuf_case "")" "$(printf '%s\n%s\nlog:' "$REC" "$REC")"
+# A PATH change between calls re-picks: uutils first, then GNU.
+: > "$SB/log"
+assert_eq "$(env -u REGISTRY_WORKSPACE -u REGISTRY_CLI_LOG -u REGISTRY_CMD_OVERRIDE \
+  AGENT_TEAM_MODELS_CONFIG="$REG_TMP/none.json" AGY_CLI="$REG_TMP/rec" SB_LOG="$SB/log" \
+  PATH="$SB/uutils:$SB/tools" "$SB/tools/bash" -c '. "$1/dev-trio/lib/registry.sh"; registry_run agy P >/dev/null; PATH="$2:$PATH"; registry_run agy P >/dev/null' _ "$ROOT" "$SB/gnu"; tr '\n' ',' < "$SB/log")" 'stdbuf -oL,'
+
 rm -rf "$REG_TMP"
 
 smoke_done 70-registry-models

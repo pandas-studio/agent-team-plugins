@@ -20,6 +20,16 @@ PLUGIN = ROOT / "debate-conductor"
 REAL_TMUX = shutil.which("tmux")
 
 
+
+def non_atomic_mkdir(tools):
+    """A mkdir that always succeeds, like uutils' under a race (Ubuntu 26.04:
+    two concurrent mkdirs both succeeded in 131 of 200 runs)."""
+    real = shutil.which("mkdir")
+    path = tools / "mkdir"
+    path.write_text(f'#!/bin/sh\nexec {shlex.quote(real)} -p "$@"\n')
+    path.chmod(0o755)
+    return path
+
 class ViewFixture(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(prefix="debate view ' ")
@@ -68,6 +78,19 @@ class ViewPreparationTests(ViewFixture):
         marker = self.root / 'mkdir-raced'
         self.tool('mkdir', 'case "$1" in */debate-view-lock.*) if [ ! -f "$RACE_MARKER" ]; then\n' +
                   'touch "$RACE_MARKER"; echo "mkdir: File exists" >&2; exit 1; fi;; esac\n' +
+                  f'exec {shlex.quote(mkdir)} "$@"\n')
+        ctx = self.prepare('--view=tmux', RACE_MARKER=str(marker))
+        self.assertEqual(ctx['status'], 'ready-detached')
+        self.assertTrue(marker.exists())
+
+    def test_lock_that_vanishes_after_a_reported_mkdir_success_is_retried(self):
+        # uutils' mkdir can report success on a directory its previous owner
+        # then removes; the owner file then cannot be created. That is a race
+        # to retry, not a setup error.
+        mkdir = shutil.which('mkdir')
+        marker = self.root / 'mkdir-vanished'
+        self.tool('mkdir', 'case "$1" in */debate-view-lock.*) if [ ! -f "$RACE_MARKER" ]; then\n' +
+                  'touch "$RACE_MARKER"; exit 0; fi;; esac\n' +
                   f'exec {shlex.quote(mkdir)} "$@"\n')
         ctx = self.prepare('--view=tmux', RACE_MARKER=str(marker))
         self.assertEqual(ctx['status'], 'ready-detached')
@@ -194,6 +217,13 @@ class ViewPreparationTests(ViewFixture):
             results.append(json.loads(out))
         self.assertEqual(results[0]["session"], results[1]["session"])
         self.assertEqual(sum(c[0] == "split-window" for c in self.read_state()["calls"]), 1)
+
+    def test_concurrent_preparations_create_only_one_view_with_a_non_atomic_mkdir(self):
+        shim = non_atomic_mkdir(self.tools)
+        try:
+            self.test_concurrent_preparations_create_only_one_view()
+        finally:
+            shim.unlink()
 
     def test_partial_creation_cleans_only_the_new_unattached_view(self):
         state = self.read_state()
