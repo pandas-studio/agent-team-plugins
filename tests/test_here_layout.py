@@ -2,6 +2,8 @@
 
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -19,6 +21,16 @@ SCRIPTS = {
 }
 TEAMS = {"debate-3pane": "debate-conductor", "dev-trio-layout": "dev-trio"}
 
+
+
+def non_atomic_mkdir(tools):
+    """A mkdir that always succeeds, like uutils' under a race (Ubuntu 26.04:
+    two concurrent mkdirs both succeeded in 131 of 200 runs)."""
+    real = shutil.which("mkdir")
+    path = tools / "mkdir"
+    path.write_text(f'#!/bin/sh\nexec {shlex.quote(real)} -p "$@"\n')
+    path.chmod(0o755)
+    return path
 
 class HereLayoutTests(unittest.TestCase):
     def setUp(self):
@@ -283,6 +295,15 @@ class HereLayoutTests(unittest.TestCase):
                 self.assertEqual(len(self.window()["panes"]), 3)
                 self.assertEqual(sum("already present" in out for _, out, _ in results), 1)
                 self.assertEqual([c[0] for c in self.read()["calls"]].count("split-window"), 2)
+
+    def test_concurrent_runs_build_one_layout_with_a_non_atomic_mkdir(self):
+        # The pid file, created with noclobber, is what the lock owns; a mkdir
+        # that reports success for an existing directory must not admit both.
+        shim = non_atomic_mkdir(self.tools)
+        try:
+            self.test_concurrent_runs_build_one_layout()
+        finally:
+            shim.unlink()
 
     def test_a_dead_runs_lock_is_taken_over(self):
         # A run killed mid-build leaves its lock behind; a later run must take

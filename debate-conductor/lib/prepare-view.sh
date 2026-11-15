@@ -89,10 +89,17 @@ acquire_view_lock() {
   root=$(cd /tmp && pwd -P)
   key=$(printf '%s\n%s' "$VIEW_SOCKET" "$SESSION" | cksum | cut -d' ' -f1)
   LOCK="$root/debate-view-lock.$(id -u).$key"
-  until mkdir_error=$(LC_ALL=C mkdir "$LOCK" 2>&1); do
+  # The owner file is what is owned: it is created with noclobber (O_EXCL, a
+  # shell redirection), because uutils' mkdir (Ubuntu 26.04's default) is not
+  # atomic: two concurrent mkdirs both succeeded in 131 of 200 races, measured.
+  # A mkdir that "succeeded" without the owner file falls to the retry below.
+  until mkdir_error=$(LC_ALL=C mkdir "$LOCK" 2>&1) &&
+      (set -C; printf '%s\n' "$LOCK_TOKEN" > "$LOCK/owner") 2>/dev/null; do
     # EEXIST can race with the old owner releasing the directory. Retain the
-    # bounded retry even if it has disappeared by this check.
-    if [[ $mkdir_error != *'File exists'* ]] && [ ! -d "$LOCK" ]; then
+    # bounded retry even if it has disappeared by this check. So can a mkdir
+    # that reported success on the old owner's directory, which was then
+    # removed before the owner file: no message, so retry, never an error.
+    if [ -n "$mkdir_error" ] && [[ $mkdir_error != *'File exists'* ]] && [ ! -d "$LOCK" ]; then
       view_error "$mkdir_error"
       LOCK=""
       return 1
@@ -121,7 +128,6 @@ acquire_view_lock() {
     fi
     sleep 0.1
   done
-  printf '%s\n' "$LOCK_TOKEN" > "$LOCK/owner"
 }
 
 prepare_detached() {

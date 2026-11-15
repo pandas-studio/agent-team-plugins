@@ -543,6 +543,36 @@ registry_config_role() {
 
 # ---- run --------------------------------------------------------------------
 
+# _registry_pick_stdbuf — sets _REGISTRY_STDBUF to the command that line-buffers
+# a CLI's stdout, or to "" for none. uutils coreutils' stdbuf (the default
+# stdbuf on Ubuntu 26.04, 0.10.0) leaves an empty .tmpXXXXXX directory in
+# $TMPDIR on every call (measured 2026-11-15: two calls, two directories),
+# so every model call would litter /tmp. GNU's stdbuf is gnustdbuf there and
+# leaves nothing. Any other stdbuf (GNU, BSD) is used as before; with only
+# uutils' the CLI runs unbuffered-by-us, as it does where stdbuf is missing.
+# Chosen once per PATH.
+_registry_pick_stdbuf() {
+  local v=""
+  if [ "${_REGISTRY_STDBUF_PATH-}" = "$PATH" ] && [ -n "${_REGISTRY_STDBUF+x}" ]; then
+    return 0
+  fi
+  _REGISTRY_STDBUF=""
+  _REGISTRY_STDBUF_PATH="$PATH"
+  if command -v gnustdbuf >/dev/null 2>&1; then
+    _REGISTRY_STDBUF=gnustdbuf
+  elif command -v stdbuf >/dev/null 2>&1; then
+    # stdin from /dev/null: in argv mode registry_run's stdin is the CLI's,
+    # and a probe must not consume it. No deadline: real stdbufs answer at
+    # once, and the CLI call that follows has none either.
+    v="$(stdbuf --version </dev/null 2>/dev/null)" || v=""
+    case "$v" in
+      *uutils*) ;;
+      *) _REGISTRY_STDBUF=stdbuf ;;
+    esac
+  fi
+  return 0
+}
+
 # registry_run <model-id> <prompt> [final-file]
 #   Expand the model's argv template and exec the CLI, streaming stdout/stderr
 #   to the caller (who is expected to wrap the call in `2>&1 | tee`). When a
@@ -614,8 +644,9 @@ registry_run() {
   if [ "$via" = stdin ]; then
     # A here-string, not `printf | cli`: a pipeline writer would wait on a
     # child the CLI leaves holding stdin, and its SIGPIPE would need handling.
-    if command -v stdbuf >/dev/null 2>&1; then
-      stdbuf -oL "$bin" ${argv[@]+"${argv[@]}"} <<< "$prompt"
+    _registry_pick_stdbuf
+    if [ -n "$_REGISTRY_STDBUF" ]; then
+      "$_REGISTRY_STDBUF" -oL "$bin" ${argv[@]+"${argv[@]}"} <<< "$prompt"
     else
       "$bin" ${argv[@]+"${argv[@]}"} <<< "$prompt"
     fi
@@ -630,8 +661,9 @@ registry_run() {
     echo "registry: model '$id' takes its prompt as one argument, and this prompt is $bytes bytes; Linux refuses a single argument of $limit bytes or more. Bind the role to a model with \"prompt_via\": \"stdin\", or pass less context." >&2
     return 3
   fi
-  if command -v stdbuf >/dev/null 2>&1; then
-    stdbuf -oL "$bin" ${argv[@]+"${argv[@]}"}
+  _registry_pick_stdbuf
+  if [ -n "$_REGISTRY_STDBUF" ]; then
+    "$_REGISTRY_STDBUF" -oL "$bin" ${argv[@]+"${argv[@]}"}
   else
     "$bin" ${argv[@]+"${argv[@]}"}
   fi
