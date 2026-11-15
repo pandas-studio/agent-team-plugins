@@ -1457,6 +1457,117 @@ runstate_begin "$R/empty.log" channel=codex wrapper=w
         self.agy_argv(self.recorded()[0], "review")
         self.assert_model("agy")
 
+    def _linked_worktree(self):
+        self._init_git_workspace()
+        (self.workspace / "tracked.txt").write_text("initial\n")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=self.workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=self.workspace, check=True, stdout=subprocess.DEVNULL)
+        worktree = self.root / "linked wt"
+        subprocess.run(["git", "worktree", "add", "-q", str(worktree), "-b", "feat"], cwd=self.workspace,
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        (worktree / "tracked.txt").write_text("changed\n")
+        return worktree
+
+    def _run_in(self, cwd, script, *args, **env):
+        return subprocess.run([str(self.plugin / "bin" / script), *args], cwd=cwd, env=self.env | env,
+                              input="", text=True, capture_output=True, timeout=20)
+
+    def _inputs(self, root):
+        manifests = sorted(root.glob(".dev-trio/log/host-test/*.manifest.json"), key=lambda m: m.stat().st_mtime_ns)
+        return json.loads(manifests[-1].read_text())["inputs"]
+
+    def test_agy_in_a_linked_worktree_is_told_git_cannot_run(self):
+        # agy's terminal sandbox sees only its workspace; a linked worktree's
+        # .git names <common>/worktrees/<name>, outside it, so every git
+        # command there fails with "not a git repository" (agy 1.5.9). The
+        # metadata directory is not granted: argv keeps one --add-dir.
+        worktree = self._linked_worktree()
+        common = os.path.realpath(self.workspace / ".git")
+        for wrapper, args, stem in (("ask-reviewer.sh", (), "review"),
+                                    ("ask-researcher.sh", ("research question",), "research")):
+            with self.subTest(wrapper=wrapper):
+                self.calls.unlink(missing_ok=True)
+                result = self._run_in(worktree, wrapper, *args, DEV_TRIO_REVIEWER_MODEL="agy")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                call = self.recorded()[0]
+                self.assertEqual(call[0], "--log-file", call)
+                self.assertRegex(call[1].rsplit("/", 1)[-1], rf"^cli-dev-trio-{stem}-")
+                self.assertEqual(call[2:8], ["--add-dir", os.path.realpath(worktree),
+                                             "--input-format", "text", "--output-format", "text"], call)
+                self.assertEqual(len(call), 10, call)
+                self.assertIn(f"Git cannot run in this workspace: its metadata is at `{common}`,", call[9])
+                self.assertIn("Do not run any git command.", call[9])
+                inputs = self._inputs(worktree)
+                self.assertEqual([i for i in inputs if i.get("kind") == "workspace-git-outside"],
+                                 [{"kind": "workspace-git-outside", "value": common}])
+                if wrapper == "ask-reviewer.sh":
+                    snap = [i["value"] for i in inputs if i.get("kind") == "workspace-snapshot"]
+                    self.assertEqual(len(snap), 1, inputs)
+                    self.assertTrue(snap[0].startswith("working-tree:262144:"), snap)
+
+    def test_snapshot_text_never_sends_agy_to_git_in_a_linked_worktree(self):
+        # The no-git paragraph must not be contradicted by later prompt text.
+        worktree = self._linked_worktree()
+        result = self._run_in(worktree, "ask-reviewer.sh", DEV_TRIO_REVIEWER_MODEL="agy")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        prompt = self.recorded()[0][9]
+        self.assertIn("<workspace_snapshot>\n", prompt)
+        self.assertNotIn("Use git for independent checks", prompt)
+        self.assertIn("do not run git status or git diff to discover them when it is complete. Git cannot run here: "
+                      "for independent checks or sections marked omitted or truncated, read the files with your "
+                      "file viewer.\n", prompt)
+        subprocess.run(["git", "commit", "-qam", "second"], cwd=worktree, check=True)
+        self.calls.unlink()
+        result = self._run_in(worktree, "ask-reviewer.sh", "review HEAD~1..HEAD", DEV_TRIO_REVIEWER_MODEL="agy")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        prompt = self.recorded()[0][9]
+        self.assertIn("\n# Snapshot inspection rule (range)\nThe <workspace_snapshot> covers only `git diff HEAD~1..HEAD`. "
+                      "When it has no omitted or truncated section, use it for that diff without calling CommandLine "
+                      "for the same `git diff`. Commit messages and per-commit history are not available here; if the "
+                      "review needs them, record the gap. Inspect the working tree", prompt)
+        self.assertNotIn("git log` or `git show` for the commits", prompt)
+        self.assertNotIn("follow the notice in the snapshot", prompt)
+        self.assertIn("read the affected files with your file viewer instead of running the git command the notice "
+                      "names", prompt)
+
+    def test_snapshot_text_keeps_git_pointers_in_a_main_checkout(self):
+        self._init_git_workspace()
+        (self.workspace / "tracked.txt").write_text("one\n")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=self.workspace, check=True)
+        subprocess.run(["git", "commit", "-qm", "one"], cwd=self.workspace, check=True)
+        (self.workspace / "tracked.txt").write_text("two\n")
+        subprocess.run(["git", "commit", "-qam", "two"], cwd=self.workspace, check=True)
+        result = self.run_cli("ask-reviewer.sh", "review HEAD~1..HEAD", DEV_TRIO_REVIEWER_MODEL="agy")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        prompt = self.recorded()[0][9]
+        self.assertIn("for the same `git diff`. Use `git log` or `git show` for the commits inside the range. "
+                      "Inspect the working tree", prompt)
+        self.assertIn("follow the notice in the snapshot.", prompt)
+        self.assertNotIn("Git cannot run", prompt)
+
+    def test_explicit_snapshot_ceiling_wins_in_a_linked_worktree(self):
+        worktree = self._linked_worktree()
+        result = self._run_in(worktree, "ask-reviewer.sh", DEV_TRIO_REVIEWER_MODEL="agy",
+                              DEV_TRIO_SNAPSHOT_MAX_BYTES="70000")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        snap = [i["value"] for i in self._inputs(worktree) if i.get("kind") == "workspace-snapshot"]
+        self.assertEqual(len(snap), 1)
+        self.assertTrue(snap[0].startswith("working-tree:70000:"), snap)
+
+    def test_agy_in_a_main_checkout_keeps_git_and_the_default_ceiling(self):
+        worktree = self._linked_worktree()
+        del worktree
+        (self.workspace / "tracked.txt").write_text("changed\n")
+        result = self.run_cli(DEV_TRIO_REVIEWER_MODEL="agy")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        call = self.recorded()[0]
+        self.agy_argv(call, "review")
+        self.assertNotIn("Git cannot run", call[9])
+        inputs = self._inputs(self.workspace)
+        self.assertFalse([i for i in inputs if i.get("kind") == "workspace-git-outside"], inputs)
+        snap = [i["value"] for i in inputs if i.get("kind") == "workspace-snapshot"]
+        self.assertTrue(snap and snap[0].startswith("working-tree:65536:"), inputs)
+
     def test_agy_without_log_dir_gets_a_private_temporary_log(self):
         # #193: without --log-file agy writes its whole log, allow list
         # included, into the transcript; the wrapper pins a temporary one.
