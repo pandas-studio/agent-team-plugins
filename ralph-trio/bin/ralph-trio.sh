@@ -149,7 +149,7 @@ TEAM=$(detect_team) || exit 2
 LOG_DIR=$(init_log_dir)
 # Durable, ralph-owned root for ask-reviewer.sh's --output-last-message artifacts.
 # Pinned via DEV_TRIO_LOG_DIR on every reviewer call so the authoritative
-# codex-<TS>.final.md survives `git worktree remove`: the reviewer runs inside
+# reviewer-<TS>.final.md survives `git worktree remove`: the reviewer runs inside
 # `cd "$WORK_DIR"`, and ask-reviewer.sh otherwise defaults its log root to
 # $PWD/.dev-trio — i.e. inside the worktree that Stage-3 dispatch tears down.
 # LOG_DIR is computed here at top level (PWD = ORIGINAL_DIR, the main repo), so
@@ -637,7 +637,7 @@ while :; do
         # Researcher role recorded by ask-researcher.sh via the PR 9 carve-out.
         # Research content is captured durably via the tee into $RESEARCH_LOG
         # (ralph's main-repo log tree); DEV_TRIO_LOG_DIR pins ask-researcher.sh's own
-        # agy-<TS>-<PID>.log there too so it doesn't litter the (torn-down) worktree.
+        # researcher-<TS>-<PID>.log there too so it doesn't litter the (torn-down) worktree.
         manifest_add_input kind=question value="$RESEARCH_QS"
         RESEARCH_RC=0
         ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$LOG_DIR/agy" \

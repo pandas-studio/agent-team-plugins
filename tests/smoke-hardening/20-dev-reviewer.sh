@@ -29,7 +29,7 @@ chmod +x "$STUB_CLI"
 run_ask_codex() {
   # Clear the previous run's artifacts so a run that spawns nothing cannot pass
   # on them (several cases expect the same argv).
-  rm -f "$TMP/argv" "$TMP/argv.stdin" "$TMP/log/smoke/latest-codex.final.md"
+  rm -f "$TMP/argv" "$TMP/argv.stdin" "$TMP/log/smoke/latest-reviewer.final.md"
   (cd "$TMP/repo" && env -u REVIEWER_CLI -u DEV_TRIO_REVIEWER_MODEL \
     -u DEV_TRIO_PM_HOST \
     -u MANIFEST_PARENT_TMP -u REVIEWER_ROLE_FILE -u DEV_TRIO_REVIEW_PROFILE \
@@ -38,7 +38,7 @@ run_ask_codex() {
     AGENT_TEAM_MODELS_CONFIG="$TMP/no-models.json" \
     "$@" "$ROOT/dev-trio/bin/ask-reviewer.sh" "${ASK_ARGS[@]}" >/dev/null 2>&1)
 }
-final_path() { printf '%s/log/smoke/%s' "$TMP" "$(readlink "$TMP/log/smoke/latest-codex.final.md")"; }
+final_path() { printf '%s/log/smoke/%s' "$TMP" "$(readlink "$TMP/log/smoke/latest-reviewer.final.md")"; }
 # Compare argv slot by slot (one per line) so a merged "-c features.memories=false"
 # slot cannot pass for the two slots codex needs. The prompt is not in argv:
 # codex gets "-" last and the review prompt, focus included, on stdin.

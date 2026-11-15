@@ -2,13 +2,18 @@
 # dashboard.sh — live, formatted summary view of researcher/reviewer runs.
 #
 # Usage:
-#   dashboard.sh agy            # render researcher status
-#   dashboard.sh codex          # render reviewer status
-#   dashboard.sh codex --once   # render one frame and exit (tests, scripts)
+#   dashboard.sh researcher        # render researcher status
+#   dashboard.sh reviewer          # render reviewer status
+#   dashboard.sh reviewer --once   # render one frame and exit (tests, scripts)
 #
-# `agy` and `codex` are compatibility identifiers for the two log channels
-# (agy-*.log, codex-*.log), not the model that runs — any CLI can fill any role
+# `researcher` and `reviewer` name the two log channels (researcher-*.log,
+# reviewer-*.log) by role, not the model that runs — any CLI can fill any role
 # via the registry, and the header shows the model this run actually used.
+# `agy` and `codex`, the channels' names before the role names, are accepted
+# as aliases. A directory written before the rename has only latest-agy.* /
+# latest-codex.* links, agy-*/codex-* logs and run metadata with the old
+# channel values; it is still rendered, and a pane opened on it moves to the
+# canonical link once a new run publishes one.
 #
 # Every rendered value comes from the run's *.run.json (lib/runstate.sh) and
 # *.review.json (lib/review-result.sh), both written by the wrapper. This
@@ -37,36 +42,45 @@ PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=../lib/runstate.sh
 . "$PLUGIN_ROOT/lib/runstate.sh" || exit 2
 
-ROLE="${1:?usage: $0 agy|codex [--once]}"
+ROLE="${1:?usage: $0 reviewer|researcher [--once]}"
 shift
 ONCE=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --once) ONCE=1; shift ;;
-    *) echo "usage: $0 agy|codex [--once]" >&2; exit 2 ;;
+    *) echo "usage: $0 reviewer|researcher [--once]" >&2; exit 2 ;;
   esac
 done
 
+# The role is canonicalized here, once: every later branch compares against
+# the canonical name, and LEGACY_ROLE is only the pre-rename spelling of the
+# same channel.
 case "$ROLE" in
-  agy)
+  researcher|agy)
+    ROLE="researcher"; LEGACY_ROLE="agy"
     ICON="🔍"; TITLE="Researcher"
     HEADER_COLOR=$'\033[1;36m'   # bright cyan
     LABEL="Query"
     ;;
-  codex)
+  reviewer|codex)
+    ROLE="reviewer"; LEGACY_ROLE="codex"
     ICON="🧐"; TITLE="Reviewer"
     HEADER_COLOR=$'\033[1;35m'   # bright magenta
     LABEL="Focus"
     ;;
   *)
-    echo "usage: $0 agy|codex [--once]" >&2; exit 2 ;;
+    echo "usage: $0 reviewer|researcher [--once]" >&2; exit 2 ;;
 esac
 
 # Team namespace — must match what wrappers use.
 TEAM=$(agent_team_detect_team) || exit 2
 LOG_DIR="${DEV_TRIO_LOG_DIR:-$PWD/.dev-trio/log}/$TEAM"
 case "$LOG_DIR" in /*) ;; *) LOG_DIR="$PWD/$LOG_DIR" ;; esac
-LATEST="$LOG_DIR/latest-$ROLE.log"
+# The canonical link, and the one a wrapper from before the role names wrote.
+# Which one a frame follows is decided every frame (see the loop).
+LATEST_CANONICAL="$LOG_DIR/latest-$ROLE.log"
+LATEST_LEGACY="$LOG_DIR/latest-$LEGACY_ROLE.log"
+LATEST="$LATEST_CANONICAL"
 
 RESET=$'\033[0m'
 DIM=$'\033[2m'
@@ -116,7 +130,7 @@ sanitize_block() {
 # script is not the place to decide which env values were checked elsewhere —
 # so both go through the same containment as model text.
 TEAM_SHOWN=$(printf '%s' "$TEAM" | sanitize_line 48)
-LATEST_SHOWN=$(printf '%s' "$LATEST" | sanitize_line 120)
+LATEST_SHOWN=$(printf '%s' "$LATEST_CANONICAL" | sanitize_line 120)
 
 DASH_TMPDIR=""   # set below; declared here so the traps are safe under set -u
 _dash_discard_snapshots() { [ -z "$DASH_TMPDIR" ] || rm -rf "$DASH_TMPDIR"; }
@@ -206,6 +220,14 @@ while true; do
     # render as "no runs yet"; containment is never checked against a name that
     # was never resolved.
     LOG_DIR_REAL=$(cd "$LOG_DIR" 2>/dev/null && pwd -P) || LOG_DIR_REAL=""
+    # The canonical link when it exists, else the legacy one a pre-rename
+    # wrapper left. Chosen every frame, so a pane opened on an old directory
+    # follows the first run that publishes the canonical link.
+    LATEST="$LATEST_CANONICAL"
+    if [ ! -e "$LATEST_CANONICAL" ] && [ ! -L "$LATEST_CANONICAL" ] \
+       && { [ -e "$LATEST_LEGACY" ] || [ -L "$LATEST_LEGACY" ]; }; then
+      LATEST="$LATEST_LEGACY"
+    fi
     # Freeze the latest log target for this frame. Every sibling artifact is
     # resolved from this path, never from an independently changing latest link.
     SOURCE="$LATEST"
@@ -247,6 +269,13 @@ while true; do
         RUN_JSON=""
       else
         RUN_CHANNEL=$(printf '%s\n' "$RUN_JSON" | jq -r '.channel')
+        # Metadata written before the role names carries the old channel value
+        # of the same role.
+        case "$RUN_CHANNEL" in
+          codex) RUN_ROLE="reviewer" ;;
+          agy)   RUN_ROLE="researcher" ;;
+          *)     RUN_ROLE="$RUN_CHANNEL" ;;
+        esac
         RUN_TEAM=$(printf '%s\n' "$RUN_JSON" | jq -r '.team')
         RUN_LOG=$(printf '%s\n' "$RUN_JSON" | jq -r '.log_path')
         # The metadata must describe *this* log. A valid run.json belonging to
@@ -262,7 +291,7 @@ while true; do
         elif [ "$RUN_LOG_DIR" != "$LOG_DIR_REAL" ]; then
           STATE="mismatch"
           STATE_DETAIL="metadata names a log outside the team directory"
-        elif [ "$RUN_CHANNEL" != "$ROLE" ]; then
+        elif [ "$RUN_ROLE" != "$ROLE" ]; then
           STATE="mismatch"
           STATE_DETAIL="channel $(printf '%s' "$RUN_CHANNEL" | sanitize_line 24) != $ROLE"
         elif [ "$RUN_TEAM" != "$TEAM" ]; then
@@ -318,6 +347,10 @@ while true; do
         case "$REAL" in
           "$ROLE"-*.log)
             TS="${REAL#"$ROLE"-}"
+            TS="${TS%.log}"
+            ;;
+          "$LEGACY_ROLE"-*.log)
+            TS="${REAL#"$LEGACY_ROLE"-}"
             TS="${TS%.log}"
             ;;
         esac
@@ -380,7 +413,7 @@ while true; do
         [ "$(printf '%s\n' "$RUN_JSON" | jq -r 'if .result_path == null then 0 else 1 end')" = "0" ] \
           || RESULT_PATH="$STEM.review.json"
 
-        if [ "$ROLE" = "agy" ] && [ "$STATE" = "done" ]; then
+        if [ "$ROLE" = "researcher" ] && [ "$STATE" = "done" ]; then
           ANSWER=""
           ANSWER_PARTIAL=0
           if [ -n "$FINAL_PATH" ]; then
@@ -423,7 +456,7 @@ while true; do
             fi
           fi
 
-        elif [ "$ROLE" = "codex" ] && [ "$STATE" = "done" ]; then
+        elif [ "$ROLE" = "reviewer" ] && [ "$STATE" = "done" ]; then
           RESULT_JSON=""
           if [ -n "$RESULT_PATH" ] && read_bounded "$RESULT_PATH" "$MAX_DOC_BYTES" "$RESULT_SNAP"; then
             RESULT_JSON=$(review_result_read "$RESULT_SNAP") || RESULT_JSON=""

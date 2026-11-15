@@ -252,9 +252,9 @@ FOCUS="Audit ralph run since $SINCE for team $TEAM. Read the brief in <remote_co
 
 CODEX_OUT="$LOG_DIR/ralph-meta-$TS-codex.log"
 # ask-reviewer.sh writes the authoritative final review verbatim to a
-# codex-<ts>.final.md (via `--output-last-message`) and the full streamed
+# reviewer-<ts>.final.md (via `--output-last-message`) and the full streamed
 # transcript — bracketed by `=== RESPONSE ===` / `=== END (rc=N) ===` markers —
-# to codex-<ts>.log, both under the dev-trio plugin's workspace log dir (e.g.
+# to reviewer-<ts>.log, both under the dev-trio plugin's workspace log dir (e.g.
 # $PWD/.dev-trio/log/<team>/). Neither lands on stdout, so we capture ask-reviewer's
 # stderr and scrape the `(log: <path>, final: <path>, rc=<n>)` line it prints
 # there. Prefer the .final.md (clean, and empty when codex died before emitting

@@ -199,7 +199,7 @@ LOG_DIR=$(spec_init_log_dir)
 LOG_DIR=$(cd -P "$LOG_DIR" && pwd -P) || exit 1
 # Durable, spec-trio-owned root for ask-reviewer.sh's --output-last-message
 # artifacts. Pinned via DEV_TRIO_LOG_DIR on every reviewer call so the
-# authoritative codex-<TS>.final.md survives `git worktree remove`: the
+# authoritative reviewer-<TS>.final.md survives `git worktree remove`: the
 # reviewer runs inside `cd "$WORK_DIR"`, and ask-reviewer.sh otherwise defaults its
 # log root to $PWD/.dev-trio — i.e. inside the worktree that Stage-3 dispatch
 # tears down. LOG_DIR is computed here at top level (PWD = ORIGINAL_DIR, the
@@ -880,7 +880,7 @@ while :; do
         RESEARCH_RUN_ID="$MANIFEST_RUN_ID"
         manifest_set_parent "$REVIEW_RUN_ID" || exit 1
         # Researcher role recorded by ask-researcher.sh via the PR 9 carve-out.
-        # DEV_TRIO_LOG_DIR pins ask-researcher.sh's own agy-<TS>-<PID>.log into spec-trio's
+        # DEV_TRIO_LOG_DIR pins ask-researcher.sh's own researcher-<TS>-<PID>.log into spec-trio's
         # main-repo log tree so it doesn't litter the (torn-down) worktree; the
         # research content is captured durably via the tee into $RESEARCH_LOG.
         manifest_add_input kind=spec path="$SPEC_FILE" || exit 1

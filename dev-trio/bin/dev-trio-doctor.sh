@@ -204,13 +204,13 @@ STUB
   fi
 
   LOG_DIR_SMOKE="$TMPDIR_SMOKE/.dev-trio/log/doctor-smoke"
-  if [ ! -L "$LOG_DIR_SMOKE/latest-agy.log" ]; then
-    fail "latest-agy.log symlink not created at $LOG_DIR_SMOKE"
+  if [ ! -L "$LOG_DIR_SMOKE/latest-researcher.log" ]; then
+    fail "latest-researcher.log symlink not created at $LOG_DIR_SMOKE"
   else
-    ok "latest-agy.log symlink created"
+    ok "latest-researcher.log symlink created"
   fi
 
-  MANIFEST=$(ls "$LOG_DIR_SMOKE"/agy-*.manifest.json 2>/dev/null | tail -1)
+  MANIFEST=$(ls "$LOG_DIR_SMOKE"/researcher-*.manifest.json 2>/dev/null | tail -1)
   if [ -z "$MANIFEST" ]; then
     fail "no manifest emitted under $LOG_DIR_SMOKE"
   elif ! jq . "$MANIFEST" >/dev/null 2>&1; then

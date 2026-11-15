@@ -6,8 +6,8 @@
 #   dashboard.sh solo|trio|debate
 #
 # This is a thin wrapper around `tail -F` with a colored header. The dev-trio
-# plugin's dashboard.sh is structured around agy/codex roles and hardcodes
-# those names — it doesn't render ralph logs. Use that one for the trio
+# plugin's dashboard.sh is structured around its researcher/reviewer roles and
+# hardcodes those names — it doesn't render ralph logs. Use that one for the trio
 # variant's inner ask-reviewer/ask-researcher calls; use this one for the ralph
 # outer-loop summary.
 #

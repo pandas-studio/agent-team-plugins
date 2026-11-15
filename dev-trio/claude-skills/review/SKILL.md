@@ -14,7 +14,7 @@ You are the **PM**. Codex is the reviewer (bottom-right pane). You dispatch one 
 
 `$ARGUMENTS` is a single string that may interleave six pieces in any order:
 
-- **Optional `--with-research <file>`** — research context from a previous Antigravity call (typically `latest-agy.log` or a curated `research-<TS>.md`).
+- **Optional `--with-research <file>`** — research context from a previous Antigravity call (typically `latest-researcher.log` or a curated `research-<TS>.md`).
 - **Optional `--with-spec <file>`** — spec/contract the changes are expected to satisfy.
 - **Optional `--with-context <file>`** — repository facts you fetched (PR commit IDs, issue text, CI output) for a reviewer that may not reach the network.
 - **Optional `--model <id>`** (short: `-m <id>`) — reviewer model for this call only (`codex`, `claude`, `agy`, or any id from `agent-team-models list`); wins over `DEV_TRIO_REVIEWER_MODEL` and the role binding.
@@ -88,7 +88,7 @@ Worked example — if `$ARGUMENTS = "focus on src/agent.py concurrency --with-sp
 The wrapper reports exact paths for this invocation in its final stderr line:
 
 ```text
-(log: .../codex-<TS>-<PID>.log, final: .../codex-<TS>-<PID>.final.md, result: .../codex-<TS>-<PID>.review.json, rc=...)
+(log: .../reviewer-<TS>-<PID>.log, final: .../reviewer-<TS>-<PID>.final.md, result: .../reviewer-<TS>-<PID>.review.json, rc=...)
 ```
 
 **Read that exact `.review.json` result.** It is the common parsed result used by the wrapper, manifest and dashboard. Do not independently parse verdicts or count bullets in Markdown. Do not resolve `latest` links after completion: another invocation may already have retargeted them.

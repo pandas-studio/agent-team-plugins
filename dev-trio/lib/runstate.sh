@@ -13,13 +13,15 @@
 # Schema (schema_version=1):
 #   {
 #     schema_version: 1,
-#     channel,          # log stream: "agy" | "codex". NEVER a model id: any CLI
-#                       # can fill any role via the registry, so the channel
-#                       # names the log family only.
+#     channel,          # log stream: "researcher" | "reviewer". NEVER a model
+#                       # id: any CLI can fill any role via the registry, so
+#                       # the channel names the log family only. Documents
+#                       # written before the role names carry "agy" | "codex"
+#                       # and are still read.
 #     wrapper,          # ask-researcher.sh | ask-reviewer.sh
 #     variant,          # dev-trio-research | dev-trio-review
 #     team,             # namespace dir the artifacts live in
-#     run_stem,         # "codex-20260919-122406-48531"
+#     run_stem,         # "reviewer-20260919-122406-48531"
 #     started_at,       # ISO-8601 with offset
 #     started_display,  # the TS stem, what the dashboard has always shown
 #     pid,              # diagnostic only — no consumer may derive state from it
@@ -316,7 +318,8 @@ _RUNSTATE_READ_FILTER='
     | .[0]
     | select(type == "object")
     | select(.schema_version == 1)
-    | select((.channel | type) == "string" and (.channel == "agy" or .channel == "codex"))
+    | select((.channel | type) == "string" and (.channel == "researcher" or .channel == "reviewer"
+         or .channel == "agy" or .channel == "codex"))
     | select((.wrapper | type) == "string")
     | select((.team    | type) == "string")
     | select((.run_stem | type) == "string")

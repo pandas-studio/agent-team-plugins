@@ -198,9 +198,9 @@ EOF
 fi
 
 echo
-echo "6. Stub-CLI smoke (spec-trio Stage 3 — verdict from codex .final.md)"
+echo "6. Stub-CLI smoke (spec-trio Stage 3 — verdict from reviewer .final.md)"
 # Real-logic regression guard for the forward-port: the reviewer's verdict MUST
-# come from ask-reviewer.sh's --output-last-message file (codex-<TS>.final.md), NOT
+# come from ask-reviewer.sh's --output-last-message file (reviewer-<TS>.final.md), NOT
 # the streamed stdout the dev-trio contract declares unreliable; and that file
 # MUST land in spec-trio's durable log tree (pinned DEV_TRIO_LOG_DIR) so it
 # survives worktree teardown. Stub ask-reviewer.sh emits a clean SHIP in the
@@ -239,10 +239,10 @@ TEAM="${AGENT_TEAM:-default}"
 LOG_DIR="${DEV_TRIO_LOG_DIR:-$PWD/.dev-trio/log}/$TEAM"
 mkdir -p "$LOG_DIR"
 TS=$(date +%Y%m%d-%H%M%S)
-LOG="$LOG_DIR/codex-$TS.log"
-FINAL="$LOG_DIR/codex-$TS.final.md"
-ln -sfn "codex-$TS.log" "$LOG_DIR/latest-codex.log"
-ln -sfn "codex-$TS.final.md" "$LOG_DIR/latest-codex.final.md"
+LOG="$LOG_DIR/reviewer-$TS.log"
+FINAL="$LOG_DIR/reviewer-$TS.final.md"
+ln -sfn "reviewer-$TS.log" "$LOG_DIR/latest-reviewer.log"
+ln -sfn "reviewer-$TS.final.md" "$LOG_DIR/latest-reviewer.final.md"
 case "${STUB_MODE:-final-ship}" in
   final-ship)
     # Authoritative final = clean SHIP in codex's native `## Verdict` form.
@@ -342,17 +342,17 @@ STUB
   fi
   VA=$(review_verdict "$CASE_A")
   if [ "$VA" = "SHIP" ]; then
-    ok "verdict=SHIP parsed from codex .final.md (decoy stdout NEEDS-FIX ignored)"
+    ok "verdict=SHIP parsed from reviewer .final.md (decoy stdout NEEDS-FIX ignored)"
   else
     fail "expected verdict=SHIP from .final.md, got: ${VA:-<no manifest>} (regression: parsing streamed stdout?)"
   fi
   # Durability: the .final.md must land under spec-trio's pinned workspace dir
   # (CODEX_FINAL_ROOT=$LOG_DIR/codex; ask-reviewer appends /$TEAM), NOT in a stray
   # .dev-trio under the run cwd (which a worktree would tear down).
-  if [ -e "$CASE_A/.spec-trio/log/doctor-spec/codex/doctor-spec/latest-codex.final.md" ]; then
-    ok "codex .final.md pinned under spec-trio workspace (survives worktree teardown)"
+  if [ -e "$CASE_A/.spec-trio/log/doctor-spec/codex/doctor-spec/latest-reviewer.final.md" ]; then
+    ok "reviewer .final.md pinned under spec-trio workspace (survives worktree teardown)"
   else
-    fail "codex .final.md not found under spec-trio workspace — DEV_TRIO_LOG_DIR not pinned?"
+    fail "reviewer .final.md not found under spec-trio workspace — DEV_TRIO_LOG_DIR not pinned?"
   fi
   if [ -e "$CASE_A/.dev-trio" ]; then
     fail "stray .dev-trio created in run cwd — DEV_TRIO_LOG_DIR redirect leaked"
@@ -557,8 +557,8 @@ TEAM="${AGENT_TEAM:-default}"
 LOG_DIR="${DEV_TRIO_LOG_DIR:-$PWD/.dev-trio/log}/$TEAM"
 mkdir -p "$LOG_DIR"
 TS=$(date +%Y%m%d-%H%M%S)
-FINAL="$LOG_DIR/codex-$TS.final.md"
-ln -sfn "codex-$TS.final.md" "$LOG_DIR/latest-codex.final.md"
+FINAL="$LOG_DIR/reviewer-$TS.final.md"
+ln -sfn "reviewer-$TS.final.md" "$LOG_DIR/latest-reviewer.final.md"
 case "$MODE" in
   need-research) printf '## Verdict\nNEEDS-FIX — needs research\n## NEED RESEARCH\n- what is the helper signature?\n' > "$FINAL" ;;
   *)             printf '## Verdict\nSHIP — stub ok\n' > "$FINAL" ;;

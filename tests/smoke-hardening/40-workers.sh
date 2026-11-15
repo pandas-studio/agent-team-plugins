@@ -204,18 +204,20 @@ run_agy_fixed_second() {
 assert_eq "$(run_agy_fixed_second)" "0"
 assert_eq "$(run_agy_fixed_second)" "0"
 AGY_DIR="$TMP/agy-naming/worker"
-AGY_LOGS="$(cd "$AGY_DIR" && ls | grep -cE '^agy-20260101-000000-[0-9]+\.log$' || true)"
+AGY_LOGS="$(cd "$AGY_DIR" && ls | grep -cE '^researcher-20260101-000000-[0-9]+\.log$' || true)"
 assert_eq "$AGY_LOGS" "2"
 AGY_MANIFESTS=0
-for m in "$AGY_DIR"/agy-20260101-000000-*.manifest.json; do
+for m in "$AGY_DIR"/researcher-20260101-000000-*.manifest.json; do
   [ -f "$m" ] || continue
   jq -e . "$m" >/dev/null
   AGY_MANIFESTS=$((AGY_MANIFESTS + 1))
 done
 assert_eq "$AGY_MANIFESTS" "2"
-AGY_LATEST="$(readlink "$AGY_DIR/latest-agy.log")"
+AGY_LATEST="$(readlink "$AGY_DIR/latest-researcher.log")"
 assert_ok test -f "$AGY_DIR/$AGY_LATEST"
-assert_eq "$(printf '%s\n' "$AGY_LATEST" | grep -cE '^agy-20260101-000000-[0-9]+\.log$')" "1"
-assert_eq "$(cd "$AGY_DIR" && ls -A | grep -c '^\.latest-agy-' || true)" "0"
+assert_eq "$(printf '%s\n' "$AGY_LATEST" | grep -cE '^researcher-20260101-000000-[0-9]+\.log$')" "1"
+# The legacy alias names the same run as the canonical link.
+assert_eq "$(readlink "$AGY_DIR/latest-agy.log")" "$AGY_LATEST"
+assert_eq "$(cd "$AGY_DIR" && ls -A | grep -c '^\.latest-' || true)" "0"
 
 smoke_done 40-workers
