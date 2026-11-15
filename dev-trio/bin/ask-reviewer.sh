@@ -337,6 +337,10 @@ if registry_has_workspace "$REVIEWER_MODEL"; then
   PROMPT="$PROMPT
 
 $(dev_trio_agy_exec_note "$AGY_WORKSPACE" "$FOCUS_IS_DEFAULT" "$AGY_GIT_OUTSIDE")"
+  INLINED_NOTE="$(dev_trio_agy_inlined_note "$AGY_GIT_OUTSIDE" research_context "$RESEARCH_FILE" \
+    spec "$SPEC_FILE" remote_context "$CONTEXT_FILE")"
+  [ -z "$INLINED_NOTE" ] || PROMPT="$PROMPT
+$INLINED_NOTE"
 
   default_ceiling=65536
   [ -z "$AGY_GIT_OUTSIDE" ] || default_ceiling=262144
