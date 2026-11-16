@@ -994,6 +994,10 @@ class DriverProcessTests(unittest.TestCase):
             [sys.executable, "-m", "unittest", "spec-trio.tests.test_verification"],
             [sys.executable, "-m", "unittest", "discover", "-s", "spec-trio/tests"],
             ["bash", str(ROOT / "scripts/check.sh")],
+            *(
+                ["bash", str(ROOT / "scripts/check.sh"), part]
+                for part in ("all", "tests", "smoke", "rest")
+            ),
         )
         with tempfile.TemporaryDirectory(prefix="spec preflight ") as tmp:
             # The marker detects whether check.sh reached the source scan.

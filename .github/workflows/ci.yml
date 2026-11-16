@@ -1,8 +1,13 @@
 name: CI
 
+# A pull request's branch runs once, as pull_request. A branch with no pull
+# request, or a tag, runs only when dispatched by hand: three macOS jobs per
+# run, and the account runs five at a time.
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 env:
   # Base for scripts/check-version-bump.py (#151): the PR's base branch; on a
@@ -64,13 +69,19 @@ jobs:
   # darwin-only tests (#153). /bin/bash is 3.2 there, but the runner image puts
   # Homebrew's bash 5 first on PATH, so a shim dir makes every `bash` and
   # `#!/usr/bin/env bash` resolve to /bin/bash.
-  macos:
+  #
+  # The whole of check.sh takes about 39 min on the hosted runner, twice the
+  # Ubuntu job, so it runs as three parts side by side (2026-11-16, one passing
+  # run: tests 17.5 min, smoke 11.7, rest 9.6; a slow run spent 20.8 min in
+  # tests). The limits cap a hung run; they are not a budget to fill.
+  macos-part:
     runs-on: macos-latest
-    # check.sh takes about 39 min on the hosted runner, twice the Ubuntu job
-    # (2026-11-16, two commits: two runs passed in 39m14s and 39m42s, two hit
-    # the former 40-minute step limit with every test up to it passed). The
-    # limits cap a hung run; they are not a budget to fill.
-    timeout-minutes: 65
+    strategy:
+      # A failed part does not cancel the others, so a re-run is of that part.
+      fail-fast: false
+      matrix:
+        part: [tests, smoke, rest]
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with:
@@ -113,12 +124,29 @@ jobs:
       # runner.
       # `exec` keeps the step's PID on check.sh, so a timeout's signal reaches
       # it; its descendants go with the hosted runner's VM at job end.
-      - name: Run scripts/check.sh in its own session
+      - name: Run scripts/check.sh ${{ matrix.part }} in its own session
         run: >-
           exec python3 -c 'import os;
           os.setsid();
           print("check.sh pid", os.getpid(), "pgid", os.getpgid(0), "sid", os.getsid(0), flush=True);
-          os.execv("/bin/bash", ["/bin/bash", "scripts/check.sh"])'
-        timeout-minutes: 60
+          os.execv("/bin/bash", ["/bin/bash", "scripts/check.sh", os.environ["CHECK_PART"]])'
+        timeout-minutes: 30
         env:
           CI: "true"
+          CHECK_PART: ${{ matrix.part }}
+
+  # The ruleset on main requires a check named `macos`; the parts report under
+  # their own names. always(): a job whose need did not pass is skipped
+  # otherwise, and a skipped required check does not block a merge.
+  macos:
+    needs: macos-part
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every macOS part passed
+        env:
+          PARTS_RESULT: ${{ needs.macos-part.result }}
+        run: |
+          echo "macos-part: $PARTS_RESULT"
+          [ "$PARTS_RESULT" = success ]
