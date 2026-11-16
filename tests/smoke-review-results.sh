@@ -1137,7 +1137,11 @@ Repeated on purpose: https://example.com/a
 ANSWER
 PROMPT_START=$SECONDS
 research RESEARCH_ANSWER_FILE="$TMP/answer.md" RESEARCH_STDERR='Ripgrep not found; falling back'
-check 'an ordinary run adds no waiting of its own' test $((SECONDS - PROMPT_START)) -lt 3
+# Same failure and same limit as "an ordinary run does not wait out a bound"
+# above: a fixed wait charged to every call. A stubbed researcher run is
+# 1.2-1.6 s on a developer Mac and slower on a hosted macOS runner, where a
+# 3 s limit failed with nothing waiting (PRs #197, #214, #235).
+check 'an ordinary run adds no waiting of its own' test $((SECONDS - PROMPT_START)) -lt 5
 check 'researcher succeeds' test "$AGY_RC" -eq 0
 check 'answer artifact holds the answer' grep -q 'loader resolves the role' "$AGY_FINAL"
 check 'answer artifact excludes CLI diagnostics' no_match 'Ripgrep not found' "$AGY_FINAL"
