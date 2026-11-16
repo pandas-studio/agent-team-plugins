@@ -83,7 +83,9 @@ Report model, exit code, cause and one recovery step. Distinguish authentication
 (inspect `/permissions`). For a confirmed denial, show the action/target only
 if the wrapper printed it (`agy denied: <kind>(<target>)`, read from agy's own
 record of this run), and explain `command(<target>)`, `read_url(<domain>)`,
-or `mcp(<server/tool>)` as appropriate. If the target is missing, say it is
+or `mcp(<server/tool>)` as appropriate. A `read_file(<path>)` target is a path
+to check (outside the workspace? does it exist?), not a rule to add; the
+recovery guide below has the step. If the target is missing, say it is
 unknown and direct the user to reproduce the question/context in interactive
 agy to see the request, then use `/permissions`. This is another model call,
 not a read-only diagnostic; do not launch it automatically.

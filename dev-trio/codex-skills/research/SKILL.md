@@ -138,6 +138,8 @@ Report the selected model, exit code, cause and the next recovery step:
   because agy could not write its home. Explain the corresponding
   `command(<target>)`, `read_url(<domain>)`, or `mcp(<server/tool>)` allow rule
   using [the recovery guide](../../README.md#research-troubleshooting).
+  A `read_file(<path>)` target is a path to check (outside the workspace? does
+  it exist?), not a rule to add; the guide has the step.
   If the target is absent, say it is unknown and direct the user to inspect
   the request by reproducing the question/context in interactive agy, then use
   `/permissions`. Explain that reproduction is another model call, not a
