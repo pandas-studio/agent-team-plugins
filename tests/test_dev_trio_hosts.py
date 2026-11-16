@@ -1389,6 +1389,12 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         # no allow-rule; the note names the git status form that replaces it.
         self.assertIn("use `git status --short --untracked-files=all` instead of `git ls-files`", note)
         self.assertIn("record the gap in your answer", note)
+        # A read outside the workspace ends a headless run too (7 recorded
+        # denials through 2026-11-16); the CLI's own saved output is the one
+        # outside path the same runs read without a denial.
+        self.assertIn("reading a path outside your workspace is denied and ends this run with no answer at all", note)
+        self.assertIn("never a guessed or placeholder path", note)
+        self.assertIn("saved for a truncated command result is readable at the path it reported", note)
 
     def test_workspace_root_uses_cwd_without_python_instead_of_unbounded_git(self):
         self._init_git_workspace()

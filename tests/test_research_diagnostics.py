@@ -353,6 +353,43 @@ class ResearchDiagnosticsTests(unittest.TestCase):
         self.assertIn('[ask-researcher] agy denied: command(git log -S "```mermaid" --oneline -- slides/src/)', lines)
         self.assertIn(f"[ask-researcher] agy conversation: {self.CONVERSATION}", lines)
 
+    def test_soft_denied_read_file_without_error_step_names_its_path(self):
+        # agy 1.5.9, 2026-11-16: the 4th read of a parallel batch was outside
+        # the workspace and agy exited before writing that step's row.
+        logs = self.agy_home / "brain" / self.CONVERSATION / ".system_generated/logs"
+        logs.mkdir(parents=True)
+        output = "/agy/brain/steps/3/output.txt"
+        rows = [{
+            "step_index": 6,
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "tool_calls": [
+                {"id": "r1", "name": "read_file", "args": {"Path": output, "StartLine": 1, "EndLine": 800}},
+                {"id": "r2", "name": "read_file", "args": {"Path": output, "StartLine": 801, "EndLine": 1600}},
+                {"id": "r3", "name": "read_file", "args": {"Path": "/repo/notes.md"}},
+                {"id": "r4", "name": "read_file", "args": {"Path": "/outside/made_up"}},
+            ],
+        }] + [{"step_index": step, "type": "GENERIC", "status": "DONE"} for step in (7, 8, 9)]
+        (logs / "transcript_full.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+        extra_log = (
+            'W1116 19:26:35.5 1 tool_confirmation_manager.go:221] Print mode: soft-denying tool confirmation '
+            '"ReadFile" at step 10\n'
+            f"I1116 19:26:35.5 1 server.go:2738] Tool confirmation for conversation {self.CONVERSATION} "
+            "step 10 (type=*gemini_coder_go_proto.Step_Generic approved=false)"
+        )
+        result = self.run_script(
+            "ask-researcher.sh", "question", DIAG_RC="0", DIAG_ANSWER="",
+            DIAG_STDERR=self.NOTICE, DIAG_CONVERSATION=self.CONVERSATION,
+            DIAG_CONVERSATION_SUFFIX=" (backend=BACKEND_TYPE_UNSPECIFIED)",
+            DIAG_EXTRA_LOG=extra_log,
+        )
+        self.assertEqual(result.returncode, 5, result.stderr)
+        denied = [line for line in result.stderr.splitlines() if line.startswith("[ask-researcher] agy denied: ")]
+        self.assertEqual(denied, [
+            "[ask-researcher] agy denied: read_file(/outside/made_up) (check whether this path is inside "
+            "the workspace before adding a rule; see the README step on read_file targets)"
+        ])
+
     # A hold for shell shims (#195): readiness, then an external waiter that a
     # process-group signal ends at once. A waiter that times out leaves a
     # marker the test checks, so a late test fails instead of drifting.
