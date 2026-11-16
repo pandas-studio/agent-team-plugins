@@ -66,8 +66,11 @@ jobs:
   # `#!/usr/bin/env bash` resolve to /bin/bash.
   macos:
     runs-on: macos-latest
-    # A local full run took 12-25 min depending on load; cap a hung run.
-    timeout-minutes: 45
+    # check.sh takes about 39 min on the hosted runner, twice the Ubuntu job
+    # (2026-11-16, two commits: two runs passed in 39m14s and 39m42s, two hit
+    # the former 40-minute step limit with every test up to it passed). The
+    # limits cap a hung run; they are not a budget to fill.
+    timeout-minutes: 65
     steps:
       - uses: actions/checkout@v4
         with:
@@ -116,6 +119,6 @@ jobs:
           os.setsid();
           print("check.sh pid", os.getpid(), "pgid", os.getpgid(0), "sid", os.getsid(0), flush=True);
           os.execv("/bin/bash", ["/bin/bash", "scripts/check.sh"])'
-        timeout-minutes: 40
+        timeout-minutes: 60
         env:
           CI: "true"
