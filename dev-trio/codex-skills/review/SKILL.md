@@ -86,7 +86,9 @@ bullets in Markdown, and do not use `latest` artifacts.
   wrote no review. Report each `denied` entry (a target agy recorded as
   denied; agy 1.2.9 ignores `unsandboxed(...)` rules; empty means agy
   recorded none) and `conversation_ids`, and point to the
-  README section "Resolve a confirmed agy permission denial". If a denied
+  README section "Resolve a confirmed agy permission denial". A
+  `read_file(<path>)` entry is a path to check (outside the workspace? does it
+  exist?), not a rule to add. If a denied
   `command(git ...)` target contains backticks (`` ` ``), `$()`, or shell
   operators (even inside `"..."`), agy's `unquoted_shell_operators` check
   prevented the `command(git ...)` prefix rule from matching rather than missing
