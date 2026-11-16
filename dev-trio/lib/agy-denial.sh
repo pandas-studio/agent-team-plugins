@@ -37,7 +37,12 @@ agy_denial_conversations() {
 # CLI log recorded as unapproved tool confirmations for CONVERSATION_ID.
 # agy 1.4+ print-mode soft-denials close the stream before writing a step N
 # {"status":"ERROR"} entry to transcript_full.jsonl, leaving only the preceding
-# PLANNER_RESPONSE (step N-1) and the CLI log's confirmation lines.
+# PLANNER_RESPONSE and the CLI log's confirmation lines. The denied call is
+# then that response's tool call number N - <its step> - 1: each call of a
+# parallel batch takes the next step (agy 1.5.9: equal to the ERROR row's
+# target in the 4 of 7 read_file denials that had one). agy_denial_targets
+# names a run_command by its CommandLine and a read_file by its Path; no
+# other tool's call has been recorded to take the argument from.
 _agy_denial_steps() {
   [ -f "$1" ] && [ -r "$1" ] || { printf '[]\n'; return 0; }
   awk -v id="$2" -v conv_count="${3:-1}" '
@@ -89,6 +94,8 @@ agy_denial_targets() {
       def call_target:
         if (.name == "run_command") and (.args.CommandLine | type == "string") then
           "command(\(.args.CommandLine))"
+        elif (.name == "read_file") and (.args.Path | type == "string") then
+          "read_file(\(.args.Path))"
         else empty end;
       [inputs | fromjson? | select(type == "object")] as $rows
       | ($rows | map(select((.status == "DONE" or .status == "ERROR") and (.step_index | type == "number")) | .step_index)) as $recorded
@@ -153,9 +160,13 @@ agy_denial_notice_only() {
 
 # agy_denial_describe TARGET — one line for a human. unsandboxed(...) rules
 # grant nothing in agy 1.2.9, so that kind is not presented as a rule to add.
+# A read_file target gets a check to make first: every one recorded so far
+# was a path outside the workspace, some of them files that do not exist, and
+# nothing here knows the workspace root to say which this one is.
 agy_denial_describe() {
   case "$1" in
     unsandboxed\(*) printf '%s (unsandboxed rules are ignored by agy 1.2.9; see the README step on them)\n' "$1" ;;
+    read_file\(*) printf '%s (check whether this path is inside the workspace before adding a rule; see the README step on read_file targets)\n' "$1" ;;
     *) printf '%s\n' "$1" ;;
   esac
 }

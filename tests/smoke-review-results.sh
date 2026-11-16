@@ -1449,6 +1449,58 @@ check 'agy 1.4+ print-mode soft-denial extracts the denied command from PLANNER_
   ".status==\"permission-denied\" and .denied==[\"command(git log -S \\\"\`\`\`mermaid\\\" --oneline -- slides/src/)\"] and .conversation_ids==[\"$AGY_ID\"]"
 check 'stderr names the soft-denied backtick git command' grep -Fxq '[ask-reviewer] agy denied: command(git log -S "```mermaid" --oneline -- slides/src/)' "$TMP/wrapper.err"
 
+# A soft-denied read_file (agy 1.5.9, 2026-11-16): the denied call is the 4th
+# of a parallel batch and agy exited before writing its row (step 10), so the
+# path is the planner's. PATH_JSON is that call's Path; further arguments are
+# extra transcript rows.
+agy_read_denial_transcript() {
+  local dir="$AGY_HOME/brain/$AGY_ID/.system_generated/logs" path="$1" row
+  shift
+  rm -rf "$AGY_HOME/brain"
+  mkdir -p "$dir"
+  {
+    jq -cn --argjson path "$path" '{step_index:6,type:"PLANNER_RESPONSE",status:"DONE",tool_calls:[
+      {id:"r1",name:"read_file",args:{Path:"/agy/brain/steps/3/output.txt",StartLine:1,EndLine:800}},
+      {id:"r2",name:"read_file",args:{Path:"/agy/brain/steps/3/output.txt",StartLine:801,EndLine:1600}},
+      {id:"r3",name:"read_file",args:{Path:"/repo/notes.md"}},
+      {id:"r4",name:"read_file",args:{Path:$path}}]}'
+    for row in 7 8 9; do jq -cn --argjson s "$row" '{step_index:$s,type:"GENERIC",status:"DONE"}'; done
+    for row in "$@"; do printf '%s\n' "$row"; done
+  } > "$dir/transcript_full.jsonl"
+}
+agy_read_denial_review() {
+  agy_review 3 TEST_AGY_ID="$AGY_ID" TEST_AGY_LOG_SUFFIX=' (backend=BACKEND_TYPE_UNSPECIFIED)' TEST_AGY_EXTRA_LOG="$READ_LOG" TEST_AGY_NOTICE=1
+}
+READ_LOG=$(printf 'W1116 19:26:35.5 1 tool_confirmation_manager.go:221] Print mode: soft-denying tool confirmation "ReadFile" at step 10\nI1116 19:26:35.5 1 server.go:2738] Tool confirmation for conversation %s step 10 (type=*gemini_coder_go_proto.Step_Generic approved=false)' "$AGY_ID")
+READ_HINT='(check whether this path is inside the workspace before adding a rule; see the README step on read_file targets)'
+read_denied_row() {
+  jq -cn --argjson s "$1" --arg p "$2" '{step_index:$s,type:"GENERIC",status:"ERROR",error:("permission check failed for read_file " + ($p | tojson) + ": user denied permission for read_file(" + $p + ")")}'
+}
+
+agy_read_denial_transcript '"/outside/made_up"'
+agy_read_denial_review
+check 'a soft-denied read_file is named from the planner call at its index' json_is "$RESULT" \
+  ".status==\"permission-denied\" and .denied==[\"read_file(/outside/made_up)\"] and .conversation_ids==[\"$AGY_ID\"]"
+check 'the denial error names the read' json_is "$RESULT" '.error | startswith("agy denied a tool in headless mode: read_file(/outside/made_up) (parse:")'
+check 'stderr names the soft-denied read with the workspace check' grep -Fxq "[ask-reviewer] agy denied: read_file(/outside/made_up) $READ_HINT" "$TMP/wrapper.err"
+
+# The step agy did record is not restored a second time: the planner call
+# here names another path, which would show if the fallback ran.
+agy_read_denial_transcript '"/outside/planner_only"' "$(read_denied_row 10 /outside/recorded)"
+agy_read_denial_review
+check 'a recorded read denial suppresses the planner fallback for that step' json_is "$RESULT" '.denied==["read_file(/outside/recorded)"]'
+
+# The same path from both sources — an earlier denial agy recorded and went on
+# from, then the unrecorded one that ended the run — is listed once.
+agy_read_denial_transcript '"/outside/made_up"' "$(read_denied_row 5 /outside/made_up)"
+agy_read_denial_review
+check 'a read named by an ERROR row and by the planner is listed once' json_is "$RESULT" '.denied==["read_file(/outside/made_up)"]'
+
+agy_read_denial_transcript '{"not":"a string"}'
+agy_read_denial_review
+check 'a read_file call without a string Path names no target' json_is "$RESULT" '.status=="permission-denied" and .denied==[] and (.error|contains("target unknown"))'
+check 'stderr says that read target is not recorded' grep -q 'its target is not recorded' "$TMP/wrapper.err"
+
 rm -rf "$AGY_HOME/brain"
 agy_review 3 TEST_AGY_NOTICE=1
 check 'a notice-only run with no record is a denial of unknown target' json_is "$RESULT" '.status=="permission-denied" and .denied==[] and .conversation_ids==[] and (.error|contains("target unknown"))'
