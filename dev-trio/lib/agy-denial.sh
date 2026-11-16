@@ -12,7 +12,13 @@
 # one JSON object per line; a denial is {"status":"ERROR","error":"permission
 # check failed for <kind> \"<target>\": …"} with the target quoted Go-style.
 # The conversation id is read from the CLI log a wrapper pinned with
-# --log-file (line "server.go:NNNN] Created conversation <id> …").
+# --log-file (message "Created conversation <id> …").
+#
+# That log is glog's: each line is "<level><mmdd> <time> <thread> <file>.go:
+# <line>] <message>". A line is read only as such an event, the header at the
+# start of the line and the message right after it. The log also holds text
+# agy did not write as an event — an allow rule is printed in full — and a
+# phrase found anywhere in a line would let that text stand in for one.
 #
 # Everything here is best-effort diagnosis: missing or partly written files
 # yield fewer lines, never an error, and callers must not let it change a
@@ -21,13 +27,22 @@
 
 _AGY_DENIAL_UUID_RE='^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
 _AGY_DENIAL_NOTICE='jetski: no output produced'
+# The header as an ERE without backslashes, so `awk -v` passes it unchanged.
+# Field widths vary (the thread id is padded); a format this does not match
+# yields no event, which reads as "target unknown", never as a wrong target.
+_AGY_DENIAL_LOG_PREFIX='^[IWEF][0-9]+ [0-9:.]+ +[0-9]+ [^][:space:]]+[.]go:[0-9]+[]] '
 
 # agy_denial_conversations CLI_LOG — each well-formed conversation id the log
 # records, in order. Anything else on such a line (a path, "../x", or trailing
 # fields such as "(backend=...)") is dropped before it can become part of a path.
 agy_denial_conversations() {
   [ -f "$1" ] && [ -r "$1" ] || return 0
-  sed -n 's/^.*server\.go:[0-9][0-9]*\] Created conversation \([^[:space:]]*\)\([[:space:]].*\)\{0,1\}$/\1/p' "$1" 2>/dev/null \
+  awk -v pre="$_AGY_DENIAL_LOG_PREFIX" '
+    match($0, pre) {
+      msg = substr($0, RLENGTH + 1)
+      if (msg ~ /^Created conversation [^[:space:]]/) { split(msg, field, /[[:space:]]+/); print field[3] }
+    }
+  ' "$1" 2>/dev/null \
     | grep -E "$_AGY_DENIAL_UUID_RE" 2>/dev/null \
     | awk '!seen[$0]++'
   return 0
@@ -37,23 +52,26 @@ agy_denial_conversations() {
 # CLI log recorded as unapproved tool confirmations for CONVERSATION_ID.
 # agy 1.4+ print-mode soft-denials close the stream before writing a step N
 # {"status":"ERROR"} entry to transcript_full.jsonl, leaving only the preceding
-# PLANNER_RESPONSE (step N-1) and the CLI log's confirmation lines.
+# PLANNER_RESPONSE (step N-1) and the CLI log's confirmation lines. A log
+# with no "Tool confirmation" line and one conversation falls back to its
+# "soft-denying" lines, whatever one-word tool kind they name.
 _agy_denial_steps() {
   [ -f "$1" ] && [ -r "$1" ] || { printf '[]\n'; return 0; }
-  awk -v id="$2" -v conv_count="${3:-1}" '
-    match($0, /Tool confirmation for conversation [0-9a-f-]+ step [0-9]+ .*approved=false/) {
+  awk -v id="$2" -v conv_count="${3:-1}" -v pre="$_AGY_DENIAL_LOG_PREFIX" '
+    !match($0, pre) { next }
+    { msg = substr($0, RLENGTH + 1) }
+    match(msg, /^Tool confirmation for conversation [0-9a-f-]+ step [0-9]+ .*approved=false/) {
       has_conv = 1
-      s = substr($0, RSTART, RLENGTH)
+      s = substr(msg, RSTART, RLENGTH)
       sub(/^Tool confirmation for conversation /, "", s)
       cid = s; sub(/ step .*$/, "", cid)
       st = s; sub(/^[^ ]+ step /, "", st); sub(/[^0-9].*$/, "", st)
       if (cid == id && st ~ /^[0-9]+$/) conv_steps[++nc] = st + 0
       next
     }
-    match($0, /Print mode: soft-denying tool confirmation "RunCommand" at step [0-9]+/) {
-      s = substr($0, RSTART, RLENGTH)
+    match(msg, /^Print mode: soft-denying tool confirmation "[A-Za-z]+" at step [0-9]+/) {
+      s = substr(msg, RSTART, RLENGTH)
       sub(/^.* at step /, "", s)
-      sub(/[^0-9].*$/, "", s)
       if (s ~ /^[0-9]+$/) soft_steps[++ns] = s + 0
     }
     END {

@@ -42,7 +42,7 @@ class ResearchDiagnosticsTests(unittest.TestCase):
             'if [ "$1" = --version ]; then echo "fixture CLI 1.2.7"; exit 0; fi\n'
             # Like agy, record the conversation in the pinned --log-file.
             'if [ "$1" = --log-file ] && [ -n "${DIAG_CONVERSATION:-}" ]; then\n'
-            '  printf "I0923 1 server.go:1239] Created conversation %s%s\\n" "$DIAG_CONVERSATION" "${DIAG_CONVERSATION_SUFFIX:-}" > "$2"\n'
+            '  printf "I0923 17:51:49.1 1 server.go:1239] Created conversation %s%s\\n" "$DIAG_CONVERSATION" "${DIAG_CONVERSATION_SUFFIX:-}" > "$2"\n'
             '  [ -z "${DIAG_EXTRA_LOG:-}" ] || printf "%s\\n" "$DIAG_EXTRA_LOG" >> "$2"\n'
             'fi\n'
             'if [ -n "${DIAG_READY:-}" ]; then : > "$DIAG_READY"; fi\n'
