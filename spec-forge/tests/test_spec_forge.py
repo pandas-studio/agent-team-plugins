@@ -481,6 +481,24 @@ class LintTest(SpecForgeCase):
         self.backlog("- [x] (§4)", "- [ ] Tidy up.\n- [x] (§4)")
         self.assertEqual(self.rules(), {"B2"})
 
+    def test_seeded_spec_trio_backlog_rows_cite_in_parentheses(self):
+        """spec-trio's bootstrap BACKLOG shows the citation form this lint reads.
+
+        Its rows carry `(replace this)` placeholders (P2) until filled in, but
+        none may read as uncited (B2): a row written by following the template
+        must pass B2 once the placeholder text is replaced.
+        """
+        template = ROOT / "spec-trio/prompts/BACKLOG.md.template"
+        (self.run_dir / "BACKLOG.md").write_text(template.read_text())
+        self.lint()
+        report = json.loads((self.run_dir / "lint.json").read_text())
+        self.assertNotIn("B2", {v["rule"] for v in report["violations"]})
+        filled = template.read_text().replace("(replace this) ", "")
+        (self.run_dir / "BACKLOG.md").write_text(filled)
+        self.lint()
+        report = json.loads((self.run_dir / "lint.json").read_text())
+        self.assertEqual({v["rule"] for v in report["violations"]} & {"B2", "P2"}, set())
+
     def test_B3_unknown_citation(self):
         self.backlog("- [x] (§4)", "- [ ] (spec §7.1) Something else.\n- [x] (§4)")
         self.assertEqual(self.rules(), {"B3"})

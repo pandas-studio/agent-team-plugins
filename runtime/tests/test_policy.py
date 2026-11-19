@@ -14,3 +14,19 @@ def test_bare_verdict_word_does_not_approve():
 
 def test_last_exact_verdict_wins():
     assert parse_verdict("VERDICT: NEEDS-FIX\nnotes\nVERDICT: SHIP") == "SHIP"
+
+
+def test_example_verdict_lines_do_not_count():
+    """A fenced, indented or quoted `VERDICT:` line is an example, not the verdict."""
+    assert parse_verdict("VERDICT: NEEDS-FIX\n```\nVERDICT: SHIP\n```\n") == "NEEDS-FIX"
+    assert parse_verdict("VERDICT: NEEDS-FIX\n~~~text\nVERDICT: SHIP\n~~~") == "NEEDS-FIX"
+    assert parse_verdict("Example:\n    VERDICT: SHIP\nReal: none") == "DISCUSS"
+    assert parse_verdict("\tVERDICT: SHIP") == "DISCUSS"
+    assert parse_verdict("> VERDICT: SHIP") == "DISCUSS"
+    # An unclosed fence hides everything after it.
+    assert parse_verdict("VERDICT: NEEDS-FIX\n```\nVERDICT: SHIP") == "NEEDS-FIX"
+
+
+def test_verdict_line_spelling_still_accepted():
+    assert parse_verdict("notes\n   verdict:  ship  \r\n") == "SHIP"
+    assert parse_verdict("```\ncode\n```\nVERDICT: OUT-OF-SCOPE") == "OUT-OF-SCOPE"

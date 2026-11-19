@@ -412,5 +412,59 @@ class DebateAnswerTests(unittest.TestCase):
         self.assertEqual([(r["round"], r["rc"]) for r in rows if r["t"] == "end"], [(1, 143)])
 
 
+class CriticVerdictTests(unittest.TestCase):
+    """debate_critic_verdict: the one reader of a critic transcript's verdict."""
+
+    LIB = ROOT / "debate-conductor/lib/debate-result.sh"
+
+    def verdict(self, text):
+        with tempfile.TemporaryDirectory(prefix="critic-verdict-") as tmp:
+            path = Path(tmp) / "round-2-crit.md"
+            path.write_bytes(text.encode())
+            result = subprocess.run(["bash", "-c", '. "$1"; debate_critic_verdict "$2"; echo "rc=$?"',
+                                     "test", str(self.LIB), str(path)],
+                                    capture_output=True, text=True, timeout=15)
+        self.assertTrue(result.stdout.endswith("rc=0\n"), result)
+        return result.stdout[:-len("rc=0\n")].strip()
+
+    def test_canonical_last_line(self):
+        self.assertEqual(self.verdict("## Verdict\nOVERTURN — wrong premise\n\nVerdict: OVERTURN\n"), "OVERTURN")
+        self.assertEqual(self.verdict("<!-- debate-round: 2 crit codex -->\n## Verdict\nx\n\nVerdict: RECONSIDER\r\n"),
+                         "RECONSIDER")
+
+    def test_section_text_is_never_a_verdict(self):
+        # Ralph's old fallback took the first token substring in `## Verdict`,
+        # checking STRENGTHEN first, so both of these read as STRENGTHEN.
+        self.assertEqual(self.verdict("## Verdict\nOVERTURN — the STRENGTHEN case fails\n"), "")
+        self.assertEqual(self.verdict("## Verdict\n<one of: STRENGTHEN / RECONSIDER / OVERTURN> — <reason>\n"), "")
+
+    def test_examples_and_decorated_lines_do_not_count(self):
+        self.assertEqual(self.verdict("Verdict: OVERTURN\n```\nVerdict: STRENGTHEN\n```\n"), "OVERTURN")
+        self.assertEqual(self.verdict("Verdict: OVERTURN\n~~~md\nVerdict: STRENGTHEN\n~~~\n"), "OVERTURN")
+        self.assertEqual(self.verdict("## Critique\n    Verdict: STRENGTHEN\n"), "")
+        self.assertEqual(self.verdict("## Critique\n  Verdict: STRENGTHEN\n"), "")
+        self.assertEqual(self.verdict("> Verdict: STRENGTHEN\n"), "")
+        self.assertEqual(self.verdict("**Verdict: STRENGTHEN**\n"), "")
+        self.assertEqual(self.verdict("Verdict: STRENGTHEN.\n"), "")
+
+    def test_a_fence_closes_only_on_its_own_character(self):
+        self.assertEqual(self.verdict("Verdict: OVERTURN\n```\n`~~\nVerdict: STRENGTHEN\n```\n"), "OVERTURN")
+        self.assertEqual(self.verdict("~~~`\nx\n~~~\nVerdict: OVERTURN\n"), "OVERTURN")
+        self.assertEqual(self.verdict("``` a`b\nVerdict: OVERTURN\n"), "OVERTURN")
+
+    def test_kimi_envelope_with_trailing_session_notice(self):
+        text = ("• ## Verdict\n  STRENGTHEN — sound\n\n• Verdict: STRENGTHEN\n"
+                "To resume this session: kimi -r 0123abcd-4567\n")
+        self.assertEqual(self.verdict(text), "STRENGTHEN")
+        self.assertEqual(self.verdict("<!-- debate-round: 2 crit kimi -->\n• Verdict: OVERTURN\n"), "OVERTURN")
+
+    def test_missing_or_empty_file(self):
+        self.assertEqual(self.verdict(""), "")
+        result = subprocess.run(["bash", "-c", '. "$1"; debate_critic_verdict "$2" </dev/null; echo "rc=$?"',
+                                 "test", str(self.LIB), "/nonexistent/round-2-crit.md"],
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.stdout, "rc=0\n")
+
+
 if __name__ == "__main__":
     unittest.main()

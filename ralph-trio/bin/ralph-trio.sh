@@ -258,20 +258,6 @@ build_range_hint() {
   fi
 }
 
-# Extract the NEED RESEARCH question(s) if present
-extract_need_research() {
-  local f="$1"
-  # No readable file (e.g. a failed review left the path empty): no questions.
-  # Never let awk fall back to reading stdin.
-  [ -n "$f" ] && [ -f "$f" ] || return 0
-  awk '
-    /^## NEED RESEARCH/ { in_r = 1; next }
-    in_r && /^## /      { in_r = 0 }
-    in_r                { print }
-  ' "$f" 2>/dev/null
-}
-
-
 ITER=0
 COMPLETED=0
 # --dry-run termination ceiling. --max-iter 0 (unlimited) combined with the
@@ -371,7 +357,9 @@ while :; do
   CODE_LOG="$LOG_DIR/ralph-trio-$TS-iter-$ITER-code.log"
   REVIEW_LOG="$LOG_DIR/ralph-trio-$TS-iter-$ITER-review.log"
   RESEARCH_LOG="$LOG_DIR/ralph-trio-$TS-iter-$ITER-research.log"
+  RESEARCH_ANSWER="$LOG_DIR/ralph-trio-$TS-iter-$ITER-research-answer.md"
   PLAN_RESEARCH_LOG="$LOG_DIR/ralph-trio-$TS-iter-$ITER-research-plan.log"
+  PLAN_RESEARCH_ANSWER="$LOG_DIR/ralph-trio-$TS-iter-$ITER-research-plan-answer.md"
 
   # Wrapped fix_plan excerpt (optional, -literal-stripped)
   FP_EXCERPT=""
@@ -433,7 +421,7 @@ while :; do
   # is reset every iter and threads into Stage 2's build_coder_prompt.
   PRE_RESEARCH=""
   if [ "$PLAN_FAILED" = "0" ] && [ "$DRY_RUN" != "1" ] && [ "$NO_RESEARCH" = "0" ]; then
-    PLAN_RESEARCH_QS=$(extract_need_research "$PLAN_STDOUT")
+    PLAN_RESEARCH_QS=$(stage_need_section "$PLAN_STDOUT" "NEED RESEARCH")
     if [ -n "$PLAN_RESEARCH_QS" ]; then
       ralph_log "  [stage 1.5] planner requested research → $PLAN_RESEARCH_LOG"
       manifest_init ralph-research "$PLAN_RESEARCH_LOG"
@@ -441,10 +429,12 @@ while :; do
       manifest_set_parent "$PARENT_RUN_ID"   # parent = planner
       manifest_add_input kind=question value="$PLAN_RESEARCH_QS"
       # Durable agy log under ralph's tree (survives worktree teardown); the
-      # research body is captured via the tee into $PLAN_RESEARCH_LOG.
+      # answer is ask-researcher.sh's stdout alone, kept in $PLAN_RESEARCH_ANSWER and
+      # appended to the log; its stderr (status line, diagnostics) never reaches <research>.
       RESEARCH_RC=0
       ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$LOG_DIR/agy" \
-          MANIFEST_PARENT_TMP="$MANIFEST_TMP" "$ASK_RESEARCHER" "$PLAN_RESEARCH_QS" </dev/null 2>&1 ) | tee "$PLAN_RESEARCH_LOG" >/dev/null || RESEARCH_RC=$?
+          MANIFEST_PARENT_TMP="$MANIFEST_TMP" "$ASK_RESEARCHER" "$PLAN_RESEARCH_QS" </dev/null 2>"$PLAN_RESEARCH_LOG" ) >"$PLAN_RESEARCH_ANSWER" || RESEARCH_RC=$?
+      cat "$PLAN_RESEARCH_ANSWER" >> "$PLAN_RESEARCH_LOG" 2>/dev/null || true
       [ "$RESEARCH_RC" -ne 0 ] && manifest_add_input kind=research-rc value="$RESEARCH_RC"
       manifest_finalize || { manifest_cleanup; exit 1; }
       PARENT_RUN_ID="$PLAN_RESEARCH_RUN_ID"  # coder's parent becomes research
@@ -458,7 +448,7 @@ while :; do
         ralph_log "  [stage 1.5] ask-researcher.sh failed (rc=$RESEARCH_RC) — research unavailable; not injecting error output (see $PLAN_RESEARCH_LOG)"
         RESEARCH_FAILED=1
       else
-        PRE_RESEARCH="$(cat "$PLAN_RESEARCH_LOG")"
+        PRE_RESEARCH="$(cat "$PLAN_RESEARCH_ANSWER")"
       fi
     fi
   fi
@@ -496,7 +486,7 @@ while :; do
     manifest_set_parent "$PARENT_RUN_ID"
     manifest_add_input kind=task value="$TASK"
     manifest_add_input kind=plan path="$PLAN_STDOUT"
-    [ -n "$PRE_RESEARCH" ] && manifest_add_input kind=research path="$PLAN_RESEARCH_LOG"
+    [ -n "$PRE_RESEARCH" ] && manifest_add_input kind=research path="$PLAN_RESEARCH_ANSWER"
     if [ "$DRY_RUN" = "1" ]; then
       manifest_add_input kind=skip-reason value=dry-run
       echo "[dry-run code] would implement plan for: $TASK" | tee "$CODE_LOG" >/dev/null
@@ -627,7 +617,7 @@ while :; do
 
     # NEED RESEARCH branch — runs once
     if [ "$NO_RESEARCH" = "0" ]; then
-      RESEARCH_QS=$(extract_need_research "$REVIEW_SRC")
+      RESEARCH_QS=$(stage_need_section "$REVIEW_SRC" "NEED RESEARCH")
       if [ -n "$RESEARCH_QS" ]; then
         # Stage 4: Research (parent = stage 3 review)
         ralph_log "  [stage 3.5] codex requested research → $RESEARCH_LOG"
@@ -635,20 +625,21 @@ while :; do
         RESEARCH_RUN_ID="$MANIFEST_RUN_ID"
         manifest_set_parent "$REVIEW_RUN_ID"
         # Researcher role recorded by ask-researcher.sh via the PR 9 carve-out.
-        # Research content is captured durably via the tee into $RESEARCH_LOG
-        # (ralph's main-repo log tree); DEV_TRIO_LOG_DIR pins ask-researcher.sh's own
+        # The answer (stdout only) lands in $RESEARCH_ANSWER and is appended to
+        # $RESEARCH_LOG (ralph's main-repo log tree); DEV_TRIO_LOG_DIR pins ask-researcher.sh's own
         # researcher-<TS>-<PID>.log there too so it doesn't litter the (torn-down) worktree.
         manifest_add_input kind=question value="$RESEARCH_QS"
         RESEARCH_RC=0
         ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$LOG_DIR/agy" \
-            MANIFEST_PARENT_TMP="$MANIFEST_TMP" "$ASK_RESEARCHER" "$RESEARCH_QS" </dev/null 2>&1 ) | tee "$RESEARCH_LOG" >/dev/null || RESEARCH_RC=$?
+            MANIFEST_PARENT_TMP="$MANIFEST_TMP" "$ASK_RESEARCHER" "$RESEARCH_QS" </dev/null 2>"$RESEARCH_LOG" ) >"$RESEARCH_ANSWER" || RESEARCH_RC=$?
+        cat "$RESEARCH_ANSWER" >> "$RESEARCH_LOG" 2>/dev/null || true
         [ "$RESEARCH_RC" -ne 0 ] && manifest_add_input kind=research-rc value="$RESEARCH_RC"
         manifest_finalize || { manifest_cleanup; exit 1; }
         # Stage 5: Code2 (parent = research)
         RESEARCH=""
         if [ "$RESEARCH_RC" -eq 0 ]; then
           ralph_log "  [stage 2 retry] re-running coder with research"
-          RESEARCH="$(cat "$RESEARCH_LOG")"
+          RESEARCH="$(cat "$RESEARCH_ANSWER")"
         else
           # As in Stage 1.5: $RESEARCH_LOG holds the failure stream, not facts.
           ralph_log "  [stage 3.5] ask-researcher.sh failed (rc=$RESEARCH_RC) — re-running coder without research; not injecting error output (see $RESEARCH_LOG)"
@@ -674,8 +665,8 @@ $RESEARCH"
         manifest_add_role worker "$CODER_MODEL" "$ROLES_DIR/worker.md"
         manifest_add_input kind=task value="$TASK"
         manifest_add_input kind=plan path="$PLAN_STDOUT"
-        [ -n "$PRE_RESEARCH" ] && manifest_add_input kind=research path="$PLAN_RESEARCH_LOG"
-        [ "$RESEARCH_RC" -eq 0 ] && manifest_add_input kind=research path="$RESEARCH_LOG"
+        [ -n "$PRE_RESEARCH" ] && manifest_add_input kind=research path="$PLAN_RESEARCH_ANSWER"
+        [ "$RESEARCH_RC" -eq 0 ] && manifest_add_input kind=research path="$RESEARCH_ANSWER"
         CODE_PROMPT2=$(build_coder_prompt "$TASK" "$PLAN" "$PROMPT_CONTEXT" "$RETRY_RESEARCH" "$FP_EXCERPT")
         CODE_RC=0
         STAGE_PROMPT=$CODE_PROMPT2

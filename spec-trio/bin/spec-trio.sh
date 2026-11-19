@@ -332,20 +332,6 @@ build_range_hint() {
   fi
 }
 
-
-# Extract the NEED RESEARCH question(s) if present
-extract_need_research() {
-  local f="$1"
-  # No readable file (e.g. a failed review left the path empty): no questions.
-  # Never let awk fall back to reading stdin.
-  [ -n "$f" ] && [ -f "$f" ] || return 0
-  awk '
-    /^## NEED RESEARCH/ { in_r = 1; next }
-    in_r && /^## /      { in_r = 0 }
-    in_r                { print }
-  ' "$f" 2>/dev/null
-}
-
 # Scope exemptions cover driver-owned contract/backlog files and only the
 # configured workspace's log/ and state/ subdirectories, even when the workspace
 # root is WORK_DIR. Directory exemptions end in / for check_scope prefix matching.
@@ -524,7 +510,9 @@ while :; do
   CODE_LOG="$LOG_DIR/spec-trio-$TS-iter-$ITER-code.log"
   REVIEW_LOG="$LOG_DIR/spec-trio-$TS-iter-$ITER-review.log"
   RESEARCH_LOG="$LOG_DIR/spec-trio-$TS-iter-$ITER-research.log"
+  RESEARCH_ANSWER="$LOG_DIR/spec-trio-$TS-iter-$ITER-research-answer.md"
   PLAN_RESEARCH_LOG="$LOG_DIR/spec-trio-$TS-iter-$ITER-research-plan.log"
+  PLAN_RESEARCH_ANSWER="$LOG_DIR/spec-trio-$TS-iter-$ITER-research-plan-answer.md"
   SCOPE_LOG="$LOG_DIR/spec-trio-$TS-iter-$ITER-scope.log"
   SCOPE_FAIL=0           # 1 = pipeline short-circuited to OUT-OF-SCOPE
   ALLOWED_PATHS_LIST=""  # populated after Stage 1; empty = no plan parse yet
@@ -646,7 +634,7 @@ while :; do
   # --dry-run / --no-research. PRE_RESEARCH was reset above and threads into
   # Stage 2's build_coder_prompt.
   if [ "$PLAN_FAILED" = "0" ] && [ "$SCOPE_FAIL" = "0" ] && [ "$DRY_RUN" != "1" ] && [ "$NO_RESEARCH" = "0" ]; then
-    PLAN_RESEARCH_QS=$(extract_need_research "$PLAN_STDOUT")
+    PLAN_RESEARCH_QS=$(stage_need_section "$PLAN_STDOUT" "NEED RESEARCH")
     if [ -n "$PLAN_RESEARCH_QS" ]; then
       ralph_log "  [stage 1.5] planner requested research → $PLAN_RESEARCH_LOG"
       manifest_init spec-research "$PLAN_RESEARCH_LOG" || exit 1
@@ -655,10 +643,12 @@ while :; do
       manifest_add_input kind=spec path="$SPEC_FILE" || exit 1
       manifest_add_input kind=question value="$PLAN_RESEARCH_QS" || exit 1
       # Durable agy log under spec-trio's tree (survives worktree teardown); the
-      # research body is captured via the tee into $PLAN_RESEARCH_LOG.
+      # answer is ask-researcher.sh's stdout alone, kept in $PLAN_RESEARCH_ANSWER and
+      # appended to the log; its stderr (status line, diagnostics) never reaches <research>.
       RESEARCH_RC=0
       ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$LOG_DIR/agy" \
-          MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage "$ASK_RESEARCHER" "$PLAN_RESEARCH_QS" </dev/null 2>&1 ) | tee "$PLAN_RESEARCH_LOG" >/dev/null || RESEARCH_RC=$?
+          MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage "$ASK_RESEARCHER" "$PLAN_RESEARCH_QS" </dev/null 2>"$PLAN_RESEARCH_LOG" ) >"$PLAN_RESEARCH_ANSWER" || RESEARCH_RC=$?
+      cat "$PLAN_RESEARCH_ANSWER" >> "$PLAN_RESEARCH_LOG" 2>/dev/null || true
       spec_check_or_stop
       [ "$RESEARCH_RC" -ne 0 ] && manifest_add_input kind=research-rc value="$RESEARCH_RC"
       manifest_finalize || exit 1
@@ -673,7 +663,7 @@ while :; do
         ralph_log "  [stage 1.5] ask-researcher.sh failed (rc=$RESEARCH_RC) — research unavailable; not injecting error output (see $PLAN_RESEARCH_LOG)"
         RESEARCH_FAILED=1
       else
-        PRE_RESEARCH="$(cat "$PLAN_RESEARCH_LOG")"
+        PRE_RESEARCH="$(cat "$PLAN_RESEARCH_ANSWER")"
       fi
     fi
   fi
@@ -721,7 +711,7 @@ while :; do
     else
       manifest_add_role worker "$CODER_MODEL" "$ROLES_DIR/worker.md" || exit 1
       [ -n "$PROMPT_FILE" ] && manifest_add_input kind=prompt-md path="$PROMPT_FILE"
-      [ -n "$PRE_RESEARCH" ] && manifest_add_input kind=research path="$PLAN_RESEARCH_LOG"
+      [ -n "$PRE_RESEARCH" ] && manifest_add_input kind=research path="$PLAN_RESEARCH_ANSWER"
       if [ "$INJECT_FIX_PLAN" = "1" ]; then
         manifest_add_input kind=fix-plan path="$FIX_PLAN_FILE" || exit 1
         manifest_add_input kind=fix-plan-tail value="$FIX_PLAN_TAIL" || exit 1
@@ -833,10 +823,13 @@ while :; do
     # the PR 9 nested-write carve-out (it knows REVIEWER_ROLE_FILE; we don't).
     # DEV_TRIO_LOG_DIR pins ask-reviewer.sh's .final.md into spec-trio's durable
     # log tree (survives worktree teardown — see CODEX_FINAL_ROOT above).
+    # The focus only describes the scope. The reviewer role already fixes the
+    # output format, and the focus lands inside <review_target>, where text
+    # about output format is untrusted (ralph-trio.sh removed the same thing).
     RANGE_HINT=$(build_range_hint "$ITER_BASE_SHA" "$WORK_DIR")
     REVIEW_RECEIPT=$(review_receipt_create "$REVIEW_LOG") || exit 2
     ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$CODEX_FINAL_ROOT" \
-        DEV_TRIO_REVIEW_PROFILE=spec DEV_TRIO_REVIEW_RECEIPT="$REVIEW_RECEIPT" MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage "$ASK_REVIEWER" --with-spec "$SPEC_FILE" "Review uncommitted+committed changes related to this task: '$TASK'.${RANGE_HINT} Use the standard SHIP/NEEDS-FIX/DISCUSS/OUT-OF-SCOPE verdict format from your role prompt." </dev/null 2>&1 ) | tee "$REVIEW_LOG" >/dev/null
+        DEV_TRIO_REVIEW_PROFILE=spec DEV_TRIO_REVIEW_RECEIPT="$REVIEW_RECEIPT" MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage "$ASK_REVIEWER" --with-spec "$SPEC_FILE" "Review uncommitted+committed changes related to this task: '$TASK'.${RANGE_HINT}" </dev/null 2>&1 ) | tee "$REVIEW_LOG" >/dev/null
     # PIPESTATUS[0] = ask-reviewer.sh's rc (the subshell). Non-zero means codex
     # invocation or result processing failed — even if it echoes the verdict
     # placeholder, so naive parsing would yield a bogus verdict. Force UNKNOWN
@@ -872,7 +865,7 @@ while :; do
 
     # NEED RESEARCH branch — runs once. Read from the authoritative final.
     if [ "$NO_RESEARCH" = "0" ] && { [ "$VERDICT" = "SHIP" ] || [ "$VERDICT" = "NEEDS-FIX" ]; }; then
-      RESEARCH_QS=$(extract_need_research "$REVIEW_SRC")
+      RESEARCH_QS=$(stage_need_section "$REVIEW_SRC" "NEED RESEARCH")
       if [ -n "$RESEARCH_QS" ]; then
         # Stage 4: Research (parent = stage 3 review)
         ralph_log "  [stage 3.5] codex requested research → $RESEARCH_LOG"
@@ -882,19 +875,20 @@ while :; do
         # Researcher role recorded by ask-researcher.sh via the PR 9 carve-out.
         # DEV_TRIO_LOG_DIR pins ask-researcher.sh's own researcher-<TS>-<PID>.log into spec-trio's
         # main-repo log tree so it doesn't litter the (torn-down) worktree; the
-        # research content is captured durably via the tee into $RESEARCH_LOG.
+        # answer (stdout only) lands in $RESEARCH_ANSWER and is appended to $RESEARCH_LOG.
         manifest_add_input kind=spec path="$SPEC_FILE" || exit 1
         manifest_add_input kind=question value="$RESEARCH_QS" || exit 1
         RESEARCH_RC=0
         ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$LOG_DIR/agy" \
-            MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage "$ASK_RESEARCHER" "$RESEARCH_QS" </dev/null 2>&1 ) | tee "$RESEARCH_LOG" >/dev/null || RESEARCH_RC=$?
+            MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage "$ASK_RESEARCHER" "$RESEARCH_QS" </dev/null 2>"$RESEARCH_LOG" ) >"$RESEARCH_ANSWER" || RESEARCH_RC=$?
+        cat "$RESEARCH_ANSWER" >> "$RESEARCH_LOG" 2>/dev/null || true
         spec_check_or_stop
         manifest_add_input kind=research-rc value="$RESEARCH_RC" || exit 1
         manifest_finalize || exit 1
         # Stage 5: Code2 (parent = research)
         ralph_log "  [stage 2 retry] re-running coder with research"
         RESEARCH=""
-        [ "$RESEARCH_RC" -ne 0 ] || RESEARCH="$(cat "$RESEARCH_LOG")"
+        [ "$RESEARCH_RC" -ne 0 ] || RESEARCH="$(cat "$RESEARCH_ANSWER")"
         # Carry the planner's pre-coding research (Stage 1.5, if any) into the
         # retry too: the first coder built on it, so dropping it here would make
         # the retry coder lose facts it relied on. Stack the planner block above
@@ -912,8 +906,12 @@ $RESEARCH"
         manifest_add_input kind=task value="$TASK" || exit 1
         manifest_add_input kind=spec path="$SPEC_FILE" || exit 1
         manifest_add_input kind=plan path="$PLAN_STDOUT" || exit 1
-        [ -n "${PRE_RESEARCH:-}" ] && manifest_add_input kind=research path="${PLAN_RESEARCH_LOG:-}"
-        manifest_add_input kind=research path="$RESEARCH_LOG" || exit 1
+        [ -n "${PRE_RESEARCH:-}" ] && manifest_add_input kind=research path="${PLAN_RESEARCH_ANSWER:-}"
+        # Failed research has no answer to record; its log and research-rc stay
+        # on the research manifest.
+        if [ "$RESEARCH_RC" -eq 0 ]; then
+          manifest_add_input kind=research path="$RESEARCH_ANSWER" || exit 1
+        fi
         [ -n "$ALLOWED_JOINED" ] && manifest_add_input kind=allowed-paths value="$ALLOWED_JOINED"
         CODE_PROMPT2=$(build_coder_prompt "$TASK" "$SPEC_BODY" "$PLAN" "$PROMPT_CONTEXT" "$RETRY_RESEARCH" "$FP_EXCERPT")
         CODE_RC=0
@@ -965,7 +963,7 @@ $RESEARCH"
           RANGE_HINT2=$(build_range_hint "$ITER_BASE_SHA" "$WORK_DIR")
           REVIEW_RECEIPT=$(review_receipt_create "$REVIEW2_LOG") || exit 2
           ( cd "$WORK_DIR" && AGENT_TEAM="$TEAM" DEV_TRIO_LOG_DIR="$CODEX_FINAL_ROOT" \
-              DEV_TRIO_REVIEW_PROFILE=spec DEV_TRIO_REVIEW_RECEIPT="$REVIEW_RECEIPT" MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage "$ASK_REVIEWER" --with-spec "$SPEC_FILE" "Re-review the same task after research-informed retry: '$TASK'.${RANGE_HINT2} Use the standard SHIP/NEEDS-FIX/DISCUSS/OUT-OF-SCOPE verdict format from your role prompt." </dev/null 2>&1 ) | tee "$REVIEW2_LOG" >/dev/null
+              DEV_TRIO_REVIEW_PROFILE=spec DEV_TRIO_REVIEW_RECEIPT="$REVIEW_RECEIPT" MANIFEST_PARENT_TMP="$MANIFEST_TMP" spec_run_stage "$ASK_REVIEWER" --with-spec "$SPEC_FILE" "Re-review the same task after research-informed retry: '$TASK'.${RANGE_HINT2}" </dev/null 2>&1 ) | tee "$REVIEW2_LOG" >/dev/null
           CODEX2_RC=${PIPESTATUS[0]}
           spec_check_or_stop
           REVIEW_DATA=$(review_result_from_receipt "$REVIEW_RECEIPT" "$CODEX2_RC") || REVIEW_DATA=""
