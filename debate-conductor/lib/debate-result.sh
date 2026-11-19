@@ -144,3 +144,66 @@ debate_receipt_field() {
   data="$(debate_receipt_read "$1")" || return 1
   printf '%s\n' "$data" | jq -r --arg f "$2" '.[$f] // "" | tostring'
 }
+
+# debate_critic_verdict FILE — print the critic's canonical verdict token
+# (STRENGTHEN, RECONSIDER or OVERTURN), or nothing.
+#
+# critic.md makes `Verdict: TOKEN` the answer's last line, exactly that and
+# nothing else, and this is the only reader of it: debate.sh's --until-converged
+# and ralph-debate.sh both call it, so one transcript has one verdict. A line
+# inside a code fence, indented, quoted or decorated is an example, and text in
+# the `## Verdict` section is prose; neither is read as the verdict. The last
+# canonical line wins. A leading round marker is skipped, and the Kimi print
+# envelope (`• ` first lines, two-space continuations, trailing session notices)
+# is unwrapped only when the whole answer has that shape — the rule
+# dev-trio/lib/review-result.sh applies. Nothing printed means no verdict: the
+# caller decides what that is (debate.sh: not converged; ralph-debate: UNKNOWN).
+debate_critic_verdict() {
+  [ -f "$1" ] || return 0
+  awk '
+    # Length of the run of character ch that s starts with.
+    function run_of(s, ch,    n) { n = 0; while (substr(s, n + 1, 1) == ch) n++; return n }
+    function read_line(line, candidate, ch, n) {
+      candidate = line; sub(/^ ? ? ?/, "", candidate)
+      if (fence != "") {
+        # Only a run of the opening character, at least as long, closes it.
+        if (line !~ /^    / && line !~ /^\t/ && substr(candidate, 1, 1) == fence) {
+          n = run_of(candidate, fence)
+          if (n >= fence_len && substr(candidate, n + 1) ~ /^[[:space:]]*$/) fence = ""
+        }
+        return
+      }
+      ch = substr(candidate, 1, 1)
+      if (line !~ /^    / && line !~ /^\t/ && (ch == "`" || ch == "~") && run_of(candidate, ch) >= 3 &&
+          !(ch == "`" && index(substr(candidate, run_of(candidate, ch) + 1), "`"))) {
+        fence = ch
+        fence_len = run_of(candidate, ch)
+        return
+      }
+      if (line ~ /^Verdict: (STRENGTHEN|RECONSIDER|OVERTURN)[[:space:]]*$/) {
+        v = line
+        sub(/^Verdict: /, "", v)
+        sub(/[[:space:]]*$/, "", v)
+      }
+    }
+    {
+      sub(/\r$/, "")
+      if (NR == 1 && $0 ~ /^<!-- debate-round: /) next
+      raw[++nraw] = $0
+    }
+    END {
+      bullet = "• "
+      for (i = 1; i <= nraw; i++) {
+        r = raw[i]
+        if (index(r, bullet) == 1) { in_block = 1; blocks++; kimi[++nkimi] = substr(r, length(bullet) + 1) }
+        else if (r == "") { if (in_block) kimi[++nkimi] = "" }
+        else if (in_block && substr(r, 1, 2) == "  ") kimi[++nkimi] = substr(r, 3)
+        else if (r ~ /^(To resume this session: kimi -r [0-9a-f-]+|kimi version [0-9]|Warning: |Session ".*" was updated by another client; reloaded it\.|No sessions to continue under )/) continue
+        else not_kimi = 1
+      }
+      if (!not_kimi && blocks > 0) { for (i = 1; i <= nkimi; i++) read_line(kimi[i]) }
+      else { for (i = 1; i <= nraw; i++) read_line(raw[i]) }
+      if (v != "") print v
+    }
+  ' "$1" 2>/dev/null
+}

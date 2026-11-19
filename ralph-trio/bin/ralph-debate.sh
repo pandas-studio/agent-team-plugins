@@ -111,10 +111,15 @@ if [ "$DRY_RUN" != "1" ]; then
     echo "ERROR: update debate-conductor; shared debate-result.sh is required (looked in $DEBATE_BIN_DIR/../lib, debate.sh via $RESOLVED_SOURCE)" >&2
     exit 2
   }
-  command -v debate_receipt_read >/dev/null 2>&1 || {
-    echo "ERROR: update debate-conductor; debate-result.sh must define debate_receipt_read" >&2
-    exit 2
-  }
+  # The verdict reader moved into the same library (one parser for debate.sh
+  # and this loop). An older debate-conductor lacks it: refuse here, before any
+  # task is popped, rather than read every verdict as UNKNOWN.
+  for fn in debate_receipt_read debate_critic_verdict; do
+    command -v "$fn" >/dev/null 2>&1 || {
+      echo "ERROR: update debate-conductor; debate-result.sh must define $fn" >&2
+      exit 2
+    }
+  done
 fi
 [ "$ROUNDS" -lt 2 ] && { echo "--rounds must be >= 2 (need at least one critic round)" >&2; exit 2; }
 
@@ -179,37 +184,6 @@ DEBATE_TEAM_DIR="$DEBATE_LOG_BASE/$TEAM"
 } | tee "$SUMMARY_LOG" >&2
 
 trap 'ralph_log "interrupted (Ctrl-C). Last iter=$ITER. Summary: $SUMMARY_LOG"; exit 130' INT TERM
-
-# Returns: STRENGTHEN / RECONSIDER / OVERTURN / (empty if neither found)
-# Model-agnostic: prefers the canonical `Verdict: TOKEN` line that critic.md
-# mandates as the final output line, then falls back to scanning the
-# `## Verdict` section header. The canonical line is checked first because
-# different models may format the section header inconsistently
-# (e.g. `### Verdict`, `**Verdict**`, missing heading).
-parse_critic_verdict() {
-  local f="$1"
-  awk '
-    # Canonical line: matches `Verdict: STRENGTHEN`, `verdict: reconsider`, etc.
-    # Allows leading whitespace, Kimi PromptBlockWriter `• ` prefix, and optional markdown emphasis.
-    tolower($0) ~ /^[[:space:]]*(•[[:space:]]+)?\**[[:space:]]*verdict[[:space:]]*:[[:space:]]*(strengthen|reconsider|overturn)\**[[:space:]]*$/ {
-      v = toupper($0)
-      sub(/.*VERDICT[[:space:]]*:[[:space:]]*/, "", v)
-      sub(/[^A-Z].*$/, "", v)
-      canonical = v
-      next
-    }
-    # Fallback: first token inside `## Verdict` section.
-    /^[[:space:]]*(•[[:space:]]+)?#+[[:space:]]*Verdict/ { in_v = 1; next }
-    in_v && /^[[:space:]]*(•[[:space:]]+)?#+[[:space:]]/  { in_v = 0 }
-    in_v && !section_hit && /STRENGTHEN/ { section_hit = "STRENGTHEN" }
-    in_v && !section_hit && /RECONSIDER/ { section_hit = "RECONSIDER" }
-    in_v && !section_hit && /OVERTURN/   { section_hit = "OVERTURN" }
-    END {
-      if (canonical)   { print canonical }
-      else if (section_hit) { print section_hit }
-    }
-  ' "$f" 2>/dev/null
-}
 
 # The task was already marked [x] by pop_top_task. Keep its text in the
 # fix_plan record even when the BACKLOG cannot be made writable again.
@@ -386,7 +360,7 @@ while :; do
       printf '  debate dir: %s\n' "$DEBATE_DIR" >> "$SUMMARY_LOG"
       if [ -n "$LAST_CRIT" ]; then
         printf '  last critic: %s\n' "$LAST_CRIT" >> "$SUMMARY_LOG"
-        VERDICT=$(parse_critic_verdict "$LAST_CRIT")
+        VERDICT=$(debate_critic_verdict "$LAST_CRIT")
         [ -z "$VERDICT" ] && VERDICT="UNKNOWN"
       else
         ralph_log "  no completed critic round in $DEBATE_DIR"

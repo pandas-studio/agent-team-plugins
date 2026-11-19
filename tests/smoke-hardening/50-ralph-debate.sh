@@ -370,6 +370,24 @@ assert_eq "$(rd106_outcome)" "max-iter 1|pending=0|verdicts=1|iter 1 UNKNOWN ver
 assert_eq "$(sed -n 's/^  verdict: *//p' "$TMP/rw61/log/smoke/latest-ralph-debate.log")" "UNKNOWN"
 assert_eq "$(cat "$DRV/BACKLOG.md")" "- [x] task 61"
 
+# Text in the `## Verdict` section is prose, not the verdict. The old fallback
+# took the first token substring there, checking STRENGTHEN first, so this
+# OVERTURN critique was logged as STRENGTHEN.
+cat > "$TMP/worker-cli/sectiononly" <<'STUB'
+#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --output-last-message ]; then
+    printf '## Verdict\nOVERTURN — the STRENGTHEN case fails\n' > "$2"
+    break
+  fi
+  shift
+done
+printf '## Verdict\nOVERTURN — the STRENGTHEN case fails\n'
+STUB
+chmod +x "$TMP/worker-cli/sectiononly"
+assert_eq "$(run_rd61 env CRITIC_CLI="$TMP/worker-cli/sectiononly")" "rc=0"
+assert_eq "$(sed -n 's/^  verdict: *//p' "$TMP/rw61/log/smoke/latest-ralph-debate.log")" "UNKNOWN"
+
 # --gen / --crit aliases and Kimi PromptBlockWriter `• Verdict: STRENGTHEN` parsing.
 cat > "$TMP/worker-cli/kimicrit" <<'STUB'
 #!/bin/sh
@@ -406,5 +424,19 @@ assert_eq "$( (cd "$DRV" && env PATH="$TMP/rd61old/bin:$ROOT/dev-trio/bin:$PATH"
 assert_ok grep -q 'update debate-conductor' "$TMP/rd61old.err"
 # ...and the task is still pending, not popped.
 assert_eq "$(grep -c '^- \[ \] task old$' "$DRV/BACKLOG.md")" "1"
+
+# A debate-conductor that ships the receipt reader but predates the shared
+# verdict reader is refused the same way, before any task is popped.
+mkdir -p "$TMP/rd61mid/bin" "$TMP/rd61mid/lib"
+printf '#!/bin/sh\nexit 0\n' > "$TMP/rd61mid/bin/debate.sh"
+chmod +x "$TMP/rd61mid/bin/debate.sh"
+printf 'debate_receipt_read() { return 1; }\n' > "$TMP/rd61mid/lib/debate-result.sh"
+printf -- '- [ ] task mid\n' > "$DRV/BACKLOG.md"
+assert_eq "$( (cd "$DRV" && env PATH="$TMP/rd61mid/bin:$ROOT/dev-trio/bin:$PATH" \
+  AGENT_TEAM=smoke TMUX="" RALPH_TRIO_WORKSPACE="$TMP/rw61mid" \
+  "$ROOT/ralph-trio/bin/ralph-debate.sh" --backlog BACKLOG.md --max-iter 1 \
+  >/dev/null 2>"$TMP/rd61mid.err" </dev/null; echo "rc=$?") )" "rc=2"
+assert_ok grep -q 'update debate-conductor; debate-result.sh must define debate_critic_verdict' "$TMP/rd61mid.err"
+assert_eq "$(grep -c '^- \[ \] task mid$' "$DRV/BACKLOG.md")" "1"
 
 smoke_done 50-ralph-debate

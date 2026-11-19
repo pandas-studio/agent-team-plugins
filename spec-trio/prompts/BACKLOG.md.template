@@ -2,13 +2,13 @@
 
 Each line is one iteration's worth of work. `spec-trio.sh` selects the top unchecked line and runs planner → coder → tests → reviewer against it, marking it done only after success and any required merge — with `spec.md` as the load-bearing contract.
 
-Format: GitHub-style task list (`- [ ] ...`). Cite the spec section the task satisfies so the planner has a starting hook (`§3.2`, `§5.1`, …). The planner is responsible for emitting `<allowed-paths>` based on what the spec actually permits.
+Format: GitHub-style task list (`- [ ] ...`). Cite the spec sections the task satisfies in one parenthesized group right after the checkbox — `- [ ] (§3.2, §5.1) …` — so the planner has a starting hook. `spec-forge lint` reads citations only inside parentheses. The planner is responsible for emitting `<allowed-paths>` based on what the spec actually permits.
 
 ## Tasks
 
-- [ ] (replace this) implement §3.1 — `function_name(arg: type)` per the spec's stated semantics
-- [ ] (replace this) add §5.1 coverage — a test that demonstrates §3.1's contract
-- [ ] (replace this) wire §3.2 edge case — graceful degradation when `<condition>`
+- [ ] (§3.1) (replace this) implement `function_name(arg: type)` per the spec's stated semantics
+- [ ] (§3.1, §5.1) (replace this) add a test that demonstrates §3.1's contract
+- [ ] (§3.2) (replace this) wire the edge case — graceful degradation when `<condition>`
 
 ## Rules of the road
 

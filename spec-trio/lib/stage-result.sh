@@ -208,3 +208,63 @@ stage_record_result() {
   manifest_add_input kind=stage-rc value="$1" || return 1
   manifest_add_input kind=stage-evidence value="$STAGE_EVIDENCE"
 }
+
+# stage_need_section FILE HEADING — print the request lines of the `## HEADING`
+# section a role answer carries (planner or reviewer `## NEED RESEARCH`), or
+# nothing. A heading inside a code fence, an indented block or a quote is an
+# example, not a request. Blank lines and empty markers (`- None.`) are not
+# questions, so a section holding only those requests nothing. The Kimi print
+# envelope is unwrapped only when the whole answer has that shape, the rule
+# dev-trio's review-result.sh applies to the same answers. A missing or empty
+# path prints nothing and never falls back to reading stdin.
+stage_need_section() {
+  local f="$1" heading="$2"
+  [ -n "$f" ] && [ -f "$f" ] || return 0
+  awk -v heading="$heading" '
+    # Length of the run of character ch that s starts with.
+    function run_of(s, ch,    n) { n = 0; while (substr(s, n + 1, 1) == ch) n++; return n }
+    function emit(line, candidate, ch, n) {
+      candidate = line; sub(/^ ? ? ?/, "", candidate)
+      if (fence != "") {
+        if (in_section) out[++nout] = line
+        # Only a run of the opening character, at least as long, closes it.
+        if (line !~ /^    / && line !~ /^\t/ && substr(candidate, 1, 1) == fence) {
+          n = run_of(candidate, fence)
+          if (n >= fence_len && substr(candidate, n + 1) ~ /^[[:space:]]*$/) fence = ""
+        }
+        return
+      }
+      ch = substr(candidate, 1, 1)
+      if (line !~ /^    / && line !~ /^\t/ && (ch == "`" || ch == "~") && run_of(candidate, ch) >= 3 &&
+          !(ch == "`" && index(substr(candidate, run_of(candidate, ch) + 1), "`"))) {
+        fence = ch
+        fence_len = run_of(candidate, ch)
+        if (in_section) out[++nout] = line
+        return
+      }
+      if (line ~ /^##?[ \t]/) {
+        in_section = (substr(line, 1, 3) == "## " && index(line, "## " heading) == 1 &&
+                      substr(line, length(heading) + 4) ~ /^([ \t(].*)?$/)
+        return
+      }
+      if (!in_section || line ~ /^[[:space:]]*$/) return
+      if (tolower(line) ~ /^[[:space:]]*(-[[:space:]]+)?(none|n\/a|없음)\.?[[:space:]]*$/) return
+      out[++nout] = line
+    }
+    { sub(/\r$/, ""); raw[++nraw] = $0 }
+    END {
+      bullet = "• "
+      for (i = 1; i <= nraw; i++) {
+        r = raw[i]
+        if (index(r, bullet) == 1) { in_block = 1; blocks++; kimi[++nkimi] = substr(r, length(bullet) + 1) }
+        else if (r == "") { if (in_block) kimi[++nkimi] = "" }
+        else if (in_block && substr(r, 1, 2) == "  ") kimi[++nkimi] = substr(r, 3)
+        else if (r ~ /^(To resume this session: kimi -r [0-9a-f-]+|kimi version [0-9]|Warning: |Session ".*" was updated by another client; reloaded it\.|No sessions to continue under )/) continue
+        else not_kimi = 1
+      }
+      if (!not_kimi && blocks > 0) { for (i = 1; i <= nkimi; i++) emit(kimi[i]) }
+      else { for (i = 1; i <= nraw; i++) emit(raw[i]) }
+      for (i = 1; i <= nout; i++) print out[i]
+    }
+  ' "$f" 2>/dev/null
+}

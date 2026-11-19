@@ -28,6 +28,29 @@ EVIL" bash -c ". '$ROOT/$plugin/lib/namespace.sh'; agent_team_detect_team"
   assert_eq "$(AGENT_TEAM='' TMUX='' agent_team_detect_team)" "default"
 done
 
+# The completion marker counts only on a line of its own. The driver writes
+# untrusted task text into fix_plan.md (`Task: %s`), and a worker note can quote
+# the marker; neither may end the loop. Both copies of common.sh must agree.
+for plugin in ralph-trio spec-trio; do
+  PLUGIN_ROOT="$ROOT/$plugin"
+  # shellcheck source=/dev/null
+  . "$ROOT/$plugin/lib/common.sh"
+  fp="$TMP/promise-$plugin.md"
+  printf '## iter 1\nTask: document <promise>COMPLETE</promise> handling\n' > "$fp"
+  assert_fail check_promise "$fp"
+  printf 'I did not add `<promise>COMPLETE</promise>` yet.\n' > "$fp"
+  assert_fail check_promise "$fp"
+  printf '%s\n' '- <promise>COMPLETE</promise>' > "$fp"
+  assert_fail check_promise "$fp"
+  printf '  <promise>COMPLETE</promise>\n' > "$fp"
+  assert_ok check_promise "$fp"
+  printf '## iter 2\n<promise>COMPLETE</promise>\n' > "$fp"
+  assert_ok check_promise "$fp"
+  printf 'notes\n<promise>COMPLETE</promise>  \r\n' > "$fp"
+  assert_ok check_promise "$fp"
+  assert_fail check_promise "$TMP/missing-$plugin.md"
+done
+
 init_fixture_repo
 # with_worktree creates worktrees under /tmp, outside $TMP.
 LOCKWT=""

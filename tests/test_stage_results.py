@@ -257,5 +257,63 @@ class StageResultTests(unittest.TestCase):
         self.assertEqual((self.repo / ".harness/second-seen").read_text(), "")
 
 
+class NeedSectionTests(unittest.TestCase):
+    """stage_need_section reads the NEED RESEARCH request a role ends with."""
+
+    def section(self, text, heading="NEED RESEARCH"):
+        with tempfile.TemporaryDirectory(prefix="need-section-") as tmp:
+            answer = Path(tmp) / "answer.md"
+            answer.write_bytes(text.encode())
+            result = subprocess.run(["bash", "-c", '. "$1"; stage_need_section "$2" "$3"', "test",
+                                     str(LIB), str(answer), heading],
+                                    capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def test_questions_end_at_the_next_section(self):
+        self.assertEqual(self.section("## Verdict\nNEEDS-FIX — x\n\n## NEED RESEARCH\n- q1\n\n- q2\n"
+                                      "## NEED CONTEXT\n- `gh pr view 9`\n"), "- q1\n- q2\n")
+
+    def test_heading_suffix_is_allowed_but_not_a_longer_word(self):
+        self.assertEqual(self.section("## NEED RESEARCH (only if applicable)\n- q\n"), "- q\n")
+        self.assertEqual(self.section("## NEED RESEARCHER\n- q\n"), "")
+
+    def test_empty_markers_and_blank_sections_request_nothing(self):
+        for body in ("- None.\n", "None.\n", "- none\n", "- 없음.\n", "- N/A\n", "\n\n", ""):
+            with self.subTest(body=body):
+                self.assertEqual(self.section("## Verdict\nSHIP — ok\n\n## NEED RESEARCH\n" + body), "")
+
+    def test_a_marker_next_to_a_question_is_dropped(self):
+        self.assertEqual(self.section("## NEED RESEARCH\n- None.\n- real question\n"), "- real question\n")
+
+    def test_fenced_or_indented_heading_is_an_example(self):
+        self.assertEqual(self.section("## What I checked\n```\n## NEED RESEARCH\n- example\n```\n"), "")
+        self.assertEqual(self.section("## What I checked\n    ## NEED RESEARCH\n    - example\n"), "")
+
+    def test_fenced_lines_inside_the_section_belong_to_the_question(self):
+        self.assertEqual(self.section("## NEED RESEARCH\n- does this parse?\n```\n## not a heading\n```\n"),
+                         "- does this parse?\n```\n## not a heading\n```\n")
+
+    def test_a_fence_closes_only_on_its_own_character(self):
+        # "`~~" is not three backticks, so it does not close a ``` fence.
+        self.assertEqual(self.section("```\n`~~\n## NEED RESEARCH\n- example\n```\n"), "")
+        # "~~~`" opens a three-tilde fence; a "~~~" line closes it.
+        self.assertEqual(self.section("~~~`\nx\n~~~\n## NEED RESEARCH\n- real\n"), "- real\n")
+        # A backtick opener whose info string holds a backtick is not a fence.
+        self.assertEqual(self.section("``` a`b\n## NEED RESEARCH\n- real\n"), "- real\n")
+
+    def test_kimi_envelope_is_unwrapped(self):
+        text = ("• ## Verdict\n  NEEDS-FIX — x\n\n  ## NEED RESEARCH\n  - kimi question\n"
+                "To resume this session: kimi -r 0123abcd-4567\n")
+        self.assertEqual(self.section(text), "- kimi question\n")
+
+    def test_crlf_and_missing_file(self):
+        self.assertEqual(self.section("## NEED RESEARCH\r\n- q\r\n"), "- q\n")
+        result = subprocess.run(["bash", "-c", '. "$1"; stage_need_section "" "NEED RESEARCH" </dev/null; echo rc=$?',
+                                 "test", str(LIB)], input="## NEED RESEARCH\n- stdin\n",
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.stdout, "rc=0\n")
+
+
 if __name__ == "__main__":
     unittest.main()

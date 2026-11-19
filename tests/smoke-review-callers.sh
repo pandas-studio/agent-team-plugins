@@ -32,7 +32,9 @@ printf '%s\n' "$prompt" >> "${REVIEW_TEST_STDIN_SEEN:-/dev/null}"
 case "$prompt" in
   '# Role: Ralph Planner'*|'# Role: Spec-driven Planner'*)
     echo '<allowed-paths>file.txt</allowed-paths>'
-    [ "${REVIEW_TEST_CASE:-}" != plan-research ] || printf '## NEED RESEARCH\n- planner question\n' ;;
+    [ "${REVIEW_TEST_CASE:-}" != plan-research ] || printf '## NEED RESEARCH\n- planner question\n'
+    # An empty marker requests nothing; it must not start a research round.
+    [ "${REVIEW_TEST_CASE:-}" != plan-research-none ] || printf '## NEED RESEARCH (only if applicable)\n- None.\n' ;;
   *)
     [ -z "${REVIEW_TEST_PROMPTS:-}" ] || printf '%s\n' "$prompt" >> "$REVIEW_TEST_PROMPTS"
     printf 'implemented\n' > file.txt
@@ -77,6 +79,7 @@ case "$REVIEW_TEST_CASE:$count" in
   malformed:*) printf '## Verdict\n\nSHIP — deliberately rejected\n' > "$final" ;;
   # NEED CONTEXT after NEED RESEARCH: the drivers' research extractors must stop
   # at it, so repository commands never reach the researcher as questions.
+  review-research-none:*) printf '## Verdict\nSHIP — nothing to look up\n## NEED RESEARCH\n- None.\n' > "$final" ;;
   retry:1|research-denied:1) printf '## Verdict\nNEEDS-FIX — need evidence\n## NEED RESEARCH\n- verify the API\n## NEED CONTEXT\n- `gh pr view 9 --json headRefOid`\n' > "$final" ;;
   *) printf '## Verdict\nSHIP — canonical result\n## What I checked\nVerdict: NEEDS-FIX\n' > "$final" ;;
 esac
@@ -98,7 +101,7 @@ chmod +x "$TMP/worker" "$TMP/researcher" "$TMP/reviewer"
 # given an empty path after a failed review) would dispatch it as research.
 printf '## NEED RESEARCH\n- leaked from caller stdin\n' > "$TMP/stdin-research.md"
 for plugin in ralph-trio spec-trio; do
-  for scenario in disagree malformed retarget failed retry research-denied plan-research; do
+  for scenario in disagree malformed retarget failed retry research-denied plan-research plan-research-none review-research-none; do
     case_root="$TMP/$plugin-$scenario"
     repo="$case_root/repo"
     state="$case_root/state"
@@ -115,7 +118,7 @@ for plugin in ralph-trio spec-trio; do
     git -C "$repo" -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm baseline
     args=(--backlog "$repo/BACKLOG.md" --max-iter 1)
     [ "$plugin" != spec-trio ] || args+=(--spec "$repo/spec.md" --test-cmd 'git diff --check')
-    case "$scenario" in retarget|failed|retry|research-denied|plan-research) ;; *) args+=(--no-research) ;; esac
+    case "$scenario" in retarget|failed|retry|research-denied|plan-research*|review-research-none) ;; *) args+=(--no-research) ;; esac
     driver_rc=0
     (
       cd "$repo"
@@ -151,6 +154,10 @@ for plugin in ralph-trio spec-trio; do
         "$state/log/caller"/"$plugin"-*-research*.manifest.json >/dev/null
       check "$plugin denied research not given to a coder" \
         sh -c '! grep -q "auto-denied" "$1" 2>/dev/null' _ "$case_root/coder-prompts"
+      # Failed research produced no answer, so the retry coder's manifest must
+      # not name one as an input; the research log keeps the failure.
+      check "$plugin failed research is not a coder input" \
+        json_is "$(ls "$state/log/caller"/"$plugin"-*-code2.manifest.json)" '[.inputs[]|select(.kind=="research")]|length==0'
       if [ "$plugin" = ralph-trio ]; then
         check "$plugin retry coder runs without research" test "$(grep -c '^# Role:' "$case_root/coder-prompts")" -eq 2
       else
@@ -162,9 +169,21 @@ for plugin in ralph-trio spec-trio; do
       check "$plugin real research request runs once" test "$(wc -l < "$case_root/research" | tr -d ' ')" -eq 1
       check "$plugin research question dispatched" grep -q 'verify the API' "$case_root/research.prompts"
       check "$plugin NEED CONTEXT not sent as research" sh -c '! grep -q "gh pr view" "$1"' _ "$case_root/research.prompts"
+      check "$plugin retry coder gets the research answer" grep -q 'fixture research evidence' "$case_root/coder-prompts"
+      check "$plugin wrapper status line is not research" sh -c '! grep -q "^(log: " "$1"' _ "$case_root/coder-prompts"
+      check "$plugin retry coder manifest names the answer it was given" \
+        json_is "$(ls "$state/log/caller"/"$plugin"-*-code2.manifest.json)" \
+        '[.inputs[]|select(.kind=="research")] as $r | ($r|length)==1 and ($r[0].path|endswith("-research-answer.md")) and ($r[0].sha256|length)==64'
+      answer=$(jq -r '.inputs[]|select(.kind=="research")|.path' "$state/log/caller"/"$plugin"-*-code2.manifest.json)
+      check "$plugin research manifest hash is the answer's" test "$(jq -r '.inputs[]|select(.kind=="research")|.sha256' "$state/log/caller"/"$plugin"-*-code2.manifest.json)" = "$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$answer")"
     elif [ "$scenario" = plan-research ]; then
       check "$plugin planner research request runs once" test "$(wc -l < "$case_root/research" | tr -d ' ')" -eq 1
       check "$plugin planner research question dispatched" grep -q 'planner question' "$case_root/research.prompts"
+      check "$plugin coder gets the planner research answer" grep -q 'fixture research evidence' "$case_root/coder-prompts"
+      check "$plugin planner wrapper status line is not research" sh -c '! grep -q "^(log: " "$1"' _ "$case_root/coder-prompts"
+      check "$plugin coder manifest names the planner research answer" \
+        json_is "$(ls "$state/log/caller"/"$plugin"-*-code.manifest.json)" \
+        '[.inputs[]|select(.kind=="research")] as $r | ($r|length)==1 and ($r[0].path|endswith("-research-plan-answer.md"))'
     else
       check "$plugin never dispatches stale/failed research" test ! -e "$case_root/research"
     fi

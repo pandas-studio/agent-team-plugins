@@ -81,11 +81,13 @@ ralph_state_dir() {
   echo "$d"
 }
 
-# check_promise FILE — rc=0 if completion marker present.
+# check_promise FILE — rc=0 if the completion marker stands on a line of its
+# own. A marker inside other text (a quoted note, the driver's `Task: %s` line
+# carrying untrusted task text) does not end the loop.
 check_promise() {
   local f="$1"
   [ -f "$f" ] || return 1
-  grep -q '<promise>COMPLETE</promise>' "$f"
+  grep -Eq '^[[:space:]]*<promise>COMPLETE</promise>[[:space:]]*$' "$f"
 }
 
 # enforce_max_iter CUR MAX — rc=0 ok, rc=1 cap reached.

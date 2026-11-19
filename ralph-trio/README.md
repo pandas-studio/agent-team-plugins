@@ -255,7 +255,7 @@ Needs `debate-conductor` plugin installed.
 ralph-debate.sh --max-iter 5 --backlog BACKLOG.md --rounds 3
 ```
 
-Per topic: runs `debate.sh -n $ROUNDS "$topic"`, parses the verdict of the last completed critic round (`STRENGTHEN` / `RECONSIDER` / `OVERTURN`), logs it to `fix_plan.md`, and (on `RECONSIDER`) re-queues the topic to BACKLOG. A debate that finished but whose verdict cannot be parsed is logged as `UNKNOWN` and not re-queued.
+Per topic: runs `debate.sh -n $ROUNDS "$topic"`, parses the verdict of the last completed critic round (`STRENGTHEN` / `RECONSIDER` / `OVERTURN`), logs it to `fix_plan.md`, and (on `RECONSIDER`) re-queues the topic to BACKLOG. The verdict is the critic's canonical last line, `Verdict: TOKEN`, read by the same function `debate.sh --until-converged` uses (`debate_critic_verdict` in debate-conductor's `lib/debate-result.sh`; this needs debate-conductor 0.5.42 or newer, and an older one is refused before any topic is popped). Text in the `## Verdict` section is not read as the verdict, nor is a fenced, indented, quoted or bold `Verdict:` line. A debate that finished but whose verdict cannot be parsed is logged as `UNKNOWN` and not re-queued.
 
 A dispatch that fails — `debate.sh` exits non-zero, or exits 0 without a usable receipt — has no verdict. The topic goes back on BACKLOG, `fix_plan.md` gets a `DISPATCH-FAILED` entry, and the run stops with exit 1 without counting the iteration as completed: an outage (auth, quota, a missing model) would fail every later topic the same way.
 

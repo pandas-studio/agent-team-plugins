@@ -739,46 +739,6 @@ print_marker() {
   printf '<!-- debate-round: %s %s %s -->\n' "$1" "$2" "$3"
 }
 
-# Convergence parser (--until-converged). Echoes the Critic's verdict token by
-# anchoring on the *standalone canonical line* `Verdict: TOKEN` (the critic role
-# contract — see roles/critic.md) and taking the LAST match. Anchoring + tail -1
-# is deliberate, mirroring tail-role.sh and the dev-trio reviewer parser: an
-# errored Critic round echoes the role prompt, which contains the placeholders
-# `Verdict: <STRENGTHEN | ...>` and `<one of: STRENGTHEN / ...>`. Neither matches
-# `^Verdict: (TOKEN)$`, so a failed round yields no token and is treated as
-# not-converged — the safe default that keeps the debate going on garbage rather
-# than stopping on it. Output already passed through strip_stream_controls.
-critic_verdict() {
-  awk '
-    {
-      line = $0
-      sub(/\r$/, "", line)
-      if (NR == 1 && line ~ /^<!-- debate-round: /) next
-      lines[++n] = line
-      if (line == "") next
-      if (line ~ /^• /) { has_bullet = 1; next }
-      if (has_bullet && line ~ /^  /) next
-      not_kimi = 1
-    }
-    END {
-      kimi = (has_bullet && !not_kimi)
-      for (i = 1; i <= n; i++) {
-        line = lines[i]
-        if (kimi) {
-          if (line ~ /^• /) sub(/^• [[:space:]]*/, "", line)
-          else if (line ~ /^  /) sub(/^  /, "", line)
-        }
-        if (line ~ /^Verdict: (STRENGTHEN|RECONSIDER|OVERTURN)[[:space:]]*$/) {
-          sub(/^Verdict: /, "", line)
-          sub(/[[:space:]]*$/, "", line)
-          v = line
-        }
-      }
-      if (v != "") print v
-    }
-  ' "$1" 2>/dev/null
-}
-
 # Role wrappers publish answers, not CLI console transcripts. Preserve answer
 # text verbatim except for the reserved stream framing byte. Keep the filter
 # unbuffered so stdout-only adapters still stream answers as they arrive.
@@ -1242,7 +1202,10 @@ for r in $(seq "$START_ROUND" "$END_ROUND"); do
     complete_attempt
     # Convergence check runs only on Critic (even) rounds: a STRENGTHEN verdict
     # means the position is sound, so stop before spending another gen/crit pair.
-    if [ "$UNTIL_CONVERGED" = "1" ] && [ "$(critic_verdict "$OUT")" = "STRENGTHEN" ]; then
+    # debate_critic_verdict (lib/debate-result.sh) is the reader ralph-debate.sh
+    # shares. An errored round that echoes the role prompt's placeholders yields
+    # no token and counts as not converged, so the debate goes on.
+    if [ "$UNTIL_CONVERGED" = "1" ] && [ "$(debate_critic_verdict "$OUT")" = "STRENGTHEN" ]; then
       CONVERGED="$r"
       break
     fi
