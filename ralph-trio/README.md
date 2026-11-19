@@ -233,7 +233,7 @@ Per backlog task:
 1. **Stage 1 — Planner** (`claude -p` with `lib/roles/planner.md`)
 2. **Stage 2 — Coder** (`claude -p` with `lib/roles/worker.md` + plan)
 3. **Stage 3 — Reviewer** (`ask-reviewer.sh` against HEAD diff) → verdict: SHIP / NEEDS-FIX / DISCUSS
-4. If codex emits a `## NEED RESEARCH` block: invoke `ask-researcher.sh` (Antigravity), re-run Stage 2 with research context, re-review.
+4. If a SHIP or NEEDS-FIX review emits a `## NEED RESEARCH` block: invoke `ask-researcher.sh` (Antigravity), re-run Stage 2 with research context, re-review. A DISCUSS or UNKNOWN review stops first (below), so a retry cannot replace it.
 
 Verdict dispatch:
 

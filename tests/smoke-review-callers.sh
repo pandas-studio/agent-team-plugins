@@ -79,6 +79,7 @@ case "$REVIEW_TEST_CASE:$count" in
   malformed:*) printf '## Verdict\n\nSHIP — deliberately rejected\n' > "$final" ;;
   # NEED CONTEXT after NEED RESEARCH: the drivers' research extractors must stop
   # at it, so repository commands never reach the researcher as questions.
+  discuss-research:*) printf '## Verdict\nDISCUSS — needs facts the loop cannot fetch\n## NEED RESEARCH\n- verify the API\n## NEED CONTEXT\n- `gh pr view 9 --json headRefOid`\n' > "$final" ;;
   discuss*:*) printf '## Verdict\nDISCUSS — needs facts the loop cannot fetch\n## NEED CONTEXT\n- `gh pr view 9 --json headRefOid`\n' > "$final" ;;
   review-research-none:*) printf '## Verdict\nSHIP — nothing to look up\n## NEED RESEARCH\n- None.\n' > "$final" ;;
   retry-discuss:2) printf '## Verdict\nDISCUSS — the retry needs a human\n' > "$final" ;;
@@ -103,7 +104,7 @@ chmod +x "$TMP/worker" "$TMP/researcher" "$TMP/reviewer"
 # given an empty path after a failed review) would dispatch it as research.
 printf '## NEED RESEARCH\n- leaked from caller stdin\n' > "$TMP/stdin-research.md"
 for plugin in ralph-trio spec-trio; do
-  for scenario in disagree malformed retarget failed retry research-denied plan-research plan-research-none review-research-none discuss discuss-worktree retry-discuss; do
+  for scenario in disagree malformed retarget failed retry research-denied plan-research plan-research-none review-research-none discuss discuss-worktree discuss-research retry-discuss; do
     case_root="$TMP/$plugin-$scenario"
     repo="$case_root/repo"
     state="$case_root/state"
@@ -124,7 +125,9 @@ for plugin in ralph-trio spec-trio; do
     args=(--backlog "$repo/BACKLOG.md" --max-iter 1)
     case "$scenario" in malformed|failed|discuss*|retry-discuss) args=(--backlog "$repo/BACKLOG.md" --max-iter 3) ;; esac
     [ "$plugin" != spec-trio ] || args+=(--spec "$repo/spec.md" --test-cmd 'git diff --check')
-    case "$scenario" in retarget|failed|retry|retry-discuss|research-denied|plan-research*|review-research-none) ;; *) args+=(--no-research) ;; esac
+    # discuss-research keeps research on: a DISCUSS review must stop before
+    # its NEED RESEARCH block can start a retry that replaces the verdict.
+    case "$scenario" in retarget|failed|retry|retry-discuss|discuss-research|research-denied|plan-research*|review-research-none) ;; *) args+=(--no-research) ;; esac
     [ "$scenario" != discuss-worktree ] || args+=(--worktree)
     driver_rc=0
     (

@@ -616,8 +616,11 @@ while :; do
     manifest_set_verdict "$MV"
     manifest_finalize || { manifest_cleanup; exit 1; }
 
-    # NEED RESEARCH branch — runs once
-    if [ "$NO_RESEARCH" = "0" ]; then
+    # NEED RESEARCH branch — runs once, and only for SHIP or NEEDS-FIX (as in
+    # spec-trio). A DISCUSS or UNKNOWN review goes to the human stop below: a
+    # research retry would replace that verdict, and a SHIP from it would skip
+    # whatever the DISCUSS was waiting for (a NEED CONTEXT request, say).
+    if [ "$NO_RESEARCH" = "0" ] && { [ "$VERDICT" = "SHIP" ] || [ "$VERDICT" = "NEEDS-FIX" ]; }; then
       RESEARCH_QS=$(stage_need_section "$REVIEW_SRC" "NEED RESEARCH")
       if [ -n "$RESEARCH_QS" ]; then
         # Stage 4: Research (parent = stage 3 review)
