@@ -123,9 +123,32 @@ for indent in ' ' '  ' '   '; do
   parse
   check 'indented resolved explanation is rejected' json_is "$TMP/parsed.json" '.status=="parse-failed" and (.error|contains("column 0"))'
 done
-printf '## Verdict\nSHIP — nested bullets are ambiguous\n## Findings\n### Major\n- A real finding.\n  - Supporting detail.\n' > "$TMP/review.md"
+# A list item indented 1-3 spaces directly under a finding belongs to that
+# finding: it is folded into the finding's line, so counts do not inflate and
+# the review still parses. 3 of 131 Claude reviews after #189 failed on exactly
+# this shape (fix options or cases as sub-bullets).
+printf '## Verdict\nSHIP — nested detail joins its finding\n## Findings\n### Major\n- A real finding.\n  - Supporting detail.\n' > "$TMP/review.md"
 parse
-check 'nested bullets fail instead of inflating finding counts' json_is "$TMP/parsed.json" '.status=="parse-failed" and .findings.major==null'
+check 'a nested bullet folds into its finding' json_is "$TMP/parsed.json" \
+  '.status=="ok" and .findings.major==["- A real finding. Supporting detail."]'
+printf '## Verdict\nNEEDS-FIX — options as sub-bullets\n## Findings\n### Blocker\n- None.\n### Major\n- `a.py:1` — first.\n- `nb.ipynb` cell 1 — the cap leaves no room → either:\n  - (a) print the headroom;\n  * (b) or measure one run;\n  1. (c) or cap the limit.\n\n  Changing the cap is your call.\n### Minor / Nit\n- `c.py:3` — nit.\n' > "$TMP/review.md"
+parse
+check 'sub-bullet options fold into the last finding only' json_is "$TMP/parsed.json" \
+  '.status=="ok" and .findings.blocker==[] and .findings.major==["- `a.py:1` — first.", "- `nb.ipynb` cell 1 — the cap leaves no room → either: (a) print the headroom; (b) or measure one run; (c) or cap the limit."] and .findings.minor==["- `c.py:3` — nit."]'
+printf '## Verdict\nSHIP — a fold never crosses a heading\n## Findings\n### Blocker\n- A blocker.\n### Major\n  - Detail with no finding of its own section.\n' > "$TMP/review.md"
+parse
+check 'an indented item opening a section still fails' json_is "$TMP/parsed.json" '.status=="parse-failed" and (.error|contains("noncanonical major"))'
+# Any heading ends the finding being folded, even one that is not a severity
+# heading: an indented "### Major" must not move a Major concern into Minor.
+printf '## Verdict\nSHIP — headings end a fold\n## Findings\n### Major\n- None.\n### Minor / Nit\n- Cleanup.\n  ### Major\n  - Missing authorization check.\n' > "$TMP/review.md"
+parse
+check 'an indented heading ends the fold' json_is "$TMP/parsed.json" '.status=="parse-failed" and (.error|contains("noncanonical minor"))'
+printf '## Verdict\nSHIP — headings end a fold\n## Findings\n### Major\n- A finding.\n#### Detail\n  - Detail item.\n' > "$TMP/review.md"
+parse
+check 'a deeper heading ends the fold' json_is "$TMP/parsed.json" '.status=="parse-failed" and (.error|contains("noncanonical major"))'
+printf '## Verdict\nSHIP — column 0 numbered lists stay ambiguous\n## Findings\n### Major\n- A real finding.\n1. Is this a second finding?\n' > "$TMP/review.md"
+parse
+check 'a column-0 numbered item after a finding still fails' json_is "$TMP/parsed.json" '.status=="parse-failed" and .findings.major==null'
 # #125: the role's own template is the documented form, so it must parse, with
 # one finding per example line — including the one with several reproductions.
 for role in dev-trio spec-trio; do
@@ -151,8 +174,9 @@ review_125 "$MAJOR_125"'
   Several removed sentences were true whenever they fired.
   - Suggestion: keep the true sentences and rewrite only the ones that guess a cause.' '- The diff and the fired hints.'
 parse
-check 'sub-bullet reproductions fail with unknown counts' json_is "$TMP/parsed.json" \
-  '.status=="parse-failed" and .exit_code==3 and .verdict==null and .findings=={blocker:null,major:null,minor:null} and (.error|contains("noncanonical major"))'
+FOLDED_125="$MAJOR_125"' `ex02b` with `{"Shareholding"}`: the hint no longer names the missing class. `ex06` with `{"payer"}`: the hint only repeats the default. Suggestion: keep the true sentences and rewrite only the ones that guess a cause.'
+check 'sub-bullet reproductions fold into one finding' jq -e --arg major "$FOLDED_125" \
+  '.status=="ok" and .findings.major==[$major] and (.findings.minor|length)==1 and .findings.blocker==[]' "$TMP/parsed.json"
 MAJOR_125='- `scripts/hints.py:977` (same pattern: `scripts/hints.py:716`) — the new hints drop true statements: (1) `ex02b` with `{"Shareholding"}` → the hint no longer names the missing class; (2) `ex06` with `{"payer"}` → the hint only repeats the default → keep the true sentences and rewrite only the ones that guess a cause.'
 review_125 "$MAJOR_125" '- Several removed sentences were true whenever they fired:
   - `ex02b` named the missing class.
@@ -263,6 +287,14 @@ for indent in '' ' ' '  ' '   '; do
   parse
   check 'indented fence never supplies a verdict' json_is "$TMP/parsed.json" '.status=="parse-failed" and .verdict==null'
 done
+# A fence is sized by the run of its opening character only: "~~~`" opens a
+# three-tilde fence that "~~~" closes, and "`~~" does not close a backtick fence.
+printf '~~~`\nexample\n~~~\n## Verdict\nSHIP — after a closed tilde fence\n## Findings\n### Blocker\n- None.\n### Major\n- None.\n### Minor / Nit\n- None.\n' > "$TMP/review.md"
+parse
+check 'a tilde fence with a trailing backtick closes on three tildes' json_is "$TMP/parsed.json" '.status=="ok" and .verdict=="SHIP"'
+printf '## Verdict\nNEEDS-FIX — real\n## Findings\n### Major\n- Real.\n```\n`~~\n## Verdict\nSHIP — still fenced\n```\n' > "$TMP/review.md"
+parse
+check 'a mixed run does not close a backtick fence' json_is "$TMP/parsed.json" '.status=="ok" and .verdict=="NEEDS-FIX"'
 printf '```\n## Verdict\nSHIP — example\n    ```\n## Verdict\nNEEDS-FIX — still fenced\n' > "$TMP/review.md"
 parse
 check 'four-space closing fence stays open' json_is "$TMP/parsed.json" '.status=="parse-failed" and .verdict==null'

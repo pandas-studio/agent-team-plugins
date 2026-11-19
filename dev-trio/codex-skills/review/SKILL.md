@@ -105,9 +105,10 @@ bullets in Markdown, and do not use `latest` artifacts.
   repeated headings, is a parse failure. Resolved explanations belong under
   `## What I checked`. Report the failure; do not reinterpret its bullets or
   clear counts because the Markdown says `SHIP`.
-- Findings use `- ` bullets at column 0. List items with text (including empty
-  markers) fail parsing with 1–3-space indentation, `*` / `+` / numbered
-  markers, or a tab separator after `-`. Whitespace-only list items are ignored.
+- Findings use `- ` bullets at column 0; an item indented 1–3 spaces directly
+  under a finding is joined onto that finding. Other list items with text
+  (including empty markers) fail parsing with 1–3-space indentation, `*` / `+` /
+  numbered markers, or a tab separator after `-`. Whitespace-only list items are ignored.
   Quoted and code examples stay excluded; other prose is not parsed as findings.
   Report format failures as unknown findings.
 - A missing or unreadable result means the verdict is unavailable; never fall
