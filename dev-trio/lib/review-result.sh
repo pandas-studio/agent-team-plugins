@@ -41,16 +41,25 @@ review_result_parse() {
       if (reason !~ /[^[:space:]]/) { problem = "empty verdict reason"; return }
       parsed = token
     }
-    function parse_line(line, candidate, marks, rest, content) {
-      # Fences may be indented up to three spaces. Only a matching closing
-      # fence ends the block; quoted and indented examples are never candidates.
+    # Length of the run of character ch that s starts with.
+    function run_of(s, ch,    n) { n = 0; while (substr(s, n + 1, 1) == ch) n++; return n }
+    # A finding is held until the next list item, heading or the end, so the
+    # sub-items written under it can still join its line.
+    function flush() {
+      if (open_finding) emit(open_section, open_text)
+      open_finding = 0
+    }
+    function parse_line(line, candidate, rest, content, n) {
+      # Fences may be indented up to three spaces. A fence is sized by the run
+      # of its opening character, and only a run of that character at least as
+      # long ends it; quoted and indented examples are never candidates.
       if (fence != "") {
         if (line ~ /^    / || line ~ /^\t/) return
         candidate = line; sub(/^ ? ? ?/, "", candidate)
         if (substr(candidate, 1, 1) == fence) {
-          marks = candidate; sub(/[^`~].*$/, "", marks)
-          rest = substr(candidate, length(marks) + 1)
-          if (length(marks) >= fence_len && marks !~ (fence == "`" ? "~" : "`") && rest ~ /^[[:space:]]*$/) fence = ""
+          n = run_of(candidate, fence)
+          rest = substr(candidate, n + 1)
+          if (n >= fence_len && rest ~ /^[[:space:]]*$/) fence = ""
         }
         return
       }
@@ -62,8 +71,7 @@ review_result_parse() {
       if (candidate ~ /^```/ || candidate ~ /^~~~/) {
         if (pending) { pending = 0; problem = "verdict must immediately follow its heading" }
         fence = substr(candidate, 1, 1)
-        marks = candidate; sub(/[^`~].*$/, "", marks)
-        fence_len = length(marks)
+        fence_len = run_of(candidate, fence)
         if (fence == "`" && substr(candidate, fence_len + 1) ~ /`/) problem = "invalid backtick fence"
         return
       }
@@ -71,15 +79,17 @@ review_result_parse() {
       # require the canonical spelling for a successful result. Otherwise a
       # second "## Verdict " could silently hide a conflicting verdict.
       if (line ~ /^ ? ? ?##[[:blank:]]+Verdict([[:blank:]]+#+)?[[:blank:]]*$/) {
+        flush()
         headings++; pending = 1; in_findings = 0; section = ""
         if (line != "## Verdict") problem = "noncanonical Verdict heading"
         return
       }
       if (pending) { pending = 0; verdict(line) }
-      if (line == "## Findings") { in_findings = 1; section = ""; return }
-      if (line ~ /^## /) { in_findings = 0; section = ""; return }
+      if (line == "## Findings") { flush(); in_findings = 1; section = ""; return }
+      if (line ~ /^## /) { flush(); in_findings = 0; section = ""; return }
       if (!in_findings) return
       if (line ~ /^### /) {
+        flush()
         section = ""
         if (line == "### Blocker") section = "blocker"
         if (line == "### Major") section = "major"
@@ -87,23 +97,34 @@ review_result_parse() {
         if (section != "") emit("section", section)
         return
       }
+      # Any other heading, indented or deeper, ends the finding being folded:
+      # an item under it is not detail of the finding above.
+      if (candidate ~ /^#+([[:blank:]]|$)/) { flush(); return }
       if (section != "" && candidate ~ /^([-*+]|[0-9]+[.)])([[:blank:]]|$)/) {
         content = candidate
         sub(/^([-*+]|[0-9]+[.)])[[:blank:]]*/, "", content)
         if (content !~ /[^[:space:]]/) return
-        # Do not silently drop indented findings or count nested detail bullets
-        # as independent findings. The structured format requires column 0.
+        # An item indented 1-3 spaces right under a finding is detail of that
+        # finding (cases, fix options): it joins the line of that finding, so it is
+        # neither lost nor counted as a finding of its own.
+        if (candidate != line && open_finding) {
+          open_text = open_text " " content
+          return
+        }
+        # Anywhere else an indented or non-dash item fails rather than being
+        # dropped or counted: the structured format requires column 0.
         if (candidate != line || candidate !~ /^- /) {
           problem = "noncanonical " section " finding bullet: use dash-space bullets at column 0"
           return
         }
+        flush()
         # Remember each severity across repeated headings: an explicit empty
         # marker cannot coexist with a finding in the aggregated result.
         if (tolower(line) ~ /^- none\.?[[:space:]]*$/ || line ~ /^- 없음\.?[[:space:]]*$/) {
           empty[section] = 1
         } else {
           found[section] = 1
-          emit(section, line)
+          open_finding = 1; open_section = section; open_text = line
         }
         if (empty[section] && found[section]) problem = "contradictory " section " findings: empty marker mixed with finding bullets"
       }
@@ -139,6 +160,7 @@ review_result_parse() {
       } else {
         for (i = 1; i <= nraw; i++) parse_line(raw_lines[i])
       }
+      flush()
       if (fence != "") problem = "unclosed code fence"
       if (headings == 0) problem = "missing Verdict heading"
       else if (headings != 1) problem = "duplicate Verdict headings"
