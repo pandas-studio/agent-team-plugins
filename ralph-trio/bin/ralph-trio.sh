@@ -11,7 +11,8 @@
 #   5. Verdict dispatch:
 #        SHIP        → continue (Stage 2 already committed)
 #        NEEDS-FIX   → append retry to BACKLOG (with reason)
-#        DISCUSS     → log to fix_plan.md, continue
+#        DISCUSS / UNKNOWN → restore the task to BACKLOG, keep the work (and
+#                      the worktree), log to fix_plan.md, stop with exit 4
 #        NEED RESEARCH → ask-researcher.sh, re-run Stage 2 once (reviewer-driven, post-code)
 #
 # Usage:
@@ -615,8 +616,11 @@ while :; do
     manifest_set_verdict "$MV"
     manifest_finalize || { manifest_cleanup; exit 1; }
 
-    # NEED RESEARCH branch — runs once
-    if [ "$NO_RESEARCH" = "0" ]; then
+    # NEED RESEARCH branch — runs once, and only for SHIP or NEEDS-FIX (as in
+    # spec-trio). A DISCUSS or UNKNOWN review goes to the human stop below: a
+    # research retry would replace that verdict, and a SHIP from it would skip
+    # whatever the DISCUSS was waiting for (a NEED CONTEXT request, say).
+    if [ "$NO_RESEARCH" = "0" ] && { [ "$VERDICT" = "SHIP" ] || [ "$VERDICT" = "NEEDS-FIX" ]; }; then
       RESEARCH_QS=$(stage_need_section "$REVIEW_SRC" "NEED RESEARCH")
       if [ -n "$RESEARCH_QS" ]; then
         # Stage 4: Research (parent = stage 3 review)
@@ -736,6 +740,7 @@ $RESEARCH"
 
   # ---- Verdict dispatch ----
   PASSED=0
+  HUMAN_STOP=""
   case "$VERDICT" in
     SHIP)
       PASSED=1
@@ -745,17 +750,47 @@ $RESEARCH"
       append_to_backlog "$BACKLOG_FILE" "retry (iter $ITER NEEDS-FIX): $TASK — see $REVIEW_LOG"
       printf '## iter %d · %s · NEEDS-FIX (re-queued)\nTask: %s\nReview: %s\n\n' "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TASK" "$REVIEW_LOG" >> "$FIX_PLAN_FILE"
       ;;
-    DISCUSS)
-      printf '## iter %d · %s · DISCUSS (human attention)\nTask: %s\nReview: %s\n\n' "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TASK" "$REVIEW_LOG" >> "$FIX_PLAN_FILE"
-      ;;
     *)
-      printf '## iter %d · %s · UNKNOWN verdict\nTask: %s\nReview: %s\n\n' "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TASK" "$REVIEW_LOG" >> "$FIX_PLAN_FILE"
+      # DISCUSS, or UNKNOWN (no usable review): nobody approved this work, and
+      # whatever blocked the review (missing PR/CI facts, a shared assumption)
+      # can affect every later task, which would also build on it. Put the
+      # task back, keep the work, and stop for a human, as spec-trio does.
+      HUMAN_STOP="$VERDICT"
+      [ "$VERDICT" = DISCUSS ] || HUMAN_STOP=UNKNOWN
+      RESTORED="task restored"
+      if [ "$DRY_RUN" = "1" ] || ! append_to_backlog "$BACKLOG_FILE" "$TASK"; then
+        RESTORED="task NOT restored"
+        ralph_log "  could not restore the task to BACKLOG ($BACKLOG_FILE): $TASK"
+      fi
+      {
+        printf '## iter %d · %s · %s (human attention; %s)\nTask: %s\nReview: %s\n' \
+          "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HUMAN_STOP" "$RESTORED" "$TASK" "$REVIEW_LOG"
+        if [ "$USE_WORKTREE" = "1" ]; then
+          printf 'Preserved worktree: %s\n' "$WT"
+        else
+          # Without a worktree the coder's changes are already on this branch.
+          # PRE_CODE_REF is the empty tree when the repository had no commit.
+          if [ -n "$PRE_CODE_REF" ] && git -C "$WORK_DIR" rev-parse --verify -q "$PRE_CODE_REF^{commit}" >/dev/null 2>&1; then
+            printf 'Unapproved changes: %s..HEAD plus the working tree\n' "$PRE_CODE_REF"
+          elif git -C "$WORK_DIR" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+            printf 'Unapproved changes: every commit up to HEAD (none existed before) plus the working tree\n'
+          else
+            printf 'Unapproved changes: the working tree (no commit yet)\n'
+          fi
+        fi
+        printf '\n'
+      } >> "$FIX_PLAN_FILE" || ralph_log "  could not record $HUMAN_STOP in fix_plan.md; task: $TASK"
       ;;
   esac
 
   # ---- Worktree pre-merge validation + merge/discard ----
   if [ "$USE_WORKTREE" = "1" ]; then
     PRESERVE_WORKTREE=0
+    if [ -n "$HUMAN_STOP" ]; then
+      # Neither merged nor discarded: the human decides what happens to it.
+      PRESERVE_WORKTREE=1
+      printf '  worktree: PRESERVED (%s): %s\n' "$HUMAN_STOP" "$WT" >> "$SUMMARY_LOG"
+    fi
     # Preserve the reviewed working-tree state: when the coder leaves its changes
     # uncommitted, commit them onto the iteration branch BEFORE validating/merging
     # so they are validated and survive the post-merge worktree teardown. No-op
@@ -818,6 +853,13 @@ $RESEARCH"
     unset RALPH_WT_DIR
   fi
 
+  if [ -n "$HUMAN_STOP" ]; then
+    # Not counted as completed: the task is pending again.
+    ralph_log "iter $ITER review returned $HUMAN_STOP — $RESTORED; stopping for human attention (see $FIX_PLAN_FILE)."
+    echo "=== STOP (human-attention) completed=$COMPLETED ===" >> "$SUMMARY_LOG"
+    break
+  fi
+
   COMPLETED=$ITER
 
   if check_promise "$FIX_PLAN_FILE"; then
@@ -831,3 +873,5 @@ echo "=== ralph-trio done (completed=$COMPLETED) ===" | tee -a "$SUMMARY_LOG" >&
 echo "summary: $SUMMARY_LOG" >&2
 # A worktree that could not be created, merged or discarded: don't report success.
 if [ "${WORKTREE_FAILED:-0}" = "1" ]; then exit 1; fi
+# A DISCUSS or UNKNOWN review stopped the loop with its task pending.
+if [ -n "${HUMAN_STOP:-}" ]; then exit 4; fi

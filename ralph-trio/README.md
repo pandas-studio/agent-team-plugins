@@ -233,7 +233,7 @@ Per backlog task:
 1. **Stage 1 — Planner** (`claude -p` with `lib/roles/planner.md`)
 2. **Stage 2 — Coder** (`claude -p` with `lib/roles/worker.md` + plan)
 3. **Stage 3 — Reviewer** (`ask-reviewer.sh` against HEAD diff) → verdict: SHIP / NEEDS-FIX / DISCUSS
-4. If codex emits a `## NEED RESEARCH` block: invoke `ask-researcher.sh` (Antigravity), re-run Stage 2 with research context, re-review.
+4. If a SHIP or NEEDS-FIX review emits a `## NEED RESEARCH` block: invoke `ask-researcher.sh` (Antigravity), re-run Stage 2 with research context, re-review. A DISCUSS or UNKNOWN review stops first (below), so a retry cannot replace it.
 
 Verdict dispatch:
 
@@ -241,8 +241,10 @@ Verdict dispatch:
 | :--- | :--- |
 | `SHIP` | Log to fix_plan.md, continue. |
 | `NEEDS-FIX` | Re-queue the task to BACKLOG.md with the review log path. |
-| `DISCUSS` | Log to fix_plan.md and continue (human attention). |
-| `UNKNOWN` | Log to fix_plan.md (codex output unparseable). |
+| `DISCUSS` | Put the task back on BACKLOG.md, log it to fix_plan.md, and **stop with exit 4** (human attention). |
+| `UNKNOWN` | Same as `DISCUSS`: no usable review (unparseable, failed or permission-denied), so nothing approved the work. |
+
+A `DISCUSS` or `UNKNOWN` stop does not count the iteration as completed. Its fix_plan.md entry (`… · DISCUSS (human attention; task restored)`, or `task NOT restored` when BACKLOG.md could not be written) names the review log and where the unapproved work is: with `--worktree`, the worktree is kept, neither merged nor discarded (`Preserved worktree: <path>`); without it, the coder's commits are already on the working branch (`Unapproved changes: <base>..HEAD plus the working tree`). Later tasks are not started on top of work nobody approved, and a review that could not get the facts it needed (a `## NEED CONTEXT` request, which the loop cannot answer) is handed to a human instead of being skipped. Before ralph-trio 0.5.16 both verdicts were logged and the loop continued; unattended jobs that run `ralph-trio.sh` should now treat exit 4 as "needs a human", not as a crash.
 
 Useful flags: `--worktree` (run each iter in a throwaway git worktree at `/tmp/ralph-<team>-iter-<N>.<random>` on branch `ralph/<team>-iter-<N>-<random>`, fast-forward merge on SHIP; an existing worktree or branch is never reused or removed, a worktree that can't be created stops the run with exit 1 and re-queues the task, and a worktree the coder switched to another branch is left for inspection), `--autoship` (skip review — useful for trivial mechanical refactors), `--dry-run` (no model calls; manifest emission only), `--no-research` (skip the NEED RESEARCH branch).
 

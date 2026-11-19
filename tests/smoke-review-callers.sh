@@ -79,8 +79,11 @@ case "$REVIEW_TEST_CASE:$count" in
   malformed:*) printf '## Verdict\n\nSHIP — deliberately rejected\n' > "$final" ;;
   # NEED CONTEXT after NEED RESEARCH: the drivers' research extractors must stop
   # at it, so repository commands never reach the researcher as questions.
+  discuss-research:*) printf '## Verdict\nDISCUSS — needs facts the loop cannot fetch\n## NEED RESEARCH\n- verify the API\n## NEED CONTEXT\n- `gh pr view 9 --json headRefOid`\n' > "$final" ;;
+  discuss*:*) printf '## Verdict\nDISCUSS — needs facts the loop cannot fetch\n## NEED CONTEXT\n- `gh pr view 9 --json headRefOid`\n' > "$final" ;;
   review-research-none:*) printf '## Verdict\nSHIP — nothing to look up\n## NEED RESEARCH\n- None.\n' > "$final" ;;
-  retry:1|research-denied:1) printf '## Verdict\nNEEDS-FIX — need evidence\n## NEED RESEARCH\n- verify the API\n## NEED CONTEXT\n- `gh pr view 9 --json headRefOid`\n' > "$final" ;;
+  retry-discuss:2) printf '## Verdict\nDISCUSS — the retry needs a human\n' > "$final" ;;
+  retry:1|retry-discuss:1|research-denied:1) printf '## Verdict\nNEEDS-FIX — need evidence\n## NEED RESEARCH\n- verify the API\n## NEED CONTEXT\n- `gh pr view 9 --json headRefOid`\n' > "$final" ;;
   *) printf '## Verdict\nSHIP — canonical result\n## What I checked\nVerdict: NEEDS-FIX\n' > "$final" ;;
 esac
 if [ "$REVIEW_TEST_CASE" = failed ]; then
@@ -101,7 +104,7 @@ chmod +x "$TMP/worker" "$TMP/researcher" "$TMP/reviewer"
 # given an empty path after a failed review) would dispatch it as research.
 printf '## NEED RESEARCH\n- leaked from caller stdin\n' > "$TMP/stdin-research.md"
 for plugin in ralph-trio spec-trio; do
-  for scenario in disagree malformed retarget failed retry research-denied plan-research plan-research-none review-research-none; do
+  for scenario in disagree malformed retarget failed retry research-denied plan-research plan-research-none review-research-none discuss discuss-worktree discuss-research retry-discuss; do
     case_root="$TMP/$plugin-$scenario"
     repo="$case_root/repo"
     state="$case_root/state"
@@ -114,11 +117,18 @@ for plugin in ralph-trio spec-trio; do
     printf 'baseline\n' > "$repo/file.txt"
     printf '# Spec\n## §5 Test criteria\n### §5.1 implement file\n' > "$repo/spec.md"
     printf -- '- [ ] §5.1 implement file\n' > "$repo/BACKLOG.md"
+    # A stop must leave later tasks alone: give the stop cases a second task
+    # and a cap that would reach it.
+    case "$scenario" in malformed|failed|discuss*|retry-discuss) printf -- '- [ ] §5.1 second task\n' >> "$repo/BACKLOG.md" ;; esac
     git -C "$repo" add file.txt spec.md BACKLOG.md
     git -C "$repo" -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm baseline
     args=(--backlog "$repo/BACKLOG.md" --max-iter 1)
+    case "$scenario" in malformed|failed|discuss*|retry-discuss) args=(--backlog "$repo/BACKLOG.md" --max-iter 3) ;; esac
     [ "$plugin" != spec-trio ] || args+=(--spec "$repo/spec.md" --test-cmd 'git diff --check')
-    case "$scenario" in retarget|failed|retry|research-denied|plan-research*|review-research-none) ;; *) args+=(--no-research) ;; esac
+    # discuss-research keeps research on: a DISCUSS review must stop before
+    # its NEED RESEARCH block can start a retry that replaces the verdict.
+    case "$scenario" in retarget|failed|retry|retry-discuss|discuss-research|research-denied|plan-research*|review-research-none) ;; *) args+=(--no-research) ;; esac
+    [ "$scenario" != discuss-worktree ] || args+=(--worktree)
     driver_rc=0
     (
       cd "$repo"
@@ -136,7 +146,9 @@ for plugin in ralph-trio spec-trio; do
         "$ROOT/$plugin/bin/$plugin.sh" "${args[@]}"
     ) < "$TMP/stdin-research.md" > "$TMP/driver.out" 2>&1 || driver_rc=$?
     expected_rc=0
-    if [ "$plugin" = spec-trio ] && { [ "$scenario" = malformed ] || [ "$scenario" = failed ]; }; then expected_rc=4; fi
+    # DISCUSS and UNKNOWN (malformed or failed review) stop both loops for a
+    # human with exit 4; the task stays pending.
+    case "$scenario" in malformed|failed|discuss*|retry-discuss) expected_rc=4 ;; esac
     # spec-trio skips the retry coder when research fails and leaves the task pending.
     if [ "$plugin" = spec-trio ] && [ "$scenario" = research-denied ]; then expected_rc=3; fi
     check "$plugin $scenario exit status" test "$driver_rc" -eq "$expected_rc"
@@ -144,7 +156,7 @@ for plugin in ralph-trio spec-trio; do
     check "$plugin $scenario model CLIs never read the driver's stdin" \
       sh -c '! grep -qs "leaked from caller stdin" "$1" "$2"' _ "$case_root/stdin-seen" "$case_root/research.prompts"
     expected_calls=1
-    [ "$scenario" != retry ] || expected_calls=2
+    { [ "$scenario" != retry ] && [ "$scenario" != retry-discuss ]; } || expected_calls=2
     [ "$scenario" != research-denied ] || [ "$plugin" != ralph-trio ] || expected_calls=2
     check "$plugin $scenario reviewer count" test "$(cat "$case_root/count")" -eq "$expected_calls"
     if [ "$scenario" = research-denied ]; then
@@ -165,7 +177,7 @@ for plugin in ralph-trio spec-trio; do
         check "$plugin research-failed skip recorded" \
           json_is "$(ls "$state/log/caller"/"$plugin"-*-code2.manifest.json)" '[.inputs[]|select(.kind=="skip-reason" and .value=="research-failed")]|length==1'
       fi
-    elif [ "$scenario" = retry ]; then
+    elif [ "$scenario" = retry ] || [ "$scenario" = retry-discuss ]; then
       check "$plugin real research request runs once" test "$(wc -l < "$case_root/research" | tr -d ' ')" -eq 1
       check "$plugin research question dispatched" grep -q 'verify the API' "$case_root/research.prompts"
       check "$plugin NEED CONTEXT not sent as research" sh -c '! grep -q "gh pr view" "$1"' _ "$case_root/research.prompts"
@@ -208,14 +220,42 @@ for plugin in ralph-trio spec-trio; do
         *) check "$plugin parsed result used" json_is "$result" '.status=="ok"' ;;
       esac
     done
-    if [ "$expected_calls" -eq 2 ]; then
+    if [ "$scenario" = retry-discuss ]; then
+      check "$plugin re-review DISCUSS is the final verdict" jq -se '[.[]|select(.verdict=="DISCUSS")]|length==1' "${manifests[@]}" >/dev/null
+    elif [ "$expected_calls" -eq 2 ]; then
       check "$plugin re-review uses canonical SHIP despite decoys" \
         jq -se '[.[]|select(.verdict=="SHIP")]|length==1' "${manifests[@]}" >/dev/null
     elif [ "$scenario" = research-denied ]; then
       check "$plugin research-requesting review keeps its NEEDS-FIX" json_is "${manifests[0]}" '.verdict=="NEEDS-FIX"'
+    elif [ "${scenario#discuss}" != "$scenario" ]; then
+      check "$plugin keeps the DISCUSS verdict" json_is "${manifests[0]}" '.verdict=="DISCUSS"'
     elif [ "$scenario" != malformed ] && [ "$scenario" != failed ]; then
       check "$plugin ignores competing legacy verdict" json_is "${manifests[0]}" '.verdict=="SHIP"'
     fi
+    case "$scenario" in
+      malformed|failed|discuss*|retry-discuss)
+        check "$plugin $scenario leaves the task pending" \
+          test "$(grep -c '^- \[ \] §5.1 implement file$' "$repo/BACKLOG.md")" -eq 1
+        check "$plugin $scenario never starts the next task" \
+          test "$(grep -c '^# Role: .*Planner' "$case_root/stdin-seen")" -eq 1
+        check "$plugin $scenario leaves the next task pending" grep -q '^- \[ \] §5.1 second task$' "$repo/BACKLOG.md"
+        if [ "$plugin" = ralph-trio ]; then
+          summary=$(ls "$state/log/caller"/ralph-trio-[0-9]*-[0-9]*.log | grep -v -- '-iter-' | head -1)
+          check "$plugin $scenario stops for human attention" grep -q '^=== STOP (human-attention) completed=0 ===$' "$summary"
+          check "$plugin $scenario records the restore" grep -q '(human attention; task restored)$' "$repo/fix_plan.md"
+          if [ "$scenario" = discuss-worktree ]; then
+            kept=$(sed -n 's/^  worktree: PRESERVED (DISCUSS): //p' "$summary")
+            check "$plugin DISCUSS worktree is preserved" test -d "$kept"
+            check "$plugin preserved worktree is named in fix_plan" grep -qF "Preserved worktree: $kept" "$repo/fix_plan.md"
+          fi
+        fi
+        # Preserved worktrees live under /tmp, outside $TMP: remove them here.
+        if [ "$scenario" = discuss-worktree ]; then
+          git -C "$repo" worktree list --porcelain | sed -n 's/^worktree //p' | sed 1d | while IFS= read -r w; do
+            git -C "$repo" worktree remove --force "$w" 2>/dev/null || rm -rf "$w"
+          done
+        fi ;;
+    esac
   done
 done
 # A failed manifest publication must stop both Ralph drivers and discard the

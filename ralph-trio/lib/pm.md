@@ -27,6 +27,7 @@ Reach for a Ralph loop when a task is **large, mechanical, and checklist-shaped*
 ## Reporting back to the user
 
 - After a run: give the per-iter **verdict tally** (SHIP / NEEDS-FIX / DISCUSS / UNKNOWN) from the summary log, and surface anything in `fix_plan.md` marked DISCUSS or `> BLOCKER:`.
+- Exit 4 from `ralph-trio.sh` means a review returned DISCUSS or UNKNOWN and nothing after that task ran. Its fix_plan entry says `task restored` or `task NOT restored` (then the task is missing from BACKLOG), and names the review log and the preserved worktree or unapproved changes. Report those; don't relaunch until the user has decided.
 - The trio reviewer's authoritative verdict is read from Codex's `--output-last-message` file, not the streamed transcript — quote it, don't re-derive it.
 - Logs live under `.ralph-trio/log/<team>/` (gitignored); typed run manifests sit beside each stage log. Link them, don't dump them.
 
