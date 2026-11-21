@@ -4,6 +4,12 @@
 Opens descriptors without following symlinks (artifacts.py pattern),
 bounds all reads, accounts for multibyte lengths in bytes, and buffers
 output to guarantee atomic generation.
+
+argv: repo scope target budget [log_dir] [label]. For the range scope, target
+is passed to both Git calls as given, so it must already be pinned to commit
+IDs (dev_trio_extract_git_range prints that pin): a ref name in it would be
+resolved again by each call (#243). label is the range as the focus wrote it,
+shown in the heading only.
 """
 
 from __future__ import annotations
@@ -481,7 +487,9 @@ def main() -> None:
         sensitive_excludes.append(f":(exclude,top,icase,literal){extra_log_rel}")
 
     if scope == "range":
-        header = f"### git diff {target}\n".encode("utf-8", errors="backslashreplace")
+        label = sys.argv[6] if len(sys.argv) > 6 and sys.argv[6] else target
+        shown = target if label == target else f"{target} ({label} in the focus)"
+        header = f"### git diff {shown}\n".encode("utf-8", errors="backslashreplace")
         if len(header) >= remaining:
             skip(SKIP_BUDGET)
         out.write(header)
