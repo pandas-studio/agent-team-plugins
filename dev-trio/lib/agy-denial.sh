@@ -44,7 +44,7 @@ agy_denial_conversations() {
     }
   ' "$1" 2>/dev/null \
     | grep -E "$_AGY_DENIAL_UUID_RE" 2>/dev/null \
-    | awk '!seen[$0]++'
+    | awk '!seen[$0]++' || true
   return 0
 }
 
