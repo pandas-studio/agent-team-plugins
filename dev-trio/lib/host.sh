@@ -559,15 +559,22 @@ EOF_NOTE
 }
 
 # Scan focus string for an explicit revision range A..B or A...B.
-# Verifies both endpoints as commits in git before accepting. Returns 0 with the
-# range, 1 when there is no single verified range, 124 when a probe timed out,
-# and 3 when a probe failed (anything but 0, 1 for "not a commit", or 124).
+# Verifies both endpoints as commits in git before accepting. A range is one
+# pair of commits plus one operator, so spellings that resolve to the same pair
+# (full and abbreviated SHAs, a ref name) are one range; A..B and A...B are two.
+# Returns 0 with the range, 1 when there is no single verified range, 124 when
+# a probe timed out, and 3 when a probe failed (anything but 0, 1 for "not a
+# commit", or 124). One spelling is printed as written; several are printed as
+# the verified commit pair, so the snapshot diffs exactly what was compared.
 dev_trio_extract_git_range() {
   local focus="$1"
   local repo="${2:-.}"
-  local token left right op candidate left_rc right_rc
+  local token left right op candidate left_rc right_rc left_oid right_oid
   local restore_f=0
   local matched_range=""
+  local matched_oids=""
+  local accepted=""
+  local seen known
   local probe_count=0
   case "$-" in *f*) restore_f=1 ;; esac
   set -f
@@ -593,8 +600,13 @@ dev_trio_extract_git_range() {
     case "$left" in -*|""|*[!A-Za-z0-9_.~^/-]*) continue ;; esac
     case "$right" in -*|""|*[!A-Za-z0-9_.~^/-]*) continue ;; esac
     candidate="${left}${op}${right}"
-    # Repeated mentions of the accepted range need no new Git probes.
-    [ "$candidate" = "$matched_range" ] && continue
+    # Repeated mentions of an accepted spelling need no new Git probes. Plain
+    # string comparison: a case pattern would follow nocasematch.
+    known=0
+    for seen in $accepted; do
+      if [ "$seen" = "$candidate" ]; then known=1; break; fi
+    done
+    [ "$known" = 1 ] && continue
     probe_count=$((probe_count + 1))
     if [ "$probe_count" -gt 4 ]; then
       [ "$restore_f" = 1 ] || set +f
@@ -602,9 +614,11 @@ dev_trio_extract_git_range() {
     fi
     left_rc=0
     right_rc=0
-    dev_trio_git_bounded "$repo" rev-parse --verify --quiet "$left^{commit}" >/dev/null 2>&1 || left_rc=$?
+    left_oid=""
+    right_oid=""
+    left_oid="$(dev_trio_git_bounded "$repo" rev-parse --verify --quiet "$left^{commit}" 2>/dev/null)" || left_rc=$?
     if [ "$left_rc" -eq 0 ]; then
-      dev_trio_git_bounded "$repo" rev-parse --verify --quiet "$right^{commit}" >/dev/null 2>&1 || right_rc=$?
+      right_oid="$(dev_trio_git_bounded "$repo" rev-parse --verify --quiet "$right^{commit}" 2>/dev/null)" || right_rc=$?
     fi
     if [ "$left_rc" -eq 124 ] || [ "$right_rc" -eq 124 ]; then
       # A timed-out probe is not "no range"; the caller records a timeout.
@@ -616,14 +630,18 @@ dev_trio_extract_git_range() {
       return 3
     fi
     if [ "$left_rc" -eq 0 ] && [ "$right_rc" -eq 0 ]; then
-      if [ -n "$matched_range" ]; then
-        if [ "$matched_range" != "$candidate" ]; then
-          # Multiple distinct ranges detected; ambiguous, do not precompute snapshot
-          [ "$restore_f" = 1 ] || set +f
-          return 1
-        fi
+      if [ -n "$matched_oids" ] && [ "$matched_oids" != "${left_oid}${op}${right_oid}" ]; then
+        # A second, different range: ambiguous, do not precompute a snapshot.
+        [ "$restore_f" = 1 ] || set +f
+        return 1
       fi
-      matched_range="$candidate"
+      if [ -z "$matched_oids" ]; then
+        matched_range="$candidate"
+        matched_oids="${left_oid}${op}${right_oid}"
+      else
+        matched_range="$matched_oids"
+      fi
+      accepted="$accepted $candidate"
     fi
   done
   [ "$restore_f" = 1 ] || set +f

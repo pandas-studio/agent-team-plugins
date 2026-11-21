@@ -3249,6 +3249,99 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         snapshot = self.fenced(self.sent_prompt(), "workspace_snapshot")
         self.assertIn("### git diff HEAD~1..HEAD", snapshot)
 
+    def _rev(self, rev):
+        return subprocess.run(["git", "rev-parse", rev], cwd=self.workspace, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def _commit_probes(self, log):
+        return [c for c in log.read_text().splitlines() if "^{commit}" in c]
+
+    def test_agy_reviewer_full_and_short_sha_spellings_are_one_range(self):
+        self._commit_two()
+        a, b = self._rev("HEAD~1"), self._rev("HEAD")
+        focus = f"Review of a committed range: {a}..{b}. Read it with `git diff {a[:8]}..{b[:8]}`."
+        path, log = self.git_shim("")
+        result = self.run_cli("ask-reviewer.sh", focus, DEV_TRIO_REVIEWER_MODEL="agy", PATH=path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot_status(result, "ok:range")
+        # Both spellings were probed: the short one inside `...`. is not skipped.
+        self.assertEqual(len(self._commit_probes(log)), 4, log.read_text())
+        snapshot = self.fenced(self.sent_prompt(), "workspace_snapshot")
+        self.assertTrue(snapshot.startswith(f"### git diff {a}..{b}\n"), snapshot)
+        self.assertIn("+v2", snapshot)
+
+    def test_agy_reviewer_ref_and_sha_range_spellings_snapshot_the_verified_commits(self):
+        self._commit_two()
+        a, b = self._rev("HEAD~1"), self._rev("HEAD")
+        result = self.run_cli("ask-reviewer.sh", f"review HEAD~1..HEAD, that is {a}..{b}",
+                              DEV_TRIO_REVIEWER_MODEL="agy")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot_status(result, "ok:range")
+        snapshot = self.fenced(self.sent_prompt(), "workspace_snapshot")
+        # Named by commit, so a ref that moves after verification cannot change the diff.
+        self.assertTrue(snapshot.startswith(f"### git diff {a}..{b}\n"), snapshot)
+        self.assertIn("+v2", snapshot)
+
+    def test_agy_reviewer_two_and_three_dot_range_over_same_endpoints_skip_snapshot(self):
+        self._commit_two()
+        result = self.run_cli("ask-reviewer.sh", "compare HEAD~1..HEAD and HEAD~1...HEAD",
+                              DEV_TRIO_REVIEWER_MODEL="agy")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot_status(result, "skipped:focus")
+        self.assertNotIn("<workspace_snapshot>", self.sent_prompt())
+
+    def test_agy_reviewer_three_dot_range_spellings_keep_merge_base_diff(self):
+        self._init_git_workspace()
+        git = lambda *a: subprocess.run(["git", *a], cwd=self.workspace, check=True,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        (self.workspace / "base.txt").write_text("base\n")
+        git("add", "base.txt")
+        git("commit", "-m", "base")
+        git("branch", "-M", "trunk")
+        git("switch", "-c", "topic")
+        (self.workspace / "topic.txt").write_text("topic line\n")
+        git("add", "topic.txt")
+        git("commit", "-m", "topic")
+        git("switch", "trunk")
+        (self.workspace / "trunk.txt").write_text("trunk line\n")
+        git("add", "trunk.txt")
+        git("commit", "-m", "trunk")
+        t, p = self._rev("trunk"), self._rev("topic")
+        result = self.run_cli("ask-reviewer.sh", f"review trunk...topic ({t}...{p})",
+                              DEV_TRIO_REVIEWER_MODEL="agy")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot_status(result, "ok:range")
+        snapshot = self.fenced(self.sent_prompt(), "workspace_snapshot")
+        self.assertTrue(snapshot.startswith(f"### git diff {t}...{p}\n"), snapshot)
+        self.assertIn("+topic line", snapshot)
+        # A two-dot diff would also show trunk's own commit, reversed.
+        self.assertNotIn("trunk line", snapshot)
+
+    def test_agy_reviewer_range_spelling_probe_cap(self):
+        self._commit_two()
+        a, b = self._rev("HEAD~1"), self._rev("HEAD")
+        # A fixed name the range parser accepts; init.defaultBranch may not be one.
+        branch = "trunk"
+        subprocess.run(["git", "branch", "-M", branch], cwd=self.workspace, check=True)
+        four = f"HEAD~1..HEAD HEAD^..HEAD {a}..{b} {a[:8]}..{b[:8]}"
+        cases = (
+            ("four", four, "ok:range", 8),
+            ("five", f"{four} {branch}~1..{branch}", "skipped:focus", 8),
+            ("alternating", " ".join([f"{a}..{b} {a[:8]}..{b[:8]}"] * 5), "ok:range", 4),
+        )
+        for name, spellings, status, probes in cases:
+            with self.subTest(name):
+                path, log = self.git_shim("")
+                log.unlink(missing_ok=True)
+                self.calls.unlink(missing_ok=True)
+                # Each case reads only its own manifest and run.json.
+                shutil.rmtree(self.logdir())
+                result = self.run_cli("ask-reviewer.sh", f"review {spellings}",
+                                      DEV_TRIO_REVIEWER_MODEL="agy", PATH=path)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assert_snapshot_status(result, status)
+                self.assertEqual(len(self._commit_probes(log)), probes, log.read_text())
+
     def test_agy_reviewer_consecutive_runs_exclude_dev_trio_logs(self):
         self._init_git_workspace()
         (self.workspace / "app.py").write_text("print('hello')\n")
