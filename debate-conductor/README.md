@@ -144,6 +144,18 @@ outlive pane scrollback. Foreign/incomplete views and stale detached-view setup
 locks remain intact with inspection instructions; they are not automatically
 removed. The `--here` lock is covered below.
 
+To find detached views left behind after their cleanup command is gone, run
+`bin/team-3pane.sh --prune`. It only reports: one row per `debate-view-*` session
+on the tmux server a view would be prepared on from here, and for each removable
+one the exact `kill-session` command, which it never runs itself. A view is
+removable only if it is this plugin's own complete, unmodified detached view,
+with no client attached, its window linked nowhere else, no debate writer lock
+(`debate-<TS>/.lock`, live or left behind) in its log directory, and no window
+activity for 60 minutes. Anything it cannot verify is kept with its reason; a
+session it cannot verify as its own unmodified view also gets an inspect
+command. The report is a snapshot: rerun it right before running a printed
+command.
+
 Team, absolute log root and viewer cwd are explicit, including `AGENT_TEAM` and
 custom `DEBATE_LOG_DIR`. Continue uses the chosen transcript's parent. Results
 are bound to a private validated dispatch receipt, never mutable `latest-debate`;

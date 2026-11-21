@@ -643,8 +643,7 @@ print(response)
                 self.assertEqual(json.loads(receipt.stdout)["critic_round"], 4)
 
 
-@unittest.skipUnless(REAL_TMUX, "tmux is not installed")
-class RealViewTests(ViewFixture):
+class RealTmuxFixture(ViewFixture):
     def setUp(self):
         super().setUp()
         self.tool("tmux", f"exec {shlex.quote(REAL_TMUX)} -f /dev/null \"$@\"\n")
@@ -656,6 +655,9 @@ class RealViewTests(ViewFixture):
         return subprocess.run([REAL_TMUX, "-S", str(self.socket), *args],
                               capture_output=True, text=True, timeout=5)
 
+
+@unittest.skipUnless(REAL_TMUX, "tmux is not installed")
+class RealViewTests(RealTmuxFixture):
     def test_real_two_role_output_reuse_and_dead_viewer_recovery(self):
         ctx = self.prepare("--view=tmux", AGENT_TEAM="real-test")
         run = Path(ctx["log_dir"]) / "debate-fixture"
@@ -687,6 +689,229 @@ class RealViewTests(ViewFixture):
             time.sleep(0.1)
         self.prepare("--view=tmux", AGENT_TEAM="real-test")
         self.assertEqual(self.tmux("display-message", "-p", "-t", panes[0], "#{pane_dead}").stdout.strip(), "0")
+
+
+@unittest.skipUnless(REAL_TMUX, "tmux is not installed")
+class PruneViewTests(RealTmuxFixture):
+    """Issue #216: `team-3pane.sh --prune` reports, never removes."""
+
+    def setUp(self):
+        super().setUp()
+        real_date = shutil.which("date", path=os.environ["PATH"])
+        self.tool("date", '[ "$1" = +%s ] && [ -n "${FAKE_NOW:-}" ] && { echo "$FAKE_NOW"; exit 0; }\n'
+                          f'exec {shlex.quote(real_date)} "$@"\n')
+
+    def view(self, team="prune-test"):
+        ctx = self.prepare("--view=tmux", AGENT_TEAM=team)
+        self.assertEqual(ctx["status"], "ready-detached")
+        return ctx
+
+    def later(self, session):
+        out = self.tmux("display-message", "-p", "-t", "=" + session + ":", "#{window_activity}").stdout
+        return str(int(out) + 7200)
+
+    def prune(self, *args, rc=0, **env):
+        result = self.cli("team-3pane.sh", *(args or ("--prune",)), **env)
+        self.assertEqual(result.returncode, rc, result.stdout + result.stderr)
+        return result
+
+    def rows(self, result):
+        rows = {}
+        for line in result.stdout.splitlines():
+            fields = line.split("\t")
+            if len(fields) == 4 and fields[0] in ("keep", "remove"):
+                rows[fields[1]] = (fields[0], fields[3])
+        return rows
+
+    def kept(self, session, **env):
+        action, reason = self.rows(self.prune(FAKE_NOW=self.later(session), **env))[session]
+        self.assertEqual(action, "keep")
+        return reason
+
+    def test_recent_view_is_kept_then_reported_with_a_command_removing_only_it(self):
+        session = self.view()["session"]
+        self.tmux("new-session", "-d", "-s", "mine", "exec /bin/sleep 600")
+        self.assertEqual(self.rows(self.prune()),
+                         {session: ("keep", "recently active (within 60 min)")})
+        result = self.prune(FAKE_NOW=self.later(session))
+        self.assertEqual(self.rows(result),
+                         {session: ("remove", "idle for over 60 min, no client, no debate lock")})
+        quote = lambda text: "'" + text.replace("'", "'\\''") + "'"
+        expected = "  %s -S %s kill-session -t %s" % (
+            quote(str(self.tools / "tmux")), quote(str(self.socket)), quote("=" + session))
+        commands = [l for l in result.stdout.splitlines() if "kill-session" in l]
+        self.assertEqual(commands, [expected])
+        self.assertNotIn("stops it", result.stdout)
+        self.assertEqual(self.tmux("has-session", "-t", "=" + session).returncode, 0)
+        subprocess.run(shlex.split(commands[0]), env=self.env, check=True, timeout=5)
+        self.assertNotEqual(self.tmux("has-session", "-t", "=" + session).returncode, 0)
+        self.assertEqual(self.tmux("has-session", "-t", "=mine").returncode, 0)
+
+    def test_last_sessions_note_needs_every_session_removable(self):
+        session = self.view()["session"]
+        result = self.prune(FAKE_NOW=self.later(session))
+        self.assertIn("These are the only sessions on this server; removing them all stops it", result.stdout)
+
+    def test_attached_client_keeps_the_view(self):
+        session = self.view()["session"]
+        client = subprocess.Popen([REAL_TMUX, "-S", str(self.socket), "-C", "attach", "-t", "=" + session],
+                                  stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        def reap():
+            client.stdin.close()
+            client.terminate()
+            client.wait(timeout=5)
+        self.addCleanup(reap)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not self.tmux("list-clients", "-t", "=" + session).stdout:
+            time.sleep(0.1)
+        self.assertTrue(self.tmux("list-clients", "-t", "=" + session).stdout)
+        self.assertEqual(self.kept(session), "a client is attached")
+
+    def test_debate_writer_lock_keeps_the_view(self):
+        ctx = self.view()
+        run = Path(ctx["log_dir"]) / "debate-20261121-000000"
+        run.mkdir(parents=True)
+        (run / ".lock").symlink_to("host=x pid=1 started=x run=1")
+        self.assertEqual(self.kept(ctx["session"]),
+                         "a debate holds or left a writer lock: %s" % (run / ".lock"))
+        with self.subTest("noglob inherited through SHELLOPTS"):
+            self.assertEqual(self.kept(ctx["session"], SHELLOPTS="noglob"),
+                             "a debate holds or left a writer lock: %s" % (run / ".lock"))
+        (run / ".lock").unlink()
+        odd = Path(ctx["log_dir"]) / "debate-a\tb"
+        odd.mkdir()
+        (odd / ".lock").symlink_to("held")
+        with self.subTest("control character in the lock path stays in one field"):
+            self.assertEqual(self.kept(ctx["session"]),
+                             "a debate holds or left a writer lock: %s/debate-a?b/.lock" % ctx["log_dir"])
+
+    def test_jq_failing_after_output_keeps_the_view(self):
+        session = self.view()["session"]
+        real_jq = shutil.which("jq")
+        self.tool("jq", 'case "$*" in "-r .type") %s "$@"; exit 1 ;; esac\nexec %s "$@"\n'
+                  % (shlex.quote(real_jq), shlex.quote(real_jq)))
+        self.assertEqual(self.kept(session),
+                         "incomplete or modified: its view record is missing or not a detached view")
+
+    @unittest.skipIf(os.geteuid() == 0, "root bypasses directory permissions")
+    def test_uninspectable_log_tree_keeps_the_view(self):
+        ctx = self.view()
+        log_dir = Path(ctx["log_dir"])
+        run = log_dir / "debate-20261121-000000"
+        run.mkdir(parents=True)
+        (run / ".lock").symlink_to("held")
+        reason = "cannot inspect its log directory for a debate lock: %s" % log_dir
+        # Search-only (0300) hides names from a glob but still answers a probe of
+        # a known name; both are refused, as the plan requires read and search.
+        for path, mode in ((run, 0o000), (run, 0o300), (log_dir, 0o300)):
+            with self.subTest(path=path.name, mode=oct(mode)):
+                path.chmod(mode)
+                try:
+                    self.assertEqual(self.kept(ctx["session"]), reason)
+                finally:
+                    path.chmod(0o700)
+        (run / ".lock").unlink()
+        hidden = self.root / "hidden"
+        (hidden / "run").mkdir(parents=True)
+        (log_dir / "debate-link").symlink_to(hidden / "run")
+        hidden.chmod(0o000)
+        try:
+            with self.subTest("entry that does not resolve"):
+                self.assertEqual(self.kept(ctx["session"]), reason)
+        finally:
+            hidden.chmod(0o700)
+
+    def test_foreign_and_modified_views_are_kept(self):
+        session = self.view()["session"]   # also creates the private socket directory
+        self.assertEqual(self.tmux("new-session", "-d", "-s", "debate-view-foreign", "exec /bin/sleep 600").returncode, 0)
+        result = self.prune()
+        self.assertEqual(self.rows(result)["debate-view-foreign"], ("keep", "foreign or untagged session"))
+        self.assertIn("list-panes -s -t '=debate-view-foreign'", result.stdout)
+        self.tmux("split-window", "-d", "-t", "=" + session + ":", "exec /bin/sleep 600")
+        self.assertEqual(self.kept(session), "modified: its panes are not the recorded viewers")
+
+    def test_renamed_view_is_kept(self):
+        session = self.view()["session"]
+        self.tmux("rename-session", "-t", "=" + session, "debate-view-renamed")
+        later = self.later("debate-view-renamed")
+        self.assertEqual(self.rows(self.prune(FAKE_NOW=later))["debate-view-renamed"],
+                         ("keep", "modified: its name does not match its record"))
+
+    def test_replaced_viewer_panes_are_kept(self):
+        ctx = self.view()
+        session = ctx["session"]
+        record = json.loads(self.tmux("show-options", "-wqv", "-t", "=" + session + ":", "@debate-view").stdout)
+        gen = record["gen"]
+        replacements = {
+            "live other command": "exec /bin/sleep 600",
+            "live command carrying the nonce": "exec env DEBATE_VIEW_NONCE=%s /bin/sleep 600 gen" % shlex.quote(record["nonce"]),
+            "short-lived command, pane kept dead": "exit 0",
+        }
+        start = self.tmux("display-message", "-p", "-t", gen, "#{pane_start_command}").stdout.strip()
+        original = start[1:-1].replace('\\\\', '\\').replace('\\$', '$').replace('\\"', '"')
+        team = "AGENT_TEAM='prune-test'"
+        self.assertIn(team, original)
+        # Shown by tmux as prune-\test: decoding every escape would read it as prune-test.
+        replacements["team with a tab where the record has a t"] = original.replace(team, "AGENT_TEAM='prune-\test'")
+        for label, command in replacements.items():
+            with self.subTest(label):
+                self.assertEqual(self.tmux("respawn-pane", "-k", "-t", gen, command).returncode, 0)
+                if command == "exit 0":
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline and self.tmux(
+                            "display-message", "-p", "-t", gen, "#{pane_dead}").stdout.strip() != "1":
+                        time.sleep(0.1)
+                    self.assertEqual(self.tmux("display-message", "-p", "-t", gen, "#{pane_dead}").stdout.strip(), "1")
+                self.assertEqual(self.kept(session), "modified: pane %s does not run this view's gen viewer" % gen)
+
+    def test_window_linked_elsewhere_keeps_the_view(self):
+        session = self.view()["session"]
+        self.tmux("new-session", "-d", "-s", "mine", "exec /bin/sleep 600")
+        self.assertEqual(self.tmux("link-window", "-s", "=" + session + ":", "-t", "=mine:5").returncode, 0)
+        self.assertEqual(self.kept(session), "its window is linked into another session")
+
+    def test_invoking_session_is_kept(self):
+        ctx = self.view()
+        session = ctx["session"]
+        record = json.loads(self.tmux("show-options", "-wqv", "-t", "=" + session + ":", "@debate-view").stdout)
+        sid = self.tmux("display-message", "-p", "-t", "=" + session + ":", "#{session_id}").stdout.strip()
+        # A newer session, so tmux's own default choice would not be the view.
+        self.tmux("new-session", "-d", "-s", "mine", "exec /bin/sleep 600")
+        tmux_env = "%s,%d,%s" % (self.socket, os.getpid(), sid.lstrip("$"))
+        self.assertEqual(self.kept(session, TMUX=tmux_env, TMUX_PANE=record["gen"]),
+                         "this is the session running --prune")
+        for pane in ("%999", ""):
+            with self.subTest(TMUX_PANE=pane):
+                result = self.prune(rc=1, TMUX=tmux_env, TMUX_PANE=pane)
+                self.assertIn("cannot identify the tmux session running --prune", result.stderr)
+                self.assertNotIn("kill-session", result.stdout)
+
+    def test_no_server_is_nothing_and_unknown_states_are_errors(self):
+        uid = str(os.getuid())
+        fresh = self.root / "fresh"
+        result = self.prune(TMUX_TMPDIR=str(fresh))
+        self.assertFalse(fresh.exists())
+        self.assertEqual(result.stdout, "no tmux server at %s/tmux-%s/default; nothing to prune\n" % (fresh, uid))
+        stale = self.root / "stale" / ("tmux-" + uid)
+        stale.mkdir(parents=True, mode=0o700)
+        import socket as socket_module
+        sock = socket_module.socket(socket_module.AF_UNIX)
+        sock.bind(str(stale / "default"))
+        sock.close()
+        result = self.prune(TMUX_TMPDIR=str(self.root / "stale"))
+        self.assertEqual(result.stdout, "no tmux server at %s/default; nothing to prune\n" % stale)
+        for label, make in (("regular file", lambda p: p.write_text("")),
+                            ("dangling link", lambda p: p.symlink_to(p.parent / "nowhere"))):
+            with self.subTest(label):
+                base = self.root / label.replace(" ", "-")
+                parent = base / ("tmux-" + uid)
+                parent.mkdir(parents=True, mode=0o700)
+                make(parent / "default")
+                result = self.prune(TMUX_TMPDIR=str(base), rc=1)
+                self.assertIn("cannot list the sessions on", result.stderr)
+        for args in (("--prune=apply",), ("--prune", "--view=tmux"), ("-n", "x", "--prune")):
+            with self.subTest(args=args):
+                self.assertIn("usage: team-3pane.sh --prune", self.prune(*args, rc=2).stderr)
 
 
 if __name__ == "__main__":

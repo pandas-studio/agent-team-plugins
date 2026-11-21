@@ -23,6 +23,8 @@ for option in "$@"; do
   case "$option" in
     --view=*|--view-only|--team=*|--log-base=*|--log-dir=*)
       exec bash "$SCRIPT_DIR/../lib/prepare-view.sh" "$@" ;;
+    --prune|--prune=*)
+      exec bash "$SCRIPT_DIR/../lib/prune-views.sh" "$@" ;;
   esac
 done
 
@@ -44,6 +46,8 @@ Options:
   --view-only    Prepare a detached two-role view (no PM pane).
   --team=ID --log-base=ABS  Explicit preflight context (supply both).
   --log-dir=ABS  Manual-only view of a nonstandard continuation directory.
+  --prune        Report which detached views can be removed and print the
+                 command removing each; removes nothing itself.
   -h, --help     Show this help.
 EOF
 }

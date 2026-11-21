@@ -74,6 +74,27 @@ view_context_read() {
 
 view_tmux() { "$VIEW_TMUX" -S "$VIEW_SOCKET" "$@"; }
 
+# The tmux socket a view is made on from here: the caller's own server inside
+# tmux, else the user's default socket. Physical, so every lock key and every
+# printed command names the same path for the same server.
+view_resolve_socket() {
+  local socket
+  if [ -n "${TMUX:-}" ]; then
+    socket=${TMUX%%,*}
+  else
+    socket="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/default"
+  fi
+  view_absolute "$socket"
+}
+
+# view_expected_session TEAM LOG_DIR — the name of that team's detached view.
+view_expected_session() {
+  local name hash
+  name=$(printf '%s' "$1" | tr -c 'A-Za-z0-9_-' '_')
+  hash=$(printf '%s' "$2" | cksum | cut -d' ' -f1)
+  printf 'debate-view-%s-%s\n' "$name" "$hash"
+}
+
 view_record() { view_tmux show-options -wqv -t "$1" @debate-view; }
 
 view_complete() {
