@@ -1,6 +1,7 @@
 """agy CLI-log parsing in dev-trio/lib/agy-denial.sh: a line counts only as a log event."""
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -38,10 +39,18 @@ class AgyDenialLogTests(unittest.TestCase):
         self.home = self.root / "agy home"
         self.log = self.root / "cli.log"
 
-    def call(self, function, *args):
+    AFTER = "after the call\n"
+
+    def call(self, function, *args, strict=False):
+        # strict: the options the wrappers run under, then a line printed after
+        # the call — a shell the call ended never prints it.
+        script = '. "$1"; shift; "$@"'
+        if strict:
+            script = f'set -euo pipefail; {script}; printf "%s" "$AFTER"'
         result = subprocess.run(
-            ["bash", "-c", '. "$1"; shift; "$@"', "bash", str(LIB), function, *args],
+            ["bash", "-c", script, "bash", str(LIB), function, *args],
             stdin=subprocess.DEVNULL, text=True, capture_output=True, timeout=15, check=False,
+            env={**os.environ, "AFTER": self.AFTER},
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
@@ -163,6 +172,22 @@ class AgyDenialLogTests(unittest.TestCase):
             CREATED, CREATED,
         )
         self.assertEqual(self.conversations(), [ID])
+
+    def test_a_direct_call_under_errexit_and_pipefail_does_not_end_the_shell(self):
+        # A log that names no conversation is what a run leaves when it fails
+        # before agy creates one: grep matching nothing is not an error here.
+        for name, lines, printed in (
+            ("no conversation line", [soft("RunCommand", 10)], ""),
+            ("empty log", [], ""),
+            ("one conversation", [CREATED], ID + "\n"),
+        ):
+            with self.subTest(name):
+                self.write_log(*lines)
+                self.assertEqual(self.call("agy_denial_conversations", str(self.log), strict=True),
+                                 printed + self.AFTER)
+        with self.subTest("no log file"):
+            self.log.unlink()
+            self.assertEqual(self.call("agy_denial_conversations", str(self.log), strict=True), self.AFTER)
 
 
 if __name__ == "__main__":
