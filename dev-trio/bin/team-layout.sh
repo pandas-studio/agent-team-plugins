@@ -123,25 +123,30 @@ here_stamp() {
 }
 # here_lock — serialize the guard, the build and the stamp per window: two
 # runs that both saw one pane would otherwise both split it. A lock directory
-# holding the owner's pid, not `tmux wait-for -L`, so a run that died (even
-# to SIGKILL) cannot leave every later bootstrap blocked. Released at exit.
+# holding the owner's pid, not `tmux wait-for -L`, so it can be inspected and
+# removed by hand. Released at exit by the EXIT trap, which bash also runs on
+# TERM, HUP and INT; a run that dies without running it (SIGKILL, a crash, or
+# any signal before the trap is installed) leaves the lock behind.
 # The pid file is what is owned: it is created with noclobber (O_EXCL, a
 # shell redirection), because uutils' mkdir (Ubuntu 26.04's default) is not
 # atomic: two concurrent runs both succeeded in 131 of 200 races, measured.
+# noclobber refuses only an existing regular file, so any existing entry is
+# refused before the redirection: a FIFO there would block it.
+# A held lock is never taken over, and what it records is not read: two runs
+# that both saw the same dead owner would each remove it, the second removing
+# the first's live claim (#222). After the wait the lock is reported instead,
+# and a new tmux window, which has its own lock, is the way on.
 here_lock() {
-  local wid owner i=0
+  local wid i=0
   wid=$(tmux display-message -p -t "$HERE_PANE" '#{window_id}') || return 1
   HERE_LOCK="${TMPDIR:-/tmp}/agent-team-layout.$(id -u).$(printf '%s %s' "${TMUX%%,*}" "$wid" | cksum | cut -d' ' -f1)"
-  until mkdir "$HERE_LOCK" 2>/dev/null && (set -C; echo "$$" > "$HERE_LOCK/pid") 2>/dev/null; do
-    owner=$(cat "$HERE_LOCK/pid" 2>/dev/null || true)
-    if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
-      rm -rf "$HERE_LOCK"   # its owner is gone
-      continue
-    fi
+  until mkdir "$HERE_LOCK" 2>/dev/null && [ ! -e "$HERE_LOCK/pid" ] && [ ! -L "$HERE_LOCK/pid" ] \
+      && (set -C; echo "$$" > "$HERE_LOCK/pid") 2>/dev/null; do
     i=$((i + 1))
     if [ "$i" -ge 100 ]; then
-      printf 'error: another layout run is still setting up this window (lock %s); retry when it finishes.\n' \
+      printf 'error: the layout lock for this window (%q) is still held: another layout run is setting up this window, or one was killed before it could release the lock.\n' \
         "$HERE_LOCK" >&2
+      printf 'Retry when it finishes, or open a new tmux window (prefix + c) and run this there; remove the lock once no layout run for this window is active.\n' >&2
       return 2
     fi
     sleep 0.1
