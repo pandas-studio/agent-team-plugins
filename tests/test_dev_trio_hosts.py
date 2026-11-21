@@ -3399,19 +3399,26 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         self._git("switch", "-q", "trunk")
         return {n: self._rev(n) for n in ("trunk~1", "trunk", "side", "clean")}
 
-    def _moving_shim(self, trigger, ref, to, before=False):
-        """Move ref to `to` once, at the first Git call whose argv matches the
-        case pattern `trigger`: after that call runs, or before it if `before`."""
+    def _moving_shim(self, trigger, ref, to, before=False, nth=1):
+        """Move ref to `to` once, at the nth Git call whose argv matches the
+        case pattern `trigger`: after that call runs, or before it if `before`.
+        The marker exists only if update-ref succeeded."""
         real = shutil.which("git")
         marker = self.root / "moved"
-        move = (f'[ -f "{marker}" ] || {{ : > "{marker}"; '
-                f'"{real}" -C "{self.workspace}" update-ref {ref} {to}; }}')
+        count = self.root / "trigger-count"
+        move = (f'printf x >> "{count}"; '
+                f'if [ "$(wc -c < "{count}" | tr -d " ")" = {nth} ]; then '
+                f'"{real}" -C "{self.workspace}" update-ref {ref} {to} && : > "{marker}"; fi')
         if before:
             body = f'case "$*" in {trigger}) {move} ;; esac'
         else:
             body = (f'case "$*" in {trigger}) "{real}" "$@"; rc=$?; {move}; exit $rc ;; esac')
         path, log = self.git_shim(body)
         return path, log, marker
+
+    def assert_moved(self, marker, ref, to):
+        self.assertTrue(marker.exists())
+        self.assertEqual(self._rev(ref), to)
 
     def _diff_calls(self, log):
         return [c.split(" diff ", 1)[1] for c in log.read_text().splitlines() if " diff " in c]
@@ -3422,7 +3429,7 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         result = self.run_cli("ask-reviewer.sh", "review trunk~1..trunk",
                               DEV_TRIO_REVIEWER_MODEL="agy", PATH=path)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(marker.exists())
+        self.assert_moved(marker, "trunk", c["side"])
         self.assert_snapshot_status(result, "ok:range")
         snapshot = self.fenced(self.sent_prompt(), "workspace_snapshot")
         pin = f"{c['trunk~1']}..{c['trunk']}"
@@ -3439,18 +3446,11 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
     def test_range_snapshot_diffs_the_pair_the_extractor_verified(self):
         c = self._moving_fixture()
         # The extractor's last endpoint probe is its second ^{commit} call.
-        real = shutil.which("git")
-        marker = self.root / "moved"
-        seen = self.root / "seen"
-        body = (f'case "$*" in *"^{{commit}}"*) "{real}" "$@"; rc=$?; '
-                f'if [ -f "{seen}" ]; then [ -f "{marker}" ] || {{ : > "{marker}"; '
-                f'"{real}" -C "{self.workspace}" update-ref refs/heads/trunk {c["side"]}; }}; '
-                f'else : > "{seen}"; fi; exit $rc ;; esac')
-        path, log = self.git_shim(body)
+        path, log, marker = self._moving_shim('*"^{commit}"*', "refs/heads/trunk", c["side"], nth=2)
         result = self.run_cli("ask-reviewer.sh", "review trunk~1..trunk",
                               DEV_TRIO_REVIEWER_MODEL="agy", PATH=path)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(marker.exists())
+        self.assert_moved(marker, "trunk", c["side"])
         self.assert_snapshot_status(result, "ok:range")
         snapshot = self.fenced(self.sent_prompt(), "workspace_snapshot")
         self.assertIn("+v2", snapshot)
@@ -3461,13 +3461,14 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
 
     def test_range_snapshot_screens_the_pair_it_publishes(self):
         c = self._moving_fixture()
-        # side~1..side holds the .env commit; after screening starts, side
-        # moves to a clean commit. The screened pair is the one published.
-        path, log, marker = self._moving_shim("*--name-status*", "refs/heads/side", c["clean"], before=True)
+        # side~1..side holds the .env commit; right after the extractor's
+        # last endpoint probe, side moves to a clean commit. Screening must
+        # cover the pair the extractor accepted.
+        path, log, marker = self._moving_shim('*"^{commit}"*', "refs/heads/side", c["clean"], nth=2)
         result = self.run_cli("ask-reviewer.sh", "review side~1..side",
                               DEV_TRIO_REVIEWER_MODEL="agy", PATH=path)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(marker.exists())
+        self.assert_moved(marker, "side", c["clean"])
         self.assert_snapshot_status(result, "ok:range")
         snapshot = self.fenced(self.sent_prompt(), "workspace_snapshot")
         pin = f"{c['trunk']}..{c['side']}"
@@ -3505,12 +3506,14 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
     def test_three_dot_range_is_pinned_to_its_merge_base(self):
         c = self._diverged_fixture()
         # Moving trunk onto a commit that merges topic would make topic the
-        # merge base, and `git diff trunk...topic` empty.
-        path, log, marker = self._moving_shim("*\" diff \"*", "refs/heads/trunk", c["merged"], before=True)
+        # merge base, and `git diff trunk...topic` empty. The move follows the
+        # extractor's merge-base call, so any later recomputation would see it
+        # (0.8.53 makes no such call and fails on the marker).
+        path, log, marker = self._moving_shim('*" merge-base "*', "refs/heads/trunk", c["merged"])
         result = self.run_cli("ask-reviewer.sh", "review trunk...topic",
                               DEV_TRIO_REVIEWER_MODEL="agy", PATH=path)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(marker.exists())
+        self.assert_moved(marker, "trunk", c["merged"])
         self.assert_snapshot_status(result, "ok:range")
         prompt = self.sent_prompt()
         snapshot = self.fenced(prompt, "workspace_snapshot")
@@ -3534,6 +3537,8 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
              None, "skipped:git-failed", {}),
             ("timeout", 'case "$*" in *" merge-base "*) sleep 15 ;; esac', None, "skipped:timeout",
              {"DEV_TRIO_GIT_TIMEOUT": "2"}),
+            ("snapshot deadline", 'case "$*" in *" merge-base "*) sleep 15 ;; esac', None, "skipped:timeout",
+             {"DEV_TRIO_GIT_TIMEOUT": "60", "DEV_TRIO_SNAPSHOT_TIMEOUT": "3"}),
         )
         c = self._diverged_fixture()
         self._git("switch", "-q", "--orphan", "orphan")
