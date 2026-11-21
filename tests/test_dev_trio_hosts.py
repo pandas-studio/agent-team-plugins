@@ -27,6 +27,19 @@ DEFAULT_FOCUS = (
 )
 
 
+def range_pin(cwd, spec):
+    """The pin dev_trio_extract_git_range prints for spec: commit IDs, and the
+    merge base for A...B (what `git diff A...B` compares)."""
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=cwd, check=True,
+                              capture_output=True, text=True).stdout.strip()
+    if "..." in spec:
+        left, right = spec.split("...", 1)
+        return f"{git('merge-base', left, right)}..{git('rev-parse', right + '^{commit}')}"
+    left, right = spec.split("..", 1)
+    return f"{git('rev-parse', left + '^{commit}')}..{git('rev-parse', right + '^{commit}')}"
+
+
 class HostTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="dev trio ")
@@ -1605,11 +1618,13 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         result = self._run_in(worktree, "ask-reviewer.sh", "review HEAD~1..HEAD", DEV_TRIO_REVIEWER_MODEL="agy")
         self.assertEqual(result.returncode, 0, result.stderr)
         prompt = self.recorded()[0][9]
-        self.assertIn("\n# Snapshot inspection rule (range)\nThe <workspace_snapshot> covers only `git diff HEAD~1..HEAD`. "
+        pin = range_pin(worktree, "HEAD~1..HEAD")
+        self.assertIn(f"\n# Snapshot inspection rule (range)\nThe <workspace_snapshot> covers only `git diff {pin}`. "
                       "When it has no omitted or truncated section, use it for that diff without calling CommandLine "
                       "for the same `git diff`. Commit messages and per-commit history are not available here; if the "
                       "review needs them, record the gap. Inspect the working tree", prompt)
-        self.assertNotIn("git log` or `git show` for the commits", prompt)
+        self.assertNotIn("Use `git log", prompt)
+        self.assertNotIn("To rerun the snapshot's diff", prompt)
         self.assertNotIn("follow the notice in the snapshot", prompt)
         self.assertIn("read the affected files with your file viewer instead of running the git command the notice "
                       "names", prompt)
@@ -1624,8 +1639,11 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         result = self.run_cli("ask-reviewer.sh", "review HEAD~1..HEAD", DEV_TRIO_REVIEWER_MODEL="agy")
         self.assertEqual(result.returncode, 0, result.stderr)
         prompt = self.recorded()[0][9]
-        self.assertIn("for the same `git diff`. Use `git log` or `git show` for the commits inside the range. "
-                      "Inspect the working tree", prompt)
+        pin = range_pin(self.workspace, "HEAD~1..HEAD")
+        self.assertIn(f"for the same `git diff`. Use `git log {pin}` or `git show <commit>` for the commits reachable from "
+                      "its right commit and not from its left one, not the focus's ref names, which may have moved. "
+                      f"To rerun the snapshot's diff, use `git diff {pin}`, even where the focus writes the range "
+                      "another way. Inspect the working tree", prompt)
         self.assertIn("follow the notice in the snapshot.", prompt)
         self.assertNotIn("Git cannot run", prompt)
 
@@ -1769,7 +1787,8 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         result = self.run_cli("ask-reviewer.sh", "review HEAD~1..HEAD with focus on security", DEV_TRIO_REVIEWER_MODEL="agy")
         self.assertEqual(result.returncode, 0, result.stderr)
         snapshot = self.fenced(self.sent_prompt(), "workspace_snapshot")
-        self.assertIn("### git diff HEAD~1..HEAD\n", snapshot)
+        pin = range_pin(self.workspace, "HEAD~1..HEAD")
+        self.assertIn(f"### git diff {pin} (HEAD~1..HEAD in the focus)\n", snapshot)
         self.assertIn("-v1", snapshot)
         self.assertIn("+v2", snapshot)
         self.assertNotIn("untracked.txt", snapshot)
@@ -1785,7 +1804,8 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         result = self.run_cli("ask-reviewer.sh", "review HEAD~1..HEAD.", DEV_TRIO_REVIEWER_MODEL="agy")
         self.assertEqual(result.returncode, 0, result.stderr)
         snapshot = self.fenced(self.sent_prompt(), "workspace_snapshot")
-        self.assertIn("### git diff HEAD~1..HEAD\n", snapshot)
+        pin = range_pin(self.workspace, "HEAD~1..HEAD")
+        self.assertIn(f"### git diff {pin} (HEAD~1..HEAD in the focus)\n", snapshot)
         self.assertIn("-v1", snapshot)
         self.assertIn("+v2", snapshot)
 
@@ -1799,7 +1819,8 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         result = self.run_cli("ask-reviewer.sh", "review `HEAD~1..HEAD`", DEV_TRIO_REVIEWER_MODEL="agy")
         self.assertEqual(result.returncode, 0, result.stderr)
         snapshot = self.fenced(self.sent_prompt(), "workspace_snapshot")
-        self.assertIn("### git diff HEAD~1..HEAD\n", snapshot)
+        pin = range_pin(self.workspace, "HEAD~1..HEAD")
+        self.assertIn(f"### git diff {pin} (HEAD~1..HEAD in the focus)\n", snapshot)
         self.assertIn("-v1", snapshot)
         self.assertIn("+v2", snapshot)
 
@@ -1822,7 +1843,8 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
                                       DEV_TRIO_REVIEWER_MODEL="agy")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 snapshot = self.fenced(self.recorded()[-1][-1], "workspace_snapshot")
-                self.assertIn(f"### git diff {revision_range}", snapshot)
+                pin = range_pin(self.workspace, revision_range)
+                self.assertIn(f"### git diff {pin} ({revision_range} in the focus)\n", snapshot)
                 self.assertIn("-old content", snapshot)
                 self.assertIn("+after", snapshot)
                 self.assertNotIn("range diff content omitted", snapshot)
@@ -1908,8 +1930,9 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         prompt = self.sent_prompt()
         snapshot = self.fenced(prompt, "workspace_snapshot")
         self.assertIn("snapshot truncated", snapshot)
-        self.assertIn("run 'git diff HEAD~1..HEAD --' for remaining diff", snapshot)
-        self.assertIn("This is only `git diff HEAD~1..HEAD`", prompt)
+        pin = range_pin(self.workspace, "HEAD~1..HEAD")
+        self.assertIn(f"run 'git diff {pin} --' for remaining diff", snapshot)
+        self.assertIn(f"This is only `git diff {pin}` (`HEAD~1..HEAD` in the focus), taken from", prompt)
         self.assertIn("it does not cover the working tree", prompt)
 
     def test_agy_reviewer_large_diff_exceeding_pipe_buffer_truncated(self):
@@ -1924,7 +1947,7 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         prompt = self.sent_prompt()
         snapshot = self.fenced(prompt, "workspace_snapshot")
         self.assertIn("snapshot truncated", snapshot)
-        self.assertIn("run 'git diff HEAD~1..HEAD --' for remaining diff", snapshot)
+        self.assertIn(f"run 'git diff {range_pin(self.workspace, 'HEAD~1..HEAD')} --' for remaining diff", snapshot)
 
     def test_agy_reviewer_file_named_head_does_not_break_tracked_diff(self):
         self._init_git_workspace()
@@ -2329,7 +2352,8 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_snapshot_status(result, "ok:range")
         prompt = self.sent_prompt()
-        self.assertIn("\n# Snapshot inspection rule (range)\nThe <workspace_snapshot> covers only `git diff HEAD~1..HEAD`.", prompt)
+        pin = range_pin(self.workspace, "HEAD~1..HEAD")
+        self.assertIn(f"\n# Snapshot inspection rule (range)\nThe <workspace_snapshot> covers only `git diff {pin}`.", prompt)
         self.assertNotIn("\n# Snapshot inspection rule\n", prompt)
         self.assertNotIn("The execution environment's `git status` step", prompt)
 
@@ -3247,7 +3271,8 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         snapshot = self.fenced(self.sent_prompt(), "workspace_snapshot")
-        self.assertIn("### git diff HEAD~1..HEAD", snapshot)
+        pin = range_pin(self.workspace, "HEAD~1..HEAD")
+        self.assertTrue(snapshot.startswith(f"### git diff {pin} (HEAD~1..HEAD in the focus)\n"), snapshot)
 
     def _rev(self, rev):
         return subprocess.run(["git", "rev-parse", rev], cwd=self.workspace, check=True,
@@ -3278,8 +3303,8 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_snapshot_status(result, "ok:range")
         snapshot = self.fenced(self.sent_prompt(), "workspace_snapshot")
-        # Named by commit, so a ref that moves after verification cannot change the diff.
-        self.assertTrue(snapshot.startswith(f"### git diff {a}..{b}\n"), snapshot)
+        # Diffed by commit, labelled with the first spelling.
+        self.assertTrue(snapshot.startswith(f"### git diff {a}..{b} (HEAD~1..HEAD in the focus)\n"), snapshot)
         self.assertIn("+v2", snapshot)
 
     def test_agy_reviewer_two_and_three_dot_range_over_same_endpoints_skip_snapshot(self):
@@ -3312,7 +3337,10 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_snapshot_status(result, "ok:range")
         snapshot = self.fenced(self.sent_prompt(), "workspace_snapshot")
-        self.assertTrue(snapshot.startswith(f"### git diff {t}...{p}\n"), snapshot)
+        mb = subprocess.run(["git", "merge-base", t, p], cwd=self.workspace, check=True,
+                            capture_output=True, text=True).stdout.strip()
+        # Pinned to the merge base, labelled with the first spelling.
+        self.assertTrue(snapshot.startswith(f"### git diff {mb}..{p} (trunk...topic in the focus)\n"), snapshot)
         self.assertIn("+topic line", snapshot)
         # A two-dot diff would also show trunk's own commit, reversed.
         self.assertNotIn("trunk line", snapshot)
@@ -3341,6 +3369,240 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assert_snapshot_status(result, status)
                 self.assertEqual(len(self._commit_probes(log)), probes, log.read_text())
+
+    # #243: a range is resolved once. The shims below move a ref at a chosen
+    # Git call and leave a marker, so a test that passes without the move
+    # happening is caught.
+
+    def _git(self, *args):
+        return subprocess.run(["git", *args], cwd=self.workspace, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def _moving_fixture(self):
+        """trunk: v1 -> v2. side: one more commit, v3 plus a new .env.
+        clean: one more commit on side, v4 only."""
+        self._init_git_workspace()
+        (self.workspace / "f.txt").write_text("v1\n")
+        self._git("add", "f.txt")
+        self._git("commit", "-qm", "v1")
+        (self.workspace / "f.txt").write_text("v2\n")
+        self._git("commit", "-qam", "v2")
+        self._git("branch", "-M", "trunk")
+        self._git("switch", "-qc", "side")
+        (self.workspace / "f.txt").write_text("v3\n")
+        (self.workspace / ".env").write_text("SECRET=1\n")
+        self._git("add", "f.txt", ".env")
+        self._git("commit", "-qm", "v3")
+        self._git("switch", "-qc", "clean")
+        (self.workspace / "f.txt").write_text("v4\n")
+        self._git("commit", "-qam", "v4")
+        self._git("switch", "-q", "trunk")
+        return {n: self._rev(n) for n in ("trunk~1", "trunk", "side", "clean")}
+
+    def _moving_shim(self, trigger, ref, to, nth=1):
+        """Move ref to `to` once, right after the nth Git call whose argv
+        matches the case pattern `trigger`. The marker exists only if
+        update-ref succeeded."""
+        real = shutil.which("git")
+        marker = self.root / "moved"
+        # One file per matching call: counts without wc, whose output format
+        # differs between coreutils builds.
+        count = self.root / "trigger-count"
+        move = (f'n=1; while [ -e "{count}.$n" ]; do n=$((n + 1)); done; : > "{count}.$n"; '
+                f'if [ "$n" = {nth} ]; then '
+                f'"{real}" -C "{self.workspace}" update-ref {ref} {to} && : > "{marker}"; fi')
+        body = f'case "$*" in {trigger}) "{real}" "$@"; rc=$?; {move}; exit $rc ;; esac'
+        path, log = self.git_shim(body)
+        return path, log, marker
+
+    def assert_moved(self, marker, ref, to):
+        self.assertTrue(marker.exists())
+        self.assertEqual(self._rev(ref), to)
+
+    def _diff_calls(self, log):
+        return [c.split(" diff ", 1)[1] for c in log.read_text().splitlines() if " diff " in c]
+
+    def test_range_snapshot_ignores_a_ref_moved_after_screening(self):
+        c = self._moving_fixture()
+        path, log, marker = self._moving_shim("*--name-status*", "refs/heads/trunk", c["side"])
+        result = self.run_cli("ask-reviewer.sh", "review trunk~1..trunk",
+                              DEV_TRIO_REVIEWER_MODEL="agy", PATH=path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_moved(marker, "trunk", c["side"])
+        self.assert_snapshot_status(result, "ok:range")
+        snapshot = self.fenced(self.sent_prompt(), "workspace_snapshot")
+        pin = f"{c['trunk~1']}..{c['trunk']}"
+        self.assertTrue(snapshot.startswith(f"### git diff {pin} (trunk~1..trunk in the focus)\n"), snapshot)
+        self.assertIn("+v2", snapshot)
+        self.assertNotIn("+v3", snapshot)
+        self.assertNotIn("omitted", snapshot)
+        calls = self._diff_calls(log)
+        self.assertEqual(len(calls), 2, calls)
+        for call in calls:
+            self.assertIn(f" {pin} --", call)
+            self.assertNotIn("trunk", call)
+
+    def test_range_snapshot_diffs_the_pair_the_extractor_verified(self):
+        c = self._moving_fixture()
+        # The extractor's last endpoint probe is its second ^{commit} call.
+        path, log, marker = self._moving_shim('*"^{commit}"*', "refs/heads/trunk", c["side"], nth=2)
+        result = self.run_cli("ask-reviewer.sh", "review trunk~1..trunk",
+                              DEV_TRIO_REVIEWER_MODEL="agy", PATH=path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_moved(marker, "trunk", c["side"])
+        self.assert_snapshot_status(result, "ok:range")
+        snapshot = self.fenced(self.sent_prompt(), "workspace_snapshot")
+        self.assertIn("+v2", snapshot)
+        self.assertNotIn("+v3", snapshot)
+        self.assertNotIn("omitted", snapshot)
+        pin = f"{c['trunk~1']}..{c['trunk']}"
+        self.assertEqual([f" {pin} --" in call for call in self._diff_calls(log)], [True, True])
+
+    def test_range_snapshot_screens_the_pair_it_publishes(self):
+        c = self._moving_fixture()
+        # side~1..side holds the .env commit; right after the extractor's
+        # last endpoint probe, side moves to a clean commit. Screening must
+        # cover the pair the extractor accepted.
+        path, log, marker = self._moving_shim('*"^{commit}"*', "refs/heads/side", c["clean"], nth=2)
+        result = self.run_cli("ask-reviewer.sh", "review side~1..side",
+                              DEV_TRIO_REVIEWER_MODEL="agy", PATH=path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_moved(marker, "side", c["clean"])
+        self.assert_snapshot_status(result, "ok:range")
+        snapshot = self.fenced(self.sent_prompt(), "workspace_snapshot")
+        pin = f"{c['trunk']}..{c['side']}"
+        self.assertIn("range diff content omitted because a sensitive path is present", snapshot)
+        self.assertNotIn("+v", snapshot)
+        calls = self._diff_calls(log)
+        self.assertEqual(len(calls), 1, calls)
+        self.assertIn("--name-status", calls[0])
+        self.assertIn(f" {pin} --", calls[0])
+
+    def _diverged_fixture(self):
+        """trunk and topic diverge from base; merged = trunk with topic merged."""
+        self._init_git_workspace()
+        (self.workspace / "base.txt").write_text("base\n")
+        self._git("add", "base.txt")
+        self._git("commit", "-qm", "base")
+        self._git("branch", "-M", "trunk")
+        self._git("switch", "-qc", "topic")
+        (self.workspace / "topic.txt").write_text("topic line\n")
+        self._git("add", "topic.txt")
+        self._git("commit", "-qm", "topic")
+        self._git("switch", "-q", "trunk")
+        (self.workspace / "trunk.txt").write_text("trunk line\n")
+        self._git("add", "trunk.txt")
+        self._git("commit", "-qm", "trunk")
+        self._git("switch", "-qc", "merged")
+        self._git("merge", "-q", "--no-edit", "topic")
+        self._git("switch", "-q", "trunk")
+        return {n: self._rev(n) for n in ("trunk", "topic", "merged")} | {
+            "mb": self._git("merge-base", "trunk", "topic")}
+
+    def _merge_base_calls(self, log):
+        return [c for c in log.read_text().splitlines() if " merge-base " in c]
+
+    def test_three_dot_range_is_pinned_to_its_merge_base(self):
+        c = self._diverged_fixture()
+        # Moving trunk onto a commit that merges topic would make topic the
+        # merge base, and `git diff trunk...topic` empty. The move follows the
+        # extractor's merge-base call, so anything that later re-reads the
+        # symbolic range would see it; the argv checks below show that both
+        # diffs use the pinned merge base. (0.8.53 makes no merge-base call
+        # and fails on the marker.)
+        path, log, marker = self._moving_shim('*" merge-base "*', "refs/heads/trunk", c["merged"])
+        result = self.run_cli("ask-reviewer.sh", "review trunk...topic",
+                              DEV_TRIO_REVIEWER_MODEL="agy", PATH=path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_moved(marker, "trunk", c["merged"])
+        self.assert_snapshot_status(result, "ok:range")
+        prompt = self.sent_prompt()
+        snapshot = self.fenced(prompt, "workspace_snapshot")
+        pin = f"{c['mb']}..{c['topic']}"
+        self.assertTrue(snapshot.startswith(f"### git diff {pin} (trunk...topic in the focus)\n"), snapshot)
+        self.assertIn("+topic line", snapshot)
+        self.assertNotIn("trunk line", snapshot)
+        self.assertEqual([f" {pin} --" in call for call in self._diff_calls(log)], [True, True])
+        self.assertEqual(len(self._merge_base_calls(log)), 1, log.read_text())
+        self.assertIn(f"This is only `git diff {pin}` (`trunk...topic` in the focus), taken from", prompt)
+        self.assertIn(f"Use `git log {pin}` or `git show <commit>` for the commits", prompt)
+
+    def test_three_dot_range_merge_base_failures_skip_the_snapshot(self):
+        cases = (
+            ("no merge base", "", "orphan", "skipped:git-failed", {}),
+            ("git error", 'case "$*" in *" merge-base "*) exit 2 ;; esac', None, "skipped:git-failed", {}),
+            ("two lines", 'case "$*" in *" merge-base "*) echo {mb}; echo {mb}; exit 0 ;; esac',
+             None, "skipped:git-failed", {}),
+            ("not an id", 'case "$*" in *" merge-base "*) echo zzz; exit 0 ;; esac', None, "skipped:git-failed", {}),
+            ("short id", 'case "$*" in *" merge-base "*) echo abc123; exit 0 ;; esac',
+             None, "skipped:git-failed", {}),
+            # If the bounded probe waited out its 30 s sleep, run_cli's 20 s
+            # timeout would fail the test, so these show the probe is bounded.
+            ("timeout", 'case "$*" in *" merge-base "*) sleep 30 ;; esac', None,
+             "skipped:timeout", {"DEV_TRIO_GIT_TIMEOUT": "2"}),
+            # The deadline leaves the earlier probes several seconds and still
+            # ends well before the sleep or the per-call limit.
+            ("snapshot deadline", 'case "$*" in *" merge-base "*) sleep 30 ;; esac', None,
+             "skipped:timeout", {"DEV_TRIO_GIT_TIMEOUT": "120", "DEV_TRIO_SNAPSHOT_TIMEOUT": "8"}),
+        )
+        c = self._diverged_fixture()
+        self._git("switch", "-q", "--orphan", "orphan")
+        (self.workspace / "o.txt").write_text("o\n")
+        self._git("add", "o.txt")
+        self._git("commit", "-qm", "o")
+        self._git("switch", "-q", "trunk")
+        for name, body, right, status, env in cases:
+            with self.subTest(name):
+                path, log = self.git_shim(body.replace("{mb}", c["mb"]))
+                log.unlink(missing_ok=True)
+                self.calls.unlink(missing_ok=True)
+                shutil.rmtree(self.logdir(), ignore_errors=True)
+                result = self.run_cli("ask-reviewer.sh", f"review trunk...{right or 'topic'}",
+                                      DEV_TRIO_REVIEWER_MODEL="agy", PATH=path, **env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assert_snapshot_status(result, status)
+                self.assertEqual(len(self._merge_base_calls(log)), 1, log.read_text())
+                self.assertEqual(self._diff_calls(log), [])
+                self.assertNotIn("<workspace_snapshot>", self.sent_prompt())
+
+    def test_three_dot_range_merge_base_runs_once_and_only_on_acceptance(self):
+        c = self._diverged_fixture()
+        t, p = c["trunk"], c["topic"]
+        pin = f"{c['mb']}..{p}"
+        cases = (
+            ("repeated spellings", f"trunk...topic trunk...topic {t}...{p} {t}...{p}", "ok:range", 1),
+            ("second range", "trunk...topic trunk~1..trunk", "skipped:focus", 0),
+            ("trailing unverified", "trunk...topic missing..trunk", "ok:range", 1),
+        )
+        for name, focus, status, merge_bases in cases:
+            with self.subTest(name):
+                path, log = self.git_shim("")
+                log.unlink(missing_ok=True)
+                self.calls.unlink(missing_ok=True)
+                shutil.rmtree(self.logdir(), ignore_errors=True)
+                result = self.run_cli("ask-reviewer.sh", f"review {focus}",
+                                      DEV_TRIO_REVIEWER_MODEL="agy", PATH=path)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assert_snapshot_status(result, status)
+                self.assertEqual(len(self._merge_base_calls(log)), merge_bases, log.read_text())
+                if status == "ok:range":
+                    self.assertEqual([f" {pin} --" in call for call in self._diff_calls(log)], [True, True])
+
+    def test_extract_git_range_prints_pin_then_label(self):
+        self._commit_two()
+        a, b = self._rev("HEAD~1"), self._rev("HEAD")
+        for name, focus, label in (
+            ("one spelling", "review `HEAD~1..HEAD`.", "HEAD~1..HEAD"),
+            ("several spellings", f"review HEAD~1..HEAD and {a[:8]}..{b[:8]}", "HEAD~1..HEAD"),
+        ):
+            with self.subTest(name):
+                result = subprocess.run(
+                    ["/bin/bash", "-c", 'set -u; . "$P/lib/host.sh"; dev_trio_extract_git_range "$1" "$2"',
+                     "_", focus, str(self.workspace)],
+                    text=True, capture_output=True, timeout=30, env=self.env | {"P": str(self.plugin)},
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, f"{a}..{b}\n{label}\n")
 
     def test_agy_reviewer_consecutive_runs_exclude_dev_trio_logs(self):
         self._init_git_workspace()

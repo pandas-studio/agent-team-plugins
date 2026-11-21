@@ -564,8 +564,14 @@ EOF_NOTE
 # (full and abbreviated SHAs, a ref name) are one range; A..B and A...B are two.
 # Returns 0 with the range, 1 when there is no single verified range, 124 when
 # a probe timed out, and 3 when a probe failed (anything but 0, 1 for "not a
-# commit", or 124). One spelling is printed as written; several are printed as
-# the verified commit pair, so the snapshot diffs exactly what was compared.
+# commit", or 124).
+#
+# On 0 it prints two lines. Line 1 is the pin: the commits to diff, resolved
+# once, so a ref that moves later cannot change what the snapshot shows (#243).
+# A..B pins to <a>..<b>; A...B pins to <merge-base>..<b>, which is what
+# `git diff A...B` compares, so the merge base is not recomputed either. A
+# three-dot range with no merge base returns 3. Line 2 is the label for the
+# prompt: the first accepted spelling, as the focus wrote it.
 dev_trio_extract_git_range() {
   local focus="$1"
   local repo="${2:-.}"
@@ -573,6 +579,7 @@ dev_trio_extract_git_range() {
   local restore_f=0
   local matched_range=""
   local matched_oids=""
+  local matched_op="" matched_left="" matched_right="" pin mb mb_rc
   local accepted=""
   local seen known
   local probe_count=0
@@ -638,18 +645,33 @@ dev_trio_extract_git_range() {
       if [ -z "$matched_oids" ]; then
         matched_range="$candidate"
         matched_oids="${left_oid}${op}${right_oid}"
-      else
-        matched_range="$matched_oids"
+        # Saved here: the loop variables end up holding the last candidate
+        # probed, which may be a later one that failed verification.
+        matched_op="$op"
+        matched_left="$left_oid"
+        matched_right="$right_oid"
       fi
       accepted="$accepted $candidate"
     fi
   done
   [ "$restore_f" = 1 ] || set +f
-  if [ -n "$matched_range" ]; then
-    printf '%s\n' "$matched_range"
-    return 0
+  [ -n "$matched_range" ] || return 1
+  if [ "$matched_op" = "..." ]; then
+    mb_rc=0
+    mb="$(dev_trio_git_bounded "$repo" merge-base "$matched_left" "$matched_right" 2>/dev/null)" || mb_rc=$?
+    [ "$mb_rc" -eq 124 ] && return 124
+    # rc 1 is "no merge base"; like any other failure, there is no diff to take.
+    [ "$mb_rc" -eq 0 ] || return 3
+    case "$mb" in
+      *[!0-9a-f]*|"") return 3 ;;
+    esac
+    [ "${#mb}" -eq "${#matched_right}" ] || return 3
+    pin="${mb}..${matched_right}"
+  else
+    pin="${matched_left}..${matched_right}"
   fi
-  return 1
+  printf '%s\n%s\n' "$pin" "$matched_range"
+  return 0
 }
 
 # The deadline for the whole snapshot block (#138): CLOCK_MONOTONIC now plus
@@ -679,10 +701,11 @@ sys.exit(0 if time.clock_gettime(time.CLOCK_MONOTONIC) < float(sys.argv[1]) else
 ' "$DEV_TRIO_SNAPSHOT_DEADLINE" 2>/dev/null
 }
 
-# Invoke python workspace snapshot helper.
+# Invoke python workspace snapshot helper. For a range, target is the pin from
+# dev_trio_extract_git_range and the optional label is its spelling.
 dev_trio_workspace_snapshot() {
-  local repo="$1" scope="$2" target="$3" budget="$4" log_dir="$5"
+  local repo="$1" scope="$2" target="$3" budget="$4" log_dir="$5" label="${6:-}"
   local plugin_root
   plugin_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-  python3 "$plugin_root/lib/workspace_snapshot.py" "$repo" "$scope" "$target" "$budget" "${log_dir:-}" 2>/dev/null
+  python3 "$plugin_root/lib/workspace_snapshot.py" "$repo" "$scope" "$target" "$budget" "${log_dir:-}" "$label" 2>/dev/null
 }
