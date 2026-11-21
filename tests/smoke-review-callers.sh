@@ -89,13 +89,10 @@ esac
 if [ "$REVIEW_TEST_CASE" = failed ]; then
   printf '## NEED RESEARCH\n- do not run this failed review request\n' >> "$final"
 fi
-# Make latest-final misleading for every case, under the canonical name and
-# its legacy alias. The exact captured final is still available and differs
-# from both this decoy and the legacy prose line.
+# Make latest-final misleading for every case. The exact captured final is
+# still available and differs from both this decoy and the legacy prose line.
 printf '## Verdict\nNEEDS-FIX — unrelated invocation\n## NEED RESEARCH\n- stale request\n' > "$REVIEW_TEST_DECOY"
-for latest_final in latest-reviewer.final.md latest-codex.final.md; do
-  ln -sfn "$REVIEW_TEST_DECOY" "$(dirname "$final")/$latest_final"
-done
+ln -sfn "$REVIEW_TEST_DECOY" "$(dirname "$final")/latest-reviewer.final.md"
 cat "$final"
 [ "$REVIEW_TEST_CASE" != failed ] || exit 7
 STUB

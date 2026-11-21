@@ -1435,13 +1435,15 @@ check 'agy argv pins its log and the workspace without a prompt' test "$(sed -n 
 check 'agy workspace is the repository root' test "$(sed -n 4p "$TMP/agy-argv")" = "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 check 'agy log lives in agy home' test "$(sed -n 2p "$TMP/agy-argv")" = "$AGY_HOME/log/cli-dev-trio-review-${LOG##*/reviewer-}"
 # The channel is the role: an agy reviewer still writes reviewer-* and links
-# both latest names to this run; the model is in the run metadata.
+# links latest-reviewer.* to this run, and no pre-role latest-codex.*; the
+# model is in the run metadata.
 check 'agy reviewer log is on the reviewer channel' eval 'case "${LOG##*/}" in reviewer-[0-9]*.log) true ;; *) false ;; esac'
 check 'agy reviewer metadata records the real model' json_is "${LOG%.log}.run.json" \
   ".channel==\"reviewer\" and .role==\"reviewer\" and .model==\"agy\" and .run_stem==\"$(basename "${LOG%.log}")\""
-for latest in latest-reviewer latest-codex; do
-  check "$latest.log names this run" test "$(readlink "$TMP/log/review-test/$latest.log")" = "${LOG##*/}"
-  check "$latest.final.md names this run" test "$(readlink "$TMP/log/review-test/$latest.final.md")" = "${FINAL##*/}"
+check "latest-reviewer.log names this run" test "$(readlink "$TMP/log/review-test/latest-reviewer.log")" = "${LOG##*/}"
+check "latest-reviewer.final.md names this run" test "$(readlink "$TMP/log/review-test/latest-reviewer.final.md")" = "${FINAL##*/}"
+for suffix in log final.md; do
+  check "no latest-codex.$suffix is published" eval "[ ! -e \"\$TMP/log/review-test/latest-codex.$suffix\" ] && [ ! -L \"\$TMP/log/review-test/latest-codex.$suffix\" ]"
 done
 check 'denial is its own status with the targets' json_is "$RESULT" ".status==\"permission-denied\" and .exit_code==3 and .invocation_rc==0 and .verdict==null and .denied==$AGY_DENIED and .conversation_ids==[\"$AGY_ID\"]"
 check 'denial keeps the parse error' json_is "$RESULT" '.error | startswith("agy denied a tool in headless mode: command(lsof") and endswith("(parse: missing Verdict heading)")'

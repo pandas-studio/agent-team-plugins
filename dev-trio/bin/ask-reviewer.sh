@@ -605,7 +605,7 @@ RUNSTATE_ARGS=(result_path="$RESULT" "input=focus:$FOCUS")
 [ -z "$CONTEXT_FILE" ]  || RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" "inputpath=context:$CONTEXT_FILE")
 run_begin_metadata reviewer dev-trio-review reviewer "$REVIEWER_MODEL" "${RUNSTATE_ARGS[@]}"
 
-run_publish_latest reviewer "$REVIEWER_MODEL" codex
+run_publish_latest reviewer "$REVIEWER_MODEL"
 RC=0
 # For models with native final-message capture (codex's --output-last-message),
 # the registry's final_args template writes the structured review to $FINAL

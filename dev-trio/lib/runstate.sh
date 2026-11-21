@@ -17,7 +17,7 @@
 #                       # id: any CLI can fill any role via the registry, so
 #                       # the channel names the log family only. Documents
 #                       # written before the role names carry "agy" | "codex"
-#                       # and are still read.
+#                       # and are rejected by runstate_read.
 #     wrapper,          # ask-researcher.sh | ask-reviewer.sh
 #     variant,          # dev-trio-research | dev-trio-review
 #     team,             # namespace dir the artifacts live in
@@ -318,8 +318,7 @@ _RUNSTATE_READ_FILTER='
     | .[0]
     | select(type == "object")
     | select(.schema_version == 1)
-    | select((.channel | type) == "string" and (.channel == "researcher" or .channel == "reviewer"
-         or .channel == "agy" or .channel == "codex"))
+    | select((.channel | type) == "string" and (.channel == "researcher" or .channel == "reviewer"))
     | select((.wrapper | type) == "string")
     | select((.team    | type) == "string")
     | select((.run_stem | type) == "string")

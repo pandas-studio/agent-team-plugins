@@ -312,7 +312,7 @@ RUNSTATE_ARGS=("input=question:$QUERY")
 [ -z "$STDIN_CONTEXT" ] || RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" "inputdigest=context:$STDIN_CONTEXT")
 run_begin_metadata researcher dev-trio-research researcher "$RESEARCHER_MODEL" "${RUNSTATE_ARGS[@]}"
 
-run_publish_latest researcher "$RESEARCHER_MODEL" agy
+run_publish_latest researcher "$RESEARCHER_MODEL"
 RC=0
 ORIGINAL_LOG_FD=8
 # Legacy RESEARCHER_CLI still wins as a per-role binary override; otherwise the
