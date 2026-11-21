@@ -181,12 +181,17 @@ Log channels are named by role too: the reviewer writes `reviewer-*.log` and
 `latest-reviewer.*`, the researcher `researcher-*.log` and `latest-researcher.*`,
 whichever model fills the role, and the dashboard is `dashboard.sh
 reviewer|researcher`. Before this they were `codex-*` / `agy-*`, which named the
-wrong CLI whenever another model ran. For a transition period the wrappers keep
-updating the old `latest-codex.*` / `latest-agy.*` links as aliases of the same
-run, `dashboard.sh codex|agy` still works, and the dashboard renders a directory
-holding only old names. See [Logs](#logs) for the details. `CODEX_CLI`,
-`AGY_CLI` and the `codex` / `agy` model ids keep their names: they name the
-vendor CLI, not the role.
+wrong CLI whenever another model ran. `CODEX_CLI`, `AGY_CLI` and the `codex` /
+`agy` model ids keep their names: they name the vendor CLI, not the role.
+
+**Since dev-trio 0.8.55 the old names are gone.** The wrappers no longer update
+`latest-codex.*` / `latest-agy.*` (0.8.46–0.8.54 kept them as aliases). A
+script or `tail -F` reading one of them must move to `latest-reviewer.*` /
+`latest-researcher.*`: an old link that already exists is left in place and
+keeps naming the last run published before the upgrade. `dashboard.sh` accepts
+only `reviewer` and `researcher` (`codex` / `agy` exit 2 with the usage line),
+and reads nothing the old names left — a directory holding only old links shows
+"no runs yet" until the next run.
 
 ## Install in Claude Code
 
@@ -420,22 +425,19 @@ $PWD/.dev-trio/log/<team>/
 ├── latest-researcher.final.md         # symlink to its answer
 ├── latest-reviewer.log                # symlink to most recent reviewer run
 ├── latest-reviewer.final.md           # symlink to its final response
-├── latest-agy.*, latest-codex.*       # legacy aliases of the two links above
 └── <name>-<TS>-<PID>.manifest.json    # RFC 0004 typed run manifest
 ```
 
 The channel is the role, never the model: a reviewer run on agy still writes
 `reviewer-*`, and its run metadata records `model: "agy"`. Directories written
 before the role names hold `codex-*` / `agy-*` files and `latest-codex.*` /
-`latest-agy.*` links; nothing renames them. For a transition period each new run
-also points the legacy links at itself, so `tail -F …/latest-codex.log` and any
-script reading an old link keep following the current run instead of a stale
-one. A later release removes these aliases. Each link is replaced atomically
-and always names a complete run, but the links are replaced one at a time and
-before the model runs: under concurrent runs, or with an older wrapper writing
-the same directory, the canonical and legacy links can name different runs,
-ordered by start, not completion. Automation should use the paths the wrapper
-prints, never a link.
+`latest-agy.*` links; nothing renames or removes them, and nothing reads them
+any more (see the upgrade note above). Each link is replaced atomically on its
+own, before the model runs, so it names the run that published it last — under
+concurrent runs not necessarily the one that started or finished last — and its
+target may not exist yet. Whether that run finished is recorded in its
+`run.json`, not by the link. Automation should use the paths the wrapper prints,
+never a link.
 
 New raw researcher and reviewer logs, and new RFC 0004 manifests in dev-trio,
 ralph-trio, and spec-trio, are created with mode `0600`. Existing artifacts are
@@ -444,8 +446,8 @@ and are published only after the complete JSON has been written.
 
 **Run metadata.** Every invocation publishes `<stem>.run.json` (`lib/runstate.sh`)
 atomically beside its log: `channel` (`researcher`/`reviewer` — the log stream,
-never a model; metadata written before the role names says `agy`/`codex` and is
-still read), `role`, the resolved `model`, `team`, `started_at`, `pid`, `pm_host`,
+never a model; metadata written before the role names says `agy`/`codex` and the
+dashboard reports it as unreadable), `role`, the resolved `model`, `team`, `started_at`, `pid`, `pm_host`,
 `nested`, the absolute artifact paths, and the `inputs` the wrapper was given.
 A research stdin context is recorded there only as its `bytes` and `sha256`,
 so a large context cannot push the file past the dashboard's size bound; the
@@ -570,10 +572,8 @@ dashboard.sh researcher   # in one side pane
 dashboard.sh reviewer     # in another side pane
 ```
 
-`dashboard.sh agy` and `dashboard.sh codex` are accepted as aliases. A pane
-follows `latest-<role>.log`; while only the legacy `latest-agy.log` /
-`latest-codex.log` exists it follows that one, and it moves to the canonical
-link on the first frame after a new run publishes it.
+A pane follows `latest-<role>.log`. The pre-role arguments `agy` and `codex`
+are not accepted (exit 2).
 
 Color legend (reviewer verdict):
 

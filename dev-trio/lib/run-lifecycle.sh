@@ -172,24 +172,20 @@ run_begin_metadata() {
   fi
 }
 
-# run_publish_latest CHANNEL MODEL [LEGACY] — aborting. ln -sfn unlinks then
-# creates and can fail under concurrent dispatch, so a unique sibling link is
-# renamed over each latest-* link instead; readers see either complete target.
-# LEGACY names the channel's pre-role name (codex, agy): its latest-* links are
-# kept as aliases of this run, so a reader of the old link never reads a stale
-# older run. Each link is replaced on its own; under concurrent publication the
-# canonical and legacy links can name different runs. LATEST_TMP names the one
-# temporary link that exists, so the EXIT trap removes it.
+# run_publish_latest CHANNEL MODEL — aborting. ln -sfn unlinks then creates
+# and can fail under concurrent dispatch, so a unique sibling link is renamed
+# over each latest-* link instead; readers see either complete target. Only the
+# role's own links are published: latest-codex.* / latest-agy.* left by a
+# wrapper from before the role names are not touched and keep naming the last
+# run published then. LATEST_TMP names the one temporary link that exists, so
+# the EXIT trap removes it.
 run_publish_latest() {
-  local link
-  for link in "$1" ${3:+"$3"}; do
-    LATEST_TMP="$LOG_DIR/.latest-$link-$TS"
-    ln -s "$1-$TS.log" "$LATEST_TMP"
-    mv -f "$LATEST_TMP" "$LOG_DIR/latest-$link.log"
-    ln -s "$1-$TS.final.md" "$LATEST_TMP"
-    mv -f "$LATEST_TMP" "$LOG_DIR/latest-$link.final.md"
-    LATEST_TMP=""
-  done
+  LATEST_TMP="$LOG_DIR/.latest-$1-$TS"
+  ln -s "$1-$TS.log" "$LATEST_TMP"
+  mv -f "$LATEST_TMP" "$LOG_DIR/latest-$1.log"
+  ln -s "$1-$TS.final.md" "$LATEST_TMP"
+  mv -f "$LATEST_TMP" "$LOG_DIR/latest-$1.final.md"
+  LATEST_TMP=""
   echo "[$RUN_TAG] running ($2) — monitor: dashboard.sh $1  (raw: tail -F $LOG_DIR/latest-$1.log)" >&2
 }
 

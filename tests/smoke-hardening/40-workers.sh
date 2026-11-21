@@ -216,8 +216,8 @@ assert_eq "$AGY_MANIFESTS" "2"
 AGY_LATEST="$(readlink "$AGY_DIR/latest-researcher.log")"
 assert_ok test -f "$AGY_DIR/$AGY_LATEST"
 assert_eq "$(printf '%s\n' "$AGY_LATEST" | grep -cE '^researcher-20260101-000000-[0-9]+\.log$')" "1"
-# The legacy alias names the same run as the canonical link.
-assert_eq "$(readlink "$AGY_DIR/latest-agy.log")" "$AGY_LATEST"
+# No pre-role latest-agy.* link is published.
+assert_eq "$(cd "$AGY_DIR" && ls -A | grep -c '^latest-agy\.' || true)" "0"
 assert_eq "$(cd "$AGY_DIR" && ls -A | grep -c '^\.latest-' || true)" "0"
 
 smoke_done 40-workers
