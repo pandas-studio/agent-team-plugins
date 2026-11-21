@@ -184,8 +184,8 @@ reviewer|researcher`. Before this they were `codex-*` / `agy-*`, which named the
 wrong CLI whenever another model ran. `CODEX_CLI`, `AGY_CLI` and the `codex` /
 `agy` model ids keep their names: they name the vendor CLI, not the role.
 
-**Since dev-trio 0.8.54 the old names are gone.** The wrappers no longer update
-`latest-codex.*` / `latest-agy.*` (0.8.46–0.8.53 kept them as aliases). A
+**Since dev-trio 0.8.55 the old names are gone.** The wrappers no longer update
+`latest-codex.*` / `latest-agy.*` (0.8.46–0.8.54 kept them as aliases). A
 script or `tail -F` reading one of them must move to `latest-reviewer.*` /
 `latest-researcher.*`: an old link that already exists is left in place and
 keeps naming the last run published before the upgrade. `dashboard.sh` accepts
