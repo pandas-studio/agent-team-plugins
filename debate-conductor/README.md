@@ -140,8 +140,9 @@ Default keys: `Ctrl-b d` detaches, `Ctrl-b [` scrolls, `space` pauses one viewer
 `q` stops it. Next preparation revives owned dead detached viewers without adding panes.
 Detached sessions remain after the debate for rereading. Their emitted cleanup
 command removes only the view, not the separate PM/debate. Disk transcripts
-outlive pane scrollback. Foreign/incomplete views and stale setup locks remain
-intact with inspection instructions; they are not automatically removed.
+outlive pane scrollback. Foreign/incomplete views and stale detached-view setup
+locks remain intact with inspection instructions; they are not automatically
+removed. The `--here` lock is covered below.
 
 Team, absolute log root and viewer cwd are explicit, including `AGENT_TEAM` and
 custom `DEBATE_LOG_DIR`. Continue uses the chosen transcript's parent. Results
@@ -149,9 +150,21 @@ are bound to a private validated dispatch receipt, never mutable `latest-debate`
 even exit 0 without a receipt is incomplete.
 
 New layouts carry context/readiness metadata. Unverified legacy layouts remain
-intact and use a separate view rather than claiming they are ready. The legacy
-shared `--here` stale-lock takeover is unchanged; new detached locks never
-automatically take over stale ownership.
+intact and use a separate view rather than claiming they are ready. No setup
+lock is taken over automatically, detached or `--here`. A `--here` lock (one
+per tmux window) still held after about ten seconds is reported with its path,
+whether its run is still working or died before it could release it (SIGKILL,
+a crash, or a signal before its cleanup was in place): run `--here` from a new
+tmux window, and remove the old lock once no layout run for that window is
+active. That report reaches you only from a direct `team-3pane.sh` run in its
+default here mode (with or without `--here`).
+When the PM prepares the view inside tmux, a failed `--here` attempt, a held
+lock included, is silent: the PM sets up a detached session instead, and shows
+its attach command when that works. If the detached setup fails too, the
+`--view` mode decides what follows, as in the table above. dev-trio's
+`team-layout.sh --here` shares this lock, and an older copy of either plugin
+still takes over a lock whose recorded PID appears dead, so update dev-trio and
+debate-conductor together.
 
 ### Explicit three-pane bootstrap
 

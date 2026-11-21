@@ -4,6 +4,7 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -35,6 +36,9 @@ def non_atomic_mkdir(tools):
 class HereLayoutTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
+        # A cleanup, not tearDown: cleanups run last-registered first, so every
+        # run a test started is reaped (popen_here) before the fixture goes.
+        self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
         tools = self.root / "tools"
         tools.mkdir()
@@ -42,9 +46,6 @@ class HereLayoutTests(unittest.TestCase):
         (tools / "tmux").chmod(0o755)
         self.state_path = self.root / "tmux.json"
         self.tools = tools
-
-    def tearDown(self):
-        self._tmp.cleanup()
 
     # ---- fixture ---------------------------------------------------------
 
@@ -305,27 +306,273 @@ class HereLayoutTests(unittest.TestCase):
         finally:
             shim.unlink()
 
-    def test_a_dead_runs_lock_is_taken_over(self):
-        # A run killed mid-build leaves its lock behind; a later run must take
-        # it over, not wait on it.
-        self.state()
-        r = self.run_here("debate-3pane")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual([p for p in self.root.iterdir() if p.name.startswith("agent-team-layout.")], [],
-                         "the lock is released at exit")
-        dead = subprocess.Popen(["true"])
-        dead.wait()
+    # ---- #222: a held lock is waited out and reported, never taken over -----
+
+    # here_lock polls 100 times and sleeps between polls: a lock it waited out
+    # costs exactly 99 sleeps.
+    WAITED_OUT = 99
+
+    def lock_path(self, wid="@0", tmpdir=None):
         name = subprocess.run(
-            ["bash", "-c", 'printf "%s %s" "${TMUX%%,*}" "@0" | cksum | cut -d" " -f1'],
+            ["bash", "-c", 'printf "%s %s" "${TMUX%%,*}" "$1" | cksum | cut -d" " -f1', "_", wid],
             env={"TMUX": "fake,1,0", "PATH": os.environ["PATH"]}, capture_output=True, text=True, check=True)
-        stale = self.root / f"agent-team-layout.{os.getuid()}.{name.stdout.strip()}"
-        stale.mkdir()
-        (stale / "pid").write_text(f"{dead.pid}\n")
-        self.state()
-        r = self.run_here("debate-3pane")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(len(self.window()["panes"]), 3)
-        self.assertFalse(stale.exists())
+        return Path(tmpdir or self.root) / f"agent-team-layout.{os.getuid()}.{name.stdout.strip()}"
+
+    @staticmethod
+    def bash_q(text):
+        """What bash's printf %q prints for `text`, computed outside the scripts."""
+        return subprocess.run(["bash", "-c", 'printf %q "$1"', "_", text], capture_output=True,
+                              text=True, check=True).stdout
+
+    @staticmethod
+    def dead_pid():
+        p = subprocess.Popen(["true"])
+        p.wait()
+        return p.pid
+
+    def plant_lock(self, content, wid="@0", tmpdir=None):
+        lock = self.lock_path(wid, tmpdir)
+        shutil.rmtree(lock, ignore_errors=True)
+        lock.mkdir()
+        if content is not None:
+            (lock / "pid").write_text(content)
+        return lock
+
+    @staticmethod
+    def snapshot(lock):
+        """The lock as a later run must leave it: inodes, and the pid file's bytes when readable."""
+        pid = lock / "pid"
+        content = None
+        if pid.is_file() and not pid.is_symlink() and os.access(pid, os.R_OK):
+            content = pid.read_bytes()
+        return (os.lstat(lock).st_ino, os.lstat(pid).st_ino if os.path.lexists(pid) else None, content)
+
+    def sleep_tools(self):
+        """A `sleep` that counts the calls a run makes (one line per call in $SLEEP_LOG)."""
+        tools = self.root / "sleep tools"
+        if not tools.exists():
+            tools.mkdir()
+            (tools / "sleep").write_text(
+                "#!/bin/sh\n"
+                '[ -z "${SLEEP_LOG:-}" ] || echo "$*" >> "$SLEEP_LOG"\n'
+                f'exec {shlex.quote(shutil.which("sleep"))} "$@"\n')
+            (tools / "sleep").chmod(0o755)
+        return tools
+
+    @staticmethod
+    def sleeps(log):
+        return len(log.read_text().splitlines()) if log.exists() else 0
+
+    def popen_here(self, layout, pane="%0", path=(), **env):
+        script, host_env = SCRIPTS[layout]
+        full = {k: v for k, v in os.environ.items()
+                if k not in ("TMUX_PANE", "AGENT_TEAM") and not k.startswith(("DEV_TRIO_", "DEBATE_CONDUCTOR_"))}
+        full.update(host_env, TMUX="fake,1,0", FAKE_TMUX_STATE=str(self.state_path), TMPDIR=str(self.root),
+                    TMUX_PANE=pane,
+                    PATH=os.pathsep.join([*map(str, path), str(self.tools), os.environ["PATH"]]))
+        full.update(env)
+        # Its own session, so every process of the run can be killed at once:
+        # a subshell blocked opening a FIFO would otherwise keep the pipes open.
+        proc = subprocess.Popen(["bash", str(script), "--here"], cwd=self.root, env=full, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                                start_new_session=True)
+        self.addCleanup(self.reap, proc)
+        return proc
+
+    @staticmethod
+    def kill_group(proc):
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    def reap(self, proc):
+        # Only a run not yet reaped: until it is waited for, its PID (and so
+        # its process group id) cannot be reused, even if it already exited
+        # and a descendant still holds the pipes. Once reaped, the id may name
+        # an unrelated group.
+        if proc.returncode is not None:
+            return
+        self.kill_group(proc)
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+    def finish(self, proc, timeout=40):
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.kill_group(proc)
+            try:
+                _, err = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                err = "(stderr not drained)"
+            self.fail(f"--here did not finish within {timeout}s; stderr:\n{err}")
+        return proc.returncode, out, err
+
+    def splits(self):
+        return [c[0] for c in self.read()["calls"]].count("split-window")
+
+    def held_lines(self, lock):
+        return [f"error: the layout lock for this window ({self.bash_q(str(lock))}) is still held: another "
+                "layout run is setting up this window, or one was killed before it could release the lock.",
+                "Retry when it finishes, or open a new tmux window (prefix + c) and run this there; "
+                "remove the lock once no layout run for this window is active."]
+
+    def gate_tools(self, name):
+        """`cat` and `tmux` shims that force the interleave #222 describes, with
+        bounded waits (a timeout leaves a timeout.* marker: a harness failure).
+
+        cat: the first two reads of a pid file capture its content, then wait
+        until both have read; the second then also waits until the first run
+        reached the protected section (entered.*), and only then returns what
+        it captured.
+        tmux: a run's first call after here_lock (anything but display-message;
+        measured: the only calls before it are two display-message) marks
+        entered.<RUN_ID> and waits for the other run's mark.
+        """
+        tools = self.root / f"gate tools {name}"
+        tools.mkdir()
+        gate = self.root / f"gate {name}"
+        gate.mkdir()
+        real_sleep = shlex.quote(shutil.which("sleep"))
+        wait = ('wait_for() { i=0; while ! eval "$1"; do i=$((i + 1)); '
+                'if [ "$i" -ge 200 ]; then : > "$GATE/timeout.$2"; return 1; fi; '
+                f'{real_sleep} 0.05; done; }}\n')
+        (tools / "cat").write_text(
+            "#!/bin/sh\n"
+            f"real={shlex.quote(shutil.which('cat'))}\n"
+            'last=; for a do last=$a; done\n'
+            'case "$last" in */pid) ;; *) exec "$real" "$@" ;; esac\n'
+            'content=$("$real" "$@"); rc=$?\n'
+            'n=1; while ! (set -C; : > "$GATE/read.$n") 2>/dev/null; do\n'
+            '  n=$((n + 1)); [ "$n" -le 50 ] || { : > "$GATE/timeout.read-marker"; exec "$real" "$@"; }\n'
+            'done\n'
+            + wait +
+            'if [ "$n" -le 2 ]; then\n'
+            '  wait_for \'[ -e "$GATE/read.2" ]\' barrier.$n\n'
+            '  [ "$n" != 2 ] || wait_for \'ls "$GATE" | grep -q "^entered\\."\' release\n'
+            'fi\n'
+            '[ -z "$content" ] || printf "%s\\n" "$content"\n'
+            'exit "$rc"\n')
+        (tools / "tmux").write_text(
+            "#!/bin/sh\n"
+            f"real={shlex.quote(str(self.tools / 'tmux'))}\n"
+            'case "$1" in display-message) exec "$real" "$@" ;; esac\n'
+            + wait +
+            'if [ ! -e "$GATE/entered.$RUN_ID" ]; then\n'
+            '  : > "$GATE/entered.$RUN_ID"\n'
+            '  wait_for \'[ "$(ls "$GATE" | grep -c "^entered\\.")" -ge 2 ]\' tmux.$RUN_ID'
+            ' && : > "$GATE/both"\n'
+            'fi\n'
+            'exec "$real" "$@"\n')
+        for shim in ("cat", "tmux"):
+            (tools / shim).chmod(0o755)
+        return tools, gate
+
+    def test_two_runs_that_saw_the_same_dead_owner_never_both_enter(self):
+        # #222: both waiters read the same dead PID; the first removed the lock
+        # and took it, then the second removed the first's live lock and took
+        # it too. Now neither reads the record nor removes anything: both wait
+        # the lock out, report it and leave it as it was.
+        for layout in SCRIPTS:
+            with self.subTest(layout=layout):
+                self.state()
+                tools, gate = self.gate_tools(layout)
+                lock = self.plant_lock(f"{self.dead_pid()}\n")
+                before = self.snapshot(lock)
+                logs = {run_id: self.root / f"sleeps {layout} {run_id}" for run_id in ("A", "B")}
+                runs = [self.popen_here(layout, path=[tools, self.sleep_tools()], GATE=str(gate),
+                                        RUN_ID=run_id, SLEEP_LOG=str(log))
+                        for run_id, log in logs.items()]
+                results = [self.finish(p, timeout=60) for p in runs]
+                marks = sorted(p.name for p in gate.iterdir())
+                self.assertEqual([m for m in marks if m.startswith("timeout.")], [], "harness timeout")
+                self.assertNotIn("both", marks, "both runs were inside the protected section at once")
+                self.assertEqual(marks, [])
+                for rc, _, err in results:
+                    self.assertEqual(rc, 2, err)
+                    self.assertEqual(err.splitlines(), self.held_lines(lock))
+                self.assertEqual([self.sleeps(log) for log in logs.values()], [self.WAITED_OUT] * 2)
+                self.assertEqual(self.snapshot(lock), before)
+                self.assertEqual(self.splits(), 0)
+
+    def test_a_held_lock_is_waited_out_reported_and_left_alone(self):
+        # Whatever the lock records, it is not interpreted: every case waits
+        # out the limit (about 10 s, so all run at once, each in its own
+        # window and so on its own lock), prints the same report and leaves
+        # the lock as it was.
+        mkdir_tools = self.root / "mkdir tools"
+        mkdir_tools.mkdir()
+        non_atomic_mkdir(mkdir_tools)
+        cases = {
+            "dead owner": (f"{self.dead_pid()}\n", ()),
+            "live owner": (f"{os.getpid()}\n", ()),
+            "empty pid file": ("", ()),
+            "no pid file": (None, ()),
+            "not a PID": ("12ab\n", ()),
+            "symlinked pid file": ("symlink", ()),
+            # noclobber does not refuse a FIFO: opening it would block the claim.
+            "FIFO pid file, non-atomic mkdir": ("fifo", (mkdir_tools,)),
+            "dead owner, non-atomic mkdir": (f"{self.dead_pid()}\n", (mkdir_tools,)),
+        }
+        runs = [(name, layout) for name in cases for layout in SCRIPTS]
+        self.state(windows={f"@{i}": {"options": {}, "panes": [f"%{i}"]} for i in range(len(runs))},
+                   nxt=len(runs))
+        procs = []
+        for i, (name, layout) in enumerate(runs):
+            content, path = cases[name]
+            lock = self.plant_lock(None if content in ("symlink", "fifo") else content, wid=f"@{i}")
+            if content == "symlink":
+                (self.root / f"pid target {i}").write_text(f"{os.getpid()}\n")
+                (lock / "pid").symlink_to(self.root / f"pid target {i}")
+            elif content == "fifo":
+                os.mkfifo(lock / "pid")
+            log = self.root / f"sleeps {i}"
+            procs.append((name, layout, lock, log, self.snapshot(lock),
+                          self.popen_here(layout, pane=f"%{i}", path=[*path, self.sleep_tools()],
+                                          SLEEP_LOG=str(log))))
+        for name, layout, lock, log, before, proc in procs:
+            with self.subTest(case=name, layout=layout):
+                rc, _, err = self.finish(proc)
+                self.assertEqual(rc, 2, err)
+                self.assertEqual(err.splitlines(), self.held_lines(lock))
+                self.assertEqual(self.sleeps(log), self.WAITED_OUT)
+                self.assertEqual(self.snapshot(lock), before)
+        self.assertEqual(self.splits(), 0)
+
+    def test_a_new_window_is_not_blocked_by_another_windows_lock(self):
+        for layout in SCRIPTS:
+            with self.subTest(layout=layout):
+                self.state(windows={"@0": {"options": {}, "panes": ["%0"]},
+                                    "@1": {"options": {}, "panes": ["%1"]}}, nxt=2)
+                lock = self.plant_lock(f"{self.dead_pid()}\n")
+                before = self.snapshot(lock)
+                rc, _, err = self.finish(self.popen_here(layout, pane="%1"))
+                self.assertEqual(rc, 0, err)
+                self.assertEqual(len(self.window("@1")["panes"]), 3)
+                self.assertEqual(self.window("@0")["panes"], ["%0"])
+                self.assertEqual(self.snapshot(lock), before)
+
+    def test_the_lock_path_is_quoted_in_the_report(self):
+        # A TMPDIR with a space, a quote and a control character: the report is
+        # exactly the expected text with bash's own %q of the path, and no raw
+        # control character reaches the terminal.
+        tmpdir = self.root / "tmp a b'c\x01d"
+        tmpdir.mkdir()
+        self.state(windows={f"@{i}": {"options": {}, "panes": [f"%{i}"]} for i in range(len(SCRIPTS))},
+                   nxt=len(SCRIPTS))
+        procs = []
+        for i, layout in enumerate(SCRIPTS):
+            lock = self.plant_lock(f"{self.dead_pid()}\n", wid=f"@{i}", tmpdir=tmpdir)
+            procs.append((layout, lock, self.popen_here(layout, pane=f"%{i}", TMPDIR=str(tmpdir))))
+        for layout, lock, proc in procs:
+            with self.subTest(layout=layout):
+                rc, _, err = self.finish(proc)
+                self.assertEqual(rc, 2, err)
+                self.assertNotIn("\x01", err)
+                self.assertEqual(err.splitlines(), self.held_lines(lock))
 
     def test_new_session_layout_is_recorded(self):
         for layout, session in (("debate-3pane", "debate-conductor"), ("dev-trio-layout", "dev-trio")):
