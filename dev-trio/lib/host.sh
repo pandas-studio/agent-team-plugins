@@ -571,7 +571,7 @@ EOF_NOTE
 # A..B pins to <a>..<b>; A...B pins to <merge-base>..<b>, which is what
 # `git diff A...B` compares, so the merge base is not recomputed either. A
 # three-dot range with no merge base returns 3. Line 2 is the label for the
-# prompt: one spelling as written, several as <a><op><b>.
+# prompt: the first accepted spelling, as the focus wrote it.
 dev_trio_extract_git_range() {
   local focus="$1"
   local repo="${2:-.}"
@@ -650,8 +650,6 @@ dev_trio_extract_git_range() {
         matched_op="$op"
         matched_left="$left_oid"
         matched_right="$right_oid"
-      else
-        matched_range="$matched_oids"
       fi
       accepted="$accepted $candidate"
     fi

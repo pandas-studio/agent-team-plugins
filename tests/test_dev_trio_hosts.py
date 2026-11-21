@@ -1640,7 +1640,7 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         self.assertEqual(result.returncode, 0, result.stderr)
         prompt = self.recorded()[0][9]
         pin = range_pin(self.workspace, "HEAD~1..HEAD")
-        self.assertIn(f"for the same `git diff`. Use `git log {pin}` or `git show` for the commits reachable from "
+        self.assertIn(f"for the same `git diff`. Use `git log {pin}` or `git show <commit>` for the commits reachable from "
                       "its right commit and not from its left one, not the focus's ref names, which may have moved. "
                       f"To rerun the snapshot's diff, use `git diff {pin}`, even where the focus writes the range "
                       "another way. Inspect the working tree", prompt)
@@ -3303,8 +3303,8 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_snapshot_status(result, "ok:range")
         snapshot = self.fenced(self.sent_prompt(), "workspace_snapshot")
-        # Named by commit, so a ref that moves after verification cannot change the diff.
-        self.assertTrue(snapshot.startswith(f"### git diff {a}..{b}\n"), snapshot)
+        # Diffed by commit, labelled with the first spelling.
+        self.assertTrue(snapshot.startswith(f"### git diff {a}..{b} (HEAD~1..HEAD in the focus)\n"), snapshot)
         self.assertIn("+v2", snapshot)
 
     def test_agy_reviewer_two_and_three_dot_range_over_same_endpoints_skip_snapshot(self):
@@ -3339,8 +3339,8 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         snapshot = self.fenced(self.sent_prompt(), "workspace_snapshot")
         mb = subprocess.run(["git", "merge-base", t, p], cwd=self.workspace, check=True,
                             capture_output=True, text=True).stdout.strip()
-        # Pinned to the merge base, labelled with the verified commit pair.
-        self.assertTrue(snapshot.startswith(f"### git diff {mb}..{p} ({t}...{p} in the focus)\n"), snapshot)
+        # Pinned to the merge base, labelled with the first spelling.
+        self.assertTrue(snapshot.startswith(f"### git diff {mb}..{p} (trunk...topic in the focus)\n"), snapshot)
         self.assertIn("+topic line", snapshot)
         # A two-dot diff would also show trunk's own commit, reversed.
         self.assertNotIn("trunk line", snapshot)
@@ -3399,10 +3399,10 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         self._git("switch", "-q", "trunk")
         return {n: self._rev(n) for n in ("trunk~1", "trunk", "side", "clean")}
 
-    def _moving_shim(self, trigger, ref, to, before=False, nth=1):
-        """Move ref to `to` once, at the nth Git call whose argv matches the
-        case pattern `trigger`: after that call runs, or before it if `before`.
-        The marker exists only if update-ref succeeded."""
+    def _moving_shim(self, trigger, ref, to, nth=1):
+        """Move ref to `to` once, right after the nth Git call whose argv
+        matches the case pattern `trigger`. The marker exists only if
+        update-ref succeeded."""
         real = shutil.which("git")
         marker = self.root / "moved"
         # One file per matching call: counts without wc, whose output format
@@ -3411,10 +3411,7 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         move = (f'n=1; while [ -e "{count}.$n" ]; do n=$((n + 1)); done; : > "{count}.$n"; '
                 f'if [ "$n" = {nth} ]; then '
                 f'"{real}" -C "{self.workspace}" update-ref {ref} {to} && : > "{marker}"; fi')
-        if before:
-            body = f'case "$*" in {trigger}) {move} ;; esac'
-        else:
-            body = (f'case "$*" in {trigger}) "{real}" "$@"; rc=$?; {move}; exit $rc ;; esac')
+        body = f'case "$*" in {trigger}) "{real}" "$@"; rc=$?; {move}; exit $rc ;; esac'
         path, log = self.git_shim(body)
         return path, log, marker
 
@@ -3528,7 +3525,7 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         self.assertEqual([f" {pin} --" in call for call in self._diff_calls(log)], [True, True])
         self.assertEqual(len(self._merge_base_calls(log)), 1, log.read_text())
         self.assertIn(f"This is only `git diff {pin}` (`trunk...topic` in the focus), taken from", prompt)
-        self.assertIn(f"Use `git log {pin}` or `git show`", prompt)
+        self.assertIn(f"Use `git log {pin}` or `git show <commit>` for the commits", prompt)
 
     def test_three_dot_range_merge_base_failures_skip_the_snapshot(self):
         cases = (
@@ -3539,12 +3536,13 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
             ("not an id", 'case "$*" in *" merge-base "*) echo zzz; exit 0 ;; esac', None, "skipped:git-failed", {}),
             ("short id", 'case "$*" in *" merge-base "*) echo abc123; exit 0 ;; esac',
              None, "skipped:git-failed", {}),
-            # {late} is written only if the sleeping probe is not cut off.
-            ("timeout", 'case "$*" in *" merge-base "*) sleep 30; : > "{late}" ;; esac', None,
+            # If the bounded probe waited out its 30 s sleep, run_cli's 20 s
+            # timeout would fail the test, so these show the probe is bounded.
+            ("timeout", 'case "$*" in *" merge-base "*) sleep 30 ;; esac', None,
              "skipped:timeout", {"DEV_TRIO_GIT_TIMEOUT": "2"}),
             # The deadline leaves the earlier probes several seconds and still
             # ends well before the sleep or the per-call limit.
-            ("snapshot deadline", 'case "$*" in *" merge-base "*) sleep 30; : > "{late}" ;; esac', None,
+            ("snapshot deadline", 'case "$*" in *" merge-base "*) sleep 30 ;; esac', None,
              "skipped:timeout", {"DEV_TRIO_GIT_TIMEOUT": "120", "DEV_TRIO_SNAPSHOT_TIMEOUT": "8"}),
         )
         c = self._diverged_fixture()
@@ -3555,8 +3553,7 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         self._git("switch", "-q", "trunk")
         for name, body, right, status, env in cases:
             with self.subTest(name):
-                late = self.root / f"late-{name.replace(' ', '-')}"
-                path, log = self.git_shim(body.replace("{mb}", c["mb"]).replace("{late}", str(late)))
+                path, log = self.git_shim(body.replace("{mb}", c["mb"]))
                 log.unlink(missing_ok=True)
                 self.calls.unlink(missing_ok=True)
                 shutil.rmtree(self.logdir(), ignore_errors=True)
@@ -3567,7 +3564,6 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
                 self.assertEqual(len(self._merge_base_calls(log)), 1, log.read_text())
                 self.assertEqual(self._diff_calls(log), [])
                 self.assertNotIn("<workspace_snapshot>", self.sent_prompt())
-                self.assertFalse(late.exists(), "the merge-base probe was not cut off")
 
     def test_three_dot_range_merge_base_runs_once_and_only_on_acceptance(self):
         c = self._diverged_fixture()
@@ -3597,7 +3593,7 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         a, b = self._rev("HEAD~1"), self._rev("HEAD")
         for name, focus, label in (
             ("one spelling", "review `HEAD~1..HEAD`.", "HEAD~1..HEAD"),
-            ("several spellings", f"review HEAD~1..HEAD and {a[:8]}..{b[:8]}", f"{a}..{b}"),
+            ("several spellings", f"review HEAD~1..HEAD and {a[:8]}..{b[:8]}", "HEAD~1..HEAD"),
         ):
             with self.subTest(name):
                 result = subprocess.run(

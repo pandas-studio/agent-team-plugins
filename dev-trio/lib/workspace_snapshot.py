@@ -9,8 +9,8 @@ argv: repo scope target budget [log_dir] [label]. For the range scope, target
 is passed to both Git calls as given, so it must already be pinned to commit
 IDs (dev_trio_extract_git_range prints that pin): a ref name in it would be
 resolved again by each call (#243). label is the range as the focus wrote it
-(or the verified <a><op><b> when it wrote it several ways); the heading shows
-it after the target when the two differ.
+(the first spelling when it wrote it several ways); the heading shows it after
+the target when the two differ.
 """
 
 from __future__ import annotations

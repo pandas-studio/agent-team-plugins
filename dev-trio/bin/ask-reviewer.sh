@@ -460,7 +460,7 @@ $INLINED_NOTE"
           else
             snapshot_gap="If any section was omitted or truncated due to size limits, follow the notice in the snapshot."
             snapshot_checks="Use git for independent checks or to inspect sections marked omitted or truncated."
-            range_commits="Use \`git log ${AGY_RANGE_PIN}\` or \`git show\` for the commits reachable from its right commit and not from its left one, not the focus's ref names, which may have moved. To rerun the snapshot's diff, use \`git diff ${AGY_RANGE_PIN}\`, even where the focus writes the range another way."
+            range_commits="Use \`git log ${AGY_RANGE_PIN}\` or \`git show <commit>\` for the commits reachable from its right commit and not from its left one, not the focus's ref names, which may have moved. To rerun the snapshot's diff, use \`git diff ${AGY_RANGE_PIN}\`, even where the focus writes the range another way."
           fi
           if [ "$AGY_SCOPE" = "range" ]; then
             range_shown="\`git diff ${AGY_RANGE_PIN}\`"
