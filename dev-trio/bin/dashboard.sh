@@ -9,11 +9,10 @@
 # `researcher` and `reviewer` name the two log channels (researcher-*.log,
 # reviewer-*.log) by role, not the model that runs — any CLI can fill any role
 # via the registry, and the header shows the model this run actually used.
-# `agy` and `codex`, the channels' names before the role names, are accepted
-# as aliases. A directory written before the rename has only latest-agy.* /
-# latest-codex.* links, agy-*/codex-* logs and run metadata with the old
-# channel values; it is still rendered, and a pane opened on it moves to the
-# canonical link once a new run publishes one.
+# The channels' names before the role names (`agy`, `codex`) are not accepted,
+# and nothing they left is read: a directory holding only latest-agy.* /
+# latest-codex.* links renders as "no runs yet" until a new run publishes
+# latest-<role>.*.
 #
 # Every rendered value comes from the run's *.run.json (lib/runstate.sh) and
 # *.review.json (lib/review-result.sh), both written by the wrapper. This
@@ -52,18 +51,13 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-# The role is canonicalized here, once: every later branch compares against
-# the canonical name, and LEGACY_ROLE is only the pre-rename spelling of the
-# same channel.
 case "$ROLE" in
-  researcher|agy)
-    ROLE="researcher"; LEGACY_ROLE="agy"
+  researcher)
     ICON="🔍"; TITLE="Researcher"
     HEADER_COLOR=$'\033[1;36m'   # bright cyan
     LABEL="Query"
     ;;
-  reviewer|codex)
-    ROLE="reviewer"; LEGACY_ROLE="codex"
+  reviewer)
     ICON="🧐"; TITLE="Reviewer"
     HEADER_COLOR=$'\033[1;35m'   # bright magenta
     LABEL="Focus"
@@ -76,11 +70,7 @@ esac
 TEAM=$(agent_team_detect_team) || exit 2
 LOG_DIR="${DEV_TRIO_LOG_DIR:-$PWD/.dev-trio/log}/$TEAM"
 case "$LOG_DIR" in /*) ;; *) LOG_DIR="$PWD/$LOG_DIR" ;; esac
-# The canonical link, and the one a wrapper from before the role names wrote.
-# Which one a frame follows is decided every frame (see the loop).
-LATEST_CANONICAL="$LOG_DIR/latest-$ROLE.log"
-LATEST_LEGACY="$LOG_DIR/latest-$LEGACY_ROLE.log"
-LATEST="$LATEST_CANONICAL"
+LATEST="$LOG_DIR/latest-$ROLE.log"
 
 RESET=$'\033[0m'
 DIM=$'\033[2m'
@@ -130,7 +120,7 @@ sanitize_block() {
 # script is not the place to decide which env values were checked elsewhere —
 # so both go through the same containment as model text.
 TEAM_SHOWN=$(printf '%s' "$TEAM" | sanitize_line 48)
-LATEST_SHOWN=$(printf '%s' "$LATEST_CANONICAL" | sanitize_line 120)
+LATEST_SHOWN=$(printf '%s' "$LATEST" | sanitize_line 120)
 
 DASH_TMPDIR=""   # set below; declared here so the traps are safe under set -u
 _dash_discard_snapshots() { [ -z "$DASH_TMPDIR" ] || rm -rf "$DASH_TMPDIR"; }
@@ -220,14 +210,6 @@ while true; do
     # render as "no runs yet"; containment is never checked against a name that
     # was never resolved.
     LOG_DIR_REAL=$(cd "$LOG_DIR" 2>/dev/null && pwd -P) || LOG_DIR_REAL=""
-    # The canonical link when it exists, else the legacy one a pre-rename
-    # wrapper left. Chosen every frame, so a pane opened on an old directory
-    # follows the first run that publishes the canonical link.
-    LATEST="$LATEST_CANONICAL"
-    if [ ! -e "$LATEST_CANONICAL" ] && [ ! -L "$LATEST_CANONICAL" ] \
-       && { [ -e "$LATEST_LEGACY" ] || [ -L "$LATEST_LEGACY" ]; }; then
-      LATEST="$LATEST_LEGACY"
-    fi
     # Freeze the latest log target for this frame. Every sibling artifact is
     # resolved from this path, never from an independently changing latest link.
     SOURCE="$LATEST"
@@ -269,13 +251,6 @@ while true; do
         RUN_JSON=""
       else
         RUN_CHANNEL=$(printf '%s\n' "$RUN_JSON" | jq -r '.channel')
-        # Metadata written before the role names carries the old channel value
-        # of the same role.
-        case "$RUN_CHANNEL" in
-          codex) RUN_ROLE="reviewer" ;;
-          agy)   RUN_ROLE="researcher" ;;
-          *)     RUN_ROLE="$RUN_CHANNEL" ;;
-        esac
         RUN_TEAM=$(printf '%s\n' "$RUN_JSON" | jq -r '.team')
         RUN_LOG=$(printf '%s\n' "$RUN_JSON" | jq -r '.log_path')
         # The metadata must describe *this* log. A valid run.json belonging to
@@ -291,7 +266,7 @@ while true; do
         elif [ "$RUN_LOG_DIR" != "$LOG_DIR_REAL" ]; then
           STATE="mismatch"
           STATE_DETAIL="metadata names a log outside the team directory"
-        elif [ "$RUN_ROLE" != "$ROLE" ]; then
+        elif [ "$RUN_CHANNEL" != "$ROLE" ]; then
           STATE="mismatch"
           STATE_DETAIL="channel $(printf '%s' "$RUN_CHANNEL" | sanitize_line 24) != $ROLE"
         elif [ "$RUN_TEAM" != "$TEAM" ]; then
@@ -347,10 +322,6 @@ while true; do
         case "$REAL" in
           "$ROLE"-*.log)
             TS="${REAL#"$ROLE"-}"
-            TS="${TS%.log}"
-            ;;
-          "$LEGACY_ROLE"-*.log)
-            TS="${REAL#"$LEGACY_ROLE"-}"
             TS="${TS%.log}"
             ;;
         esac
