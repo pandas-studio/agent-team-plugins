@@ -3260,9 +3260,12 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         self._commit_two()
         a, b = self._rev("HEAD~1"), self._rev("HEAD")
         focus = f"Review of a committed range: {a}..{b}. Read it with `git diff {a[:8]}..{b[:8]}`."
-        result = self.run_cli("ask-reviewer.sh", focus, DEV_TRIO_REVIEWER_MODEL="agy")
+        path, log = self.git_shim("")
+        result = self.run_cli("ask-reviewer.sh", focus, DEV_TRIO_REVIEWER_MODEL="agy", PATH=path)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_snapshot_status(result, "ok:range")
+        # Both spellings were probed: the short one inside `...`. is not skipped.
+        self.assertEqual(len(self._commit_probes(log)), 4, log.read_text())
         snapshot = self.fenced(self.sent_prompt(), "workspace_snapshot")
         self.assertTrue(snapshot.startswith(f"### git diff {a}..{b}\n"), snapshot)
         self.assertIn("+v2", snapshot)
@@ -3320,7 +3323,7 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         # A fixed name the range parser accepts; init.defaultBranch may not be one.
         branch = "trunk"
         subprocess.run(["git", "branch", "-M", branch], cwd=self.workspace, check=True)
-        four =f"HEAD~1..HEAD HEAD^..HEAD {a}..{b} {a[:8]}..{b[:8]}"
+        four = f"HEAD~1..HEAD HEAD^..HEAD {a}..{b} {a[:8]}..{b[:8]}"
         cases = (
             ("four", four, "ok:range", 8),
             ("five", f"{four} {branch}~1..{branch}", "skipped:focus", 8),
