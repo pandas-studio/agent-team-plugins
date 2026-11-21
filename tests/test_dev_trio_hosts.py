@@ -3405,9 +3405,11 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         The marker exists only if update-ref succeeded."""
         real = shutil.which("git")
         marker = self.root / "moved"
+        # One file per matching call: counts without wc, whose output format
+        # differs between coreutils builds.
         count = self.root / "trigger-count"
-        move = (f'printf x >> "{count}"; '
-                f'if [ "$(wc -c < "{count}" | tr -d " ")" = {nth} ]; then '
+        move = (f'n=1; while [ -e "{count}.$n" ]; do n=$((n + 1)); done; : > "{count}.$n"; '
+                f'if [ "$n" = {nth} ]; then '
                 f'"{real}" -C "{self.workspace}" update-ref {ref} {to} && : > "{marker}"; fi')
         if before:
             body = f'case "$*" in {trigger}) {move} ;; esac'
@@ -3507,8 +3509,10 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         c = self._diverged_fixture()
         # Moving trunk onto a commit that merges topic would make topic the
         # merge base, and `git diff trunk...topic` empty. The move follows the
-        # extractor's merge-base call, so any later recomputation would see it
-        # (0.8.53 makes no such call and fails on the marker).
+        # extractor's merge-base call, so anything that later re-reads the
+        # symbolic range would see it; the argv checks below show that both
+        # diffs use the pinned merge base. (0.8.53 makes no merge-base call
+        # and fails on the marker.)
         path, log, marker = self._moving_shim('*" merge-base "*', "refs/heads/trunk", c["merged"])
         result = self.run_cli("ask-reviewer.sh", "review trunk...topic",
                               DEV_TRIO_REVIEWER_MODEL="agy", PATH=path)
@@ -3535,10 +3539,13 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
             ("not an id", 'case "$*" in *" merge-base "*) echo zzz; exit 0 ;; esac', None, "skipped:git-failed", {}),
             ("short id", 'case "$*" in *" merge-base "*) echo abc123; exit 0 ;; esac',
              None, "skipped:git-failed", {}),
-            ("timeout", 'case "$*" in *" merge-base "*) sleep 15 ;; esac', None, "skipped:timeout",
-             {"DEV_TRIO_GIT_TIMEOUT": "2"}),
-            ("snapshot deadline", 'case "$*" in *" merge-base "*) sleep 15 ;; esac', None, "skipped:timeout",
-             {"DEV_TRIO_GIT_TIMEOUT": "60", "DEV_TRIO_SNAPSHOT_TIMEOUT": "3"}),
+            # {late} is written only if the sleeping probe is not cut off.
+            ("timeout", 'case "$*" in *" merge-base "*) sleep 30; : > "{late}" ;; esac', None,
+             "skipped:timeout", {"DEV_TRIO_GIT_TIMEOUT": "2"}),
+            # The deadline leaves the earlier probes several seconds and still
+            # ends well before the sleep or the per-call limit.
+            ("snapshot deadline", 'case "$*" in *" merge-base "*) sleep 30; : > "{late}" ;; esac', None,
+             "skipped:timeout", {"DEV_TRIO_GIT_TIMEOUT": "120", "DEV_TRIO_SNAPSHOT_TIMEOUT": "8"}),
         )
         c = self._diverged_fixture()
         self._git("switch", "-q", "--orphan", "orphan")
@@ -3548,7 +3555,8 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         self._git("switch", "-q", "trunk")
         for name, body, right, status, env in cases:
             with self.subTest(name):
-                path, log = self.git_shim(body.replace("{mb}", c["mb"]))
+                late = self.root / f"late-{name.replace(' ', '-')}"
+                path, log = self.git_shim(body.replace("{mb}", c["mb"]).replace("{late}", str(late)))
                 log.unlink(missing_ok=True)
                 self.calls.unlink(missing_ok=True)
                 shutil.rmtree(self.logdir(), ignore_errors=True)
@@ -3559,6 +3567,7 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
                 self.assertEqual(len(self._merge_base_calls(log)), 1, log.read_text())
                 self.assertEqual(self._diff_calls(log), [])
                 self.assertNotIn("<workspace_snapshot>", self.sent_prompt())
+                self.assertFalse(late.exists(), "the merge-base probe was not cut off")
 
     def test_three_dot_range_merge_base_runs_once_and_only_on_acceptance(self):
         c = self._diverged_fixture()
