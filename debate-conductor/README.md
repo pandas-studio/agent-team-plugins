@@ -149,9 +149,15 @@ are bound to a private validated dispatch receipt, never mutable `latest-debate`
 even exit 0 without a receipt is incomplete.
 
 New layouts carry context/readiness metadata. Unverified legacy layouts remain
-intact and use a separate view rather than claiming they are ready. The legacy
-shared `--here` stale-lock takeover is unchanged; new detached locks never
-automatically take over stale ownership.
+intact and use a separate view rather than claiming they are ready. No setup
+lock is taken over automatically, detached or `--here`. A `--here` lock (one
+per tmux window) still held after about ten seconds is reported with its path,
+whether its run is still working or died before it could release it (SIGKILL,
+a crash, or a signal before its cleanup was in place): run `--here` from a new tmux window, and remove the old lock once
+no layout run for that window is active. dev-trio's `team-layout.sh --here`
+shares this lock, and an older copy of either plugin still takes over a lock
+whose recorded PID appears dead, so update dev-trio and debate-conductor
+together.
 
 ### Explicit three-pane bootstrap
 
