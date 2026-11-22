@@ -51,10 +51,10 @@ context as described in the shared contract; strict tmux refuses that case.
 ## 3 · Resolve `extra-rounds`
 
 Look at what is left of the argument string once the shared contract's leading
-controls are consumed:
+controls are consumed. A `--` that ends the controls is dropped with them.
 
 - A single integer (1–9) → that many more rounds.
-- Nothing → default `2`.
+- Nothing, or only whitespace → default `2`.
 - Anything else → ask for a number.
 
 ## 4 · Run the extension

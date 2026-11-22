@@ -1,4 +1,5 @@
 """Shipped skills must be loadable by their host's YAML parser."""
+import json
 import re
 from pathlib import Path
 
@@ -6,28 +7,56 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
-SKILLS = sorted(
-    [*ROOT.glob("*/*-skills/*/SKILL.md"), *ROOT.glob("runtime/skills/*/SKILL.md")]
-)
-DEBATE = ROOT / "debate-conductor"
+MANIFESTS = sorted(ROOT.glob("*/.*-plugin/plugin.json"))
 
 
-def skill_id(skill):
-    return str(skill.relative_to(ROOT))
+def declared_skill_dirs():
+    """Every skills directory a plugin manifest points a host at.
+
+    A manifest without a `skills` key uses the host's default, `skills/`, when
+    the plugin has one; a plugin with neither ships no skills.
+    """
+    directories = {}
+    for manifest in MANIFESTS:
+        plugin = manifest.parents[1]
+        declared = json.loads(manifest.read_text()).get("skills")
+        directory = (plugin / (declared or "skills")).resolve()
+        if declared is None and not directory.is_dir():
+            continue
+        directories.setdefault(directory, []).append(manifest)
+    return directories
 
 
-def test_skills_are_discoverable():
-    assert SKILLS, f"No shipped skills found under {ROOT}"
-    plugins = {skill.relative_to(ROOT).parts[0] for skill in SKILLS}
-    for plugin in ("debate-conductor", "dev-trio", "eval-trio", "ralph-trio", "spec-trio", "runtime"):
-        assert plugin in plugins, plugin
-    for host in ("claude", "codex", "agy"):
-        assert any(
-            skill.parent.parent == DEBATE / f"{host}-skills" for skill in SKILLS
-        ), host
+SKILL_DIRS = declared_skill_dirs()
+SKILLS = sorted(skill for directory in SKILL_DIRS for skill in directory.glob("*/SKILL.md"))
 
 
-@pytest.mark.parametrize("skill", SKILLS, ids=skill_id)
+def relative(path):
+    return str(path.relative_to(ROOT))
+
+
+def test_manifests_are_discoverable():
+    assert MANIFESTS, f"No plugin manifests found under {ROOT}"
+    assert SKILL_DIRS, "No manifest declares a skills directory"
+
+
+@pytest.mark.parametrize("directory", sorted(SKILL_DIRS), ids=relative)
+def test_declared_skill_directory_ships_skills(directory):
+    manifests = [relative(manifest) for manifest in SKILL_DIRS[directory]]
+    assert directory.is_dir(), manifests
+    assert list(directory.glob("*/SKILL.md")), manifests
+
+
+def test_no_skill_outside_a_declared_directory():
+    shipped = {
+        skill.resolve()
+        for skill in ROOT.glob("**/SKILL.md")
+        if ".venv" not in skill.parts and ".git" not in skill.parts
+    }
+    assert shipped == {skill.resolve() for skill in SKILLS}
+
+
+@pytest.mark.parametrize("skill", SKILLS, ids=relative)
 def test_skill_frontmatter(skill):
     sections = re.split(r"(?m)^---$", skill.read_text(), maxsplit=2)
     assert len(sections) == 3 and not sections[0].strip(), skill

@@ -2,7 +2,7 @@
 name: review
 description: One-shot Codex review. Default scope = uncommitted working-tree changes. Optional --with-research <file>, --with-spec <file> and --with-context <file> for context injection. Streaming output lands in the bottom-right dashboard pane; chat-side surfaces the verdict (SHIP/NEEDS-FIX/DISCUSS) + Blocker/Major counts and handles NEED RESEARCH and NEED CONTEXT blocks.
 disable-model-invocation: true
-allowed-tools: Bash(ask-reviewer.sh:*) Bash(ask-researcher.sh:*) Bash(agent-team-models:*) Bash(gh pr view:*) Bash(gh pr diff:*) Bash(gh pr checks:*) Bash(gh issue view:*) Bash(gh run view:*) Bash(git:*) Bash(cat:*) Bash(ls:*) Bash(date:*) Bash(mkdir:*) Bash(echo:*) Bash(sed:*) Read
+allowed-tools: Bash(ask-reviewer.sh:*) Bash(ask-researcher.sh:*) Bash(agent-team-models list:*) Bash(gh pr view:*) Bash(gh pr diff:*) Bash(gh pr checks:*) Bash(gh issue view:*) Bash(gh run view:*) Bash(git:*) Bash(cat:*) Bash(ls:*) Bash(date:*) Bash(mkdir:*) Bash(echo:*) Bash(sed:*) Read
 argument-hint: "[focus] [-m|--model <id>[,<id>...]] [--with-research <file>] [--with-spec <file>] [--with-context <file>] [--no-memories] [-- <focus>]"
 ---
 
@@ -40,7 +40,12 @@ Algorithm:
 2. If a token is `--with-research`, the next token is `<research-file>`; consume both.
 3. If a token is `--with-spec`, the next token is `<spec-file>`; consume both.
    Likewise `--with-context` and `<context-file>`.
-4. If a token is `--model` or `-m`, the next token is its value: one model id, or a comma list of ids (`agy,codex`). Consume both. Then, while the token that follows is exactly a registered model id, consume it as one more reviewer (`-m agy codex` names two). Only this run of ids ends at the first token that is not a registered id; that token is handled by these steps like any other, so a later `-m` is still an option. `-m`/`--model` may appear more than once. Keep the ids in first-seen order, each once. With one id, dispatch it as `--model <id>`; with several, follow **Several reviewers** below. Dispatch nothing, and tell the user the model id goes in its own token and that focus text containing `-m` belongs after `--`, when: there is no next token; the next token is `--` or is shaped like an option (`-m --with-spec spec.md`); a token is an attached form (`-m=agy`, `--model=agy`); or a comma list has an empty element (`agy,,codex`, `agy,`).
+4. If a token is `--model` or `-m`, the next token is its value: one model id, or a comma list of ids (`agy,codex`). Consume both. `-m`/`--model` may appear more than once.
+   - **Malformed value — dispatch nothing.** Tell the user the model id goes in its own token and that focus text containing `-m` belongs after `--`, when: there is no next token; the next token is `--` or is shaped like an option (`-m --with-spec spec.md`); a token is an attached form (`-m=agy`, `--model=agy`); or a comma list has an empty element (`agy,,codex`, `agy,`).
+   - **Look up the registered ids** whenever a token follows the value, or more than one id has been named: run `agent-team-models list` once. The registered ids are the first column under `Models:` (built-ins such as `codex-no-memories` included). If the command fails (exit 3 means the models config is malformed), dispatch nothing and report it.
+   - **Ids that follow the value.** While the token after the value is exactly a registered id, consume it as one more reviewer (`-m agy codex` names two). Only this run of ids ends at the first token that is not a registered id. That token is not an error: it is handled by these steps like any other, so a later `-m` is still an option.
+   - **Unregistered id.** After a lookup, an id written as a `-m` value or inside a comma list that is not registered is an error: dispatch nothing and tell the user. A lone `-m <id>` with nothing after it needs no lookup — the wrapper rejects an unregistered id with exit 2 before any model runs.
+   - Keep the ids as written, in first-seen order, each once. With one id, dispatch it as `--model <id>`; with several, follow **Several reviewers** below.
 5. If a token is `--no-memories`, pass it through as its own argv slot; consume only it.
 6. If a token is `--`, stop: it and nothing after it is an option, so every later token goes to the focus (`--model agy -- --help` reviews the focus `--help`; `-- --model codex` reviews the focus `--model codex`). A focus that mentions `-m`, such as `git commit -m`, must come after `--`, or step 4 reads it as a model option.
 7. Every remaining token belongs to the focus; join them with a single space into one FOCUS string.
@@ -69,7 +74,9 @@ ask-reviewer.sh --with-context "$CFILE" -- "review <merge-base>..<headRefOid> (P
 
 The wrapper runs one model per call. When step 4 yields more than one id, you dispatch one call per id.
 
-| Argument string | Reviewers | Focus |
+How step 4 reads five argument strings when only the built-in ids are registered (`agy`, `claude`, `codex`, …). The last column is the focus text as parsed; a `pr 12` focus is still resolved to a range before dispatch (step 9).
+
+| Argument string | Reviewers | Focus text |
 | :--- | :--- | :--- |
 | `-m agy codex` | agy, codex | (default scope) |
 | `pr 12 -m agy codex` | agy, codex | `pr 12` |
@@ -77,14 +84,14 @@ The wrapper runs one model per call. When step 4 yields more than one id, you di
 | `-m agy,codex claude -- codex is slow` | agy, codex, claude | `codex is slow` |
 | `-m agy too` | agy | `too` |
 
-A focus that begins with a word that is also a model id goes after `--`.
+A registered id changes the reading: with a user model named `too`, the last row names two reviewers. Focus text that could be read as an id goes after `--`.
 
-1. **Validate before the first dispatch.** Whenever a token follows a model value, or more than one id was named, run `agent-team-models list` once: the registered ids are the first column under `Models:` (built-ins such as `codex-no-memories` included). An id given as a `-m` value or inside a comma list that is not registered is an error — dispatch nothing and tell the user. A token after a model value that is not registered is not an error; it is focus. If the command itself fails (exit 3 means the models config is malformed), dispatch nothing and report it.
-2. **Dispatch one call per reviewer, in parallel** — one background Bash call each (§2) — with the same focus, the same flags and the same attachment files, differing only in `--model <id>`. For a pull request, resolve it once (**PR reviews** above) and hand the same context file and the same range to every reviewer.
-3. **`--no-memories` with several reviewers** goes only on the calls whose id is exactly `codex` or `codex-no-memories`; the wrapper refuses it for any other model. Say in your report which calls carried it. With one reviewer, or with no `-m` at all, pass it through unchanged and let the wrapper decide.
-4. **One reviewer failing does not cancel the others.** A usage or setup failure (exit 2), a declined permission prompt or a failed invocation makes that reviewer "no verdict"; let the rest finish and report every reviewer.
-5. **Report side by side.** §3 applies to each result: one verdict line and one findings count per reviewer, then every Blocker and Major bullet labelled with its reviewer. Do not merge or de-duplicate findings across reviewers. A `NEED RESEARCH` or `NEED CONTEXT` retry (§4, §4b) re-runs only the reviewer that asked.
-6. For §6, the reviewers dispatched together against one revision are **one round**.
+1. **Dispatch one call per reviewer, in parallel** — one background Bash call each (§2) — with the same focus, the same flags and the same attachment files. The calls differ only in `--model <id>` and, by item 2, in `--no-memories`. For a pull request, resolve it once (**PR reviews** above) and hand the same context file and the same range to every reviewer.
+2. **`--no-memories` with several reviewers** goes only on the calls whose id is exactly `codex` or `codex-no-memories`; the wrapper refuses it for any other model. Say in your report which calls carried it. With one reviewer, or with no `-m` at all, pass it through unchanged and let the wrapper decide.
+3. **One reviewer failing does not cancel the others.** A usage or setup failure (exit 2), a declined permission prompt or a failed invocation makes that reviewer "no verdict"; let the rest finish and report every reviewer.
+4. **Report side by side.** §3 applies to each result: one verdict line and one findings count per reviewer, then every Blocker and Major bullet labelled with its reviewer. Do not merge or de-duplicate findings across reviewers.
+5. **Retries.** A `NEED RESEARCH`, `NEED CONTEXT` or format retry (§4, §4b, Retry rule) re-runs only the reviewer that asked. The files the batch shared stay as they are: copy the context or research file to a new file, append the new evidence there, and pass the copy. If the PR's head or base moved, the retry is a new review and the other reviewers' verdicts belong to the old revision — say so and ask the user whether to re-run the whole batch; do not present a verdict for the new revision beside verdicts for the old one.
+6. **Rounds.** For §6, one round is one batch against one revision together with its retries. A new round starts only after a fix.
 
 ## 2 · Dispatch
 
@@ -112,7 +119,7 @@ Worked example — the argument string is `focus on src/agent.py concurrency --w
 3. Remaining tokens joined → FOCUS = `focus on src/agent.py concurrency`
 4. Invoke: `ask-reviewer.sh --with-spec docs/agent.md -- "focus on src/agent.py concurrency"`
 
-**Streaming output is already visible in the bottom-right pane — do not duplicate it in the chat.** Acknowledge that it's running and wait.
+**When the dev-trio layout is up (`/dev-trio:bootstrap`), streaming output is already visible in the bottom-right pane — do not duplicate it in the chat.** With several reviewers that pane follows only the most recent run. Acknowledge that it's running and wait.
 
 ## 3 · Surface the verdict after completion
 

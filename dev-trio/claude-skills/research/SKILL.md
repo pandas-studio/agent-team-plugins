@@ -48,7 +48,7 @@ To pipe extra context (e.g., your own grep results):
 echo "<context bullets>" | ask-researcher.sh -- "<question>"
 ```
 
-**Streaming output is already visible in the top-right pane — do not duplicate it in the chat.** Just acknowledge that it's running and wait.
+**When the dev-trio layout is up (`/dev-trio:bootstrap`), streaming output is already visible in the top-right pane — do not duplicate it in the chat.** Just acknowledge that it's running and wait.
 
 ## 3 · Surface the lead after completion
 
