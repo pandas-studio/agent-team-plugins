@@ -44,8 +44,9 @@ reviewer; then dispatch one call per reviewer. Model selection, before any
   (`-m --with-spec spec.md`) or a comma list with an empty element
   (`agy,,codex`, `agy,`) is not dispatched, like the missing-id and attached
   forms above.
-- Directly after a `-m` value, each following word that is exactly `agy`,
-  `claude` or `codex` is one more reviewer (`-m agy codex` names two). Only
+- Directly after a `-m` or `--model` value, each following word that is exactly
+  `agy`, `claude` or `codex` is one more reviewer (`-m agy codex` and
+  `--model agy codex` each name two). Only
   these three ids are read this way, and nothing is looked up: any other id — a
   model the user registered, `codex-no-memories` — is named in a comma list or
   with its own `-m`. The run ends at the first other word, which is read like
@@ -73,7 +74,9 @@ With several reviewers:
 - Dispatch the calls in parallel with the same focus, the same flags and the
   same attachment files. The calls differ only in `--model <id>` and, by the
   next rule, in `--no-memories`. For a pull request, resolve it once and hand
-  the same context file and range to every reviewer.
+  the same context file and range to every reviewer. An attachment that can
+  change under the batch — a `latest-*` link, a file still being written — is
+  copied to a fresh file first, and every reviewer gets the copy.
 - `--no-memories` goes only on the calls whose id is exactly `codex` or
   `codex-no-memories`; say which calls carried it. With one reviewer, or with
   no `-m`, pass it through unchanged.
@@ -89,10 +92,12 @@ With several reviewers:
 - A `NEED RESEARCH`, `NEED CONTEXT` or format repeat re-runs only the reviewer
   that asked. The files the batch shared stay as they are: copy the context or
   research file to a new file, add the new evidence there, and pass the copy.
-  If the PR's head or base moved, the repeat is a new review and the other
-  reviewers' verdicts belong to the old revision: say so and ask the user
-  whether to re-run the whole batch; do not present a verdict for the new
-  revision beside verdicts for the old one.
+  If what is under review changed since the batch was dispatched — the PR's
+  head or base moved, a commit in the reviewed range moved, or the working tree
+  was edited — the repeat is a new review and the other reviewers' verdicts
+  belong to the old state: say so and ask the user whether to re-run the whole
+  batch; do not present a verdict for the new state beside verdicts for the old
+  one.
 - For the third-round check at the end of this skill, one round is one batch
   against one revision together with its repeats. A new round starts only
   after a fix.

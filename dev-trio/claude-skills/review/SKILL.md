@@ -84,11 +84,11 @@ How step 4 reads five argument strings. The last column is the focus text as par
 
 Focus text that begins with `agy`, `claude` or `codex` directly after a model value goes after `--`, as in the fourth row.
 
-1. **Dispatch one call per reviewer, in parallel** — one background Bash call each (§2) — with the same focus, the same flags and the same attachment files. The calls differ only in `--model <id>` and, by item 2, in `--no-memories`. For a pull request, resolve it once (**PR reviews** above) and hand the same context file and the same range to every reviewer.
+1. **Dispatch one call per reviewer, in parallel** — one background Bash call each (§2) — with the same focus, the same flags and the same attachment files. The calls differ only in `--model <id>` and, by item 2, in `--no-memories`. For a pull request, resolve it once (**PR reviews** above) and hand the same context file and the same range to every reviewer. An attachment that can change under the batch — a `latest-*` link, a file still being written — is copied to a fresh file first, and every reviewer gets the copy.
 2. **`--no-memories` with several reviewers** goes only on the calls whose id is exactly `codex` or `codex-no-memories`; the wrapper refuses it for any other model. Say in your report which calls carried it. With one reviewer, or with no `-m` at all, pass it through unchanged and let the wrapper decide.
 3. **One reviewer failing does not cancel the others.** A usage or setup failure (exit 2), a declined permission prompt or a failed invocation makes that reviewer "no verdict"; let the rest finish and report every reviewer.
 4. **Report side by side.** §3 applies to each result: one verdict line and one findings count per reviewer, then every Blocker and Major bullet labelled with its reviewer. Do not merge or de-duplicate findings across reviewers.
-5. **Retries.** A `NEED RESEARCH`, `NEED CONTEXT` or format retry (§4, §4b, Retry rule) re-runs only the reviewer that asked. The files the batch shared stay as they are: copy the context or research file to a new file, append the new evidence there, and pass the copy. If the PR's head or base moved, the retry is a new review and the other reviewers' verdicts belong to the old revision — say so and ask the user whether to re-run the whole batch; do not present a verdict for the new revision beside verdicts for the old one.
+5. **Retries.** A `NEED RESEARCH`, `NEED CONTEXT` or format retry (§4, §4b, Retry rule) re-runs only the reviewer that asked. The files the batch shared stay as they are: copy the context or research file to a new file, append the new evidence there, and pass the copy. If what is under review changed since the batch was dispatched — the PR's head or base moved, a commit in the reviewed range moved, or the working tree was edited — the retry is a new review and the other reviewers' verdicts belong to the old state. Say so and ask the user whether to re-run the whole batch; do not present a verdict for the new state beside verdicts for the old one.
 6. **Rounds.** For §6, one round is one batch against one revision together with its retries. A new round starts only after a fix.
 
 ## 2 · Dispatch
@@ -170,6 +170,9 @@ If the exact `.final.md` path reported by the same successful invocation contain
        fi
      done
    } > "$RFILE"
+   # The last two lines are what the background call reports back.
+   echo "RFILE=$RFILE RESEARCH_FAILED=$RESEARCH_FAILED"
+   [ "$RESEARCH_FAILED" -eq 0 ]
    ```
    If `RESEARCH_FAILED=1`, tell the user which question failed before re-reviewing; don't present the failed output to Codex as evidence (drop that section or re-run it).
 3. Re-invoke under the **Retry rule** below with `<RFILE>` as the research attachment (merged with any research file the original call had).
