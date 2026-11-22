@@ -16,7 +16,10 @@
 #   - its window has had no activity for an hour.
 # One tmux server per run: the one a view would be prepared on from here.
 set -euo pipefail
-set +f   # the lock scan globs; a noglob inherited through SHELLOPTS would hide every lock
+# The lock scan globs: a noglob inherited through SHELLOPTS, or a GLOBIGNORE
+# set by a BASH_ENV file, would hide locks from it.
+set +f
+unset GLOBIGNORE
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/view.sh"
 
@@ -108,7 +111,8 @@ viewer_command_matches() {
   inner=${middle#\'}
   inner=${inner%\'}
   case "${inner//"$q"/}" in *\'*) return 1 ;; esac
-  case "$inner" in */bin/tail-role.sh) return 0 ;; *) return 1 ;; esac
+  # Absolute, as view_start_pane always writes it.
+  case "$inner" in /*/bin/tail-role.sh) return 0 ;; *) return 1 ;; esac
 }
 
 # lock_state LOG_DIR — rc 0: no debate writer lock; 1: LOCK_FOUND holds one
@@ -133,15 +137,18 @@ lock_state() {
   return 0
 }
 
-# windows ID — the session's window count, read now rather than from the listing.
-windows() { view_tmux display-message -p -t "$1" '#{session_windows}'; }
+# windows ID — "<window count> <current window id>", read now rather than
+# from the listing, and compared again as the last check.
+windows() { view_tmux display-message -p -t "$1" '#{session_windows} #{window_id}'; }
 
 # classify ID NAME — sets ACTION (keep|remove), REASON, ACTIVITY and INSPECT
 # (1 when a person should look at the session before removing it).
 classify() {
-  local id="$1" name="$2" nwin owner token record team dir type base nonce role pane start
+  local id="$1" name="$2" win now_win owner token record team dir type base nonce role pane start
   local clients linked activity rc
-  ACTION=keep REASON="" ACTIVITY=- INSPECT=0
+  ACTION=keep REASON="" INSPECT=0
+  ACTIVITY=$(view_tmux display-message -p -t "$id:" '#{t:window_activity}' 2>/dev/null) || ACTIVITY=""
+  [ -n "$ACTIVITY" ] || ACTIVITY=-
   if [ -n "$SELF" ] && [ "$id" = "$SELF" ]; then REASON='this is the session running --prune'; return; fi
   owner=$(view_tmux show-options -qv -t "$id" @debate-view-owner) || { REASON='cannot read its owner tag'; INSPECT=1; return; }
   case "$owner" in
@@ -149,8 +156,8 @@ classify() {
     *) REASON='foreign or untagged session'; INSPECT=1; return ;;
   esac
   INSPECT=1
-  nwin=$(windows "$id") || { REASON='cannot read its window count'; return; }
-  [ "$nwin" = 1 ] || { REASON="modified: $nwin windows"; return; }
+  win=$(windows "$id") || { REASON='cannot read its window count'; return; }
+  case "$win" in 1\ @*) ;; *) REASON="modified: ${win%% *} windows"; return ;; esac
   record=$(view_record "$id:") || { REASON='cannot read its view record'; return; }
   team=$(printf '%s' "$record" | jq -r 'if type == "object" then .team // "" else "" end' 2>/dev/null) || team=""
   dir=$(printf '%s' "$record" | jq -r 'if type == "object" then .log_dir // "" else "" end' 2>/dev/null) || dir=""
@@ -176,7 +183,6 @@ classify() {
   done
   INSPECT=0
   activity=$(view_tmux display-message -p -t "$id:" '#{window_activity}') || activity=""
-  ACTIVITY=$(view_tmux display-message -p -t "$id:" '#{t:window_activity}') || ACTIVITY=-
   clients=$(view_tmux list-clients -t "$id" -F '#{client_name}') || { REASON='cannot list its clients'; return; }
   [ -z "$clients" ] || { REASON='a client is attached'; return; }
   linked=$(view_tmux display-message -p -t "$id:" '#{window_linked}') || { REASON='cannot read whether its window is linked'; return; }
@@ -191,9 +197,10 @@ classify() {
   esac
   case "$activity" in ''|*[!0-9]*) REASON='cannot read its last activity'; return ;; esac
   [ $((NOW - activity)) -ge "$IDLE_SECONDS" ] || { REASON='recently active (within 60 min)'; return; }
-  # Again, last: a window added during the checks would go with the session.
-  nwin=$(windows "$id") || nwin=""
-  [ "$nwin" = 1 ] || { REASON="modified: ${nwin:-unknown} windows"; INSPECT=1; return; }
+  # Again, last: a window added or swapped in during the checks would go with
+  # the session, unverified.
+  now_win=$(windows "$id") || now_win=""
+  [ "$now_win" = "$win" ] || { REASON='modified during the checks: its windows changed'; INSPECT=1; return; }
   ACTION=remove
   REASON='idle for over 60 min, no client, no debate lock'
 }

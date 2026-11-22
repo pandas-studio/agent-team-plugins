@@ -783,6 +783,11 @@ class PruneViewTests(RealTmuxFixture):
         with self.subTest("noglob inherited through SHELLOPTS"):
             self.assertEqual(self.kept(ctx["session"], SHELLOPTS="noglob"),
                              "a debate holds or left a writer lock: %s" % (run / ".lock"))
+        bash_env = self.root / "bash-env"
+        bash_env.write_text("GLOBIGNORE='*debate-*'\n")
+        with self.subTest("GLOBIGNORE set by a BASH_ENV file"):
+            self.assertEqual(self.kept(ctx["session"], BASH_ENV=str(bash_env)),
+                             "a debate holds or left a writer lock: %s" % (run / ".lock"))
         (run / ".lock").unlink()
         odd = Path(ctx["log_dir"]) / "debate-a\tb"
         odd.mkdir()
@@ -834,6 +839,9 @@ class PruneViewTests(RealTmuxFixture):
         foreign = self.tmux("display-message", "-p", "-t", "=debate-view-foreign:", "#{session_id}").stdout.strip()
         result = self.prune()
         rows = self.rows(result)
+        activity = [l.split("\t")[2] for l in result.stdout.splitlines() if l.startswith("keep\tdebate-view-foreign\t")]
+        self.assertEqual(len(activity), 1)
+        self.assertNotEqual(activity[0], "-")   # shown even for a session kept by an early check
         self.assertEqual(rows["debate-view-foreign"], ("keep", "foreign or untagged session"))
         self.assertEqual(rows["debate-view-with space"], ("keep", "foreign or untagged session"))
         self.assertIn("list-panes -s -t '%s'" % foreign, result.stdout)
@@ -863,6 +871,11 @@ class PruneViewTests(RealTmuxFixture):
         self.assertIn(team, original)
         # Shown by tmux as prune-\test: decoding every escape would read it as prune-test.
         replacements["team with a tab where the record has a t"] = original.replace(team, "AGENT_TEAM='prune-\test'")
+        quote = lambda text: "'" + text.replace("'", "'\\''") + "'"
+        tail = quote(str(self.plugin / "lib" / ".." / "bin" / "tail-role.sh"))
+        self.assertIn(tail, original)
+        # Preparation always writes an absolute viewer path; a relative one is not its own.
+        replacements["relative viewer path"] = original.replace(tail, "'rel/bin/tail-role.sh'")
         for label, command in replacements.items():
             with self.subTest(label):
                 self.assertEqual(self.tmux("respawn-pane", "-k", "-t", gen, command).returncode, 0)
