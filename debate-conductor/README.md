@@ -147,7 +147,7 @@ removed. The `--here` lock is covered below.
 To find detached views left behind after their cleanup command is gone, run
 `bin/team-3pane.sh --prune`. It only reports: one row per `debate-view-*` session
 on the tmux server a view would be prepared on from here, and for each removable
-one the exact `kill-session` command, which it never runs itself. A view is
+one the exact `kill-session` command, by session id, which it never runs itself. A view is
 removable only if it is this plugin's own complete, unmodified detached view,
 with no client attached, its window linked nowhere else, no debate writer lock
 (`debate-<TS>/.lock`, live or left behind) in its log directory, and no window

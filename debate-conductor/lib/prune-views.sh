@@ -62,7 +62,8 @@ if ! probe=$(view_tmux list-sessions -F '#{session_id}' 2>&1 >/dev/null); then
   view_error "cannot list the sessions on $VIEW_SOCKET: $probe"
   exit 1
 fi
-SESSIONS=$(view_tmux list-sessions -F '#{session_id}	#{session_name}	#{session_windows}') || {
+# Ids only: a session name may hold any character, a tab included.
+SESSIONS=$(view_tmux list-sessions -F '#{session_id}') || {
   view_error "cannot list the sessions on $VIEW_SOCKET"; exit 1; }
 NOW=$(date +%s)
 
@@ -132,10 +133,13 @@ lock_state() {
   return 0
 }
 
-# classify ID NAME WINDOWS — sets ACTION (keep|remove), REASON, ACTIVITY and
-# INSPECT (1 when a person should look at the session before removing it).
+# windows ID — the session's window count, read now rather than from the listing.
+windows() { view_tmux display-message -p -t "$1" '#{session_windows}'; }
+
+# classify ID NAME — sets ACTION (keep|remove), REASON, ACTIVITY and INSPECT
+# (1 when a person should look at the session before removing it).
 classify() {
-  local id="$1" name="$2" nwin="$3" owner token record team dir type base nonce role pane start
+  local id="$1" name="$2" nwin owner token record team dir type base nonce role pane start
   local clients linked activity rc
   ACTION=keep REASON="" ACTIVITY=- INSPECT=0
   if [ -n "$SELF" ] && [ "$id" = "$SELF" ]; then REASON='this is the session running --prune'; return; fi
@@ -145,6 +149,7 @@ classify() {
     *) REASON='foreign or untagged session'; INSPECT=1; return ;;
   esac
   INSPECT=1
+  nwin=$(windows "$id") || { REASON='cannot read its window count'; return; }
   [ "$nwin" = 1 ] || { REASON="modified: $nwin windows"; return; }
   record=$(view_record "$id:") || { REASON='cannot read its view record'; return; }
   team=$(printf '%s' "$record" | jq -r 'if type == "object" then .team // "" else "" end' 2>/dev/null) || team=""
@@ -186,26 +191,35 @@ classify() {
   esac
   case "$activity" in ''|*[!0-9]*) REASON='cannot read its last activity'; return ;; esac
   [ $((NOW - activity)) -ge "$IDLE_SECONDS" ] || { REASON='recently active (within 60 min)'; return; }
+  # Again, last: a window added during the checks would go with the session.
+  nwin=$(windows "$id") || nwin=""
+  [ "$nwin" = 1 ] || { REASON="modified: ${nwin:-unknown} windows"; INSPECT=1; return; }
   ACTION=remove
   REASON='idle for over 60 min, no client, no debate lock'
 }
 
 ROWS="" COMMANDS="" HINTS="" scanned=0 removable=0 total=0
-while IFS='	' read -r id name nwin; do
+while IFS= read -r id; do
   [ -n "$id" ] || continue
   total=$((total + 1))
-  [[ $name =~ ^debate-view-[A-Za-z0-9_-]+$ ]] || continue
+  name=$(view_tmux display-message -p -t "$id" '#{session_name}') || {
+    view_error "cannot read the name of session $id on $VIEW_SOCKET"; exit 1; }
+  case "$name" in debate-view-*) ;; *) continue ;; esac
   scanned=$((scanned + 1))
-  classify "$id" "$name" "$nwin"
-  ROWS="$ROWS$ACTION	$name	$ACTIVITY	$REASON
+  classify "$id" "$name"
+  ROWS="$ROWS$ACTION	$(shown "$name")	$ACTIVITY	$REASON
 "
+  # By session id, not name: an id names this one session for the server's
+  # lifetime, while a name can be taken by another session before the command
+  # runs. (A restarted server reuses ids, hence: rerun before running.)
   quoted="$(view_quote "$VIEW_TMUX") -S $(view_quote "$VIEW_SOCKET")"
   if [ "$ACTION" = remove ]; then
     removable=$((removable + 1))
-    COMMANDS="$COMMANDS  $quoted kill-session -t $(view_quote "=$name")
+    # No trailing "# name" comment: zsh without interactivecomments would pass it to tmux.
+    COMMANDS="$COMMANDS  $quoted kill-session -t $(view_quote "$id")
 "
   elif [ "$INSPECT" = 1 ]; then
-    HINTS="$HINTS  $quoted list-panes -s -t $(view_quote "=$name") -F '#{pane_id} #{pane_start_command}'
+    HINTS="$HINTS  $quoted list-panes -s -t $(view_quote "$id") -F '#{session_name} #{pane_id} #{pane_start_command}'
 "
   fi
 done < <(printf '%s\n' "$SESSIONS")   # not a here-document: bash 3.2 writes those to a temp file
@@ -219,6 +233,7 @@ printf '%s' "$ROWS"
 printf '%s of %s views removable, as of %s.\n' "$removable" "$scanned" "$(date)"
 if [ "$removable" -gt 0 ]; then
   printf 'This is a snapshot: rerun --prune right before running a command below, and run only those it still lists.\n'
+  printf 'One command per removable view, by session id, in the order of the rows above:\n'
   printf '%s' "$COMMANDS"
   if [ "$removable" = "$total" ] &&
       [ "$(view_tmux show-options -sv exit-empty 2>/dev/null || true)" = on ]; then
@@ -226,6 +241,6 @@ if [ "$removable" -gt 0 ]; then
   fi
 fi
 if [ -n "$HINTS" ]; then
-  printf 'Kept because they are not verifiably this plugin'"'"'s unmodified views; inspect before removing by hand:\n'
+  printf 'Kept because they are not verifiably this plugin'"'"'s unmodified views; inspect before removing by hand (in row order):\n'
   printf '%s' "$HINTS"
 fi

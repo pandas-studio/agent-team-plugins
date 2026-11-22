@@ -736,15 +736,21 @@ class PruneViewTests(RealTmuxFixture):
         result = self.prune(FAKE_NOW=self.later(session))
         self.assertEqual(self.rows(result),
                          {session: ("remove", "idle for over 60 min, no client, no debate lock")})
+        sid = self.tmux("display-message", "-p", "-t", "=" + session + ":", "#{session_id}").stdout.strip()
         quote = lambda text: "'" + text.replace("'", "'\\''") + "'"
         expected = "  %s -S %s kill-session -t %s" % (
-            quote(str(self.tools / "tmux")), quote(str(self.socket)), quote("=" + session))
+            quote(str(self.tools / "tmux")), quote(str(self.socket)), quote(sid))
         commands = [l for l in result.stdout.splitlines() if "kill-session" in l]
         self.assertEqual(commands, [expected])
         self.assertNotIn("stops it", result.stdout)
         self.assertEqual(self.tmux("has-session", "-t", "=" + session).returncode, 0)
+        # The name is taken by another session before the command runs: the
+        # command still removes the verified session, by id, and only it.
+        self.assertEqual(self.tmux("rename-session", "-t", sid, "debate-view-moved").returncode, 0)
+        self.assertEqual(self.tmux("new-session", "-d", "-s", session, "exec /bin/sleep 600").returncode, 0)
         subprocess.run(shlex.split(commands[0]), env=self.env, check=True, timeout=5)
-        self.assertNotEqual(self.tmux("has-session", "-t", "=" + session).returncode, 0)
+        self.assertNotEqual(self.tmux("has-session", "-t", sid).returncode, 0)
+        self.assertEqual(self.tmux("has-session", "-t", "=" + session).returncode, 0)
         self.assertEqual(self.tmux("has-session", "-t", "=mine").returncode, 0)
 
     def test_last_sessions_note_needs_every_session_removable(self):
@@ -824,9 +830,13 @@ class PruneViewTests(RealTmuxFixture):
     def test_foreign_and_modified_views_are_kept(self):
         session = self.view()["session"]   # also creates the private socket directory
         self.assertEqual(self.tmux("new-session", "-d", "-s", "debate-view-foreign", "exec /bin/sleep 600").returncode, 0)
+        self.assertEqual(self.tmux("new-session", "-d", "-s", "debate-view-with space", "exec /bin/sleep 600").returncode, 0)
+        foreign = self.tmux("display-message", "-p", "-t", "=debate-view-foreign:", "#{session_id}").stdout.strip()
         result = self.prune()
-        self.assertEqual(self.rows(result)["debate-view-foreign"], ("keep", "foreign or untagged session"))
-        self.assertIn("list-panes -s -t '=debate-view-foreign'", result.stdout)
+        rows = self.rows(result)
+        self.assertEqual(rows["debate-view-foreign"], ("keep", "foreign or untagged session"))
+        self.assertEqual(rows["debate-view-with space"], ("keep", "foreign or untagged session"))
+        self.assertIn("list-panes -s -t '%s'" % foreign, result.stdout)
         self.tmux("split-window", "-d", "-t", "=" + session + ":", "exec /bin/sleep 600")
         self.assertEqual(self.kept(session), "modified: its panes are not the recorded viewers")
 
