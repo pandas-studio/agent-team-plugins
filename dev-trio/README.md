@@ -236,8 +236,10 @@ claude --plugin-dir ./agent-team-plugins/dev-trio
    Or use the wrapping skills:
    ```
    /dev-trio:research <question>
-   /dev-trio:review  [focus] [--with-research <file>] [--with-spec <file>] [--with-context <file>]
+   /dev-trio:review  [focus] [-m <id>[,<id>...]] [--with-research <file>] [--with-spec <file>] [--with-context <file>]
    ```
+
+   Name several reviewers (`-m agy codex`, `-m agy,codex`) and the skill dispatches one `ask-reviewer.sh` call per reviewer in parallel, with the same focus and attachments, and reports the verdicts side by side. The wrapper itself still runs one model per call.
 
    When calling `ask-reviewer.sh` directly, a long focus can be passed as `--focus-file <file>` instead of an argument. That works where a host refuses a computed `"$(cat angles.txt)"` argument, and it needs no shell quoting. `/dev-trio:review` itself takes the focus as text.
 
@@ -399,9 +401,9 @@ stub checks are not evidence of a successful live research call.
 
 | Skill | What it does |
 | :--- | :--- |
-| `/dev-trio:bootstrap` | One-time per session: splits the current tmux pane into 3 and starts the researcher/reviewer dashboards. |
+| `/dev-trio:bootstrap` | Optional, one-time per session: splits the current tmux pane into 3 and starts the researcher/reviewer dashboards. |
 | `/dev-trio:research <question>` | One-shot Antigravity lookup. Streaming output lands in the top-right pane; chat-side surfaces the lead + cited URLs. |
-| `/dev-trio:review [focus] [--with-research <file>] [--with-spec <file>] [--with-context <file>]` | One-shot Codex review (default = git-uncommitted scope). Chat-side surfaces verdict (`SHIP / NEEDS-FIX / DISCUSS`) + Blocker/Major counts. Handles `## NEED RESEARCH` (via Antigravity) and `## NEED CONTEXT` (via the PM's read-only `gh`/`git`) blocks. |
+| `/dev-trio:review [focus] [-m <id>[,<id>...]] [--with-research <file>] [--with-spec <file>] [--with-context <file>]` | One-shot Codex review (default = git-uncommitted scope); several `-m` ids run one review each, in parallel. Chat-side surfaces verdict (`SHIP / NEEDS-FIX / DISCUSS`) + Blocker/Major counts. Handles `## NEED RESEARCH` (via Antigravity) and `## NEED CONTEXT` (via the PM's read-only `gh`/`git`) blocks. |
 | `/dev-trio:install-pm` | Writes/upgrades the PM orchestration policy in the workspace's `CLAUDE.md` (idempotent, marker-guarded). |
 
 Claude skills carry `disable-model-invocation: true`; Codex skills use

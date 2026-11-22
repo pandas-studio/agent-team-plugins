@@ -2,37 +2,45 @@
 name: review
 description: One-shot Codex review. Default scope = uncommitted working-tree changes. Optional --with-research <file>, --with-spec <file> and --with-context <file> for context injection. Streaming output lands in the bottom-right dashboard pane; chat-side surfaces the verdict (SHIP/NEEDS-FIX/DISCUSS) + Blocker/Major counts and handles NEED RESEARCH and NEED CONTEXT blocks.
 disable-model-invocation: true
-allowed-tools: Bash(ask-reviewer.sh:*) Bash(ask-researcher.sh:*) Bash(gh pr view:*) Bash(gh pr diff:*) Bash(gh pr checks:*) Bash(gh issue view:*) Bash(gh run view:*) Bash(git:*) Bash(cat:*) Bash(ls:*) Bash(date:*) Bash(mkdir:*) Bash(echo:*) Bash(sed:*) Read
-argument-hint: [focus] [-m|--model <id>] [--with-research <file>] [--with-spec <file>] [--with-context <file>] [--no-memories] [-- <focus>]
+allowed-tools: Bash(ask-reviewer.sh:*) Bash(ask-researcher.sh:*) Bash(agent-team-models:*) Bash(gh pr view:*) Bash(gh pr diff:*) Bash(gh pr checks:*) Bash(gh issue view:*) Bash(gh run view:*) Bash(git:*) Bash(cat:*) Bash(ls:*) Bash(date:*) Bash(mkdir:*) Bash(echo:*) Bash(sed:*) Read
+argument-hint: "[focus] [-m|--model <id>[,<id>...]] [--with-research <file>] [--with-spec <file>] [--with-context <file>] [--no-memories] [-- <focus>]"
 ---
 
 # Review (Codex, one-shot)
 
 You are the **PM**. Codex is the reviewer (bottom-right pane). You dispatch one review, surface the verdict, and route a `NEED RESEARCH` block through Antigravity and a `NEED CONTEXT` block through your own read-only `gh`/`git` commands.
 
-## 1 · Parse `$ARGUMENTS` and build the dispatch command
+## Arguments
 
-`$ARGUMENTS` is a single string that may interleave six pieces in any order:
+<arguments>
+$ARGUMENTS
+</arguments>
+
+Everything between the tags is the argument string the user typed, verbatim. It may be empty.
+
+## 1 · Parse the argument string and build the dispatch command
+
+The argument string may interleave six pieces in any order:
 
 - **Optional `--with-research <file>`** — research context from a previous Antigravity call (typically `latest-researcher.log` or a curated `research-<TS>.md`).
 - **Optional `--with-spec <file>`** — spec/contract the changes are expected to satisfy.
 - **Optional `--with-context <file>`** — repository facts you fetched (PR commit IDs, issue text, CI output) for a reviewer that may not reach the network.
-- **Optional `--model <id>`** (short: `-m <id>`) — reviewer model for this call only (`codex`, `claude`, `agy`, or any id from `agent-team-models list`); wins over `DEV_TRIO_REVIEWER_MODEL` and the role binding.
+- **Optional `--model <id>`** (short: `-m <id>`) — reviewer model for this call only (`codex`, `claude`, `agy`, or any id from `agent-team-models list`); wins over `DEV_TRIO_REVIEWER_MODEL` and the role binding. More than one reviewer can be named — see **Several reviewers** below.
 - **Optional `--no-memories`** — bare flag; Codex runs without its memory summary from earlier sessions.
 - **Optional free-form focus** — review scope, possibly multi-word. Examples:
   - `focus on the new retry logic in src/agent.py — concurrency safety`
   - `review HEAD~2..HEAD`
   - `review only the changes to src/auth/`
 
-**You must parse `$ARGUMENTS` yourself and assemble the bash command with explicit shell quoting.** Do NOT write `ask-reviewer.sh $ARGUMENTS` — unquoted expansion word-splits the focus across multiple shell args, and `ask-reviewer.sh` rejects extra positionals with rc=2.
+**You must parse the argument string yourself and assemble the bash command with explicit shell quoting.** Do NOT paste the argument string after `ask-reviewer.sh` as it stands — unquoted, the shell word-splits the focus across multiple args, and `ask-reviewer.sh` rejects extra positionals with rc=2.
 
 Algorithm:
 
-1. Tokenise `$ARGUMENTS` on whitespace, walk left-to-right.
+1. Tokenise the argument string on whitespace, walk left-to-right.
 2. If a token is `--with-research`, the next token is `<research-file>`; consume both.
 3. If a token is `--with-spec`, the next token is `<spec-file>`; consume both.
    Likewise `--with-context` and `<context-file>`.
-4. If a token is `--model` or `-m`, the next token is `<model-id>`; consume both and dispatch them as `--model <model-id>`. If there is no next token, the next token is `--`, or a token is an attached form (`-m=agy`, `--model=agy`), do not dispatch: tell the user the model id goes in its own token and that focus text containing `-m` belongs after `--`.
+4. If a token is `--model` or `-m`, the next token is its value: one model id, or a comma list of ids (`agy,codex`). Consume both. Then, while the token that follows is exactly a registered model id, consume it as one more reviewer (`-m agy codex` names two). Only this run of ids ends at the first token that is not a registered id; that token is handled by these steps like any other, so a later `-m` is still an option. `-m`/`--model` may appear more than once. Keep the ids in first-seen order, each once. With one id, dispatch it as `--model <id>`; with several, follow **Several reviewers** below. Dispatch nothing, and tell the user the model id goes in its own token and that focus text containing `-m` belongs after `--`, when: there is no next token; the next token is `--` or is shaped like an option (`-m --with-spec spec.md`); a token is an attached form (`-m=agy`, `--model=agy`); or a comma list has an empty element (`agy,,codex`, `agy,`).
 5. If a token is `--no-memories`, pass it through as its own argv slot; consume only it.
 6. If a token is `--`, stop: it and nothing after it is an option, so every later token goes to the focus (`--model agy -- --help` reviews the focus `--help`; `-- --model codex` reviews the focus `--model codex`). A focus that mentions `-m`, such as `git commit -m`, must come after `--`, or step 4 reads it as a model option.
 7. Every remaining token belongs to the focus; join them with a single space into one FOCUS string.
@@ -57,14 +65,37 @@ If either commit is missing locally, tell the user which one and ask before fetc
 ask-reviewer.sh --with-context "$CFILE" -- "review <merge-base>..<headRefOid> (PR #55)"
 ```
 
+### Several reviewers
+
+The wrapper runs one model per call. When step 4 yields more than one id, you dispatch one call per id.
+
+| Argument string | Reviewers | Focus |
+| :--- | :--- | :--- |
+| `-m agy codex` | agy, codex | (default scope) |
+| `pr 12 -m agy codex` | agy, codex | `pr 12` |
+| `-m agy pr 12 -m codex` | agy, codex | `pr 12` |
+| `-m agy,codex claude -- codex is slow` | agy, codex, claude | `codex is slow` |
+| `-m agy too` | agy | `too` |
+
+A focus that begins with a word that is also a model id goes after `--`.
+
+1. **Validate before the first dispatch.** Whenever a token follows a model value, or more than one id was named, run `agent-team-models list` once: the registered ids are the first column under `Models:` (built-ins such as `codex-no-memories` included). An id given as a `-m` value or inside a comma list that is not registered is an error — dispatch nothing and tell the user. A token after a model value that is not registered is not an error; it is focus. If the command itself fails (exit 3 means the models config is malformed), dispatch nothing and report it.
+2. **Dispatch one call per reviewer, in parallel** — one background Bash call each (§2) — with the same focus, the same flags and the same attachment files, differing only in `--model <id>`. For a pull request, resolve it once (**PR reviews** above) and hand the same context file and the same range to every reviewer.
+3. **`--no-memories` with several reviewers** goes only on the calls whose id is exactly `codex` or `codex-no-memories`; the wrapper refuses it for any other model. Say in your report which calls carried it. With one reviewer, or with no `-m` at all, pass it through unchanged and let the wrapper decide.
+4. **One reviewer failing does not cancel the others.** A usage or setup failure (exit 2), a declined permission prompt or a failed invocation makes that reviewer "no verdict"; let the rest finish and report every reviewer.
+5. **Report side by side.** §3 applies to each result: one verdict line and one findings count per reviewer, then every Blocker and Major bullet labelled with its reviewer. Do not merge or de-duplicate findings across reviewers. A `NEED RESEARCH` or `NEED CONTEXT` retry (§4, §4b) re-runs only the reviewer that asked.
+6. For §6, the reviewers dispatched together against one revision are **one round**.
+
 ## 2 · Dispatch
 
-Single Bash call (blocking, ~30–120 s depending on diff size). `ask-reviewer.sh` is on the plugin's `bin/` PATH while the plugin is active. **Wrap FOCUS in double quotes** so it stays a single positional argument; the `--with-*` flag pairs go through as their own argv slots.
+One Bash call per review. `ask-reviewer.sh` is on the plugin's `bin/` PATH while the plugin is active. **Wrap FOCUS in double quotes** so it stays a single positional argument; the `--with-*` flag pairs go through as their own argv slots.
+
+A review takes minutes, not seconds: over 319 measured Codex reviews the median was about 3 minutes and one in ten took more than 11; an agy reviewer is slower. That is past the Bash tool's default timeout (2 minutes) and sometimes past its cap (10 minutes). **Run the call with `run_in_background: true`** and wait for its completion notice. Do not poll it, and do not edit the files under review while it runs.
 
 Concrete shapes (these are what you actually invoke):
 
 ```bash
-ask-reviewer.sh                                                 # $ARGUMENTS empty → default scope
+ask-reviewer.sh                                                 # empty argument string → default scope
 ask-reviewer.sh -- "focus on src/agent.py concurrency"          # focus only
 ask-reviewer.sh --with-research notes.md -- "concurrency focus" # flag written before the focus
 ask-reviewer.sh --with-spec docs/auth.md -- "focus on auth flow"  # flag written after the focus
@@ -74,7 +105,7 @@ ask-reviewer.sh --model agy -- "second opinion on the parser"   # a different re
 ask-reviewer.sh --model codex                                   # default scope, chosen model
 ```
 
-Worked example — if `$ARGUMENTS = "focus on src/agent.py concurrency --with-spec docs/agent.md"`:
+Worked example — the argument string is `focus on src/agent.py concurrency --with-spec docs/agent.md`:
 
 1. Tokens: `focus on src/agent.py concurrency --with-spec docs/agent.md`
 2. `--with-spec` consumes itself + `docs/agent.md` → SPEC = `docs/agent.md`

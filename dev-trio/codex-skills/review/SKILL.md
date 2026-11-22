@@ -33,6 +33,56 @@ settings still win. `--model claude` goes through the Claude login check
 below. `--no-memories` is valid only with a Codex reviewer, so a Claude
 reviewer will reject it before inference.
 
+## Several reviewers
+
+The wrapper runs one model per call. When the request names more than one
+reviewer, dispatch one call per reviewer. Model selection, before any `--`:
+
+- `-m`/`--model` may appear more than once, and its value is one id or a comma
+  list of ids (`agy,codex`).
+- Directly after a `-m` value, each following word that is exactly a registered
+  model id is one more reviewer (`-m agy codex` names two). Only this run of
+  ids ends at the first word that is not a registered id; that word is read
+  like any other, so a later `-m` is still an option.
+- Keep the ids in first-seen order, each once.
+- A comma list with an empty element (`agy,,codex`, `agy,`) is not dispatched,
+  like the missing-id and attached forms above.
+
+| Request | Reviewers | Focus |
+| :--- | :--- | :--- |
+| `-m agy codex` | agy, codex | (full working tree) |
+| `pr 12 -m agy codex` | agy, codex | `pr 12` |
+| `-m agy pr 12 -m codex` | agy, codex | `pr 12` |
+| `-m agy,codex claude -- codex is slow` | agy, codex, claude | `codex is slow` |
+| `-m agy too` | agy | `too` |
+
+A focus that begins with a word that is also a model id goes after `--`.
+
+- Validate before the first dispatch. Whenever a word follows a model value, or
+  more than one id was named, run `"<plugin-root>/bin/agent-team-models" list`
+  once: the registered ids are the first column under `Models:` (built-ins such
+  as `codex-no-memories` included). An unregistered id given as a `-m` value or
+  inside a comma list is an error: dispatch nothing and tell the user. An
+  unregistered word after a model value is focus, not an error. If the command
+  itself fails (exit 3 means the models config is malformed), dispatch nothing
+  and report it.
+- Dispatch the calls in parallel with the same focus, the same flags and the
+  same attachment files, differing only in `--model <id>`. For a pull request,
+  resolve it once and hand the same context file and range to every reviewer.
+- With several reviewers, `--no-memories` goes only on the calls whose id is
+  exactly `codex` or `codex-no-memories`; say which calls carried it. With one
+  reviewer, or with no `-m`, pass it through unchanged.
+- One reviewer failing does not cancel the others. A usage or setup failure
+  (exit 2), a denied or unavailable host approval, or a failed invocation makes
+  that reviewer "no verdict"; let the rest finish and report every reviewer.
+  The one-approval rule below applies to each Claude reviewer call separately.
+- Report each reviewer's model, verdict and counts side by side, then every
+  Blocker and Major finding labelled with its reviewer. Do not merge or
+  de-duplicate findings across reviewers. A `NEED RESEARCH` or `NEED CONTEXT`
+  repeat re-runs only the reviewer that asked.
+- For the third-round check at the end of this skill, the reviewers dispatched
+  together against one revision are one round.
+
 For a pull request, never pass a bare `pr N` focus: the reviewer may lack
 network access and cannot tell which commits the PR contains. Run
 `gh pr view N --json number,url,title,baseRefName,baseRefOid,headRefName,headRefOid`

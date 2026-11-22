@@ -19,6 +19,14 @@ its leading controls, then extend the chosen debate by the remaining number
 incomplete first round resumes at 1 using the saved context. Verified viewers
 follow appended streams; do not assume viewers exist before preparation.
 
+## Arguments
+
+<arguments>
+$ARGUMENTS
+</arguments>
+
+Everything between the tags is the argument string the user typed, verbatim. It may be empty.
+
 ## 1 · Resolve the prior debate
 
 - Prefer the last validated receipt for this ongoing workspace task. Otherwise
@@ -42,8 +50,11 @@ context as described in the shared contract; strict tmux refuses that case.
 
 ## 3 · Resolve `extra-rounds`
 
-- `$ARGUMENTS` is a single integer (1–9) → that many more rounds.
-- `$ARGUMENTS` is empty → default `2`.
+Look at what is left of the argument string once the shared contract's leading
+controls are consumed:
+
+- A single integer (1–9) → that many more rounds.
+- Nothing → default `2`.
 - Anything else → ask for a number.
 
 ## 4 · Run the extension

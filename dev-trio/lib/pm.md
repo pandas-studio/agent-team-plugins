@@ -94,6 +94,6 @@ Do this:
 ## Don't
 
 - Don't call Antigravity or Codex from inside a subagent (`Agent` tool) — keep orchestration in the main session so the user can see the routing.
-- Don't run Antigravity/Codex in the background unless the user asks; the latency is part of the deliberation budget.
+- Don't edit the files under review while Antigravity/Codex is running. Run the call in the background (a review usually outlasts a foreground call's time limit) and wait for its result — the wait is part of the deliberation budget.
 - Don't act on Codex `NEEDS-FIX` findings without showing the user first — they decide whether to address each one.
 - Don't paste secrets/credentials into prompts. Both CLIs send to external providers.

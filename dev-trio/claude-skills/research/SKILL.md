@@ -3,16 +3,24 @@ name: research
 description: One-shot Antigravity research call. Use when before coding you need library/API behavior, recent changes, spec details, or option comparisons. Streaming output lands in the top-right dashboard pane; chat-side surfaces the lead paragraph + cited URL count.
 disable-model-invocation: true
 allowed-tools: Bash(ask-researcher.sh:*) Bash(dev-trio-doctor.sh:*) Bash(cat:*) Bash(ls:*) Read
-argument-hint: [-m|--model <id>] [--] <research question>
+argument-hint: "[-m|--model <id>] [--] <research question>"
 ---
 
 # Research (Antigravity, one-shot)
 
 You are the **PM**. Antigravity is the researcher (top-right pane). You dispatch one call, then surface the lead.
 
+## Arguments
+
+<arguments>
+$ARGUMENTS
+</arguments>
+
+Everything between the tags is the argument string the user typed, verbatim. It may be empty.
+
 ## 1 · Resolve the question
 
-`$ARGUMENTS` is the research question, free-form, optionally preceded by options. Look only at its start:
+The argument string is the research question, free-form, optionally preceded by options. Look only at its start:
 
 1. While it starts with `--model <id>` or `-m <id>`, remove those two tokens, keep the pair as `--model <id>`, and repeat. Pass every kept pair to `ask-researcher.sh`, in order, before `--`: the wrapper rejects any pair whose id is missing or option-shaped, and the last id wins and must be registered. The id is the researcher model for this call (`agy`, `codex`, `claude`, or any id from `agent-team-models list`) and wins over `DEV_TRIO_RESEARCHER_MODEL` and the role binding. If a leading `--model`/`-m` has no id after it or its id is `--`, or what is left starts with an attached form (`-m=agy`, `--model=agy`), do not dispatch: tell the user the id goes in its own token, and that `--` before the question keeps it literal.
 2. If what is left starts with a `--` token, remove it. Everything after it is the question, so `-- --model is deprecated?` asks about `--model`.
@@ -23,11 +31,13 @@ You are the **PM**. Antigravity is the researcher (top-right pane). You dispatch
 
 ## 2 · Dispatch
 
-Single Bash call (blocking, ~10–60 s depending on the query). `ask-researcher.sh` is on the plugin's `bin/` PATH while the plugin is active — call it bare (no absolute path).
+Single Bash call. `ask-researcher.sh` is on the plugin's `bin/` PATH while the plugin is active — call it bare (no absolute path).
+
+Most calls finish in under a minute, but not all: over 54 measured agy calls the median was about 30 seconds, one in ten took more than 2 minutes, and the longest took almost 6. That reaches past the Bash tool's default timeout (2 minutes), so **run the call with `run_in_background: true`** and wait for its completion notice instead of polling.
 
 ```bash
 ask-researcher.sh -- "<the user's question, verbatim>"
-ask-researcher.sh --model codex -- "<question>"    # $ARGUMENTS began with --model codex or -m codex
+ask-researcher.sh --model codex -- "<question>"    # the argument string began with --model codex or -m codex
 ```
 
 Always put `--` before the question, so a question such as `--help` is researched instead of being read as an option.
