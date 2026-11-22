@@ -25,7 +25,7 @@ follow appended streams; do not assume viewers exist before preparation.
 $ARGUMENTS
 </arguments>
 
-Everything between the tags is the argument string the user typed, verbatim. It may be empty.
+Everything between the tags is the argument string the user typed. It may be empty.
 
 ## 1 · Resolve the prior debate
 

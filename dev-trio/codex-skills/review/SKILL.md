@@ -40,26 +40,22 @@ reviewer; then dispatch one call per reviewer. Model selection, before any
 `--`, applies to every request that has a `-m`/`--model`:
 
 - `-m`/`--model` may appear more than once, and its value is one id or a comma
-  list of ids (`agy,codex`). A comma list with an empty element (`agy,,codex`,
-  `agy,`) is not dispatched, like the missing-id and attached forms above.
-- Look up the registered ids whenever a word follows a model value, or more
-  than one id has been named: run `"<plugin-root>/bin/agent-team-models" list`
-  once. The registered ids are the first column under `Models:` (built-ins such
-  as `codex-no-memories` included). If the command fails (exit 3 means the
-  models config is malformed), dispatch nothing and report it.
-- Directly after a `-m` value, each following word that is exactly a registered
-  id is one more reviewer (`-m agy codex` names two). Only this run of ids ends
-  at the first word that is not a registered id. That word is not an error: it
-  is read like any other, so a later `-m` is still an option.
-- After a lookup, an id written as a `-m` value or inside a comma list that is
-  not registered is an error: dispatch nothing and tell the user. A lone
-  `-m <id>` with nothing after it needs no lookup; the wrapper rejects an
-  unregistered id with exit 2 before any model runs.
-- Keep the ids as written, in first-seen order, each once.
+  list of ids (`agy,codex`). A value shaped like an option
+  (`-m --with-spec spec.md`) or a comma list with an empty element
+  (`agy,,codex`, `agy,`) is not dispatched, like the missing-id and attached
+  forms above.
+- Directly after a `-m` value, each following word that is exactly `agy`,
+  `claude` or `codex` is one more reviewer (`-m agy codex` names two). Only
+  these three ids are read this way, and nothing is looked up: any other id — a
+  model the user registered, `codex-no-memories` — is named in a comma list or
+  with its own `-m`. The run ends at the first other word, which is read like
+  any other, so a later `-m` is still an option.
+- Keep the ids as written, in first-seen order, each once. Do not check that an
+  id is registered: the wrapper rejects an unregistered one with exit 2 before
+  any model runs.
 
-How these rules read five requests when only the built-in ids are registered
-(`agy`, `claude`, `codex`, …). The last column is the focus text as parsed; a
-`pr 12` focus is still resolved to a range before dispatch.
+How these rules read five requests. The last column is the focus text as
+parsed; a `pr 12` focus is still resolved to a range before dispatch.
 
 | Request | Reviewers | Focus text |
 | :--- | :--- | :--- |
@@ -69,9 +65,8 @@ How these rules read five requests when only the built-in ids are registered
 | `-m agy,codex claude -- codex is slow` | agy, codex, claude | `codex is slow` |
 | `-m agy too` | agy | `too` |
 
-A registered id changes the reading: with a user model named `too`, the last
-row names two reviewers. Focus text that could be read as an id goes after
-`--`.
+Focus text that begins with `agy`, `claude` or `codex` directly after a model
+value goes after `--`, as in the fourth row.
 
 With several reviewers:
 
@@ -189,11 +184,15 @@ invocation is supporting text only. For `NEED RESEARCH`, obtain the requested ev
 with the [research skill](../research/SKILL.md) within the user's authorized
 scope. For `NEED CONTEXT`, run only the read-only commands it lists (`gh pr
 view/diff/checks`, `gh issue view`, `gh run view`, `git log/show`; ask before
-`git fetch` or anything that changes state) and append their outputs to the
-context file. Then repeat the review once with the same focus and every
-original flag, including `--model`; attachments are cumulative (one file per kind holding the old
-and new evidence). If the PR's head or base moved meanwhile, start a new review
-instead of a retry. Fix findings only within the authorized task.
+`git fetch` or anything that changes state) and write their outputs to a new
+context file that starts with a copy of the original one; never edit a file
+that a finished or still-running review was given. Then repeat the review once
+with the same focus and every original flag, including `--model`; attachments
+are cumulative (one new file per kind holding the old and new evidence). Check
+before every repeat, the format repeat above included, whether the PR's head or
+base moved: if it did, start a new review instead of a retry, and with several
+reviewers stop and ask first (**Several reviewers**). Fix findings only within
+the authorized task.
 
 Before a third round on the same function/file, check whether simplifying or
 replacing that implementation would address the repeated findings. Preserve

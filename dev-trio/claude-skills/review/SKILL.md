@@ -2,7 +2,7 @@
 name: review
 description: One-shot Codex review. Default scope = uncommitted working-tree changes. Optional --with-research <file>, --with-spec <file> and --with-context <file> for context injection. Streaming output lands in the bottom-right dashboard pane; chat-side surfaces the verdict (SHIP/NEEDS-FIX/DISCUSS) + Blocker/Major counts and handles NEED RESEARCH and NEED CONTEXT blocks.
 disable-model-invocation: true
-allowed-tools: Bash(ask-reviewer.sh:*) Bash(ask-researcher.sh:*) Bash(agent-team-models list:*) Bash(gh pr view:*) Bash(gh pr diff:*) Bash(gh pr checks:*) Bash(gh issue view:*) Bash(gh run view:*) Bash(git:*) Bash(cat:*) Bash(ls:*) Bash(date:*) Bash(mkdir:*) Bash(echo:*) Bash(sed:*) Read
+allowed-tools: Bash(ask-reviewer.sh:*) Bash(ask-researcher.sh:*) Bash(gh pr view:*) Bash(gh pr diff:*) Bash(gh pr checks:*) Bash(gh issue view:*) Bash(gh run view:*) Bash(git:*) Bash(cat:*) Bash(ls:*) Bash(date:*) Bash(mkdir:*) Bash(echo:*) Bash(sed:*) Read
 argument-hint: "[focus] [-m|--model <id>[,<id>...]] [--with-research <file>] [--with-spec <file>] [--with-context <file>] [--no-memories] [-- <focus>]"
 ---
 
@@ -16,7 +16,7 @@ You are the **PM**. Codex is the reviewer (bottom-right pane). You dispatch one 
 $ARGUMENTS
 </arguments>
 
-Everything between the tags is the argument string the user typed, verbatim. It may be empty.
+Everything between the tags is the argument string the user typed. It may be empty.
 
 ## 1 · Parse the argument string and build the dispatch command
 
@@ -36,16 +36,14 @@ The argument string may interleave six pieces in any order:
 
 Algorithm:
 
-1. Tokenise the argument string on whitespace, walk left-to-right.
+1. Tokenise the argument string on whitespace, walk left-to-right. A token before `--` that is an attached model form (`-m=agy`, `--model=agy`) is malformed wherever it stands: dispatch nothing, as in step 4.
 2. If a token is `--with-research`, the next token is `<research-file>`; consume both.
 3. If a token is `--with-spec`, the next token is `<spec-file>`; consume both.
    Likewise `--with-context` and `<context-file>`.
 4. If a token is `--model` or `-m`, the next token is its value: one model id, or a comma list of ids (`agy,codex`). Consume both. `-m`/`--model` may appear more than once.
-   - **Malformed value — dispatch nothing.** Tell the user the model id goes in its own token and that focus text containing `-m` belongs after `--`, when: there is no next token; the next token is `--` or is shaped like an option (`-m --with-spec spec.md`); a token is an attached form (`-m=agy`, `--model=agy`); or a comma list has an empty element (`agy,,codex`, `agy,`).
-   - **Look up the registered ids** whenever a token follows the value, or more than one id has been named: run `agent-team-models list` once. The registered ids are the first column under `Models:` (built-ins such as `codex-no-memories` included). If the command fails (exit 3 means the models config is malformed), dispatch nothing and report it.
-   - **Ids that follow the value.** While the token after the value is exactly a registered id, consume it as one more reviewer (`-m agy codex` names two). Only this run of ids ends at the first token that is not a registered id. That token is not an error: it is handled by these steps like any other, so a later `-m` is still an option.
-   - **Unregistered id.** After a lookup, an id written as a `-m` value or inside a comma list that is not registered is an error: dispatch nothing and tell the user. A lone `-m <id>` with nothing after it needs no lookup — the wrapper rejects an unregistered id with exit 2 before any model runs.
-   - Keep the ids as written, in first-seen order, each once. With one id, dispatch it as `--model <id>`; with several, follow **Several reviewers** below.
+   - **Malformed value — dispatch nothing.** Tell the user the model id goes in its own token and that focus text containing `-m` belongs after `--`, when: there is no next token; the next token is `--` or is shaped like an option (`-m --with-spec spec.md`); a token is an attached form (step 1); or a comma list has an empty element (`agy,,codex`, `agy,`).
+   - **Ids written after the value.** While the token after the value is exactly `agy`, `claude` or `codex`, consume it as one more reviewer (`-m agy codex` names two). Only these three ids are read this way, and you do not look anything up: any other id — a model the user registered, `codex-no-memories` — is named in a comma list or with its own `-m`. The run ends at the first other token, which these steps handle like any other, so a later `-m` is still an option.
+   - Keep the ids as written, in first-seen order, each once. With one id, dispatch it as `--model <id>`; with several, follow **Several reviewers** below. You do not check that an id is registered: the wrapper rejects an unregistered one with exit 2 before any model runs.
 5. If a token is `--no-memories`, pass it through as its own argv slot; consume only it.
 6. If a token is `--`, stop: it and nothing after it is an option, so every later token goes to the focus (`--model agy -- --help` reviews the focus `--help`; `-- --model codex` reviews the focus `--model codex`). A focus that mentions `-m`, such as `git commit -m`, must come after `--`, or step 4 reads it as a model option.
 7. Every remaining token belongs to the focus; join them with a single space into one FOCUS string.
@@ -74,7 +72,7 @@ ask-reviewer.sh --with-context "$CFILE" -- "review <merge-base>..<headRefOid> (P
 
 The wrapper runs one model per call. When step 4 yields more than one id, you dispatch one call per id.
 
-How step 4 reads five argument strings when only the built-in ids are registered (`agy`, `claude`, `codex`, …). The last column is the focus text as parsed; a `pr 12` focus is still resolved to a range before dispatch (step 9).
+How step 4 reads five argument strings. The last column is the focus text as parsed; a `pr 12` focus is still resolved to a range before dispatch (step 9).
 
 | Argument string | Reviewers | Focus text |
 | :--- | :--- | :--- |
@@ -84,7 +82,7 @@ How step 4 reads five argument strings when only the built-in ids are registered
 | `-m agy,codex claude -- codex is slow` | agy, codex, claude | `codex is slow` |
 | `-m agy too` | agy | `too` |
 
-A registered id changes the reading: with a user model named `too`, the last row names two reviewers. Focus text that could be read as an id goes after `--`.
+Focus text that begins with `agy`, `claude` or `codex` directly after a model value goes after `--`, as in the fourth row.
 
 1. **Dispatch one call per reviewer, in parallel** — one background Bash call each (§2) — with the same focus, the same flags and the same attachment files. The calls differ only in `--model <id>` and, by item 2, in `--no-memories`. For a pull request, resolve it once (**PR reviews** above) and hand the same context file and the same range to every reviewer.
 2. **`--no-memories` with several reviewers** goes only on the calls whose id is exactly `codex` or `codex-no-memories`; the wrapper refuses it for any other model. Say in your report which calls carried it. With one reviewer, or with no `-m` at all, pass it through unchanged and let the wrapper decide.
@@ -155,7 +153,7 @@ Color the framing — 🟢 SHIP / 🔴 NEEDS-FIX / 🟡 DISCUSS — to match the
 If the exact `.final.md` path reported by the same successful invocation contains a `## NEED RESEARCH` section after the verdict, Codex needs Antigravity's help before the review can finalize. Do this:
 
 1. Surface the questions to the user. Confirm before fetching (research costs latency and tokens).
-2. On confirmation, run each question through `ask-researcher.sh` and concatenate the answers into a temp file. `ask-researcher.sh` prints only the answer on stdout (the `=== RESPONSE ===` markers go to its log file), and exits with the researcher's rc:
+2. On confirmation, run each question through `ask-researcher.sh` and concatenate the answers into a temp file. Run the loop below as one background Bash call (§2): several research calls in a row can outlast a foreground call. `ask-researcher.sh` prints only the answer on stdout (the `=== RESPONSE ===` markers go to its log file), and exits with the researcher's rc:
    ```bash
    RTS=$(date +%Y%m%d-%H%M%S)
    RFILE="$PWD/.dev-trio/log/${AGENT_TEAM:-default}/research-$RTS.md"
@@ -183,7 +181,7 @@ A `## NEED CONTEXT` section lists repository facts the reviewer could not fetch,
 
 1. Surface the commands to the user with one line each on why the reviewer needs it.
 2. Run only read-only commands yourself: `gh pr view`, `gh pr diff`, `gh pr checks`, `gh issue view`, `gh run view` (including `--log-failed`), `git log`, `git show`. Ask before anything that changes state, including `git fetch`, and never run a command that writes to the remote.
-3. Append each command and its output (or its failure, labelled as such) to the context file — the existing one if the review had `--with-context`, a new one otherwise.
+3. Write each command and its output (or its failure, labelled as such) to a new context file for this retry. If the review had `--with-context`, start the new file with a copy of that one. Never edit a file that a finished or still-running review was given.
 4. Re-invoke once under the retry rule below. If the second review still asks for the same context, stop and report it; do not loop.
 
 ## Retry rule (NEED RESEARCH, NEED CONTEXT, format failure)
@@ -191,8 +189,8 @@ A `## NEED CONTEXT` section lists repository facts the reviewer could not fetch,
 A retry re-reviews the **same scope**, with more evidence when the review asked for it:
 
 - Same focus (still after `--`), and every flag the original call had: `--model`, `--with-spec`, `--with-research`, `--with-context`, `--no-memories`.
-- Attachments are cumulative. The wrapper takes one file per kind, so a second `--with-research` replaces the first — write the previous content plus the new answers into one file and pass that.
-- If the PR's head or base commit moved since the first review (`gh pr view` shows different IDs), that is a new review, not a retry: drop the old context, resolve the PR again, and say so to the user.
+- Attachments are cumulative. The wrapper takes one file per kind, so a second `--with-research` replaces the first — write the previous content plus the new answers into one new file and pass that.
+- Check before every retry whether the PR's head or base commit moved since the first review (`gh pr view` shows different IDs). If it did, that is a new review, not a retry: drop the old context, resolve the PR again, and say so to the user. With several reviewers, stop instead and ask first (**Several reviewers**, item 5).
 
 ## 5 · Don't auto-fix
 

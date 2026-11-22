@@ -23,7 +23,7 @@ Consume its leading view/open controls before resolving the topic below.
 $ARGUMENTS
 </arguments>
 
-Everything between the tags is the argument string the user typed, verbatim. It may be empty.
+Everything between the tags is the argument string the user typed. It may be empty.
 
 ## 1 · Parse role/model labels, mode flags, and topic from the argument string
 
