@@ -131,10 +131,8 @@ acquire_view_lock() {
 }
 
 prepare_detached() {
-  local name hash target live nonce record pane dead count wid
-  name=$(printf '%s' "$TEAM" | tr -c 'A-Za-z0-9_-' '_')
-  hash=$(printf '%s' "$LOG_DIR" | cksum | cut -d' ' -f1)
-  SESSION="debate-view-$name-$hash"
+  local target live nonce record pane dead count wid
+  SESSION=$(view_expected_session "$TEAM" "$LOG_DIR")
   acquire_view_lock || return 1
   target="=$SESSION"
   if view_tmux has-session -t "$target" 2>/dev/null; then
@@ -200,12 +198,7 @@ prepare_view() {
     [ "$major" -gt 3 ] || { [ "$major" = 3 ] && [ "$minor" -ge 2 ]; } || {
       view_error 'managed views require tmux >=3.2'; return 1; }
   else view_error 'cannot verify tmux version >=3.2'; return 1; fi
-  if [ -n "${TMUX:-}" ]; then
-    VIEW_SOCKET=${TMUX%%,*}
-  else
-    VIEW_SOCKET="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/default"
-  fi
-  VIEW_SOCKET=$(view_absolute "$VIEW_SOCKET")
+  VIEW_SOCKET=$(view_resolve_socket)
   if [ -z "${TMUX:-}" ]; then
     # Unlike tmux's implicit default socket, explicit -S does not create its
     # parent. Create only the normal per-user socket directory, privately.
