@@ -33,6 +33,75 @@ settings still win. `--model claude` goes through the Claude login check
 below. `--no-memories` is valid only with a Codex reviewer, so a Claude
 reviewer will reject it before inference.
 
+## Several reviewers
+
+The wrapper runs one model per call. The request may name more than one
+reviewer; then dispatch one call per reviewer. Model selection, before any
+`--`, applies to every request that has a `-m`/`--model`:
+
+- `-m`/`--model` may appear more than once, and its value is one id or a comma
+  list of ids (`agy,codex`). A value shaped like an option
+  (`-m --with-spec spec.md`) or a comma list with an empty element
+  (`agy,,codex`, `agy,`) is not dispatched, like the missing-id and attached
+  forms above.
+- Directly after a `-m` or `--model` value, each following word that is exactly
+  `agy`, `claude` or `codex` is one more reviewer (`-m agy codex` and
+  `--model agy codex` each name two). Only
+  these three ids are read this way, and nothing is looked up: any other id — a
+  model the user registered, `codex-no-memories` — is named in a comma list or
+  with its own `-m`. The run ends at the first other word, which is read like
+  any other, so a later `-m` is still an option.
+- Keep the ids as written, in first-seen order, each once. Do not check that an
+  id is registered: the wrapper rejects an unregistered one with exit 2 before
+  any model runs.
+
+How these rules read five requests. The last column is the focus text as
+parsed; a `pr 12` focus is still resolved to a range before dispatch.
+
+| Request | Reviewers | Focus text |
+| :--- | :--- | :--- |
+| `-m agy codex` | agy, codex | (full working tree) |
+| `pr 12 -m agy codex` | agy, codex | `pr 12` |
+| `-m agy pr 12 -m codex` | agy, codex | `pr 12` |
+| `-m agy,codex claude -- codex is slow` | agy, codex, claude | `codex is slow` |
+| `-m agy too` | agy | `too` |
+
+Focus text that begins with `agy`, `claude` or `codex` directly after a model
+value goes after `--`, as in the fourth row.
+
+With several reviewers:
+
+- Dispatch the calls in parallel with the same focus, the same flags and the
+  same attachment files. The calls differ only in `--model <id>` and, by the
+  next rule, in `--no-memories`. For a pull request, resolve it once and hand
+  the same context file and range to every reviewer. An attachment that can
+  change under the batch — a `latest-*` link, a file still being written — is
+  copied to a fresh file first, and every reviewer gets the copy.
+- `--no-memories` goes only on the calls whose id is exactly `codex` or
+  `codex-no-memories`; say which calls carried it. With one reviewer, or with
+  no `-m`, pass it through unchanged.
+- One reviewer failing does not cancel the others. The Claude login line
+  handled by the one-approval rule below comes first: that rule applies to each
+  Claude reviewer call separately, and its "stop" ends that reviewer only.
+  After it, a usage or setup failure (exit 2), a denied or unavailable host
+  approval, or a failed invocation makes that reviewer "no verdict"; let the
+  rest finish and report every reviewer.
+- Report each reviewer's model, verdict and counts side by side, then every
+  Blocker and Major finding labelled with its reviewer. Do not merge or
+  de-duplicate findings across reviewers.
+- A `NEED RESEARCH`, `NEED CONTEXT` or format repeat re-runs only the reviewer
+  that asked. The files the batch shared stay as they are: copy the context or
+  research file to a new file, add the new evidence there, and pass the copy.
+  If what is under review changed since the batch was dispatched — the PR's
+  head or base moved, a commit in the reviewed range moved, or the working tree
+  was edited — the repeat is a new review and the other reviewers' verdicts
+  belong to the old state: say so and ask the user whether to re-run the whole
+  batch; do not present a verdict for the new state beside verdicts for the old
+  one.
+- For the third-round check at the end of this skill, one round is one batch
+  against one revision together with its repeats. A new round starts only
+  after a fix.
+
 For a pull request, never pass a bare `pr N` focus: the reviewer may lack
 network access and cannot tell which commits the PR contains. Run
 `gh pr view N --json number,url,title,baseRefName,baseRefOid,headRefName,headRefOid`
@@ -120,11 +189,15 @@ invocation is supporting text only. For `NEED RESEARCH`, obtain the requested ev
 with the [research skill](../research/SKILL.md) within the user's authorized
 scope. For `NEED CONTEXT`, run only the read-only commands it lists (`gh pr
 view/diff/checks`, `gh issue view`, `gh run view`, `git log/show`; ask before
-`git fetch` or anything that changes state) and append their outputs to the
-context file. Then repeat the review once with the same focus and every
-original flag, including `--model`; attachments are cumulative (one file per kind holding the old
-and new evidence). If the PR's head or base moved meanwhile, start a new review
-instead of a retry. Fix findings only within the authorized task.
+`git fetch` or anything that changes state) and write their outputs to a new
+context file that starts with a copy of the original one; never edit a file
+that a finished or still-running review was given. Then repeat the review once
+with the same focus and every original flag, including `--model`; attachments
+are cumulative (one new file per kind holding the old and new evidence). Check
+before every repeat, the format repeat above included, whether the PR's head or
+base moved: if it did, start a new review instead of a retry, and with several
+reviewers stop and ask first (**Several reviewers**). Fix findings only within
+the authorized task.
 
 Before a third round on the same function/file, check whether simplifying or
 replacing that implementation would address the repeated findings. Preserve

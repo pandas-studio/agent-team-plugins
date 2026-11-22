@@ -82,7 +82,7 @@ Do this:
 
 `## NEED CONTEXT` lists repository facts (PR commits, issue text, CI logs) as commands the reviewer could not run. Antigravity cannot answer these — you can:
 1. Run only the read-only commands (`gh pr view/diff/checks`, `gh issue view`, `gh run view`, `git log/show`). Ask the user before `git fetch` or anything that changes state.
-2. Append each command and its output to one context file (add to the existing one if the review already had `--with-context`).
+2. Write each command and its output to one new context file (start it with a copy of the existing one if the review already had `--with-context`; never edit a file a review was already given).
 3. Re-invoke once with `--with-context <file>`, the original focus, and every original flag. If the PR's head or base moved meanwhile, start a new review instead.
 
 ## Reporting back to the user
@@ -94,6 +94,6 @@ Do this:
 ## Don't
 
 - Don't call Antigravity or Codex from inside a subagent (`Agent` tool) — keep orchestration in the main session so the user can see the routing.
-- Don't run Antigravity/Codex in the background unless the user asks; the latency is part of the deliberation budget.
+- Don't edit the files under review while Antigravity/Codex is running. Run the call in the background (a review usually outlasts a foreground call's time limit) and wait for its result — the wait is part of the deliberation budget.
 - Don't act on Codex `NEEDS-FIX` findings without showing the user first — they decide whether to address each one.
 - Don't paste secrets/credentials into prompts. Both CLIs send to external providers.

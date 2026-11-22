@@ -17,9 +17,17 @@ You are the **conductor**. You orchestrate; you do not generate or critique.
 Read and follow the [viewing and dispatch contract](../../lib/view-workflow.md).
 Consume its leading view/open controls before resolving the topic below.
 
-## 1 · Parse role/model labels, mode flags, and topic from `$ARGUMENTS`
+## Arguments
 
-Strip any explicit CLI flags or natural-language role/model assignments from `$ARGUMENTS` before resolving the topic string:
+<arguments>
+$ARGUMENTS
+</arguments>
+
+Everything between the tags is the argument string the user typed. It may be empty.
+
+## 1 · Parse role/model labels, mode flags, and topic from the argument string
+
+Strip any explicit CLI flags or natural-language role/model assignments from the argument string before resolving the topic string:
 
 - **Role / model assignment** (`agy` / `antigravity`, `claude`, `codex`, `kimi-code` / `kimi`, or any registered model id):
   - Flags: `--primary-gen=<model>` (or `--gen=<model>`), `--primary-crit=<model>` (or `--crit=<model>`).
@@ -38,14 +46,14 @@ Strip any explicit CLI flags or natural-language role/model assignments from `$A
 
 3. **Single short token (no spaces, ≤15 chars)** → topic name fragment. Glob `$PWD/topics/*<fragment>*.txt`. If exactly one matches, use it. If multiple match, ask which. If none match, **fall through to step 4 with the token as free-form**.
 
-4. **Anything else (contains a space OR longer than 15 chars)** → **free-form topic**. Use `$ARGUMENTS` (or its leading portion, minus any trailing rounds integer) **verbatim** as the topic. Pass the string directly to `debate.sh`. **Do NOT** look it up in `topics/`. **Do NOT** ask the user "should I create a topic file?". **Do NOT** suggest existing topics. Just run the debate.
+4. **Anything else (contains a space OR longer than 15 chars)** → **free-form topic**. Use the remaining argument text (minus any trailing rounds integer) **verbatim** as the topic. Pass the string directly to `debate.sh`. **Do NOT** look it up in `topics/`. **Do NOT** ask the user "should I create a topic file?". **Do NOT** suggest existing topics. Just run the debate.
 
    Examples that go straight to free-form (no questions asked):
    - `/debate-conductor:run 찍먹 vs 부먹` → topic = `"찍먹 vs 부먹"`, default 4 rounds
    - `/debate-conductor:run "FastAPI vs Django for new project" 5` → topic = `"FastAPI vs Django for new project"`, 5 rounds
    - `/debate-conductor:run Server Components 도입 시점` → topic = `"Server Components 도입 시점"`, default rounds
 
-**Optional rounds**: if `$ARGUMENTS` ends with a bare integer (1–9) separated by space, use it as the round count and strip it from the topic. Default 4: proposal, critique, revision, final critique. Use `2` for a quick pass.
+**Optional rounds**: if the argument string ends with a bare integer (1–9) separated by space, use it as the round count and strip it from the topic. Default 4: proposal, critique, revision, final critique. Use `2` for a quick pass.
 
 **Workspace `topics/` always takes priority** over the plugin's bundled examples (`${CLAUDE_SKILL_DIR}/../../topics/`). Only fall back to bundled if `$PWD/topics/` does not exist or is empty. Do not mix sources.
 
