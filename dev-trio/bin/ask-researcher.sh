@@ -373,6 +373,7 @@ set +e
 REGISTRY_WORKSPACE="$AGY_WORKSPACE" REGISTRY_CLI_LOG="$AGY_CLI_LOG" \
   REGISTRY_CMD_OVERRIDE="${RESEARCHER_CLI:-}" registry_run_answer "$RESEARCHER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8 7<&- 9>&-
 RC=$?
+run_mark_model_returned
 set -e
 [ -z "$LOG_OFFSET" ] || LOG_END="$(dev_trio_fd_size 8)" || LOG_END=""
 run_mark_model_end

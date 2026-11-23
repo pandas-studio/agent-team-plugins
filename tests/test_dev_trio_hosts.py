@@ -976,7 +976,7 @@ date() { echo 20; }
 show() { run_timing; printf '%s' "$1"; printf ' %s' ${RUN_TIMING[@]+"${RUN_TIMING[@]}"}; printf '\n'; }
 RUN_T0=10
 show none
-RUN_MODEL_T0=13
+RUN_MODEL_STARTED=1 RUN_MODEL_T0=13
 show started
 RUN_MODEL_RETURNED=1
 show end-unread
@@ -984,6 +984,8 @@ RUN_MODEL_T1=18
 show ended
 unset RUN_T0
 show no-baseline
+RUN_MODEL_T0=
+show start-unread
 """
         result = subprocess.run(
             ["bash", "-c", script], env=self.env | dict(P=str(self.plugin)),
@@ -1002,6 +1004,9 @@ show no-baseline
         self.assertEqual(rows["end-unread"], {"pre_model_s": 3})
         self.assertEqual(rows["ended"], {"pre_model_s": 3, "model_s": 5, "post_model_s": 2})
         self.assertEqual(rows["no-baseline"], {"model_s": 5, "post_model_s": 2})
+        # A start reading that failed costs the two values that use it, not the
+        # time after the call, which has both of its readings.
+        self.assertEqual(rows["start-unread"], {"post_model_s": 2})
 
     def test_run_timing_ignores_inherited_marks(self):
         # A run that ends before its model call publishes no timing, whatever
@@ -1016,8 +1021,8 @@ run_timing; printf 'timing=[%s]\n' "${RUN_TIMING[*]-}"
 """
         result = subprocess.run(
             ["bash", "-c", script],
-            env=self.env | dict(P=str(self.plugin), RUN_MODEL_T0="13", RUN_MODEL_T1="18",
-                                RUN_MODEL_RETURNED="1"),
+            env=self.env | dict(P=str(self.plugin), RUN_MODEL_STARTED="1", RUN_MODEL_T0="13",
+                                RUN_MODEL_T1="18", RUN_MODEL_RETURNED="1"),
             text=True, capture_output=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "timing=[]\n")
@@ -1031,8 +1036,8 @@ run_timing; printf 'timing=[%s]\n' "${RUN_TIMING[*]-}"
 set -euo pipefail
 . "$P/lib/run-lifecycle.sh"
 date() { [ "${1:-}" != +%s ] || return 1; command date "$@"; }
-RUN_T0=10 RUN_MODEL_T0=13; run_timing; printf 'started=[%s]\n' "${RUN_TIMING[*]-}"
-run_mark_model_end; run_timing; printf 'end-unread=[%s]\n' "${RUN_TIMING[*]-}"
+RUN_MODEL_STARTED=1 RUN_T0=10 RUN_MODEL_T0=13; run_timing; printf 'started=[%s]\n' "${RUN_TIMING[*]-}"
+run_mark_model_returned; run_mark_model_end; run_timing; printf 'end-unread=[%s]\n' "${RUN_TIMING[*]-}"
 RUN_MODEL_T1=18; run_timing; printf 'ended=[%s]\n' "${RUN_TIMING[*]-}"
 RUN_MODEL_T1=; RUN_T0=; run_mark_model_start; run_timing; printf 'unmarked=[%s]\n' "${RUN_TIMING[*]-}"
 date() { echo 99; return 1; }; printf 'failed-read=[%s]\n' "$(run_clock)"
@@ -1077,6 +1082,55 @@ exit 143
         self.assertIsInstance(completion["timing"]["pre_model_s"], int)
         self.assertIsNone(completion["timing"]["model_s"])
         self.assertIsNone(completion["timing"]["post_model_s"])
+
+    def test_exit_trap_reads_no_clock_after_a_published_completion(self):
+        # Once the wrapper has published its completion, the EXIT trap does as
+        # little as it can: a signal during a command there can still change
+        # the exit status the caller sees, so it does not read the clock.
+        script = r"""
+set -euo pipefail
+. "$P/lib/runstate.sh"
+. "$P/lib/run-lifecycle.sh"
+run_cleanup_files() { return 0; }
+manifest_cleanup() { return 0; }
+RUNSTATE_LOG="$R/published.log"
+runstate_begin "$RUNSTATE_LOG" channel=reviewer wrapper=w
+RUN_T0=$(date +%s)
+run_mark_model_start; run_mark_model_returned; run_mark_model_end
+run_timing
+runstate_complete "$RUNSTATE_LOG" exit_code=0 verdict=SHIP reason=ok ${RUN_TIMING[@]+"${RUN_TIMING[@]}"}
+date() { echo read >> "$R/clock-reads"; command date "$@"; }
+trap run_cleanup EXIT
+exit 0
+"""
+        result = subprocess.run(
+            ["bash", "-c", script], env=self.env | dict(P=str(self.plugin), R=str(self.root)),
+            text=True, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.root / "clock-reads").exists())
+        completion = json.loads((self.root / "published.run.json").read_text())["completion"]
+        self.assertEqual((completion["reason"], completion["exit_code"]), ("ok", 0))
+
+    def test_wrappers_place_the_timing_marks_around_the_call(self):
+        # Where a mark sits is the contract: the returned flag is the statement
+        # right after the call's status is captured (a signal during the
+        # transcript sample then still counts the call as returned), the end
+        # reading follows the transcript sample, and the reviewer's start
+        # reading precedes the traps that only record a signal.
+        for wrapper, sample in (("ask-reviewer.sh", "TRANSCRIPT_END="), ("ask-researcher.sh", "LOG_END=")):
+            with self.subTest(wrapper=wrapper):
+                lines = [line.strip() for line in (self.plugin / "bin" / wrapper).read_text().splitlines()]
+                # The model call: the registry call whose output goes to fd 8.
+                call = next(i for i, line in enumerate(lines)
+                            if line.startswith("REGISTRY_CMD_OVERRIDE=") and ">&8 2>&8" in line)
+                self.assertEqual(lines[call + 1:call + 3], ["RC=$?", "run_mark_model_returned"])
+                end = lines.index("run_mark_model_end")
+                sampled = next(i for i, line in enumerate(lines) if i > call and sample in line)
+                self.assertEqual(end, sampled + 1)
+                start = lines.index("run_mark_model_start")
+                self.assertLess(start, call)
+                if wrapper == "ask-reviewer.sh":
+                    self.assertLess(start, lines.index("trap 'SIGNAL_RC=143' TERM"))
 
     def test_reader_checks_digest_fields(self):
         name = "reviewer-20260918-090000-22222.log"

@@ -473,12 +473,12 @@ before that is in `pre_model_s` and not after `started_at`. For research,
 the run never got that far: all three when the run ends before the start mark
 (taken just before the model call), `post_model_s` when it ends after the start
 mark but before the call returns. A run stopped between the start mark and the
-launch therefore records a `model_s` near 0 for a call that never ran. The clock is `date +%s`, a
-wall clock: a step of the system clock during a run shifts the values, and one
-that would be negative is `null`. A value is also `null` when a reading it
-needs failed; a call that returned without an end reading keeps only
-`pre_model_s`. Run metadata written before this field existed has no `timing`
-key.
+launch therefore records a `model_s` near 0 for a call that never ran. The
+clock is `date +%s`, a wall clock: a step of the system clock during a run
+shifts the values, and one that would be negative is `null`. Each value needs
+its own two readings and is `null` when either failed, so one failed reading
+costs only the values that use it. Run metadata written before this field
+existed has no `timing` key.
 Research completion reasons are `ok` for exit 0, `failed` for a nonzero return,
 and `aborted` for the EXIT-trap backstop. `failed` records the outcome, not a
 diagnosis of permission denial.

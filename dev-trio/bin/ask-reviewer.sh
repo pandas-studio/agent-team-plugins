@@ -717,6 +717,7 @@ set +e
 REGISTRY_WORKSPACE="$AGY_WORKSPACE" REGISTRY_CLI_LOG="$AGY_CLI_LOG" \
   REGISTRY_CMD_OVERRIDE="${REVIEWER_CLI:-}" registry_run "$REVIEWER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8 7<&- 9>&-
 RC=$?
+run_mark_model_returned
 set -e
 trap 'exit 130' INT
 trap 'exit 143' TERM

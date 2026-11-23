@@ -5,8 +5,9 @@
 # EXIT-trap backstop. Prompt building, the model call and what a wrapper makes
 # of the outcome stay in the wrapper.
 #
-# Definitions, plus emptying the three timing marks (RUN_MODEL_T0,
-# RUN_MODEL_T1, RUN_MODEL_RETURNED); sourcing runs no command. The caller sets RUN_TAG (its name
+# Definitions, plus emptying the four timing marks (RUN_MODEL_STARTED,
+# RUN_MODEL_T0, RUN_MODEL_RETURNED, RUN_MODEL_T1); sourcing runs no command.
+# The caller sets RUN_TAG (its name
 # without .sh, which prefixes every message) and the LOG_DIR, TEAM and PM_HOST
 # it already resolves. Values that differ by role come in as arguments. The
 # helpers set the wrapper's own globals — TS, LOG, FINAL, AGY_CLI_LOG,
@@ -88,22 +89,29 @@ run_clock() {
   printf '%s' "$t"
 }
 
-# run_mark_model_start, run_mark_model_end — best-effort. The two marks around
-# the wrapper's one registry call. Call them from the wrapper's own shell, as
-# plain statements: a mark set in a subshell is lost. The baseline is the
-# wrapper's first line, RUN_T0=$(date +%s ...), read before this file is
-# sourced. Each mark runs `date`, so neither sits inside a window that must
-# stay short: the start mark goes before the wrapper's signal-recording traps
-# (a signal during it then ends the run before the model is launched), and the
-# end mark after the transcript's end offset is sampled. RUN_MODEL_RETURNED
-# says the call came back, whether or not the end reading succeeded.
-run_mark_model_start() { RUN_MODEL_T0=$(run_clock); return 0; }
-run_mark_model_end() { RUN_MODEL_RETURNED=1; RUN_MODEL_T1=$(run_clock); return 0; }
+# run_mark_model_start, run_mark_model_returned, run_mark_model_end —
+# best-effort. The marks around the wrapper's one registry call. Call them from
+# the wrapper's own shell, as plain statements: a mark set in a subshell is
+# lost. The baseline is the wrapper's first line, RUN_T0=$(date +%s ...), read
+# before this file is sourced.
+#   run_mark_model_start     sets RUN_MODEL_STARTED and reads the clock. It runs
+#                            `date`, so it goes before the wrapper's
+#                            signal-recording traps: a signal during it then
+#                            ends the run before the model is launched.
+#   run_mark_model_returned  sets RUN_MODEL_RETURNED, with no command: the
+#                            statement right after RC=$?.
+#   run_mark_model_end       reads the clock, after the transcript's end offset
+#                            is sampled, so its `date` does not delay the cutoff.
+# The two flags say how far the run got whatever the clock readings were.
+run_mark_model_start() { RUN_MODEL_STARTED=1; RUN_MODEL_T0=$(run_clock); return 0; }
+run_mark_model_returned() { RUN_MODEL_RETURNED=1; return 0; }
+run_mark_model_end() { RUN_MODEL_T1=$(run_clock); return 0; }
 # The marks start empty however the wrapper was called: an inherited value
 # would be read as this run's mark.
+RUN_MODEL_STARTED=""
 RUN_MODEL_T0=""
-RUN_MODEL_T1=""
 RUN_MODEL_RETURNED=""
+RUN_MODEL_T1=""
 
 # _run_count VALUE — predicate: VALUE is a clock reading run_timing may do
 # arithmetic on, digits with no leading zero. A failed `date` leaves it empty,
@@ -120,44 +128,51 @@ _run_count() {
 
 # run_timing — best-effort. Fills RUN_TIMING with the runstate_complete
 # arguments for completion.timing, from the marks that exist now. It does not
-# ask how the run ended: no start mark gives nothing, a start mark alone gives
-# the time before the model and the time in the call so far, and both marks
-# give all three. A call that came back without an end reading gives only the
-# time before the model: the rest cannot be split. A value whose operands are
-# not both clock readings is left out, and runstate_complete publishes it as
-# null. Expand the result as
+# ask how the run ended. A run that never started the call gives nothing. Then
+# each value stands alone, from the two readings it needs:
+#   pre_model_s   RUN_T0 to the start reading
+#   model_s       the start reading to the end reading once the call returned,
+#                 to now while it is still running
+#   post_model_s  the end reading to now, once the call returned
+# A value whose readings are missing or are not numbers is left out, and
+# runstate_complete publishes it as null. Expand the result as
 # ${RUN_TIMING[@]+"${RUN_TIMING[@]}"}, the form that survives `set -u` on
 # Bash 3.2 when the array is empty.
 run_timing() {
   local now t0="${RUN_T0:-}" m0="${RUN_MODEL_T0:-}" m1="${RUN_MODEL_T1:-}"
-  now=$(run_clock)
   RUN_TIMING=()
-  _run_count "$m0" || return 0
-  if _run_count "$t0"; then
-    RUN_TIMING=("pre_model_s=$((m0 - t0))")
+  [ -n "${RUN_MODEL_STARTED:-}" ] || return 0
+  now=$(run_clock)
+  if _run_count "$t0" && _run_count "$m0"; then
+    _run_add_timing "pre_model_s=$((m0 - t0))"
   fi
   if [ -n "${RUN_MODEL_RETURNED:-}" ]; then
-    _run_count "$m1" || return 0
-    RUN_TIMING=(${RUN_TIMING[@]+"${RUN_TIMING[@]}"} "model_s=$((m1 - m0))")
-    if _run_count "$now"; then
-      RUN_TIMING=("${RUN_TIMING[@]}" "post_model_s=$((now - m1))")
+    if _run_count "$m0" && _run_count "$m1"; then
+      _run_add_timing "model_s=$((m1 - m0))"
     fi
-  elif _run_count "$now"; then
-    RUN_TIMING=(${RUN_TIMING[@]+"${RUN_TIMING[@]}"} "model_s=$((now - m0))")
+    if _run_count "$m1" && _run_count "$now"; then
+      _run_add_timing "post_model_s=$((now - m1))"
+    fi
+  elif _run_count "$m0" && _run_count "$now"; then
+    _run_add_timing "model_s=$((now - m0))"
   fi
   return 0
 }
+_run_add_timing() { RUN_TIMING=(${RUN_TIMING[@]+"${RUN_TIMING[@]}"} "$1"); }
 
 # run_cleanup — best-effort; the EXIT trap. Its first command captures the
 # status the shell is exiting with. The completion backstop runs first: a run
 # whose completion is never published would read as live forever on the
 # dashboard, and a failing cleanup step must not take the handler down before
-# it records one. It is a no-op once a real completion has been published.
+# it records one. It is a no-op once a real completion has been published, and
+# it checks that before reading the clock: after a published completion the
+# trap runs as little as it can, because a signal that lands during a command
+# here can still change the status the caller sees.
 # The caller defines run_cleanup_files, which removes its temporaries in its
 # own order (LATEST_TMP included) and returns 0.
 run_cleanup() {
   _cleanup_rc=$?
-  if [ -n "$RUNSTATE_LOG" ]; then
+  if [ -n "$RUNSTATE_LOG" ] && ! runstate_published "$RUNSTATE_LOG" 2>/dev/null; then
     run_timing
     runstate_complete "$RUNSTATE_LOG" exit_code="$_cleanup_rc" reason=aborted \
       ${RUN_TIMING[@]+"${RUN_TIMING[@]}"} 2>/dev/null || true

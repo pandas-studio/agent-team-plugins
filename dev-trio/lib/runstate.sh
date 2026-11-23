@@ -46,9 +46,8 @@
 #                       #   start mark only      -> pre_model_s, model_s (up to
 #                       #                           publication), post null
 #                       #   start and end marks  -> all three
-#                       # A value with no clock reading behind it (a failed
-#                       # `date +%s`) is null as well, and a call that came
-#                       # back without an end reading keeps only pre_model_s.
+#                       # Each value is null as well when one of its two clock
+#                       # readings (`date +%s`) failed; the others still count.
 #                       # The clock is the wall clock: a negative value (the
 #                       # system clock stepped back) is null.
 #                       # pre_model_s runs from the wrapper's first line to the
