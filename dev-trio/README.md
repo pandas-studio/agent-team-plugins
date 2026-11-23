@@ -528,6 +528,37 @@ log path out of it and recovers the partial transcript from the log itself, so
 naming the artifacts serves it better than replaying bytes onto a stdout it may
 not have captured. `result:` is absent because no review exists.
 
+**`--summary`.** With `ask-reviewer.sh --summary`, stdout carries one JSON
+document on one line instead of the transcript replay (median 498 KB in local
+run logs). The exit code, stderr, receipt, manifest, `*.review.json` and
+`*.final.md` are what the same run writes without the flag.
+
+```json
+{"summary_version": 1, "exit_code": 0, "model": "codex",
+ "paths": {"log": "…", "final": "…", "result": "…"},
+ "result": {"…": "the published *.review.json, as it is"},
+ "final_text": "## Verdict\nSHIP — …", "final_truncated": false, "error": null}
+```
+
+- `result` is the published review result unchanged, so its fields keep their
+  meaning (a `null` `findings.*` is unknown, not zero). Read the verdict and the
+  counts from it.
+- `final_text` is the `*.final.md` text only when `result.status` is `ok` and
+  the file is at most 64 KiB; otherwise it is `null`, and `final_truncated` is
+  `true` when the size was the reason. A failed run's final is not a review.
+- A run whose result could not be written has `result: null`,
+  `paths.result: null` and `error: "result-write-failed: <step>"`.
+- If the document cannot be rendered, stdout is the fixed
+  `{"summary_version":1,"exit_code":N,"result":null,"final_text":null,"error":"summary-unavailable"}`.
+  Neither case changes the exit code.
+- Stdout is empty for a usage error, a setup failure before the model call, and
+  a signal during the call. `--help` still prints the usage.
+- The one stderr difference: when the log could not be opened, the transcript
+  went to a private temp file and, with no replay, that file is the only copy.
+  It is kept even after a published review, and stderr names it once at exit,
+  after the `(log: …)` line. Look for the last line that starts with `(log:`, not
+  the last line of stderr.
+
 **Researcher answer.** `researcher-<TS>-<PID>.final.md` holds the answer on its own,
 captured by `registry_run_answer`: the model's own last message when it defines
 `final_args`, otherwise that function's existing copy of stdout — stdout alone,

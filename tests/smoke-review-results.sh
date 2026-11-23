@@ -430,8 +430,12 @@ INVOKE_ENV=(
   CODEX_CLI="$TMP/reviewer" CLAUDE_CLI="$TMP/reviewer"
   TEST_REVIEW_FILE="$TMP/review.md"
 )
+# INVOKE_ARGS are wrapper options for every invoke (empty unless a section sets
+# them, e.g. --summary).
+INVOKE_ARGS=()
 invoke() {
-  env "${INVOKE_ENV[@]}" "$@" "$ROOT/dev-trio/bin/ask-reviewer.sh" 'fixture review'
+  env "${INVOKE_ENV[@]}" "$@" "$ROOT/dev-trio/bin/ask-reviewer.sh" \
+    ${INVOKE_ARGS[@]+"${INVOKE_ARGS[@]}"} 'fixture review'
 }
 run_review() {
   local expected="$1" rc=0; shift
@@ -1630,6 +1634,17 @@ check 'a nested run still reports the conversation' json_is "$RESULT" ".status==
 check 'the nested run adds nothing but its role to the parent' json_is "$MANIFEST_TMP" '(.inputs | any(.kind=="agy-conversation") | not) and (.roles|length)==1'
 agy_review 3 TEST_AGY_ID="$AGY_ID" TEST_AGY_LOG_SUFFIX=' (backend=BACKEND_TYPE_UNSPECIFIED)' TEST_AGY_NOTICE=1
 check 'agy 1.4+ trailing backend tag still resolves the conversation and denials' json_is "$RESULT" ".status==\"permission-denied\" and .denied==$AGY_DENIED and .conversation_ids==[\"$AGY_ID\"]"
+# --summary on a denial: the published result as it is, and no final text,
+# because the review did not parse.
+INVOKE_ARGS=(--summary)
+agy_review 3 TEST_AGY_ID="$AGY_ID" TEST_AGY_NOTICE=1
+INVOKE_ARGS=()
+check 'a summarized denial carries the published result' \
+  test "$(jq -cS .result "$TMP/wrapper.out")" = "$(jq -cS . "$RESULT")"
+check 'a summarized denial has no final text' json_is "$TMP/wrapper.out" \
+  '.exit_code==3 and .model=="agy" and .result.status=="permission-denied" and .final_text==null and .final_truncated==false and .error==null'
+check 'a summarized denial still names the denial on stderr' \
+  grep -Fxq '[ask-reviewer] agy denied: command(lsof -p $$ || pwd)' "$TMP/wrapper.err"
 
 # agy 1.4+ print-mode soft-denials close the stream before writing a status:ERROR
 # step to transcript_full.jsonl, leaving only the preceding PLANNER_RESPONSE
@@ -1818,5 +1833,209 @@ chmod 700 "$TMP/tmpbad"
 check 'no log directory and no safe TMPDIR: no --log-file' test "$(head -1 "$TMP/agy-argv")" = --add-dir
 mv "$AGY_HOME/log.off" "$AGY_HOME/log"
 check 'the reserved agy log is private' test "$(find "$AGY_HOME/log" -name 'cli-dev-trio-review-*' ! -perm 600 | wc -l | tr -d ' ')" = 0
+
+# --summary: stdout is one JSON document once the model call has returned, and
+# nothing before that. Every field is compared with what the run published.
+one_document() {
+  [ "$(wc -l < "$1" | tr -d ' ')" = 1 ] \
+    && jq -e -s 'length == 1 and (.[0] | type) == "object"' "$1" >/dev/null
+}
+same_result() { test "$(jq -cS .result "$1")" = "$(jq -cS . "$2")"; }
+same_final_text() { jq -j .final_text "$1" | cmp -s - "$2"; }
+summary_paths() {
+  json_is "$1" ".paths == {log: \"$LOG\", final: \"$FINAL\", result: \"$RESULT\"} and .model == \"${2:-codex}\""
+}
+INVOKE_ARGS=(--summary)
+
+fixture 'SHIP — summarized'
+run_review 0
+check 'a summary is one JSON document on one line' one_document "$TMP/wrapper.out"
+check 'a summary has no transcript replay' no_match '=== RESPONSE ===' "$TMP/wrapper.out"
+check 'a summary names the run' summary_paths "$TMP/wrapper.out"
+check 'a summary carries the published result' same_result "$TMP/wrapper.out" "$RESULT"
+check 'a summary carries the final text byte for byte' same_final_text "$TMP/wrapper.out" "$FINAL"
+check 'a summary of an ok review has its fixed fields' json_is "$TMP/wrapper.out" \
+  '.summary_version==1 and .exit_code==0 and .result.status=="ok" and .result.verdict=="SHIP" and .final_truncated==false and .error==null'
+check 'a summarized run still writes the artifact line' grep -Fq "(log: $LOG, final: $FINAL, result: $RESULT, rc=0)" "$TMP/wrapper.err"
+check 'a summarized run still publishes its completion' json_is "${LOG%.log}.run.json" '.completion.reason=="ok" and .completion.exit_code==0'
+
+printf 'Just prose, with no Verdict heading.\n' > "$TMP/review.md"
+run_review 3
+check 'a summary of a parse failure is one document' one_document "$TMP/wrapper.out"
+check 'a summary of a parse failure carries the result and no final text' json_is "$TMP/wrapper.out" \
+  '.exit_code==3 and .result.status=="parse-failed" and .final_text==null and .final_truncated==false and .error==null'
+check 'a summary of a parse failure carries the published result' same_result "$TMP/wrapper.out" "$RESULT"
+
+for model_rc in 7 2 4; do
+  fixture "SHIP — model exited $model_rc"
+  run_review "$model_rc" TEST_REVIEW_RC="$model_rc"
+  check "a summary after the model exited $model_rc is one document" one_document "$TMP/wrapper.out"
+  check "a summary after the model exited $model_rc reports the invocation failure" json_is "$TMP/wrapper.out" \
+    ".exit_code==$model_rc and .result.status==\"invocation-failed\" and .result.invocation_rc==$model_rc and .final_text==null and .error==null"
+  check "a summary after the model exited $model_rc carries the published result" same_result "$TMP/wrapper.out" "$RESULT"
+done
+
+# A result that cannot be published: no result, and the step that failed.
+fixture 'SHIP — summarized receipt failure'
+write_rc=0
+invoke DEV_TRIO_REVIEW_RECEIPT="$TMP/missing/receipt" > "$TMP/wrapper.out" 2> "$TMP/wrapper.err" || write_rc=$?
+LOG="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-reviewer.log")"
+FINAL="${LOG%.log}.final.md"
+check 'a summarized result-write failure keeps its exit code' test "$write_rc" -eq 2
+check 'a summarized result-write failure is one document' one_document "$TMP/wrapper.out"
+check 'a summarized result-write failure names the step and no result' json_is "$TMP/wrapper.out" \
+  ".exit_code==2 and .result==null and .final_text==null and .final_truncated==false and .error==\"result-write-failed: publish receipt\" and .paths=={log: \"$LOG\", final: \"$FINAL\", result: null}"
+check 'a summarized result-write failure still says so on stderr' grep -q 'result write failed: publish receipt' "$TMP/wrapper.err"
+
+# A final past 64 KiB is not inlined, and the summary says so.
+{
+  printf '## Verdict\nSHIP — long\n\n## Findings\n\n### Blocker\n- None.\n\n### Major\n- None.\n\n### Minor / Nit\n- `long.txt:1` — '
+  head -c 70000 /dev/zero | tr '\0' 'x'
+  printf ' → shorten it.\n'
+} > "$TMP/review.md"
+run_review 0
+check 'the long final is over the bound' test "$(wc -c < "$FINAL")" -gt 65536
+check 'a summary with a long final leaves the text out and says so' json_is "$TMP/wrapper.out" \
+  '.exit_code==0 and .result.status=="ok" and .final_text==null and .final_truncated==true'
+
+# Control characters, quotes and a line that looks like a field stay inside the
+# string value.
+printf '## Verdict\nSHIP — "quoted" \033[31mred\033[0m\n\n## Findings\n\n### Blocker\n- None.\n\n### Major\n- None.\n\n### Minor / Nit\n- `a.sh:1` — "status": "ok", "exit_code": 9 } { here\r → none.\n' > "$TMP/review.md"
+run_review 0
+check 'a summary with control characters is still one document' one_document "$TMP/wrapper.out"
+check 'a summary with control characters keeps the final byte for byte' same_final_text "$TMP/wrapper.out" "$FINAL"
+check 'a field-shaped line in the final does not become a field' json_is "$TMP/wrapper.out" \
+  '.exit_code==0 and (keys == ["error","exit_code","final_text","final_truncated","model","paths","result","summary_version"])'
+
+# A summary that cannot be rendered falls back to the fixed document; the exit
+# code and the published result do not change.
+REAL_JQ=$(command -v jq)
+mkdir "$TMP/jq-shim"
+cat > "$TMP/jq-shim/jq" <<SHIM
+#!/bin/sh
+case "\$*" in *summary_version*) exit 5 ;; esac
+exec "$REAL_JQ" "\$@"
+SHIM
+chmod +x "$TMP/jq-shim/jq"
+fixture 'SHIP — unrenderable summary'
+run_review 0 PATH="$TMP/jq-shim:$PATH"
+check 'an unrenderable summary is the fixed document' \
+  test "$(cat "$TMP/wrapper.out")" = '{"summary_version":1,"exit_code":0,"result":null,"final_text":null,"error":"summary-unavailable"}'
+check 'an unrenderable summary leaves the result published' json_is "$RESULT" '.status=="ok" and .verdict=="SHIP"'
+
+# Before the model call stdout stays empty: usage errors and setup failures.
+for bad in '--summary=x' '--bogus'; do
+  bad_rc=0
+  env "${INVOKE_ENV[@]}" "$ROOT/dev-trio/bin/ask-reviewer.sh" --summary "$bad" 'fixture review' \
+    > "$TMP/wrapper.out" 2> "$TMP/wrapper.err" || bad_rc=$?
+  check "--summary with $bad is a usage error" test "$bad_rc" -eq 2
+  check "--summary with $bad writes nothing on stdout" test ! -s "$TMP/wrapper.out"
+done
+bad_rc=0
+env "${INVOKE_ENV[@]}" "$ROOT/dev-trio/bin/ask-reviewer.sh" --summary --with-spec "$TMP/no-such-spec.md" 'fixture review' \
+  > "$TMP/wrapper.out" 2> "$TMP/wrapper.err" || bad_rc=$?
+check 'a setup failure under --summary exits nonzero' test "$bad_rc" -ne 0
+check 'a setup failure under --summary writes nothing on stdout' test ! -s "$TMP/wrapper.out"
+help_lists_summary() { "$ROOT/dev-trio/bin/ask-reviewer.sh" --help | grep -q -- '--summary'; }
+check '--help lists --summary' help_lists_summary
+
+# The flag works in any position, like the others.
+fixture 'SHIP — summary after the focus'
+late_rc=0
+env "${INVOKE_ENV[@]}" "$ROOT/dev-trio/bin/ask-reviewer.sh" 'fixture review' --summary \
+  > "$TMP/wrapper.out" 2> "$TMP/wrapper.err" || late_rc=$?
+check '--summary after the focus runs' test "$late_rc" -eq 0
+check '--summary after the focus is a summary' json_is "$TMP/wrapper.out" '.summary_version==1 and .result.verdict=="SHIP"'
+
+# A signal during the model call: no summary, as there is no replay.
+fixture 'SHIP — summarized and interrupted'
+rm -f "$TMP/sum-ready" "$TMP/sum-release"
+set -m
+env "${INVOKE_ENV[@]}" CODEX_CLI="$TMP/slow-reviewer" CLAUDE_CLI="$TMP/slow-reviewer" \
+  SLOW_READY="$TMP/sum-ready" SLOW_RELEASE="$TMP/sum-release" \
+  "$ROOT/dev-trio/bin/ask-reviewer.sh" --summary 'fixture review' \
+  > "$TMP/sum-int.out" 2> "$TMP/sum-int.err" &
+sum_pid=$!
+waited=0
+while [ ! -e "$TMP/sum-ready" ] && [ "$waited" -lt 150 ]; do sleep 0.2; waited=$((waited + 1)); done
+check 'the summarized stub was running when signalled' test -e "$TMP/sum-ready"
+kill -TERM -"$sum_pid" 2>/dev/null || kill -TERM "$sum_pid" 2>/dev/null || true
+: > "$TMP/sum-release"
+sum_rc=0
+wait "$sum_pid" || sum_rc=$?
+set +m
+check 'an interrupted summarized run keeps the signal status' test "$sum_rc" -eq 143
+check 'an interrupted summarized run writes nothing on stdout' test ! -s "$TMP/sum-int.out"
+check 'an interrupted summarized run still names its artifacts' grep -q '^(log: .*, rc=143)$' "$TMP/sum-int.err"
+
+# The out-of-band transcript is the only copy when the summary replaces the
+# replay: it is kept after a published review too, and named once, on each of
+# the three ways a run ends.
+oob_summary_undo() {
+  local log="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-reviewer.log")"
+  check "out-of-band swap was exercised ($1)" test -d "$log"
+  rmdir "$log"
+  mv "$log.saved" "$log"
+}
+oob_summary_kept() {
+  local kept
+  check "the out-of-band transcript is named once ($1)" test "$(grep -Ec 'the transcript is at |it is at ' "$2")" -eq 1
+  kept=$(sed -En 's/.*(the transcript is at|it is at) //p' "$2" | tail -1)
+  check "the out-of-band transcript is kept ($1)" test -s "$kept"
+  check "the kept transcript holds the review ($1)" grep -q "$3" "$kept"
+  rm -f "$kept"
+}
+fixture 'SHIP — summarized out of band'
+rm -f "$TMP/swap-fired-s1"
+oob_rc=0
+invoke CODEX_CLI="$TMP/leaky-reviewer" CLAUDE_CLI="$TMP/leaky-reviewer" \
+  LEAK_RELEASE="$TMP/oobs-release" LEAK_DONE="$TMP/oobs-done" LEAK_STREAM=stderr \
+  DEV_TRIO_REVIEWER_MODEL=claude PATH="$TMP/swapshim:$PATH" \
+  SWAP_SHIM_DIR="$TMP/log/review-test" SWAP_SHIM_FIRED="$TMP/swap-fired-s1" \
+  > "$TMP/oobs.out" 2> "$TMP/oobs.err" || oob_rc=$?
+: > "$TMP/oobs-release"
+oob_summary_undo published
+check 'a summarized out-of-band review is published' test "$oob_rc" -eq 0
+check 'a summarized out-of-band review is a summary' json_is "$TMP/oobs.out" '.exit_code==0 and .result.verdict=="SHIP"'
+check 'the published out-of-band notice says why it is kept' grep -q 'does not replay it; it is at ' "$TMP/oobs.err"
+oob_summary_kept published "$TMP/oobs.err" 'SHIP — summarized out of band'
+
+fixture 'SHIP — summarized out of band, receipt failure'
+rm -f "$TMP/swap-fired-s2"
+oob_rc=0
+invoke CODEX_CLI="$TMP/leaky-reviewer" CLAUDE_CLI="$TMP/leaky-reviewer" \
+  LEAK_RELEASE="$TMP/oobs2-release" LEAK_DONE="$TMP/oobs2-done" LEAK_STREAM=stderr \
+  DEV_TRIO_REVIEWER_MODEL=claude PATH="$TMP/swapshim:$PATH" \
+  SWAP_SHIM_DIR="$TMP/log/review-test" SWAP_SHIM_FIRED="$TMP/swap-fired-s2" \
+  DEV_TRIO_REVIEW_RECEIPT="$TMP/missing/receipt" \
+  > "$TMP/oobs2.out" 2> "$TMP/oobs2.err" || oob_rc=$?
+: > "$TMP/oobs2-release"
+oob_summary_undo result-write-failed
+check 'a summarized out-of-band receipt failure exits 2' test "$oob_rc" -eq 2
+check 'a summarized out-of-band receipt failure is a summary' json_is "$TMP/oobs2.out" '.error=="result-write-failed: publish receipt"'
+oob_summary_kept result-write-failed "$TMP/oobs2.err" 'SHIP — summarized out of band, receipt failure'
+
+fixture 'SHIP — summarized out of band, interrupted'
+rm -f "$TMP/swap-fired-s3" "$TMP/oobs3-ready" "$TMP/oobs3-release"
+set -m
+env "${INVOKE_ENV[@]}" CODEX_CLI="$TMP/slow-reviewer" CLAUDE_CLI="$TMP/slow-reviewer" \
+  SLOW_READY="$TMP/oobs3-ready" SLOW_RELEASE="$TMP/oobs3-release" \
+  DEV_TRIO_REVIEWER_MODEL=claude PATH="$TMP/swapshim:$PATH" \
+  SWAP_SHIM_DIR="$TMP/log/review-test" SWAP_SHIM_FIRED="$TMP/swap-fired-s3" \
+  "$ROOT/dev-trio/bin/ask-reviewer.sh" --summary 'fixture review' \
+  > "$TMP/oobs3.out" 2> "$TMP/oobs3.err" &
+oobs3_pid=$!
+waited=0
+while [ ! -e "$TMP/oobs3-ready" ] && [ "$waited" -lt 150 ]; do sleep 0.2; waited=$((waited + 1)); done
+kill -TERM -"$oobs3_pid" 2>/dev/null || kill -TERM "$oobs3_pid" 2>/dev/null || true
+: > "$TMP/oobs3-release"
+oobs3_rc=0
+wait "$oobs3_pid" || oobs3_rc=$?
+set +m
+oob_summary_undo interrupted
+check 'a summarized out-of-band interruption keeps the signal status' test "$oobs3_rc" -eq 143
+check 'a summarized out-of-band interruption writes nothing on stdout' test ! -s "$TMP/oobs3.out"
+oob_summary_kept interrupted "$TMP/oobs3.err" 'SHIP — summarized out of band, interrupted'
+INVOKE_ARGS=()
 
 printf 'review-result smoke: %s assertions passed\n' "$PASS"
