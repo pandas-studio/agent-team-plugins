@@ -1644,7 +1644,7 @@ check 'a summarized denial carries the published result' \
 check 'a summarized denial is one document' \
   eval '[ "$(wc -l < "$TMP/wrapper.out" | tr -d " ")" = 1 ] && jq -e -s "length == 1" "$TMP/wrapper.out" >/dev/null'
 check 'a summarized denial has no final text' json_is "$TMP/wrapper.out" \
-  '.exit_code==3 and .model=="agy" and .result.status=="permission-denied" and .final_text==null and .final_truncated==false and .final_unavailable==null and .error==null'
+  '.exit_code==3 and .model=="agy" and .result.status=="permission-denied" and .final_text==null and .final_truncated==false and .error==null'
 check 'a summarized denial still names the denial on stderr' \
   grep -Fxq '[ask-reviewer] agy denied: command(lsof -p $$ || pwd)' "$TMP/wrapper.err"
 
@@ -1852,12 +1852,12 @@ INVOKE_ARGS=(--summary)
 fixture 'SHIP — summarized'
 run_review 0
 check 'a summary is one JSON document on one line' one_document "$TMP/wrapper.out"
-check 'a summary has no transcript replay' no_match '=== RESPONSE ===' "$TMP/wrapper.out"
+check 'a summary has no transcript replay' no_match '^## Verdict' "$TMP/wrapper.out"
 check 'a summary names the run' summary_paths "$TMP/wrapper.out"
 check 'a summary carries the published result' same_result "$TMP/wrapper.out" "$RESULT"
 check 'a summary carries the final text byte for byte' same_final_text "$TMP/wrapper.out" "$FINAL"
 check 'a summary of an ok review has its fixed fields' json_is "$TMP/wrapper.out" \
-  '.summary_version==1 and .exit_code==0 and .result.status=="ok" and .result.verdict=="SHIP" and .final_truncated==false and .final_unavailable==null and .error==null'
+  '.summary_version==1 and .exit_code==0 and .result.status=="ok" and .result.verdict=="SHIP" and .final_truncated==false and .error==null'
 check 'a summarized run still writes the artifact line' grep -Fq "(log: $LOG, final: $FINAL, result: $RESULT, rc=0)" "$TMP/wrapper.err"
 check 'a summarized run still publishes its completion' json_is "${LOG%.log}.run.json" '.completion.reason=="ok" and .completion.exit_code==0'
 
@@ -1889,14 +1889,27 @@ check 'a summarized result-write failure names the step and no result' json_is "
   ".exit_code==2 and .result==null and .final_text==null and .final_truncated==false and .error==\"result-write-failed: publish receipt\" and .paths=={log: \"$LOG\", final: \"$FINAL\", result: null}"
 check 'a summarized result-write failure still says so on stderr' grep -q 'result write failed: publish receipt' "$TMP/wrapper.err"
 
-# A final past 64 KiB is not inlined, and the summary says so.
-{
-  printf '## Verdict\nSHIP — long\n\n## Findings\n\n### Blocker\n- None.\n\n### Major\n- None.\n\n### Minor / Nit\n- `long.txt:1` — '
-  head -c 70000 /dev/zero | tr '\0' 'x'
-  printf ' → shorten it.\n'
-} > "$TMP/review.md"
+# A final past 64 KiB is not inlined, and the summary says so. The bound is
+# inclusive: 65536 bytes are inlined, one more is not.
+sized_fixture() {
+  local size="$1" pad
+  sized_frame() {
+    printf '## Verdict\nSHIP — long\n\n## Findings\n\n### Blocker\n- None.\n\n### Major\n- None.\n\n### Minor / Nit\n- `long.txt:1` — '
+    head -c "$1" /dev/zero | tr '\0' 'x'
+    printf ' → shorten it.\n'
+  }
+  pad=$((size - $(sized_frame 0 | wc -c)))
+  sized_frame "$pad" > "$TMP/review.md"
+}
+sized_fixture 65536
 run_review 0
-check 'the long final is over the bound' test "$(wc -c < "$FINAL")" -gt 65536
+check 'the final at the bound is 65536 bytes' test "$(wc -c < "$FINAL" | tr -d ' ')" = 65536
+check 'a summary with a final at the bound carries it byte for byte' same_final_text "$TMP/wrapper.out" "$FINAL"
+check 'a summary with a final at the bound is not truncated' json_is "$TMP/wrapper.out" \
+  '.exit_code==0 and .result.status=="ok" and .final_truncated==false'
+sized_fixture 65537
+run_review 0
+check 'the long final is one byte over the bound' test "$(wc -c < "$FINAL" | tr -d ' ')" = 65537
 check 'a summary with a long final leaves the text out and says so' json_is "$TMP/wrapper.out" \
   '.exit_code==0 and .result.status=="ok" and .final_text==null and .final_truncated==true'
 
@@ -1907,27 +1920,49 @@ run_review 0
 check 'a summary with control characters is still one document' one_document "$TMP/wrapper.out"
 check 'a summary with control characters keeps the final byte for byte' same_final_text "$TMP/wrapper.out" "$FINAL"
 check 'a field-shaped line in the final does not become a field' json_is "$TMP/wrapper.out" \
-  '.exit_code==0 and (keys == ["error","exit_code","final_text","final_truncated","final_unavailable","model","paths","result","summary_version"])'
+  '.exit_code==0 and (keys == ["error","exit_code","final_text","final_truncated","model","paths","result","summary_version"])'
 
-# A final that is not UTF-8 is left in its file: jq would replace the byte.
-# LC_ALL=C: under a UTF-8 locale the parser's awk already fails on that byte
-# (exit 2, before any summary), so only the C locale reaches this check.
+# final_text is jq's reading of the final: a byte that is not UTF-8 arrives as
+# U+FFFD, and the file keeps the byte.
+# LC_ALL=C: under a UTF-8 locale macOS awk fails on that byte in the parser and
+# the run ends as a result-write failure (exit 2, a summary with no result), so
+# only the C locale gets an ok result to check.
 printf '## Verdict\nSHIP — latin-1\n\n## Findings\n\n### Blocker\n- None.\n\n### Major\n- None.\n\n### Minor / Nit\n- `a.txt:1` — caf\351 → none.\n' > "$TMP/review.md"
 run_review 0 LC_ALL=C
-check 'a summary with a non-UTF-8 final leaves the text out and says why' json_is "$TMP/wrapper.out" \
-  '.exit_code==0 and .result.status=="ok" and .final_text==null and .final_truncated==false and .final_unavailable=="not-utf8"'
+check 'a summary with a non-UTF-8 final is still one document' one_document "$TMP/wrapper.out"
+check 'a non-UTF-8 byte in the final arrives as U+FFFD' json_is "$TMP/wrapper.out" \
+  '.exit_code==0 and .result.status=="ok" and .final_truncated==false and (.final_text | endswith("— caf� → none.\n"))'
+check 'the final file keeps the non-UTF-8 byte' \
+  test "$(LC_ALL=C tr -cd '\351' < "$FINAL" | wc -c | tr -d ' ')" = 1
 
-# Nobody reading stdout changes nothing: not the exit code, not the completion.
+# Nobody reading stdout changes nothing: not the exit code, not the stderr, not
+# the completion. The read end is closed before the wrapper starts — the reader
+# closes its stdin and only then leaves the marker the writer waits for — so
+# the write always meets a pipe with no reader.
+stderr_norm() { sed -E 's/reviewer-[0-9]{8}-[0-9]{6}-[0-9]+/reviewer-STEM/g' "$1"; }
 fixture 'SHIP — nobody reading'
-pipe_rc=$(set +o pipefail; invoke 2> "$TMP/wrapper.err" | true; echo "${PIPESTATUS[0]}")
+run_review 0
+stderr_norm "$TMP/wrapper.err" > "$TMP/read.err"
+rm -f "$TMP/reader-closed"
+pipe_rc=$(set +o pipefail
+  {
+    waited=0
+    while [ ! -e "$TMP/reader-closed" ] && [ "$waited" -lt 150 ]; do sleep 0.2; waited=$((waited + 1)); done
+    invoke 2> "$TMP/wrapper.err"
+  } | { exec 0<&-; : > "$TMP/reader-closed"; }
+  echo "${PIPESTATUS[0]}")
 LOG="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-reviewer.log")"
+check 'the pipe had no reader before the wrapper started' test -e "$TMP/reader-closed"
 check 'a summary to a pipe with no reader keeps the exit code' test "$pipe_rc" -eq 0
+check 'a summary to a pipe with no reader writes the stderr of a read one' \
+  eval 'stderr_norm "$TMP/wrapper.err" | cmp -s - "$TMP/read.err"'
 check 'a summary to a pipe with no reader still completes the run' json_is "${LOG%.log}.run.json" '.completion.reason=="ok" and .completion.exit_code==0'
 closed_rc=0
 invoke >&- 2> "$TMP/wrapper.err" || closed_rc=$?
 LOG="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-reviewer.log")"
 check 'a summary to a closed stdout keeps the exit code' test "$closed_rc" -eq 0
-check 'a summary to a closed stdout adds nothing to stderr' no_match 'write error' "$TMP/wrapper.err"
+check 'a summary to a closed stdout writes the stderr of a read one' \
+  eval 'stderr_norm "$TMP/wrapper.err" | cmp -s - "$TMP/read.err"'
 check 'a summary to a closed stdout still completes the run' json_is "${LOG%.log}.run.json" '.completion.reason=="ok" and .completion.exit_code==0'
 
 # A summary that cannot be rendered falls back to the fixed document; the exit
@@ -1943,11 +1978,63 @@ chmod +x "$TMP/jq-shim/jq"
 fixture 'SHIP — unrenderable summary'
 run_review 0 PATH="$TMP/jq-shim:$PATH"
 fixed_summary() {
-  printf '%s\n' '{"summary_version":1,"exit_code":0,"result":null,"final_text":null,"error":"summary-unavailable"}' \
+  printf '%s\n' '{"summary_version":1,"exit_code":'"${1:-0}"',"result":null,"final_text":null,"error":"summary-unavailable"}' \
     | cmp -s - "$TMP/wrapper.out"
 }
 check 'an unrenderable summary is the fixed document, byte for byte' fixed_summary
 check 'an unrenderable summary leaves the result published' json_is "$RESULT" '.status=="ok" and .verdict=="SHIP"'
+
+# An ok result whose final stopped being a regular file after it was parsed —
+# here a FIFO nobody writes to — is checked before it is read: the summary is
+# the fixed document and the run completes. The swap happens at the wrapper's
+# read of the result status, which comes after the parse and before the
+# summary. A wrapper that read the FIFO anyway would block, so a writer is kept
+# ready to end that read; the fixed-document check then fails instead of the
+# suite hanging.
+mkdir "$TMP/jq-fifo"
+cat > "$TMP/jq-fifo/jq" <<SHIM
+#!/bin/sh
+if [ "\$*" = '-r .status' ] && [ ! -e "$TMP/fifo-swapped" ]; then
+  swapped="$TMP/log/review-test/\$(readlink "$TMP/log/review-test/latest-reviewer.final.md")"
+  rm -f "\$swapped" && mkfifo "\$swapped" && printf '%s\n' "\$swapped" > "$TMP/fifo-swapped"
+fi
+exec "$REAL_JQ" "\$@"
+SHIM
+chmod +x "$TMP/jq-fifo/jq"
+fixture 'SHIP — the final became a FIFO'
+rm -f "$TMP/fifo-swapped"
+fifo_rc=0
+invoke PATH="$TMP/jq-fifo:$PATH" > "$TMP/wrapper.out" 2> "$TMP/wrapper.err" &
+fifo_pid=$!
+waited=0
+while kill -0 "$fifo_pid" 2>/dev/null && [ "$waited" -lt 150 ]; do sleep 0.2; waited=$((waited + 1)); done
+fifo_unblock=""
+if kill -0 "$fifo_pid" 2>/dev/null && [ -s "$TMP/fifo-swapped" ]; then
+  ( : > "$(cat "$TMP/fifo-swapped")" ) &
+  fifo_unblock=$!
+fi
+wait "$fifo_pid" || fifo_rc=$?
+[ -z "$fifo_unblock" ] || { kill "$fifo_unblock" 2>/dev/null || true; wait "$fifo_unblock" 2>/dev/null || true; }
+LOG="$TMP/log/review-test/$(readlink "$TMP/log/review-test/latest-reviewer.log")"
+check 'the final was swapped for a FIFO after the parse' test -p "${LOG%.log}.final.md"
+check 'a summary whose final became a FIFO keeps the exit code' test "$fifo_rc" -eq 0
+check 'a summary whose final became a FIFO is the fixed document' fixed_summary
+check 'a summary whose final became a FIFO still completes the run' json_is "${LOG%.log}.run.json" '.completion.reason=="ok" and .completion.exit_code==0'
+rm -f "${LOG%.log}.final.md"
+
+# A wrapper code that is not an integer is not reported as one: the fixed
+# document carries null. Only a result changed after it was published can do
+# this, so the shim answers the wrapper's read of the exit code.
+mkdir "$TMP/jq-code"
+cat > "$TMP/jq-code/jq" <<SHIM
+#!/bin/sh
+if [ "\$*" = '-r .exit_code' ]; then cat > /dev/null; echo 7.5; exit 0; fi
+exec "$REAL_JQ" "\$@"
+SHIM
+chmod +x "$TMP/jq-code/jq"
+fixture 'SHIP — a fractional exit code'
+invoke PATH="$TMP/jq-code:$PATH" > "$TMP/wrapper.out" 2> "$TMP/wrapper.err" || true
+check 'a non-integer exit code is null in the fixed document' fixed_summary null
 
 # Before the model call stdout stays empty: usage errors and setup failures.
 for bad in '--summary=x' '--bogus'; do
@@ -2069,66 +2156,80 @@ check 'a summarized out-of-band interruption writes nothing on stdout' test ! -s
 oob_summary_kept interrupted "$TMP/oobs3.err" 'SHIP — summarized out of band, interrupted'
 INVOKE_ARGS=()
 
-# Without --summary, nothing changed: the same fixtures run through the base's
-# wrapper and this one give the same stdout, stderr, exit code and receipt,
-# once run stems, plugin roots and mktemp suffixes are normalized. The base is
-# chosen as scripts/check-version-bump.py chooses it. The comparison only means
-# something while the base has no --summary, so after this lands it skips.
+# Ten fixture runs — two models; a parsed review, a parse failure, a model that
+# exits 7, a receipt, a receipt that cannot be written — each compared after
+# run stems, plugin roots and mktemp suffixes are normalized.
+# With --summary the exit code, stderr and receipt are what the same run writes
+# without it. Without --summary nothing changed: stdout, stderr, exit code and
+# receipt are what the base's wrapper writes. The base is chosen as
+# scripts/check-version-bump.py chooses it, and that half only means something
+# while the base has no --summary, so after this lands it skips.
+printf '## Verdict\nNEEDS-FIX — one\n\n## Findings\n\n### Blocker\n- None.\n\n### Major\n- `a.sh:1` — broken → fix.\n\n### Minor / Nit\n- None.\n' > "$TMP/compat-ok.md"
+printf 'Just prose, with no Verdict heading.\n' > "$TMP/compat-bad.md"
+compat_norm() {
+  sed -E -e 's/reviewer-[0-9]{8}-[0-9]{6}-[0-9]+/reviewer-STEM/g' \
+    -e 's#\.tmp\.[A-Za-z0-9]{6}#.tmp.RAND#g' -e 's#review-receipt\.[A-Za-z0-9]{6}#review-receipt.RAND#g' \
+    -e "s#$TMP/compat-old/dev-trio#ROOT#g" -e "s#$ROOT/dev-trio#ROOT#g" \
+    -e "s#$TMP/compat-(old|new|summary)-side#SIDE#g" "$1"
+}
+# compat_run SIDE WRAPPER_ROOT MODEL CASE [wrapper option]
+compat_run() {
+  local side="$1" side_root="$2" model="$3" compat_case="$4" side_dir side_rc=0
+  local review_file="$TMP/compat-ok.md" compat_receipt="" compat_env
+  shift 4
+  side_dir="$TMP/compat-$side-side"
+  rm -rf "$side_dir"
+  mkdir -p "$side_dir"
+  compat_env=(DEV_TRIO_REVIEWER_MODEL="$model")
+  case "$compat_case" in
+    bad) review_file="$TMP/compat-bad.md" ;;
+    rc7) compat_env+=(TEST_REVIEW_RC=7) ;;
+    receipt) compat_receipt=$(review_receipt_create "$side_dir/receipt"); compat_env+=(DEV_TRIO_REVIEW_RECEIPT="$compat_receipt") ;;
+    receipt-missing) compat_env+=(DEV_TRIO_REVIEW_RECEIPT="$side_dir/missing/receipt") ;;
+  esac
+  env "${INVOKE_ENV[@]}" TEST_REVIEW_FILE="$review_file" DEV_TRIO_LOG_DIR="$TMP/compat-log" "${compat_env[@]}" \
+    "$side_root/bin/ask-reviewer.sh" "$@" 'fixture review' > "$side_dir/out" 2> "$side_dir/err" < /dev/null || side_rc=$?
+  echo "$side_rc" > "$TMP/compat-$side.rc"
+  compat_norm "$side_dir/out" > "$TMP/compat-$side.out"
+  compat_norm "$side_dir/err" > "$TMP/compat-$side.err"
+  if [ -n "$compat_receipt" ]; then compat_norm "$compat_receipt" > "$TMP/compat-$side.receipt"; else : > "$TMP/compat-$side.receipt"; fi
+}
 compat_ref="${VERSION_BUMP_BASE:-origin/main}"
 ! printf '%s' "$compat_ref" | grep -Eqx '0+' || compat_ref=origin/main
 compat_base=""
-if compat_commit=$(git -C "$ROOT" rev-parse --verify --quiet "$compat_ref^{commit}"); then
+if compat_commit=$(git -C "$ROOT" rev-parse --verify --quiet "$compat_ref^{commit}" 2>/dev/null); then
   if [ "${VERSION_BUMP_DIRECT:-}" = true ]; then
     compat_base="$compat_commit"
   else
     compat_base=$(git -C "$ROOT" merge-base "$compat_commit" HEAD) || compat_base=""
   fi
 fi
+compat_old=""
 if [ -z "$compat_base" ]; then
   [ "${CI:-}" != true ] || check "the no-flag comparison base resolves ($compat_ref)" false
   echo "note: no base for the no-flag comparison ($compat_ref); skipped" >&2
-elif git -C "$ROOT" show "$compat_base:dev-trio/bin/ask-reviewer.sh" | grep -q -- '--summary'; then
+elif git -C "$ROOT" show "$compat_base:dev-trio/bin/ask-reviewer.sh" > "$TMP/compat-base-wrapper" \
+     && grep -q -- '--summary' "$TMP/compat-base-wrapper"; then
   echo "note: the base's ask-reviewer.sh already has --summary; the no-flag comparison is skipped" >&2
 else
   mkdir "$TMP/compat-old"
   git -C "$ROOT" archive "$compat_base" dev-trio | tar -x -C "$TMP/compat-old"
-  printf '## Verdict\nNEEDS-FIX — one\n\n## Findings\n\n### Blocker\n- None.\n\n### Major\n- `a.sh:1` — broken → fix.\n\n### Minor / Nit\n- None.\n' > "$TMP/compat-ok.md"
-  printf 'Just prose, with no Verdict heading.\n' > "$TMP/compat-bad.md"
-  compat_norm() {
-    sed -E -e 's/reviewer-[0-9]{8}-[0-9]{6}-[0-9]+/reviewer-STEM/g' \
-      -e 's#\.tmp\.[A-Za-z0-9]{6}#.tmp.RAND#g' -e 's#review-receipt\.[A-Za-z0-9]{6}#review-receipt.RAND#g' \
-      -e "s#$TMP/compat-old/dev-trio#ROOT#g" -e "s#$ROOT/dev-trio#ROOT#g" \
-      -e "s#$TMP/compat-(old|new)-side#SIDE#g" "$1"
-  }
-  for model in codex claude; do
-    for compat_case in ok bad rc7 receipt receipt-missing; do
-      for side in old new; do
-        side_root="$ROOT/dev-trio"
-        [ "$side" = new ] || side_root="$TMP/compat-old/dev-trio"
-        side_dir="$TMP/compat-$side-side"
-        rm -rf "$side_dir"
-        mkdir -p "$side_dir"
-        review_file="$TMP/compat-ok.md"
-        compat_env=(DEV_TRIO_REVIEWER_MODEL="$model")
-        case "$compat_case" in
-          bad) review_file="$TMP/compat-bad.md" ;;
-          rc7) compat_env+=(TEST_REVIEW_RC=7) ;;
-          receipt) compat_receipt=$(review_receipt_create "$side_dir/receipt"); compat_env+=(DEV_TRIO_REVIEW_RECEIPT="$compat_receipt") ;;
-          receipt-missing) compat_env+=(DEV_TRIO_REVIEW_RECEIPT="$side_dir/missing/receipt") ;;
-        esac
-        side_rc=0
-        env "${INVOKE_ENV[@]}" TEST_REVIEW_FILE="$review_file" DEV_TRIO_LOG_DIR="$TMP/compat-log" "${compat_env[@]}" \
-          "$side_root/bin/ask-reviewer.sh" 'fixture review' > "$side_dir/out" 2> "$side_dir/err" < /dev/null || side_rc=$?
-        echo "$side_rc" > "$TMP/compat-$side.rc"
-        compat_norm "$side_dir/out" > "$TMP/compat-$side.out"
-        compat_norm "$side_dir/err" > "$TMP/compat-$side.err"
-        if [ "$compat_case" = receipt ]; then compat_norm "$compat_receipt" > "$TMP/compat-$side.receipt"; else : > "$TMP/compat-$side.receipt"; fi
-      done
-      for part in rc out err receipt; do
-        check "without --summary, $part is unchanged ($model, $compat_case)" cmp -s "$TMP/compat-old.$part" "$TMP/compat-new.$part"
-      done
+  compat_old="$TMP/compat-old/dev-trio"
+fi
+for model in codex claude; do
+  for compat_case in ok bad rc7 receipt receipt-missing; do
+    compat_run new "$ROOT/dev-trio" "$model" "$compat_case"
+    compat_run summary "$ROOT/dev-trio" "$model" "$compat_case" --summary
+    for part in rc err receipt; do
+      check "with --summary, $part is what the run writes without it ($model, $compat_case)" \
+        cmp -s "$TMP/compat-new.$part" "$TMP/compat-summary.$part"
+    done
+    [ -n "$compat_old" ] || continue
+    compat_run old "$compat_old" "$model" "$compat_case"
+    for part in rc out err receipt; do
+      check "without --summary, $part is unchanged ($model, $compat_case)" cmp -s "$TMP/compat-old.$part" "$TMP/compat-new.$part"
     done
   done
-fi
+done
 
 printf 'review-result smoke: %s assertions passed\n' "$PASS"

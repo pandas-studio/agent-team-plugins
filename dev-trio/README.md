@@ -537,25 +537,27 @@ run logs). The exit code, stderr, receipt, manifest, `*.review.json` and
 {"summary_version": 1, "exit_code": 0, "model": "codex",
  "paths": {"log": "…", "final": "…", "result": "…"},
  "result": {"…": "the published *.review.json, as it is"},
- "final_text": "## Verdict\nSHIP — …", "final_truncated": false,
- "final_unavailable": null, "error": null}
+ "final_text": "## Verdict\nSHIP — …", "final_truncated": false, "error": null}
 ```
 
 - `result` is the published review result unchanged, so its fields keep their
   meaning (a `null` `findings.*` is unknown, not zero). Read the verdict and the
   counts from it.
-- `final_text` is the `*.final.md` text only when `result.status` is `ok`, the
-  file is at most 64 KiB and it is valid UTF-8; otherwise it is `null`. A failed
-  run's final is not a review. For an `ok` result, `final_truncated: true` says
-  the size was the reason, and `final_unavailable` is `"unreadable"` or
-  `"not-utf8"` for the other two (jq would replace invalid bytes, so such a
-  final is left in the file).
+- `final_text` is the `*.final.md` text only when `result.status` is `ok` and
+  the text is at most 64 KiB; otherwise it is `null`, and `final_truncated` is
+  `true` when the size was the reason. A failed run's final is not a review.
+  The text is jq's reading of the file: a byte that is not UTF-8 arrives as
+  U+FFFD, and the file at `paths.final` keeps the bytes.
 - A run whose result could not be written has `result: null`,
   `paths.result: null` and `error: "result-write-failed: <step>"`.
-- If the document cannot be rendered, or the exit code is not an integer,
-  stdout is the fixed
+- If the document cannot be rendered — an `ok` result whose final is no longer
+  a readable regular file counts — stdout is the fixed
   `{"summary_version":1,"exit_code":N,"result":null,"final_text":null,"error":"summary-unavailable"}`.
+  `N` is the exit code, or `null` if the wrapper's own code is not an integer.
   Neither case, nor a stdout with no reader, changes the exit code.
+- `exit_code` is the code the wrapper was about to exit with when it wrote the
+  document. The process status is the authority: a wrapper killed after that
+  point (a stderr with no reader) exits differently.
 - Stdout is empty for a usage error, a setup failure before the model call, and
   a signal during the call. `--help` still prints the usage.
 - The one stderr difference: when the log could not be opened, the transcript
