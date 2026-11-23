@@ -925,6 +925,159 @@ runstate_begin "$R/empty.log" channel=reviewer wrapper=w
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / "hash.run.json").exists())
 
+    def test_completion_timing_is_optional_and_never_fatal(self):
+        script = r"""
+set -eu
+. "$P/lib/runstate.sh"
+runstate_begin "$R/plain.log" channel=reviewer wrapper=w
+runstate_complete "$R/plain.log" exit_code=0
+runstate_begin "$R/bad.log" channel=reviewer wrapper=w
+runstate_complete "$R/bad.log" exit_code=3 reason=failed pre_model_s=2 model_s=abc post_model_s=1.5
+runstate_begin "$R/all.log" channel=reviewer wrapper=w
+runstate_complete "$R/all.log" exit_code=0 pre_model_s=0 model_s=41 post_model_s=1
+runstate_begin "$R/newline.log" channel=reviewer wrapper=w
+runstate_complete "$R/newline.log" exit_code=0 "pre_model_s=3"$'\n' model_s=4
+"""
+        result = subprocess.run(
+            ["bash", "-c", script], env=self.env | dict(P=str(self.plugin), R=str(self.root)),
+            text=True, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        expected = {
+            "plain": (0, {"pre_model_s": None, "model_s": None, "post_model_s": None}),
+            "bad": (3, {"pre_model_s": 2, "model_s": None, "post_model_s": None}),
+            "all": (0, {"pre_model_s": 0, "model_s": 41, "post_model_s": 1}),
+            # `$` in a jq regex also matches before a final newline.
+            "newline": (0, {"pre_model_s": None, "model_s": 4, "post_model_s": None}),
+        }
+        for name, (exit_code, timing) in expected.items():
+            with self.subTest(name=name):
+                path = self.root / f"{name}.run.json"
+                completion = json.loads(path.read_text())["completion"]
+                self.assertEqual(completion["exit_code"], exit_code)
+                self.assertEqual(completion["timing"], timing)
+                self.assertEqual(self.runstate_read(path).returncode, 0)
+
+    def test_reader_accepts_a_completion_written_before_timing(self):
+        name = "reviewer-20260918-090000-33333.log"
+        run_path = self.logdir() / "reviewer-20260918-090000-33333.run.json"
+        run_path.write_text(json.dumps(self.run_json(name, completion=dict(
+            ended_at="2026-09-18T09:00:01+09:00", exit_code=0, verdict="SHIP", reason="ok"))))
+        read = self.runstate_read(run_path)
+        self.assertEqual(read.returncode, 0, read.stderr)
+        self.assertNotIn("timing", json.loads(read.stdout)["completion"])
+
+    def test_run_timing_follows_the_marks_that_exist(self):
+        # The marks are set by hand, and a `date` function stands in for the
+        # clock: `now` is the value it prints, not a clock reading.
+        script = r"""
+set -euo pipefail
+. "$P/lib/run-lifecycle.sh"
+date() { echo 20; }
+show() { run_timing; printf '%s' "$1"; printf ' %s' ${RUN_TIMING[@]+"${RUN_TIMING[@]}"}; printf '\n'; }
+RUN_T0=10
+show none
+RUN_MODEL_T0=13
+show started
+RUN_MODEL_RETURNED=1
+show end-unread
+RUN_MODEL_T1=18
+show ended
+unset RUN_T0
+show no-baseline
+"""
+        result = subprocess.run(
+            ["bash", "-c", script], env=self.env | dict(P=str(self.plugin)),
+            text=True, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = {}
+        for line in result.stdout.splitlines():
+            # printf with no arguments still prints its format once, so a row
+            # with no timing ends in a bare space.
+            label, *pairs = line.split()
+            rows[label] = {key: int(value) for key, value in (pair.split("=") for pair in pairs)}
+        self.assertEqual(rows["none"], {})
+        self.assertEqual(rows["started"], {"pre_model_s": 3, "model_s": 7})
+        # The call came back but its end was not read: the time after the start
+        # mark is not all model time, so it is not published as such.
+        self.assertEqual(rows["end-unread"], {"pre_model_s": 3})
+        self.assertEqual(rows["ended"], {"pre_model_s": 3, "model_s": 5, "post_model_s": 2})
+        self.assertEqual(rows["no-baseline"], {"model_s": 5, "post_model_s": 2})
+
+    def test_run_timing_ignores_inherited_marks(self):
+        # A run that ends before its model call publishes no timing, whatever
+        # the caller exported. The inherited marks are valid readings on a fixed
+        # clock, so a mark that survived sourcing would show up as timing.
+        script = r"""
+set -euo pipefail
+date() { echo 20; }
+RUN_T0=10
+. "$P/lib/run-lifecycle.sh"
+run_timing; printf 'timing=[%s]\n' "${RUN_TIMING[*]-}"
+"""
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env=self.env | dict(P=str(self.plugin), RUN_MODEL_T0="13", RUN_MODEL_T1="18",
+                                RUN_MODEL_RETURNED="1"),
+            text=True, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "timing=[]\n")
+
+    def test_run_timing_without_a_clock(self):
+        # When `date +%s` fails, a value that needs the clock now is left out,
+        # and the marks taken earlier still count. Each call shares a line with
+        # its print: Bash drops the rest of the line an arithmetic error is on,
+        # as it would drop runstate_complete from the EXIT trap's.
+        script = r"""
+set -euo pipefail
+. "$P/lib/run-lifecycle.sh"
+date() { [ "${1:-}" != +%s ] || return 1; command date "$@"; }
+RUN_T0=10 RUN_MODEL_T0=13; run_timing; printf 'started=[%s]\n' "${RUN_TIMING[*]-}"
+run_mark_model_end; run_timing; printf 'end-unread=[%s]\n' "${RUN_TIMING[*]-}"
+RUN_MODEL_T1=18; run_timing; printf 'ended=[%s]\n' "${RUN_TIMING[*]-}"
+RUN_MODEL_T1=; RUN_T0=; run_mark_model_start; run_timing; printf 'unmarked=[%s]\n' "${RUN_TIMING[*]-}"
+date() { echo 99; return 1; }; printf 'failed-read=[%s]\n' "$(run_clock)"
+"""
+        result = subprocess.run(
+            ["bash", "-c", script], env=self.env | dict(P=str(self.plugin)),
+            text=True, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "started=[pre_model_s=3]",
+            "end-unread=[pre_model_s=3]",
+            "ended=[pre_model_s=3 model_s=5]",
+            "unmarked=[]",
+            # A `date` that printed and then failed is not a reading.
+            "failed-read=[]",
+        ])
+
+    def test_exit_trap_publishes_a_completion_without_a_clock(self):
+        # The EXIT trap is where a failed clock would cost the most: an error
+        # there ends the trap before the completion is published. Only the
+        # `+%s` reading fails; runstate_complete's own timestamp still works.
+        script = r"""
+set -euo pipefail
+. "$P/lib/runstate.sh"
+. "$P/lib/run-lifecycle.sh"
+run_cleanup_files() { return 0; }
+manifest_cleanup() { return 0; }
+RUNSTATE_LOG="$R/clockless.log"
+runstate_begin "$RUNSTATE_LOG" channel=reviewer wrapper=w
+trap run_cleanup EXIT
+RUN_T0=$(date +%s)
+run_mark_model_start
+date() { [ "${1:-}" != +%s ] || return 1; command date "$@"; }
+exit 143
+"""
+        result = subprocess.run(
+            ["bash", "-c", script], env=self.env | dict(P=str(self.plugin), R=str(self.root)),
+            text=True, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 143, result.stderr)
+        completion = json.loads((self.root / "clockless.run.json").read_text())["completion"]
+        self.assertEqual((completion["reason"], completion["exit_code"]), ("aborted", 143))
+        self.assertIsInstance(completion["timing"]["pre_model_s"], int)
+        self.assertIsNone(completion["timing"]["model_s"])
+        self.assertIsNone(completion["timing"]["post_model_s"])
+
     def test_reader_checks_digest_fields(self):
         name = "reviewer-20260918-090000-22222.log"
         run_path = self.logdir() / "reviewer-20260918-090000-22222.run.json"

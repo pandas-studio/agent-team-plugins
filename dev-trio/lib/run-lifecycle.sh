@@ -5,7 +5,8 @@
 # EXIT-trap backstop. Prompt building, the model call and what a wrapper makes
 # of the outcome stay in the wrapper.
 #
-# Definitions only; sourcing runs nothing. The caller sets RUN_TAG (its name
+# Definitions, plus emptying the three timing marks (RUN_MODEL_T0,
+# RUN_MODEL_T1, RUN_MODEL_RETURNED); sourcing runs no command. The caller sets RUN_TAG (its name
 # without .sh, which prefixes every message) and the LOG_DIR, TEAM and PM_HOST
 # it already resolves. Values that differ by role come in as arguments. The
 # helpers set the wrapper's own globals — TS, LOG, FINAL, AGY_CLI_LOG,
@@ -74,6 +75,79 @@ run_agy_log_fallback() {
   return 0
 }
 
+# run_clock — best-effort. Prints the current epoch second, or nothing when
+# `date` fails. The timing clock is the epoch, not Bash's SECONDS: SECONDS is
+# a variable the caller controls (it is inherited, so SECONDS=-100 starts the
+# count at -100, and a BASH_ENV can unset it), and the epoch is not.
+# It is a wall clock: a step of the system clock during a run shifts a value,
+# and one that goes negative is published as null. A failed `date` prints
+# nothing, even if it wrote something before failing.
+run_clock() {
+  local t
+  t=$(date +%s 2>/dev/null) || return 0
+  printf '%s' "$t"
+}
+
+# run_mark_model_start, run_mark_model_end — best-effort. The two marks around
+# the wrapper's one registry call. Call them from the wrapper's own shell, as
+# plain statements: a mark set in a subshell is lost. The baseline is the
+# wrapper's first line, RUN_T0=$(date +%s ...), read before this file is
+# sourced. Each mark runs `date`, so neither sits inside a window that must
+# stay short: the start mark goes before the wrapper's signal-recording traps
+# (a signal during it then ends the run before the model is launched), and the
+# end mark after the transcript's end offset is sampled. RUN_MODEL_RETURNED
+# says the call came back, whether or not the end reading succeeded.
+run_mark_model_start() { RUN_MODEL_T0=$(run_clock); return 0; }
+run_mark_model_end() { RUN_MODEL_RETURNED=1; RUN_MODEL_T1=$(run_clock); return 0; }
+# The marks start empty however the wrapper was called: an inherited value
+# would be read as this run's mark.
+RUN_MODEL_T0=""
+RUN_MODEL_T1=""
+RUN_MODEL_RETURNED=""
+
+# _run_count VALUE — predicate: VALUE is a clock reading run_timing may do
+# arithmetic on, digits with no leading zero. A failed `date` leaves it empty,
+# and $(( )) fails on anything but a number (08 is "value too great for
+# base"); Bash then drops the rest of the line it is on, in the EXIT trap the
+# completion. It guards every operand.
+_run_count() {
+  case "$1" in
+    0) return 0 ;;
+    '' | 0* | *[!0-9]*) return 1 ;;
+  esac
+  return 0
+}
+
+# run_timing — best-effort. Fills RUN_TIMING with the runstate_complete
+# arguments for completion.timing, from the marks that exist now. It does not
+# ask how the run ended: no start mark gives nothing, a start mark alone gives
+# the time before the model and the time in the call so far, and both marks
+# give all three. A call that came back without an end reading gives only the
+# time before the model: the rest cannot be split. A value whose operands are
+# not both clock readings is left out, and runstate_complete publishes it as
+# null. Expand the result as
+# ${RUN_TIMING[@]+"${RUN_TIMING[@]}"}, the form that survives `set -u` on
+# Bash 3.2 when the array is empty.
+run_timing() {
+  local now t0="${RUN_T0:-}" m0="${RUN_MODEL_T0:-}" m1="${RUN_MODEL_T1:-}"
+  now=$(run_clock)
+  RUN_TIMING=()
+  _run_count "$m0" || return 0
+  if _run_count "$t0"; then
+    RUN_TIMING=("pre_model_s=$((m0 - t0))")
+  fi
+  if [ -n "${RUN_MODEL_RETURNED:-}" ]; then
+    _run_count "$m1" || return 0
+    RUN_TIMING=(${RUN_TIMING[@]+"${RUN_TIMING[@]}"} "model_s=$((m1 - m0))")
+    if _run_count "$now"; then
+      RUN_TIMING=("${RUN_TIMING[@]}" "post_model_s=$((now - m1))")
+    fi
+  elif _run_count "$now"; then
+    RUN_TIMING=(${RUN_TIMING[@]+"${RUN_TIMING[@]}"} "model_s=$((now - m0))")
+  fi
+  return 0
+}
+
 # run_cleanup — best-effort; the EXIT trap. Its first command captures the
 # status the shell is exiting with. The completion backstop runs first: a run
 # whose completion is never published would read as live forever on the
@@ -84,7 +158,9 @@ run_agy_log_fallback() {
 run_cleanup() {
   _cleanup_rc=$?
   if [ -n "$RUNSTATE_LOG" ]; then
-    runstate_complete "$RUNSTATE_LOG" exit_code="$_cleanup_rc" reason=aborted 2>/dev/null || true
+    run_timing
+    runstate_complete "$RUNSTATE_LOG" exit_code="$_cleanup_rc" reason=aborted \
+      ${RUN_TIMING[@]+"${RUN_TIMING[@]}"} 2>/dev/null || true
   fi
   run_cleanup_files
   [ -z "${AGY_CLI_LOG_TMPDIR:-}" ] || rm -rf "$AGY_CLI_LOG_TMPDIR" 2>/dev/null || true
