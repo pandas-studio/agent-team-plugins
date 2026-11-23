@@ -63,7 +63,9 @@
 # --summary replaces the stdout replay with one JSON document (see summary_emit)
 # once the model call has returned; before that, and on a signal during the
 # call, stdout stays empty. Exit code, stderr, receipt, manifest and the result
-# files are what the same run writes without it.
+# files are what the same run writes without it, but for one stderr notice:
+# an out-of-band transcript (see run_cleanup_files) is kept and named at exit,
+# after the `(log: …)` line, even when the review was published.
 set -euo pipefail
 # Baseline for the run metadata's completion.timing (run_clock and run_timing
 # in lib/run-lifecycle.sh, sourced later): the epoch second, or empty.
@@ -585,6 +587,7 @@ run_cleanup_files() {
   [ -z "${TRANSCRIPT_TMP:-}" ] || rm -f "$TRANSCRIPT_TMP" || true
   [ -z "${FROZEN_TRANSCRIPT:-}" ] || rm -f "$FROZEN_TRANSCRIPT" || true
   [ -z "${TRANSCRIPT_SNAP:-}" ] || rm -f "$TRANSCRIPT_SNAP" || true
+  [ -z "${SUMMARY_SNAP:-}" ] || rm -f "$SUMMARY_SNAP" || true
 }
 run_install_traps
 run_agy_log_fallback
@@ -808,44 +811,72 @@ INVOCATION_RC="$RC"
 #   result       the published .review.json as it is, or null when none was
 #                published (the review's fields keep their meaning there:
 #                a null findings.* is unknown, and so on)
-#   final_text   the .final.md text when result.status is "ok" and the file
-#                is at most 64 KiB, else null (a failed run's final is never
-#                read for a verdict); final_truncated says which
+#   final_text   the .final.md text when result.status is "ok", the file is
+#                at most 64 KiB and it is UTF-8, else null (a failed run's
+#                final is never read for a verdict)
+#   final_truncated    true when the size was the reason
+#   final_unavailable  null, "unreadable" or "not-utf8": why an ok result's
+#                final is not inlined (jq would replace invalid bytes)
 #   error        null, or "result-write-failed: <step>"
 # The verdict and counts are read from `result`; final_text is there for what
-# a caller used to read the final for (NEED RESEARCH, NEED CONTEXT). The
-# document is rendered into a variable by one jq call and written at once. If
-# rendering fails, a fixed document built from the exit code alone is written
-# instead. Neither changes the exit code. Called once, after the result,
-# receipt and manifest are published (or have failed to be).
+# a caller used to read the final for (NEED RESEARCH, NEED CONTEXT).
+# Each input is read once: `result` and its status come from the result JSON
+# the caller already validated (passed in, never the file again), and the
+# final from one bounded read into a snapshot that decides the size, the
+# encoding check and the text alike. The document is rendered by one jq call
+# into a variable. If rendering fails, or the exit code is not an integer, a
+# fixed document built from the exit code alone is written instead. The write
+# runs in a subshell: a builtin printf to a pipe with no reader would kill this
+# shell with SIGPIPE before the completion is published (measured on Bash
+# 3.2.57: rc 141 in place, the parent's own rc from a subshell). None of this
+# changes the exit code. Called once, after the result, receipt and manifest
+# are published (or have failed to be).
 SUMMARY_FINAL_MAX=65536
+SUMMARY_SNAP=""
 summary_emit() {
-  local result_path="$1" error="$2" doc status="" final_src=/dev/null use_final=false
-  local truncated=false size code
-  [ -z "$result_path" ] || status=$(jq -r '.status' "$result_path" 2>/dev/null) || status=""
-  if [ "$status" = ok ] && [ -f "$FINAL" ]; then
-    size=$(wc -c < "$FINAL" 2>/dev/null | tr -d ' ') || size=""
-    case "$size" in
-      '' | *[!0-9]*) ;;
-      *) if [ "$size" -le "$SUMMARY_FINAL_MAX" ]; then final_src="$FINAL"; use_final=true; else truncated=true; fi ;;
-    esac
+  local result_path="$1" result_json="$2" error="$3" doc="" status="" code=""
+  local final_src=/dev/null use_final=false truncated=false unavailable="" size
+  case "$RC" in '' | *[!0-9]*) ;; *) code="$RC" ;; esac
+  [ -z "$result_json" ] || status=$(printf '%s\n' "$result_json" | jq -r '.status' 2>/dev/null) || status=""
+  if [ "$status" = ok ]; then
+    SUMMARY_SNAP=$(mktemp "$LOG_DIR/ask-reviewer-summary.XXXXXX" 2>/dev/null) || SUMMARY_SNAP=""
+    if [ -n "$SUMMARY_SNAP" ] \
+       && { head -c "$((SUMMARY_FINAL_MAX + 1))" < "$FINAL" > "$SUMMARY_SNAP"; } 2>/dev/null; then
+      size=$(wc -c < "$SUMMARY_SNAP" | tr -d ' ') || size=""
+      case "$size" in
+        '' | *[!0-9]*) unavailable=unreadable ;;
+        *) if [ "$size" -gt "$SUMMARY_FINAL_MAX" ]; then
+             truncated=true
+           elif iconv -f UTF-8 -t UTF-8 < "$SUMMARY_SNAP" > /dev/null 2>&1; then
+             final_src="$SUMMARY_SNAP"; use_final=true
+           else
+             unavailable=not-utf8
+           fi ;;
+      esac
+    else
+      unavailable=unreadable
+    fi
   fi
-  doc=$(jq -nc \
-    --argjson exit_code "$RC" --arg model "$REVIEWER_MODEL" \
-    --arg log "$LOG" --arg final "$FINAL" --arg result "$result_path" --arg error "$error" \
-    --slurpfile res "${result_path:-/dev/null}" --rawfile final_text "$final_src" \
-    --argjson use_final "$use_final" --argjson truncated "$truncated" \
-    '{summary_version: 1, exit_code: $exit_code, model: $model,
-      paths: {log: $log, final: $final, result: (if $result == "" then null else $result end)},
-      result: (if $result == "" then null else $res[0] end),
-      final_text: (if $use_final then $final_text else null end),
-      final_truncated: $truncated,
-      error: (if $error == "" then null else $error end)}' 2>/dev/null) || doc=""
-  if [ -z "$doc" ]; then
-    case "$RC" in '' | *[!0-9]*) code=null ;; *) code="$RC" ;; esac
-    doc='{"summary_version":1,"exit_code":'"$code"',"result":null,"final_text":null,"error":"summary-unavailable"}'
+  if [ -n "$code" ]; then
+    doc=$(printf '%s\n' "${result_json:-null}" | jq -c \
+      --argjson exit_code "$code" --arg model "$REVIEWER_MODEL" \
+      --arg log "$LOG" --arg final "$FINAL" --arg result "$result_path" --arg error "$error" \
+      --rawfile final_text "$final_src" --argjson use_final "$use_final" \
+      --argjson truncated "$truncated" --arg unavailable "$unavailable" \
+      '. as $res
+       | {summary_version: 1, exit_code: $exit_code, model: $model,
+          paths: {log: $log, final: $final, result: (if $result == "" then null else $result end)},
+          result: $res,
+          final_text: (if $use_final then $final_text else null end),
+          final_truncated: $truncated,
+          final_unavailable: (if $unavailable == "" then null else $unavailable end),
+          error: (if $error == "" then null else $error end)}' 2>/dev/null) || doc=""
   fi
-  printf '%s\n' "$doc" || true
+  [ -z "$SUMMARY_SNAP" ] || rm -f "$SUMMARY_SNAP" 2>/dev/null || true
+  SUMMARY_SNAP=""
+  [ -n "$doc" ] \
+    || doc='{"summary_version":1,"exit_code":'"${code:-null}"',"result":null,"final_text":null,"error":"summary-unavailable"}'
+  ( printf '%s\n' "$doc" ) 2>/dev/null || true
   return 0
 }
 result_output_failed() {
@@ -861,7 +892,7 @@ result_output_failed() {
   # exits — without the replay here, a result-write failure would lose it.
   # With --summary the summary takes its place and names no result.
   if [ "$SUMMARY" -eq 1 ]; then
-    summary_emit "" "result-write-failed: $1"
+    summary_emit "" "" "result-write-failed: $1"
   else
     emit_transcript
   fi
@@ -928,7 +959,7 @@ fi
 manifest_finalize || result_output_failed 'finalize manifest'
 # Completion is published only after the final, result and manifest are ready.
 if [ "$SUMMARY" -eq 1 ]; then
-  summary_emit "$RESULT" ""
+  summary_emit "$RESULT" "$RESULT_JSON" ""
 else
   emit_transcript
 fi

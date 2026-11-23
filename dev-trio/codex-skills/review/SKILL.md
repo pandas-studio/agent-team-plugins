@@ -141,7 +141,8 @@ the run.
   plugin update.
 
 Capture this invocation's exit code and the exact log/final/result paths from
-its last stderr line. Read that exact `.review.json`: it is the parsed result
+the last stderr line that starts with `(log:` (a notice can follow it). Read
+that exact `.review.json`: it is the parsed result
 the wrapper, manifest and dashboard share. Do not parse verdicts or count
 bullets in Markdown, and do not use `latest` artifacts.
 

@@ -121,7 +121,7 @@ Worked example — the argument string is `focus on src/agent.py concurrency --w
 
 ## 3 · Surface the verdict after completion
 
-The wrapper reports exact paths for this invocation in its final stderr line:
+The wrapper reports exact paths for this invocation in the last stderr line that starts with `(log:` (a notice can follow it):
 
 ```text
 (log: .../reviewer-<TS>-<PID>.log, final: .../reviewer-<TS>-<PID>.final.md, result: .../reviewer-<TS>-<PID>.review.json, rc=...)
