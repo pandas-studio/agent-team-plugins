@@ -59,6 +59,9 @@
 # when the streamed stdout duplicates or drops the closing block.
 # Override log root via DEV_TRIO_LOG_DIR=/abs/path.
 set -euo pipefail
+# Baseline for the run metadata's completion.timing (run_clock and run_timing
+# in lib/run-lifecycle.sh, sourced later): the epoch second, or empty.
+RUN_T0=$(date +%s 2>/dev/null) || RUN_T0=""
 
 usage() {
   cat <<'EOF'
@@ -706,6 +709,7 @@ fi
 # below reaches the caller. Nothing extra is handed to the CLI: a descriptor of
 # the caller's own streams is exactly what a leaked descendant must not be
 # given, which is why a saved duplicate was rejected for this.
+run_mark_model_start
 SIGNAL_RC=0
 trap 'SIGNAL_RC=130' INT
 trap 'SIGNAL_RC=143' TERM
@@ -713,10 +717,12 @@ set +e
 REGISTRY_WORKSPACE="$AGY_WORKSPACE" REGISTRY_CLI_LOG="$AGY_CLI_LOG" \
   REGISTRY_CMD_OVERRIDE="${REVIEWER_CLI:-}" registry_run "$REVIEWER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8 7<&- 9>&-
 RC=$?
+run_mark_model_returned
 set -e
 trap 'exit 130' INT
 trap 'exit 143' TERM
 [ -z "$TRANSCRIPT_OFFSET" ] || TRANSCRIPT_END="$(dev_trio_fd_size 8)" || TRANSCRIPT_END=""
+run_mark_model_end
 # An interrupted run owes the caller no review — a result parsed from a partial
 # transcript would be worse than none — and it does not put the partial
 # transcript on stdout either. It names its artifacts instead, in the same
@@ -794,7 +800,9 @@ result_output_failed() {
   exec 8>&- 7<&- 9>&- || true
   echo "[ask-reviewer] result write failed: $1 (log: $LOG, final: $FINAL, rc=$RC)" >&2
   # Last, so nothing fallible can change the code after it is recorded.
-  [ -z "$RUNSTATE_LOG" ] || runstate_complete "$RUNSTATE_LOG" exit_code="$RC" reason=result-write-failed || true
+  run_timing
+  [ -z "$RUNSTATE_LOG" ] || runstate_complete "$RUNSTATE_LOG" exit_code="$RC" reason=result-write-failed \
+    ${RUN_TIMING[@]+"${RUN_TIMING[@]}"} || true
   exit "$RC"
 }
 # A review that failed to parse is a headless denial (#103) only when all of
@@ -875,6 +883,8 @@ echo "(log: $LOG, final: $FINAL, result: $RESULT, rc=$RC)" >&2
 # Last, so nothing fallible runs after it: a completion recording rc=0 that the
 # caller never receives is worse than none at all (the EXIT trap then records
 # the real status).
-[ -z "$RUNSTATE_LOG" ] || runstate_complete "$RUNSTATE_LOG" exit_code="$RC" verdict="$VERDICT" reason=ok || true
+run_timing
+[ -z "$RUNSTATE_LOG" ] || runstate_complete "$RUNSTATE_LOG" exit_code="$RC" verdict="$VERDICT" reason=ok \
+  ${RUN_TIMING[@]+"${RUN_TIMING[@]}"} || true
 REVIEW_PUBLISHED=1
 exit "$RC"

@@ -36,6 +36,9 @@
 # is not covered — the header write above still aborts the wrapper under
 # errexit, as it did before this change.
 set -euo pipefail
+# Baseline for the run metadata's completion.timing (run_clock and run_timing
+# in lib/run-lifecycle.sh, sourced later): the epoch second, or empty.
+RUN_T0=$(date +%s 2>/dev/null) || RUN_T0=""
 
 usage() {
   cat <<'EOF'
@@ -365,12 +368,15 @@ else
 fi
 # Where this run's own output starts: a notice quoted in the question or the
 # context above it is not evidence of a denial.
+run_mark_model_start
 set +e
 REGISTRY_WORKSPACE="$AGY_WORKSPACE" REGISTRY_CLI_LOG="$AGY_CLI_LOG" \
   REGISTRY_CMD_OVERRIDE="${RESEARCHER_CLI:-}" registry_run_answer "$RESEARCHER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8 7<&- 9>&-
 RC=$?
+run_mark_model_returned
 set -e
 [ -z "$LOG_OFFSET" ] || LOG_END="$(dev_trio_fd_size 8)" || LOG_END=""
+run_mark_model_end
 # Only an empty answer (5) is looked into: a run that answered is not a denial.
 if [ "$RC" -eq 5 ]; then
   AGY_DENIED="$(research_agy_denials 2>/dev/null)" || AGY_DENIED=""
@@ -399,5 +405,7 @@ if [ "$RC" -ne 0 ]; then
   REASON=failed
   research_failure_hint "$RC" || true
 fi
-[ -z "$RUNSTATE_LOG" ] || runstate_complete "$RUNSTATE_LOG" exit_code="$RC" reason="$REASON" || true
+run_timing
+[ -z "$RUNSTATE_LOG" ] || runstate_complete "$RUNSTATE_LOG" exit_code="$RC" reason="$REASON" \
+  ${RUN_TIMING[@]+"${RUN_TIMING[@]}"} || true
 exit "$RC"

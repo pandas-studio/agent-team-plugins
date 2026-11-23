@@ -31,6 +31,13 @@ no_match_tree() { ! grep -rq "$1" "$2"; }
 no_runstate_begin() { ! runstate_begin "$1" channel=reviewer wrapper=ask-reviewer.sh 2>/dev/null; }
 no_runstate_complete() { ! runstate_complete "$1" exit_code=0 2>/dev/null; }
 no_runstate_read() { ! runstate_read "$1" >/dev/null 2>&1; }
+# completion.timing shapes (dev-trio/lib/runstate.sh). Each names all three
+# keys, so a missing key and a null value are told apart.
+TIMING_SECONDS='type == "number" and . >= 0 and floor == .'
+TIMING_KEYS='(.completion.timing | keys) == ["model_s", "post_model_s", "pre_model_s"]'
+TIMING_ALL="$TIMING_KEYS and (.completion.timing | all(.[]; $TIMING_SECONDS))"
+TIMING_NO_POST="$TIMING_KEYS and .completion.timing.post_model_s == null and (.completion.timing | [.pre_model_s, .model_s] | all(.[]; $TIMING_SECONDS))"
+TIMING_NONE='.completion.timing == {pre_model_s: null, model_s: null, post_model_s: null}'
 fixture() {
   printf '## Verdict\n%s\n\n## Findings\n\n### Blocker\n- 없음.\n\n### Major\n- None.\n\n### Minor / Nit\n- 없음\n' "$1" > "$TMP/review.md"
 }
@@ -688,6 +695,7 @@ for invocation_rc in 0 7; do
   check 'artifact failure warns about the incomplete log' grep -q 'final log append failed' "$TMP/io.err"
   check 'artifact failure retains its completion reason' json_is "${failed_log%.log}.run.json" \
     ".completion.exit_code==$expected_rc and .completion.verdict==null and .completion.reason==\"result-write-failed\""
+  check 'artifact failure still times the run' json_is "${failed_log%.log}.run.json" "$TIMING_ALL"
 done
 
 # Swapping the pathname after capture must not retarget the held END descriptor.
@@ -992,6 +1000,10 @@ for interrupt_signal in TERM INT; do
     test "$interrupted_rc" -eq "$expected_rc"
   check "an interrupted run records an aborted completion ($interrupt_signal)" \
     json_is "${interrupted_log%.log}.run.json" ".completion.reason==\"aborted\" and .completion.exit_code==$expected_rc"
+  # The signal is recorded while the call runs, the call comes back, and only
+  # then does the wrapper exit: both marks exist when the abort is published.
+  check "an interrupted run times the call that came back ($interrupt_signal)" \
+    json_is "${interrupted_log%.log}.run.json" "$TIMING_ALL"
   check "an interrupted run publishes no review ($interrupt_signal)" \
     test ! -f "${interrupted_log%.log}.review.json"
   check "an interrupted run names its artifacts ($interrupt_signal)" \
@@ -1105,9 +1117,32 @@ check 'metadata binds its own artifacts' json_is "$RUN" \
   ".log_path==\"$LOG\" and .result_path==\"$RESULT\" and .final_path==\"$FINAL\""
 check 'metadata records completion once the run ends' json_is "$RUN" \
   '.completion.exit_code==0 and .completion.verdict=="SHIP" and .completion.reason=="ok"'
+check 'a finished run records the time before, in and after the model call' json_is "$RUN" "$TIMING_ALL"
 check 'standalone run is not marked nested' json_is "$RUN" '.nested==false'
 check 'metadata carries the focus it was given' json_is "$RUN" \
   '(.inputs|map(select(.kind=="focus"))|length)==1'
+
+# model_s is the time inside the model call. A 1.2 s call crosses at least one
+# whole-second boundary, so it reads 1 or more however the clock falls.
+cat > "$TMP/pausing-reviewer" <<'STUB'
+#!/usr/bin/env bash
+sleep 1.2
+exec "$PAUSING_REVIEWER" "$@"
+STUB
+chmod +x "$TMP/pausing-reviewer"
+fixture 'SHIP — timed run'
+run_review 0 CODEX_CLI="$TMP/pausing-reviewer" PAUSING_REVIEWER="$TMP/reviewer"
+TIMED_RUN="${LOG%.log}.run.json"
+check 'time spent in the model call is counted as model time' json_is "$TIMED_RUN" \
+  "$TIMING_ALL and .completion.timing.model_s >= 1"
+# The clock is the epoch, not Bash's SECONDS, which the caller controls: an
+# inherited value (large or negative) changes nothing.
+for inherited_seconds in 100000 -100; do
+  fixture "SHIP — inherited SECONDS=$inherited_seconds"
+  run_review 0 SECONDS="$inherited_seconds"
+  check "an inherited SECONDS=$inherited_seconds leaves the timing whole" json_is "${LOG%.log}.run.json" \
+    "$TIMING_ALL and .completion.timing.pre_model_s < 1000"
+done
 
 # A nested dispatch emits no manifest by contract, but the dashboard still has
 # to be able to describe it — so it does emit run metadata.
@@ -1132,6 +1167,22 @@ check 'completing a run with no metadata fails' \
   no_runstate_complete "$TMP/log/review-test/orphan-20000101-000000-1.log"
 check 'failed completion invents no metadata' \
   test ! -e "$TMP/log/review-test/orphan-20000101-000000-1.run.json"
+# completion.timing at the function: what a caller with no marks publishes, and
+# that a bad timing value costs only itself, never the completion.
+UNMARKED="$TMP/log/review-test/unmarked-20000101-000000-1.log"
+runstate_begin "$UNMARKED" channel=reviewer wrapper=ask-reviewer.sh
+runstate_complete "$UNMARKED" exit_code=4 reason=failed
+check 'a completion with no timing arguments has three null timings' \
+  json_is "${UNMARKED%.log}.run.json" "$TIMING_NONE and .completion.exit_code==4"
+BADTIME="$TMP/log/review-test/badtime-20000101-000000-1.log"
+runstate_begin "$BADTIME" channel=reviewer wrapper=ask-reviewer.sh
+check 'a bad timing value does not fail the completion' \
+  runstate_complete "$BADTIME" exit_code=0 pre_model_s=3 model_s=abc post_model_s=-1
+check 'a bad timing value is published as null beside the good one' \
+  json_is "${BADTIME%.log}.run.json" \
+  '.completion.exit_code==0 and .completion.timing == {pre_model_s: 3, model_s: null, post_model_s: null}'
+check 'metadata with null timings is readable' runstate_read "${BADTIME%.log}.run.json" >/dev/null
+check 'metadata with timings from a real run is readable' runstate_read "$TIMED_RUN" >/dev/null
 # Malformed metadata yields nothing at all — never a half-populated frame.
 for bad in '{"schema_version": 1, "chan' '' '[]' '{"schema_version":2}'; do
   printf '%s' "$bad" > "$TMP/bad.run.json"
@@ -1182,6 +1233,7 @@ check 'callers receive the answer on stdout' grep -q 'loader resolves the role' 
 check 'callers do not receive diagnostics as an answer' no_match 'Ripgrep not found' "$TMP/research.out"
 check 'research metadata describes the channel' json_is "$AGY_RUN" \
   '.channel=="researcher" and .role=="researcher" and .completion.exit_code==0'
+check 'a finished research run records all three timings' json_is "$AGY_RUN" "$TIMING_ALL"
 check 'research metadata has no review result' json_is "$AGY_RUN" '.result_path==null'
 research_dashboard
 check 'research dashboard shows the lead' grep -q 'loader resolves the role' "$TMP/dashboard.out"
@@ -1239,7 +1291,11 @@ cat > "$TMP/slow-researcher" <<'STUB'
 sleep 30
 STUB
 chmod +x "$TMP/slow-researcher"
+# The marks are inherited too. An end mark that survived would give this run
+# a post_model_s it never had (and a negative model_s, published as null), and
+# a surviving RUN_MODEL_RETURNED would cost it the model_s it has.
 env -u DEV_TRIO_RESEARCHER_MODEL -u RESEARCHER_CLI -u AGY_CLI \
+  RUN_MODEL_T0=1 RUN_MODEL_T1=1 RUN_MODEL_RETURNED=1 \
   AGENT_TEAM=review-test TMUX='' DEV_TRIO_LOG_DIR="$TMP/log" \
   AGY_CLI="$TMP/slow-researcher" RESEARCH_STARTED="$TMP/started" \
   "$ROOT/dev-trio/bin/ask-researcher.sh" 'aborted question' \
@@ -1255,8 +1311,117 @@ ABORTED_RUN="${ABORTED_RUN%.log}.run.json"
 check 'aborted run publishes a completion' json_is "$ABORTED_RUN" '.completion != null'
 check 'aborted run is recorded as aborted' json_is "$ABORTED_RUN" '.completion.reason=="aborted"'
 check 'aborted run records the signal exit code' json_is "$ABORTED_RUN" '.completion.exit_code==143'
+# The research wrapper exits from its signal trap while the call is still
+# running: the start mark exists, the end mark does not.
+check 'aborted run times the call up to the abort, and nothing after it' \
+  json_is "$ABORTED_RUN" "$TIMING_NO_POST"
 research_dashboard
 check 'aborted run is not reported as still running' no_match 'no completion recorded' "$TMP/dashboard.out"
+
+# A run that ends after its metadata exists but before the model call: the
+# latest link cannot be made, errexit ends the wrapper, and the EXIT trap
+# publishes the completion with no timing.
+mkdir "$TMP/latest-ln-shim"
+cat > "$TMP/latest-ln-shim/ln" <<'SHIM'
+#!/bin/sh
+case "$*" in *"/.latest-"*) exit 1 ;; esac
+exec /bin/ln "$@"
+SHIM
+chmod +x "$TMP/latest-ln-shim/ln"
+fixture 'SHIP — never reached'
+premodel_rc=0
+invoke PATH="$TMP/latest-ln-shim:$PATH" DEV_TRIO_LOG_DIR="$TMP/premodel-log" \
+  > "$TMP/premodel.out" 2> "$TMP/premodel.err" || premodel_rc=$?
+PREMODEL_RUN=$(find "$TMP/premodel-log" -name 'reviewer-*.run.json')
+check 'a run that fails before the model call exits nonzero' test "$premodel_rc" -ne 0
+check 'a run that fails before the model call has one metadata file' \
+  test "$(printf '%s\n' "$PREMODEL_RUN" | grep -c .)" -eq 1
+check 'a run that fails before the model call publishes no timing' json_is "$PREMODEL_RUN" \
+  "$TIMING_NONE and .completion.reason==\"aborted\" and .completion.exit_code==$premodel_rc"
+
+# A BASH_ENV that unsets SECONDS changes nothing: it is not the clock.
+printf 'unset SECONDS\n' > "$TMP/unset-seconds.sh"
+help_without_seconds() { env BASH_ENV="$TMP/unset-seconds.sh" "$ROOT/dev-trio/bin/$1" --help > /dev/null; }
+for wrapper in ask-reviewer.sh ask-researcher.sh; do
+  check "an unset SECONDS leaves --help working ($wrapper)" help_without_seconds "$wrapper"
+done
+fixture 'SHIP — unset SECONDS'
+run_review 0 BASH_ENV="$TMP/unset-seconds.sh"
+check 'an unset SECONDS leaves the timing whole' json_is "${LOG%.log}.run.json" "$TIMING_ALL"
+
+# A clock that cannot be read costs the timing, nothing else: only `date +%s`
+# fails here, so the other timestamps are still written.
+REAL_DATE=$(command -v date)
+mkdir "$TMP/clockless-shim"
+cat > "$TMP/clockless-shim/date" <<SHIM
+#!/bin/sh
+[ "\${1:-}" != +%s ] || exit 1
+exec "$REAL_DATE" "\$@"
+SHIM
+chmod +x "$TMP/clockless-shim/date"
+fixture 'SHIP — no clock'
+run_review 0 PATH="$TMP/clockless-shim:$PATH"
+check 'a run with no clock still records its completion' json_is "${LOG%.log}.run.json" \
+  "$TIMING_NONE and .completion.reason==\"ok\" and .completion.exit_code==0"
+
+# Each mark runs `date`, so where a mark sits decides what happens while that
+# `date` runs. This shim acts on the Nth `date +%s` of a review: 1 is the
+# wrapper's baseline, 2 the start mark, 3 the end mark.
+mkdir "$TMP/acting-clock"
+cat > "$TMP/acting-clock/date" <<'SHIM'
+#!/bin/sh
+if [ "${1:-}" = +%s ]; then
+  n=$(( $(cat "$CLOCK_COUNT" 2>/dev/null || echo 0) + 1 ))
+  echo "$n" > "$CLOCK_COUNT"
+  if [ "$n" = "$CLOCK_ACT_AT" ]; then
+    case "$CLOCK_ACT" in
+      term)
+        i=0
+        while [ ! -s "$CLOCK_PIDFILE" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+        kill -TERM "$(cat "$CLOCK_PIDFILE")"
+        sleep 0.3 ;;
+      late) printf 'LATE-CLOCK-BYTES\n' >&8 ;;
+    esac
+  fi
+fi
+exec "$CLOCK_REAL_DATE" "$@"
+SHIM
+chmod +x "$TMP/acting-clock/date"
+cat > "$TMP/marking-reviewer" <<'STUB'
+#!/usr/bin/env bash
+: > "$MODEL_RAN"
+exec "$MARKED_REVIEWER" "$@"
+STUB
+chmod +x "$TMP/marking-reviewer"
+
+# A TERM during the start mark ends the run before the model is launched: the
+# mark is taken before the traps that only record a signal.
+fixture 'SHIP — cancelled at the start mark'
+rm -f "$TMP/clock-count" "$TMP/clock-pid" "$TMP/model-ran"
+env "${INVOKE_ENV[@]}" PATH="$TMP/acting-clock:$PATH" CLOCK_REAL_DATE="$REAL_DATE" \
+  CLOCK_COUNT="$TMP/clock-count" CLOCK_ACT_AT=2 CLOCK_ACT=term CLOCK_PIDFILE="$TMP/clock-pid" \
+  CODEX_CLI="$TMP/marking-reviewer" MARKED_REVIEWER="$TMP/reviewer" MODEL_RAN="$TMP/model-ran" \
+  DEV_TRIO_LOG_DIR="$TMP/cancel-log" \
+  "$ROOT/dev-trio/bin/ask-reviewer.sh" 'fixture review' > "$TMP/cancel.out" 2> "$TMP/cancel.err" &
+cancel_pid=$!
+echo "$cancel_pid" > "$TMP/clock-pid"
+cancel_rc=0
+wait "$cancel_pid" || cancel_rc=$?
+check 'a TERM during the start mark exits 143' test "$cancel_rc" -eq 143
+check 'a TERM during the start mark launches no model' test ! -e "$TMP/model-ran"
+check 'a TERM during the start mark records an aborted run' \
+  json_is "$(find "$TMP/cancel-log" -name 'reviewer-*.run.json')" \
+  '.completion.reason=="aborted" and .completion.exit_code==143'
+
+# Bytes written while the end mark runs come after the transcript's end was
+# sampled, so they reach neither the replay on stdout nor the final.
+fixture 'SHIP — late bytes at the end mark'
+rm -f "$TMP/clock-count"
+run_review 0 PATH="$TMP/acting-clock:$PATH" CLOCK_REAL_DATE="$REAL_DATE" \
+  CLOCK_COUNT="$TMP/clock-count" CLOCK_ACT_AT=3 CLOCK_ACT=late
+check 'the end mark ran the acting clock' grep -q 'LATE-CLOCK-BYTES' "$LOG"
+check 'bytes written during the end mark are not replayed' no_match 'LATE-CLOCK-BYTES' "$TMP/wrapper.out"
+check 'bytes written during the end mark are not in the final' no_match 'LATE-CLOCK-BYTES' "$FINAL"
 
 # Native answer capture. The artifact is authoritative: a CLI that claims a
 # native final and writes none has produced no answer, however it exited, and a

@@ -36,14 +36,35 @@
 #     inputs: [ { kind, value?, path?, bytes?, sha256? } ],
 #                       # bytes + sha256 (from inputdigest=) stand in for a
 #                       # text too large to keep here, e.g. a research context
-#     completion: null | { ended_at, exit_code, verdict, reason }
+#     completion: null | { ended_at, exit_code, verdict, reason, timing }
 #                       # reason: ok | failed | aborted | result-write-failed
 #                       #       | final-write-failed
+#                       # timing: { pre_model_s, model_s, post_model_s }, whole
+#                       # seconds or null, set from the marks that existed when
+#                       # the completion was published:
+#                       #   no model start mark  -> all three null
+#                       #   start mark only      -> pre_model_s, model_s (up to
+#                       #                           publication), post null
+#                       #   start and end marks  -> all three
+#                       # Each value is null as well when one of its two clock
+#                       # readings (`date +%s`) failed; the others still count.
+#                       # The clock is the wall clock: a negative value (the
+#                       # system clock stepped back) is null.
+#                       # pre_model_s runs from the wrapper's first line to the
+#                       # model start mark, so it covers argument parsing, the
+#                       # snapshot and the prompt. started_at falls inside it,
+#                       # stamped once the prompt is built: the setup before
+#                       # that is in pre_model_s, not after started_at.
+#                       # model_s is the wrapper's one registry call: registry_run
+#                       # for a review, registry_run_answer for research, which
+#                       # also covers its temp file, `tee` and answer check.
+#                       # Documents written before this field existed have no timing key.
 #   }
 #
 # Public API:
 #   runstate_begin    <log_path> key=value ...
 #   runstate_complete <log_path> exit_code=<n> [verdict=<v>] [reason=<r>]
+#                     [pre_model_s=<n>] [model_s=<n>] [post_model_s=<n>]
 #   runstate_published <log_path>     # rc=0 iff completion is already published
 #   runstate_read     <run_json_path> # validating reader; prints the document
 #   runstate_path     <log_path>      # echo the sidecar path
@@ -254,7 +275,11 @@ runstate_published() {
 }
 
 # runstate_complete <log_path> exit_code=<n> [verdict=<v>] [reason=<r>]
+#                   [pre_model_s=<n>] [model_s=<n>] [post_model_s=<n>]
 #   Rewrites the same file atomically — no second .done sidecar. Idempotent.
+#   The three timing values are optional and never fatal: one that is absent or
+#   is not a non-negative integer is published as null, so a timing problem
+#   cannot cost the dashboard the completion itself.
 runstate_complete() {
   local log_path="${1:-}"
   shift || true
@@ -263,6 +288,7 @@ runstate_complete() {
     return 2
   fi
   local exit_code="" verdict="" reason="ok"
+  local pre_model_s="" model_s="" post_model_s=""
   local arg k v
   for arg in "$@"; do
     k="${arg%%=*}"
@@ -271,6 +297,9 @@ runstate_complete() {
       exit_code) exit_code="$v" ;;
       verdict)   verdict="$v" ;;
       reason)    reason="$v" ;;
+      pre_model_s)  pre_model_s="$v" ;;
+      model_s)      model_s="$v" ;;
+      post_model_s) post_model_s="$v" ;;
       *) echo "runstate_complete: unknown key '$k'" >&2; return 2 ;;
     esac
   done
@@ -292,11 +321,20 @@ runstate_complete() {
     --arg ended_at "$(_runstate_now_iso)" \
     --arg verdict "$verdict" \
     --arg reason "$reason" \
-    '.completion = {
+    --arg pre_model_s "$pre_model_s" \
+    --arg model_s "$model_s" \
+    --arg post_model_s "$post_model_s" \
+    'def seconds: if test("\\A[0-9]+\\z") then tonumber else null end;
+     .completion = {
        ended_at: $ended_at,
        exit_code: $exit_code,
        verdict: ( if $verdict == "" then null else $verdict end ),
-       reason: $reason
+       reason: $reason,
+       timing: {
+         pre_model_s: ($pre_model_s | seconds),
+         model_s: ($model_s | seconds),
+         post_model_s: ($post_model_s | seconds)
+       }
      }' "$dst" 2>/dev/null) || {
     echo "runstate_complete: could not update $dst" >&2
     return 1
