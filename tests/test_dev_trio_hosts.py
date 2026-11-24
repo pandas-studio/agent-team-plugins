@@ -492,6 +492,80 @@ _dev_trio_check_log_ancestors "$CHECK_PATH" "$CHECK_TEAM" "$CHECK_UID" "$PRIVATE
         self.assertIn("cannot identify caller", result.stderr)
         self.assertFalse((root / "host-test").exists())
 
+    def _prepare_log_dir(self, request, shim_acl=True):
+        # The shim isolates the mode and ownership checks from Darwin's ACL
+        # parsing, so both platforms test the same walk.
+        shim = "_dev_trio_darwin_acl_safe() { return 0; }; " if shim_acl else ""
+        return subprocess.run(
+            ["bash", "-c", f'. "$1"; {shim}dev_trio_prepare_log_dir "$2"', "_",
+             str(self.plugin / "lib/host.sh"), str(request)],
+            env=self.env, stdin=subprocess.DEVNULL, text=True, capture_output=True,
+            timeout=10)
+
+    def _private_dir(self, path, mode=0o700):
+        path.mkdir()
+        path.chmod(mode)
+        return path
+
+    def _newline_refusal(self, physical):
+        quoted = subprocess.run(["bash", "-c", 'printf %q "$1"', "_", str(physical)],
+                                text=True, capture_output=True, check=True).stdout
+        return f"dev-trio: log directory name ends in a newline: {quoted}\n"
+
+    def test_log_directory_names_ending_in_newline_are_checked_as_written(self):
+        with self.subTest("unsafe parent ending in a newline, safe sibling"):
+            base = self._private_dir(self.root / "unsafe parent")
+            self._private_dir(base / "logs")
+            unsafe = self._private_dir(base / "logs\n", 0o777)
+            result = self._prepare_log_dir(unsafe / "team")
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual(result.stdout, "")
+            # Caller- and root-owned refusals share this prefix.
+            self.assertIn(f"dev-trio: unsafe log ancestor: {unsafe} (", result.stderr)
+            self.assertFalse((unsafe / "team").exists())
+        with self.subTest("safe parent ending in a newline, unsafe sibling"):
+            base = self._private_dir(self.root / "safe parent")
+            self._private_dir(base / "logs", 0o777)
+            safe = self._private_dir(base / "logs\n")
+            result = self._prepare_log_dir(safe / "team")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, f"{safe}/team\n")
+        with self.subTest("requested name ending in a newline"):
+            base = self._private_dir(self.root / "requested")
+            request = self._private_dir(base / "logs") / "team\n"
+            result = self._prepare_log_dir(request)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(result.stderr, self._newline_refusal(request))
+        with self.subTest("team symlink to a target ending in a newline, with a sibling"):
+            base = self._private_dir(self.root / "team link")
+            target = self._private_dir(base / "real\n")
+            self._private_dir(base / "real")
+            team = self._private_dir(base / "logs") / "team"
+            team.symlink_to(target, target_is_directory=True)
+            result = self._prepare_log_dir(team)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(result.stderr, self._newline_refusal(target))
+        with self.subTest("parent symlink to a target ending in a newline, no sibling"):
+            base = self._private_dir(self.root / "parent link")
+            target = self._private_dir(base / "real\n")
+            alias = base / "alias"
+            alias.symlink_to(target, target_is_directory=True)
+            result = self._prepare_log_dir(alias / "team")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, f"{target}/team\n")
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS ACL parsing")
+    def test_unsafe_parent_ending_in_newline_is_refused_before_mkdir_on_macos(self):
+        base = self._private_dir(self.root / "unsafe parent")
+        self._private_dir(base / "logs")
+        unsafe = self._private_dir(base / "logs\n", 0o777)
+        result = self._prepare_log_dir(unsafe / "team", shim_acl=False)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertFalse((unsafe / "team").exists())
+
     def test_macos_private_group_requires_exclusive_enumerated_membership(self):
         shim_dir = self.root / "account shims"
         shim_dir.mkdir()

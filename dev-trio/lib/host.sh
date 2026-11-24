@@ -195,7 +195,11 @@ _dev_trio_check_log_ancestors() {
       fi
     fi
     [ "$path" != / ] || break
-    path=$(dirname "$path")
+    # A command substitution drops trailing newlines, which would move the
+    # check from "logs<LF>" to "logs". dirname and pwd -P print exactly one
+    # newline: the sentinel keeps the name, and ${var%??} removes "<LF>x".
+    path=$(dirname "$path" && printf x) || return 1
+    path=${path%??}
   done
 }
 
@@ -233,9 +237,11 @@ dev_trio_prepare_log_dir() {
   fi
   existing="$requested"
   while [ ! -e "$existing" ] && [ ! -L "$existing" ]; do
-    existing=$(dirname "$existing")
+    existing=$(dirname "$existing" && printf x) || return 2
+    existing=${existing%??}
   done
-  existing_physical=$(cd -P "$existing" && pwd -P) || return 2
+  existing_physical=$(cd -P "$existing" && pwd -P && printf x) || return 2
+  existing_physical=${existing_physical%??}
   team_arg=""
   [ "$existing" != "$requested" ] || team_arg="$existing"
   _dev_trio_check_log_ancestors "$existing" "$team_arg" "$uid" "$private_gid" "$caller" || return 2
@@ -243,7 +249,14 @@ dev_trio_prepare_log_dir() {
   [ "$existing" != "$requested" ] || team_arg="$existing_physical"
   _dev_trio_check_log_ancestors "$existing_physical" "$team_arg" "$uid" "$private_gid" "$caller" || return 2
   (umask 077; mkdir -p "$requested") || return 2
-  physical=$(cd -P "$requested" && pwd -P) || return 2
+  physical=$(cd -P "$requested" && pwd -P && printf x) || return 2
+  physical=${physical%??}
+  # Callers read the printed path with $(...), which would drop this newline.
+  case "$physical" in
+    *$'\n')
+      printf 'dev-trio: log directory name ends in a newline: %q\n' "$physical" >&2
+      return 2 ;;
+  esac
   _dev_trio_check_log_ancestors "$physical" "$physical" "$uid" "$private_gid" "$caller" || return 2
   _dev_trio_check_log_ancestors "$requested" "$requested" "$uid" "$private_gid" "$caller" || return 2
   printf '%s\n' "$physical"
