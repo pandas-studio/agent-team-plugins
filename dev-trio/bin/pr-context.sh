@@ -318,59 +318,25 @@ if [ "$HEAD_STATE" = other ] || [ "$BASE_STATE" = other ]; then
   stop "failed: gh-data" 2
 fi
 
-# The remote to name in a fetch command: one whose fetch URL, after
-# url.<base>.insteadOf, is the pull request's repository. `origin` if it is
-# one, else the first by name, else the repository URL. Names that are not
-# plain are never put in a command.
-pick_remote() {
-  local listing name
-  REMOTE="https://$REPO_PATH"
-  REMOTE_PRINTABLE=1
-  listing=$(git_probe remote -v) || return 0
-  name=$(printf '%s\n' "$listing" | awk -v want="$REPO_PATH" '
-    BEGIN { want = tolower(want) }
-    NF == 3 && $3 == "(fetch)" {
-      url = tolower($2)
-      sub(/\/$/, "", url)
-      sub(/\.git$/, "", url)
-      if (url ~ /^https:\/\//) path = substr(url, 9)
-      else if (url ~ /^ssh:\/\/git@/) path = substr(url, 11)
-      else if (url ~ /^git@[^:\/]+:/) { path = substr(url, 5); sub(/:/, "/", path) }
-      else next
-      if (path != want) next
-      if ($1 == "origin") origin = 1
-      # Concatenation keeps the comparison a string one: remotes 10 and 2.
-      if (!found || ($1 "") < (first "")) first = $1
-      found = 1
-    }
-    END { if (origin) print "origin"; else if (found) print first }
-  ') || return 0
-  [ -n "$name" ] || return 0
-  REMOTE="$name"
-  case "$name" in
-    -*|*[!A-Za-z0-9._/-]*) REMOTE_PRINTABLE=0 ;;
-  esac
-}
-# Full ref names: on the remote a tag named main would win over the branch.
+# What to fetch is named by the pull request's repository URL, with full ref
+# names (on the remote a tag named main would win over the branch). A local
+# remote may use another transport or credentials; the caller substitutes it.
 if [ "$HEAD_STATE" = absent ] || [ "$BASE_STATE" = absent ]; then
-  pick_remote
+  REPO_URL="https://$REPO_PATH"
   _missing=""
   if [ "$HEAD_STATE" = absent ]; then
     _missing="head"
     say "head commit $HEAD_OID is not in this repository"
-    if [ "$REMOTE_PRINTABLE" -eq 1 ]; then
-      say "  git fetch $REMOTE refs/pull/$N/head"
-    else
-      say "  fetch pull/$N/head from https://$REPO_PATH by hand"
-    fi
+    say "  git fetch $REPO_URL refs/pull/$N/head"
   fi
   if [ "$BASE_STATE" = absent ]; then
     _missing="${_missing:+$_missing }base"
     say "base commit $BASE_OID is not in this repository"
-    if [ "$REMOTE_PRINTABLE" -eq 1 ] && [ -n "$BASE_REF" ]; then
-      say "  git fetch $REMOTE refs/heads/$BASE_REF"
+    # Git's own rule decides whether the branch name makes a valid ref.
+    if [ -n "$BASE_REF" ] && git_probe check-ref-format "refs/heads/$BASE_REF" >/dev/null 2>&1; then
+      say "  git fetch $REPO_URL refs/heads/$BASE_REF"
     else
-      say "  fetch the base branch from https://$REPO_PATH by hand"
+      say "  fetch the base branch from $REPO_URL by hand"
     fi
   fi
   stop "missing: $_missing" 4

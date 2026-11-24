@@ -4930,7 +4930,7 @@ exit 0
                 self.assertEqual(len([c for c in calls if "^{commit}" in c]), 2)
                 self.assertFalse([c for c in calls if {"fetch", "pull", "clone"} & set(c.split())], calls)
 
-    def test_pr_context_names_the_remote_of_the_pull_request_repository(self):
+    def test_pr_context_names_what_to_fetch_by_the_repository_url(self):
         base, _, _ = self.pr_repo()
         payload = self.pr_payload(base, self.PR_ABSENT)
         repo = "https://github.com/acme/widgets"
@@ -4940,42 +4940,25 @@ exit 0
             self.assert_pr_nothing_made(result, 4)
             return [line for line in result.stderr.splitlines() if line.startswith("[pr-context]   ")]
 
-        def remotes(**named):
-            for name in self.pr_git("remote").split():
-                self.pr_git("remote", "remove", name)
-            for name, url in named.items():
-                self.pr_git("remote", "add", name, url)
-
-        remotes(fork="https://github.com/someone/widgets.git")
-        self.assertEqual(advice(), [f"[pr-context]   git fetch {repo} refs/pull/55/head"])
-        remotes(origin="git@github.com:Acme/Widgets.git", alpha="https://github.com/acme/widgets")
-        self.assertEqual(advice(), ["[pr-context]   git fetch origin refs/pull/55/head"])
-        remotes(zeta="ssh://git@github.com/acme/widgets.git/", beta="https://github.com/acme/widgets.git",
-                origin="https://github.com/someone/widgets.git")
-        self.assertEqual(advice(), ["[pr-context]   git fetch beta refs/pull/55/head"])
-        # Each URL form on its own, so dropping one is seen.
-        remotes(zeta="ssh://git@github.com/acme/widgets.git/", origin="https://github.com/someone/widgets.git")
-        self.assertEqual(advice(), ["[pr-context]   git fetch zeta refs/pull/55/head"])
-        remotes(zeta="git@github.com:acme/widgets", origin="https://github.com/someone/widgets.git")
-        self.assertEqual(advice(), ["[pr-context]   git fetch zeta refs/pull/55/head"])
-        # The suffix is matched without regard to case, as the path is.
-        remotes(origin="https://github.com/Acme/Widgets.GIT", alpha="https://github.com/acme/widgets")
-        self.assertEqual(advice(), ["[pr-context]   git fetch origin refs/pull/55/head"])
-        # "First by name" is string order, even for names that are numbers.
-        remotes(**{"2": "https://github.com/acme/widgets", "10": "https://github.com/acme/widgets.git"})
-        self.assertEqual(advice(), ["[pr-context]   git fetch 10 refs/pull/55/head"])
-        # What a fetch would contact is the rewritten URL, not the configured one.
-        remotes(origin="https://github.com/acme/widgets.git")
-        self.pr_git("config", "url.https://mirror.invalid/.insteadOf", "https://github.com/")
-        self.assertEqual(advice(), [f"[pr-context]   git fetch {repo} refs/pull/55/head"])
-        self.pr_git("config", "--unset", "url.https://mirror.invalid/.insteadOf")
-        # A name that is not plain is never placed in a command.
-        remotes(**{"o+r": "https://github.com/acme/widgets.git"})
-        self.assertEqual(advice(), [f"[pr-context]   fetch pull/55/head from {repo} by hand"])
-        remotes(origin="https://github.com/acme/widgets.git")
-        self.assertEqual(advice(baseRefOid=self.PR_ABSENT, baseRefName="we;rd"),
-                         ["[pr-context]   git fetch origin refs/pull/55/head",
-                          f"[pr-context]   fetch the base branch from {repo} by hand"])
+        # A local remote of the same repository, however written, is not named.
+        for url in ("https://github.com/acme/widgets.git", "git@github.com:acme/widgets.git",
+                    "HTTPS://github.com/Acme/Widgets", "https://x.invalid/a\nhttps://github.com/acme/widgets"):
+            with self.subTest(origin=url):
+                self.pr_git("config", "remote.origin.url", url)
+                self.assertEqual(advice(), [f"[pr-context]   git fetch {repo} refs/pull/55/head"])
+        self.pr_git("config", "--remove-section", "remote.origin")
+        # The URL is the one gh named, whatever the case.
+        self.assertEqual(advice(url="https://GitHub.com/Acme/Widgets/pull/55"),
+                         ["[pr-context]   git fetch https://GitHub.com/Acme/Widgets refs/pull/55/head"])
+        # A base branch whose name is not a valid ref is fetched by hand.
+        for name in ("we;rd", "feature..old", "/main", "main.lock", "a//b"):
+            with self.subTest(base=name):
+                self.assertEqual(advice(baseRefOid=self.PR_ABSENT, baseRefName=name),
+                                 [f"[pr-context]   git fetch {repo} refs/pull/55/head",
+                                  f"[pr-context]   fetch the base branch from {repo} by hand"])
+        self.assertEqual(advice(baseRefOid=self.PR_ABSENT, baseRefName="release/1.x"),
+                         [f"[pr-context]   git fetch {repo} refs/pull/55/head",
+                          f"[pr-context]   git fetch {repo} refs/heads/release/1.x"])
 
     def test_pr_context_reports_histories_with_no_common_ancestor(self):
         base, head, _ = self.pr_repo()
@@ -5035,8 +5018,13 @@ exit 0
         # Both tips present: the merge-base probe runs, and it too cannot fetch.
         clone = clones["both keys"]
         git_log.write_text("")
-        result = self.pr_context("55", cwd=clone, PATH=path, **self.gh_stub(self.pr_payload(base, base)))
+        trace = self.root / "trace both tips"
+        result = self.pr_context("55", cwd=clone, PATH=path, GIT_TRACE=str(trace),
+                                 **self.gh_stub(self.pr_payload(base, base)))
         self.assertEqual(result.returncode, 0, result.stderr)
+        ran = [line for line in trace.read_text().splitlines() if " git " in line]
+        self.assertTrue(ran)
+        self.assertEqual([line for line in ran if re.search(r"\bgit\b.*\sfetch(\s|$)", line)], [])
         self.assertEqual(json.loads(result.stdout)["merge_base"], base)
         merge_base = [line.split() for line in git_log.read_text().splitlines() if "merge-base" in line.split()]
         self.assertEqual(len(merge_base), 1, merge_base)
@@ -5248,6 +5236,9 @@ exit 0
         env = self.gh_stub(self.pr_payload(base, head))
         first = "Usage: pr-context.sh [--with-context FILE] <N | #N | PR URL>"
         broken = dict(AGENT_TEAM="not a team")
+        # Nor does git run: arguments are parsed before anything else.
+        path, git_log = self.git_shim("")
+        env = env | dict(PATH=path)
         for args in (["--help"], ["-h"], ["bogus", "--help"], ["55", "--help"], ["--with-context", "x", "-h"]):
             for extra in ({}, broken, dict(DEV_TRIO_GH_CLI=str(self.root / "no gh"))):
                 with self.subTest(args=args, extra=sorted(extra)):
@@ -5257,6 +5248,7 @@ exit 0
                     self.assertEqual(result.stderr, "")
                     self.assertEqual(self.gh_calls(), [])
                     self.assertFalse((self.workspace / ".dev-trio").exists())
+                    self.assertFalse(git_log.exists() and git_log.read_text())
         # The setup that --help ignored does stop a run.
         self.assertEqual(self.pr_context("55", **(env | broken)).returncode, 2)
         errors = {
@@ -5288,6 +5280,7 @@ exit 0
                 message = message or f"not a pull request number or URL: {args[0]}"
                 self.assertEqual(result.stderr, f"error: {message}\nTry 'pr-context.sh --help'.\n")
                 self.assertEqual(self.gh_calls(), [])
+                self.assertFalse(git_log.exists() and git_log.read_text())
 
     def test_pr_context_runs_from_a_relative_path_under_cdpath(self):
         base, head, fork = self.pr_repo()
@@ -5358,11 +5351,11 @@ exit 0
         self.assertEqual(result.stderr.splitlines(), [
             f"error: not a pull request number or URL: {url}", "Try 'pr-context.sh --help'."])
         self.assertEqual(self.gh_calls(), [])
-        # A remote name is put in a command only if it is plain ASCII.
-        self.pr_git("remote", "add", "café", "https://github.com/acme/widgets.git")
-        result = self.pr_context("55", **env)
+        # Nor is a branch name with an é put in a command.
+        result = self.pr_context("55", **self.gh_stub(self.pr_payload(self.PR_ABSENT, self.PR_ABSENT,
+                                                                       baseRefName="café")) | dict(LC_ALL=utf8))
         self.assert_pr_nothing_made(result, 4)
-        self.assertIn("[pr-context]   fetch pull/55/head from https://github.com/acme/widgets by hand",
+        self.assertIn("[pr-context]   fetch the base branch from https://github.com/acme/widgets by hand",
                       result.stderr.splitlines())
 
     def test_pr_context_accepts_a_log_path_that_is_utf8(self):
