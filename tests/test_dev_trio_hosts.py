@@ -4804,6 +4804,8 @@ exit 0
             "head": head, "base": base, "merge_base": fork, "context_file": str(context),
             "focus": f"review {fork}..{head} (PR #55)",
         })
+        # JSON true would compare equal to 1.
+        self.assertIs(type(out["pr_context_version"]), int)
         self.assertEqual(list(out), ["pr_context_version", "number", "url", "head", "base", "merge_base",
                                      "context_file", "focus"])
         self.assertEqual(context.read_text(), self.pr_context_text(payload, fork))
@@ -5138,9 +5140,15 @@ exit 0
                     self.pr_marker("failed: attachment", 2)])
                 self.assertEqual(self.gh_calls(), [])
 
+        cat_log = self.root / "cat calls"
+        cat_path = self.pr_shim("cat", f'echo called >> "{cat_log}"; exec {shutil.which("cat")} "$@"')
+
         def attached(*args, **extra):
-            result = self.pr_context(*args, **env, **extra)
+            cat_log.unlink(missing_ok=True)
+            result = self.pr_context(*args, **env, **(dict(PATH=cat_path) | extra))
             self.assertEqual(result.returncode, 0, result.stderr)
+            # Read once: a second read before gh would also see the old text.
+            self.assertEqual(cat_log.read_text().splitlines(), ["called"])
             return Path(json.loads(result.stdout)["context_file"]).read_text()
 
         notes = self.workspace / "notes.md"
@@ -5236,9 +5244,11 @@ exit 0
         env = self.gh_stub(self.pr_payload(base, head))
         first = "Usage: pr-context.sh [--with-context FILE] <N | #N | PR URL>"
         broken = dict(AGENT_TEAM="not a team")
-        # Nor does git run: arguments are parsed before anything else.
+        # Nor does git run, nor uname from host.sh: arguments are parsed first.
         path, git_log = self.git_shim("")
-        env = env | dict(PATH=path)
+        uname_log = self.root / "uname calls"
+        self.pr_shim("uname", f'echo called >> "{uname_log}"; exec {shutil.which("uname")} "$@"')
+        env = env | dict(PATH=f"{self.root / 'tool shim'}{os.pathsep}{path}")
         for args in (["--help"], ["-h"], ["bogus", "--help"], ["55", "--help"], ["--with-context", "x", "-h"]):
             for extra in ({}, broken, dict(DEV_TRIO_GH_CLI=str(self.root / "no gh"))):
                 with self.subTest(args=args, extra=sorted(extra)):
@@ -5249,8 +5259,11 @@ exit 0
                     self.assertEqual(self.gh_calls(), [])
                     self.assertFalse((self.workspace / ".dev-trio").exists())
                     self.assertFalse(git_log.exists() and git_log.read_text())
+                    self.assertFalse(uname_log.exists())
         # The setup that --help ignored does stop a run.
         self.assertEqual(self.pr_context("55", **(env | broken)).returncode, 2)
+        uname_log.unlink()  # that run did load the libraries
+        git_log.unlink(missing_ok=True)
         errors = {
             (): "a pull request number or URL is required",
             ("55", "56"): "unexpected extra positional argument: 56",
@@ -5281,6 +5294,7 @@ exit 0
                 self.assertEqual(result.stderr, f"error: {message}\nTry 'pr-context.sh --help'.\n")
                 self.assertEqual(self.gh_calls(), [])
                 self.assertFalse(git_log.exists() and git_log.read_text())
+                self.assertFalse(uname_log.exists())
 
     def test_pr_context_runs_from_a_relative_path_under_cdpath(self):
         base, head, fork = self.pr_repo()
@@ -5446,21 +5460,31 @@ exit 0
         process = subprocess.Popen(
             [str(self.plugin / "bin" / "pr-context.sh"), "55"], cwd=self.workspace, env=env,
             stdin=subprocess.DEVNULL, stdout=out, stderr=err, start_new_session=True)
+        gh = {}
+
+        def reap():
+            # Only what is still ours: the script while it is unreaped, and gh
+            # while it is in the session made for the script. A pid that has
+            # been reused belongs to another session.
+            if process.poll() is None:
+                try:
+                    os.kill(process.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            if "pid" in gh:
+                try:
+                    if os.getsid(gh["pid"]) == process.pid:
+                        os.kill(gh["pid"], signal.SIGKILL)
+                except OSError:
+                    pass
+            process.wait()
+        self.addCleanup(reap)
         deadline = time.time() + 15
         while not self.gh_calls():
             self.assertLess(time.time(), deadline, "gh never started")
             self.assertIsNone(process.poll())
             time.sleep(0.05)
-        gh_pid = self.gh_calls()[0]["pid"]
-
-        def reap():
-            for target in (process.pid, gh_pid):
-                try:
-                    os.kill(target, signal.SIGKILL)
-                except OSError:
-                    pass
-            process.wait()
-        self.addCleanup(reap)
+        gh_pid = gh["pid"] = self.gh_calls()[0]["pid"]
         return process, gh_pid, out
 
     def pr_gone(self, pid, within=10.0):
