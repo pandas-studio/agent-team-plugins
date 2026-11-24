@@ -4909,15 +4909,15 @@ exit 0
         other = "fedcba9876543210fedcba9876543210fedcba98"
         repo = "https://github.com/acme/widgets"
         head_lines = [f"[pr-context] head commit {self.PR_ABSENT} is not in this repository",
-                      f"[pr-context]   git fetch {repo} pull/55/head"]
+                      f"[pr-context]   git fetch {repo} refs/pull/55/head"]
         cases = {
             "head": (self.pr_payload(base, self.PR_ABSENT), head_lines),
             "base": (self.pr_payload(self.PR_ABSENT, head),
                      [f"[pr-context] base commit {self.PR_ABSENT} is not in this repository",
-                      f"[pr-context]   git fetch {repo} main"]),
+                      f"[pr-context]   git fetch {repo} refs/heads/main"]),
             "head base": (self.pr_payload(other, self.PR_ABSENT),
                           head_lines + [f"[pr-context] base commit {other} is not in this repository",
-                                        f"[pr-context]   git fetch {repo} main"]),
+                                        f"[pr-context]   git fetch {repo} refs/heads/main"]),
         }
         path, git_log = self.git_shim("")
         for missing, (payload, lines) in cases.items():
@@ -4947,34 +4947,34 @@ exit 0
                 self.pr_git("remote", "add", name, url)
 
         remotes(fork="https://github.com/someone/widgets.git")
-        self.assertEqual(advice(), [f"[pr-context]   git fetch {repo} pull/55/head"])
+        self.assertEqual(advice(), [f"[pr-context]   git fetch {repo} refs/pull/55/head"])
         remotes(origin="git@github.com:Acme/Widgets.git", alpha="https://github.com/acme/widgets")
-        self.assertEqual(advice(), ["[pr-context]   git fetch origin pull/55/head"])
+        self.assertEqual(advice(), ["[pr-context]   git fetch origin refs/pull/55/head"])
         remotes(zeta="ssh://git@github.com/acme/widgets.git/", beta="https://github.com/acme/widgets.git",
                 origin="https://github.com/someone/widgets.git")
-        self.assertEqual(advice(), ["[pr-context]   git fetch beta pull/55/head"])
+        self.assertEqual(advice(), ["[pr-context]   git fetch beta refs/pull/55/head"])
         # Each URL form on its own, so dropping one is seen.
         remotes(zeta="ssh://git@github.com/acme/widgets.git/", origin="https://github.com/someone/widgets.git")
-        self.assertEqual(advice(), ["[pr-context]   git fetch zeta pull/55/head"])
+        self.assertEqual(advice(), ["[pr-context]   git fetch zeta refs/pull/55/head"])
         remotes(zeta="git@github.com:acme/widgets", origin="https://github.com/someone/widgets.git")
-        self.assertEqual(advice(), ["[pr-context]   git fetch zeta pull/55/head"])
+        self.assertEqual(advice(), ["[pr-context]   git fetch zeta refs/pull/55/head"])
         # The suffix is matched without regard to case, as the path is.
         remotes(origin="https://github.com/Acme/Widgets.GIT", alpha="https://github.com/acme/widgets")
-        self.assertEqual(advice(), ["[pr-context]   git fetch origin pull/55/head"])
+        self.assertEqual(advice(), ["[pr-context]   git fetch origin refs/pull/55/head"])
         # "First by name" is string order, even for names that are numbers.
         remotes(**{"2": "https://github.com/acme/widgets", "10": "https://github.com/acme/widgets.git"})
-        self.assertEqual(advice(), ["[pr-context]   git fetch 10 pull/55/head"])
+        self.assertEqual(advice(), ["[pr-context]   git fetch 10 refs/pull/55/head"])
         # What a fetch would contact is the rewritten URL, not the configured one.
         remotes(origin="https://github.com/acme/widgets.git")
         self.pr_git("config", "url.https://mirror.invalid/.insteadOf", "https://github.com/")
-        self.assertEqual(advice(), [f"[pr-context]   git fetch {repo} pull/55/head"])
+        self.assertEqual(advice(), [f"[pr-context]   git fetch {repo} refs/pull/55/head"])
         self.pr_git("config", "--unset", "url.https://mirror.invalid/.insteadOf")
         # A name that is not plain is never placed in a command.
         remotes(**{"o+r": "https://github.com/acme/widgets.git"})
         self.assertEqual(advice(), [f"[pr-context]   fetch pull/55/head from {repo} by hand"])
         remotes(origin="https://github.com/acme/widgets.git")
         self.assertEqual(advice(baseRefOid=self.PR_ABSENT, baseRefName="we;rd"),
-                         ["[pr-context]   git fetch origin pull/55/head",
+                         ["[pr-context]   git fetch origin refs/pull/55/head",
                           f"[pr-context]   fetch the base branch from {repo} by hand"])
 
     def test_pr_context_reports_histories_with_no_common_ancestor(self):
@@ -5013,11 +5013,17 @@ exit 0
             with self.subTest(clone=name):
                 git_log.write_text("")
                 extra = dict(GIT_CONFIG=os.devnull) if name == "GIT_CONFIG set" else {}
-                result = self.pr_context("55", cwd=clone, PATH=path, **env, **extra)
+                trace = self.root / f"trace {name}"
+                result = self.pr_context("55", cwd=clone, PATH=path, GIT_TRACE=str(trace), **env, **extra)
+                # No git, the script's or one git starts for itself, ran a fetch,
+                # whether or not it would have succeeded.
+                ran = [line for line in trace.read_text().splitlines() if " git " in line]
+                self.assertTrue(ran)
+                self.assertEqual([line for line in ran if re.search(r"\bgit\b.*\sfetch(\s|$)", line)], [])
                 self.assertEqual(result.returncode, 4, result.stderr)
                 self.assertEqual(result.stderr.splitlines(), [
                     f"[pr-context] head commit {head} is not in this repository",
-                    "[pr-context]   git fetch https://github.com/acme/widgets pull/55/head",
+                    "[pr-context]   git fetch https://github.com/acme/widgets refs/pull/55/head",
                     self.pr_marker("missing: head", 4)])
                 probes = [line.split() for line in git_log.read_text().splitlines() if "^{commit}" in line]
                 self.assertEqual(len(probes), 2)

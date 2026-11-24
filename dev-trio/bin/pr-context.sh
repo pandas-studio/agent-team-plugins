@@ -351,6 +351,7 @@ pick_remote() {
     -*|*[!A-Za-z0-9._/-]*) REMOTE_PRINTABLE=0 ;;
   esac
 }
+# Full ref names: on the remote a tag named main would win over the branch.
 if [ "$HEAD_STATE" = absent ] || [ "$BASE_STATE" = absent ]; then
   pick_remote
   _missing=""
@@ -358,7 +359,7 @@ if [ "$HEAD_STATE" = absent ] || [ "$BASE_STATE" = absent ]; then
     _missing="head"
     say "head commit $HEAD_OID is not in this repository"
     if [ "$REMOTE_PRINTABLE" -eq 1 ]; then
-      say "  git fetch $REMOTE pull/$N/head"
+      say "  git fetch $REMOTE refs/pull/$N/head"
     else
       say "  fetch pull/$N/head from https://$REPO_PATH by hand"
     fi
@@ -367,7 +368,7 @@ if [ "$HEAD_STATE" = absent ] || [ "$BASE_STATE" = absent ]; then
     _missing="${_missing:+$_missing }base"
     say "base commit $BASE_OID is not in this repository"
     if [ "$REMOTE_PRINTABLE" -eq 1 ] && [ -n "$BASE_REF" ]; then
-      say "  git fetch $REMOTE $BASE_REF"
+      say "  git fetch $REMOTE refs/heads/$BASE_REF"
     else
       say "  fetch the base branch from https://$REPO_PATH by hand"
     fi
