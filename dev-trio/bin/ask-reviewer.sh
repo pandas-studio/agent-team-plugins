@@ -36,6 +36,21 @@
 # codex-no-memories; rc=2 for any other model or when the models config
 # redefines codex-no-memories.
 #
+# Continue an earlier Codex session instead of starting a fresh one:
+#   ask-reviewer.sh --model codex --resume-session UUID "focus"
+# UUID is the value after `session id: ` in the Codex header of the earlier
+# run's log (the header Codex prints first, under `=== RESPONSE ===`). The
+# caller names the session; this script does not look one up, remember one or
+# lock one. The reviewer gets the same prompt as a fresh round and also
+# remembers its earlier turns, so a fresh round stays the default.
+# rc=2, nothing started: a value that is not a UUID; a reviewer model other
+# than the built-in codex or codex-no-memories; a models config that redefines
+# that id; a call made under another wrapper (MANIFEST_PARENT_TMP), whose
+# manifest could not record the session. Once those pass, the run uses the
+# registry's built-in definitions only, so a models config edited meanwhile
+# changes nothing about it. A session Codex does not know, or one another
+# process is writing, is refused by Codex: an ordinary failed run.
+#
 # Result: sibling *.review.json contains verdict, findings and failure status.
 # Sibling *.run.json carries this invocation's metadata for the dashboard
 # (model, start time, inputs, completion) — see lib/runstate.sh.
@@ -86,6 +101,10 @@ Options (any order relative to the focus):
   --focus-file FILE     read the focus from FILE instead of an argument
   -m, --model ID        reviewer model for this call (see: agent-team-models list)
   --no-memories         run Codex without its memory summary (codex reviewer only)
+  --resume-session UUID continue that Codex session instead of starting a fresh
+                        one (codex reviewer only); UUID is the value after
+                        "session id: " in the Codex header of the earlier
+                        run's log
   --summary             print one JSON document on stdout (exit code, paths,
                         the published result and the final review's text)
                         instead of replaying the transcript
@@ -133,6 +152,17 @@ is_option_shaped() {
   return 0
 }
 
+# is_uuid VALUE — 8-4-4-4-12 hexadecimal digits. The digits are listed, not
+# written as ranges, so the answer does not depend on the locale.
+is_uuid() {
+  [ "${#1}" -eq 36 ] || return 1
+  [ "${1:8:1}${1:13:1}${1:18:1}${1:23:1}" = "----" ] || return 1
+  case "${1:0:8}${1:9:4}${1:14:4}${1:19:4}${1:24:12}" in
+    *[!0123456789abcdefABCDEF]*) return 1 ;;
+  esac
+  return 0
+}
+
 RESEARCH_FILE=""
 SPEC_FILE=""
 CONTEXT_FILE=""
@@ -140,6 +170,7 @@ FOCUS_FILE=""
 FOCUS=""
 MODEL_ARG=""
 NO_MEMORIES=0
+RESUME_SESSION=""
 SUMMARY=0
 POSITIONAL_SEEN=0
 take_positional() {
@@ -169,6 +200,11 @@ while [ $# -gt 0 ]; do
         || usage_error "$1 requires a model id"
       MODEL_ARG="$2"; shift 2 ;;
     --no-memories) NO_MEMORIES=1; shift ;;
+    --resume-session)
+      [ -z "$RESUME_SESSION" ] || usage_error "--resume-session given more than once"
+      { [ $# -ge 2 ] && is_uuid "$2"; } \
+        || usage_error "--resume-session requires a session id: a UUID of 8-4-4-4-12 hexadecimal digits"
+      RESUME_SESSION="$2"; shift 2 ;;
     --summary) SUMMARY=1; shift ;;
     --) shift
         while [ $# -gt 0 ]; do take_positional "$1"; shift; done ;;
@@ -264,6 +300,59 @@ if [ "$NO_MEMORIES" = 1 ]; then
     echo "error: --no-memories needs the built-in codex-no-memories model, but $(registry_config_file) redefines it" >&2
     exit 2
   fi
+fi
+
+# --resume-session continues a Codex session through `codex exec resume`, which
+# is Codex's own subcommand: only the two built-in Codex models are known to
+# take it. Checked after the --no-memories swap, so both spellings of the
+# no-memories reviewer are covered.
+RESUME_BIN=""
+RESUME_ARGV=()
+if [ -n "$RESUME_SESSION" ]; then
+  case "$REVIEWER_MODEL" in
+    codex|codex-no-memories) ;;
+    *) echo "error: --resume-session only applies to the codex reviewer; resolved model is '$REVIEWER_MODEL'" >&2; exit 2 ;;
+  esac
+  # The config is read once and its status kept: piped straight into jq, a
+  # config that had just become unreadable would look like one without the id.
+  RESUME_CONFIG="$(_registry_config_json)" || exit $?
+  if printf '%s' "$RESUME_CONFIG" | jq -e --arg m "$REVIEWER_MODEL" '.models | has($m)' >/dev/null; then
+    echo "error: --resume-session needs the built-in $REVIEWER_MODEL model, but $(registry_config_file) redefines it" >&2
+    exit 2
+  fi
+  # With MANIFEST_PARENT_TMP non-empty the manifest calls below record no
+  # input, so the parent's manifest would not name the session this run
+  # continued.
+  if manifest_is_nested; then
+    echo "error: --resume-session cannot be used under another wrapper (MANIFEST_PARENT_TMP is set)" >&2
+    exit 2
+  fi
+  # From here to the end of this run the registry answers from its built-in
+  # definitions alone. The model was just seen to be the built-in one, and
+  # everything later asks the registry about it again: the binary, the
+  # arguments, whether a workspace is prepared, the preflight, the recorded
+  # final source, the fallback for a missing final. A models config edited
+  # while this run is going must not change any of those answers, least of
+  # all hand Codex's resume arguments to another program. The registry treats
+  # a config path that does not exist as "no config", and nothing can be
+  # created under /dev/null. The pin is this script's alone: the reviewer CLI
+  # still gets the caller's own value, or none (see reviewer_dispatch).
+  RESUME_CONFIG_WAS_SET="${AGENT_TEAM_MODELS_CONFIG+x}"
+  RESUME_CONFIG_ENV="${AGENT_TEAM_MODELS_CONFIG-}"
+  AGENT_TEAM_MODELS_CONFIG=/dev/null/built-in-models-only
+  # The definition's own final_args with `resume <id>` after `exec`, so a flag
+  # the fresh call carries (the no-memories switch) is carried here too.
+  # {final} is expanded at dispatch, when the path exists. The binary is the
+  # fresh call's: REVIEWER_CLI, then CODEX_CLI, then the definition's command.
+  RESUME_BIN="$(REGISTRY_CMD_OVERRIDE="${REVIEWER_CLI:-}" registry_resolve_command "$REVIEWER_MODEL")" || exit $?
+  while IFS= read -r -d '' RESUME_ARG; do
+    RESUME_ARGV+=("$RESUME_ARG")
+  done < <(_registry_model_array "$REVIEWER_MODEL" final_args)
+  if [ "${#RESUME_ARGV[@]}" -lt 2 ] || [ "${RESUME_ARGV[0]}" != exec ]; then
+    echo "error: --resume-session cannot build a resume command from the built-in $REVIEWER_MODEL model" >&2
+    exit 2
+  fi
+  RESUME_ARGV=(exec resume "$RESUME_SESSION" "${RESUME_ARGV[@]:1}")
 fi
 
 DEFAULT_FOCUS="Review the full working-tree state in this repo (see role instructions for the inspection checklist — start with \`git status --short\`, then cover both tracked diffs AND untracked files)."
@@ -596,6 +685,7 @@ run_agy_log_fallback
 manifest_init dev-trio-review "$LOG"
 manifest_add_role reviewer "$REVIEWER_MODEL" "$ROLE_FILE" "$(manifest_sha256_string "$PROMPT")"
 manifest_add_input kind=focus value="$FOCUS"
+[ -z "$RESUME_SESSION" ] || manifest_add_input kind=resume-session value="$RESUME_SESSION"
 [ -z "$AGY_GIT_OUTSIDE" ] || manifest_add_input kind=workspace-git-outside value="$AGY_GIT_OUTSIDE"
 [ -z "${SNAPSHOT_MANIFEST_ENTRY:-}" ] || manifest_add_input kind=workspace-snapshot value="$SNAPSHOT_MANIFEST_ENTRY"
 case "$SNAPSHOT_STATUS" in
@@ -609,6 +699,9 @@ run_open_log
 run_header_body() {
   echo "=== FOCUS ==="
   echo "$FOCUS"
+  if [ -n "$RESUME_SESSION" ]; then
+    echo "=== RESUME SESSION: $RESUME_SESSION ==="
+  fi
   if [ -n "$RESEARCH_FILE" ]; then
     echo "=== RESEARCH FILE: $RESEARCH_FILE ==="
   fi
@@ -622,6 +715,7 @@ run_header_body() {
 run_write_header "$REVIEWER_MODEL"
 
 RUNSTATE_ARGS=(result_path="$RESULT" "input=focus:$FOCUS")
+[ -z "$RESUME_SESSION" ] || RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" "input=resume-session:$RESUME_SESSION")
 [ -z "$SNAPSHOT_STATUS" ] || RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" "input=workspace-snapshot-status:$SNAPSHOT_STATUS")
 [ -z "$RESEARCH_FILE" ] || RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" "inputpath=research:$RESEARCH_FILE")
 [ -z "$SPEC_FILE" ]     || RUNSTATE_ARGS=("${RUNSTATE_ARGS[@]}" "inputpath=spec:$SPEC_FILE")
@@ -729,13 +823,46 @@ fi
 # below reaches the caller. Nothing extra is handed to the CLI: a descriptor of
 # the caller's own streams is exactly what a leaked descendant must not be
 # given, which is why a saved duplicate was rejected for this.
+# reviewer_dispatch — run the reviewer CLI; its status is the CLI's.
+# A fresh round is registry_run, as ever. A resumed one runs the Codex command
+# prepared with the checks above, the way registry_run runs a stdin model: the
+# prompt as a here-string (written in full before the CLI starts, no writer
+# process left behind), and the same line-buffering choice.
+reviewer_dispatch() {
+  local a rc argv=()
+  if [ -z "$RESUME_SESSION" ]; then
+    REGISTRY_WORKSPACE="$AGY_WORKSPACE" REGISTRY_CLI_LOG="$AGY_CLI_LOG" \
+      REGISTRY_CMD_OVERRIDE="${REVIEWER_CLI:-}" registry_run "$REVIEWER_MODEL" "$PROMPT" "$FINAL"
+    return
+  fi
+  for a in "${RESUME_ARGV[@]}"; do
+    case "$a" in
+      "{final}") argv+=("$FINAL") ;;
+      *)         argv+=("$a") ;;
+    esac
+  done
+  _registry_pick_stdbuf
+  # The CLI runs with the caller's AGENT_TEAM_MODELS_CONFIG, not the pin: a
+  # REVIEWER_CLI shim may read the registry itself. Nothing in this script
+  # asks the registry while the CLI runs, and the pin is back before the
+  # status is returned. A caller that did not set the variable needs nothing
+  # here: the pin then made a plain shell variable, which no child inherits.
+  [ -z "$RESUME_CONFIG_WAS_SET" ] || AGENT_TEAM_MODELS_CONFIG="$RESUME_CONFIG_ENV"
+  if [ -n "$_REGISTRY_STDBUF" ]; then
+    "$_REGISTRY_STDBUF" -oL "$RESUME_BIN" "${argv[@]}" <<< "$PROMPT"
+  else
+    "$RESUME_BIN" "${argv[@]}" <<< "$PROMPT"
+  fi
+  rc=$?
+  AGENT_TEAM_MODELS_CONFIG=/dev/null/built-in-models-only
+  return "$rc"
+}
 run_mark_model_start
 SIGNAL_RC=0
 trap 'SIGNAL_RC=130' INT
 trap 'SIGNAL_RC=143' TERM
 set +e
-REGISTRY_WORKSPACE="$AGY_WORKSPACE" REGISTRY_CLI_LOG="$AGY_CLI_LOG" \
-  REGISTRY_CMD_OVERRIDE="${REVIEWER_CLI:-}" registry_run "$REVIEWER_MODEL" "$PROMPT" "$FINAL" >&8 2>&8 7<&- 9>&-
+reviewer_dispatch >&8 2>&8 7<&- 9>&-
 RC=$?
 run_mark_model_returned
 set -e

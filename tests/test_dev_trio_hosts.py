@@ -69,6 +69,13 @@ class HostTests(unittest.TestCase):
             "    print(os.environ['STUB_AUTH'])\n"
             "    sys.exit(int(os.environ.get('STUB_AUTH_RC','0')))\n"
             "response = os.environ['STUB_RESPONSE']\n"
+            # The models config changes while the model is running.
+            # What the model's own environment says about the models config.
+            "if os.environ.get('STUB_ENV_OUT'):\n"
+            "    pathlib.Path(os.environ['STUB_ENV_OUT']).write_text(\n"
+            "        os.environ.get('AGENT_TEAM_MODELS_CONFIG', '<unset>'))\n"
+            "if os.environ.get('STUB_WRITE_CONFIG'):\n"
+            "    pathlib.Path(os.environ['STUB_CONFIG_PATH']).write_text(os.environ['STUB_WRITE_CONFIG'])\n"
             "if '--output-last-message' in args and not os.environ.get('STUB_NO_FINAL'):\n"
             "    pathlib.Path(args[args.index('--output-last-message')+1]).write_text(response)\n"
             "if os.environ.get('STUB_SWAP_LOG_DIR'):\n"
@@ -1122,9 +1129,17 @@ exit 0
         for wrapper, sample in (("ask-reviewer.sh", "TRANSCRIPT_END="), ("ask-researcher.sh", "LOG_END=")):
             with self.subTest(wrapper=wrapper):
                 lines = [line.strip() for line in (self.plugin / "bin" / wrapper).read_text().splitlines()]
-                # The model call: the registry call whose output goes to fd 8.
+                # The model call: the one whose output goes to fd 8. The
+                # researcher's is the registry call itself; the reviewer's is
+                # reviewer_dispatch, whose fresh branch is that registry call.
+                opener = "reviewer_dispatch " if wrapper == "ask-reviewer.sh" else "REGISTRY_CMD_OVERRIDE="
                 call = next(i for i, line in enumerate(lines)
-                            if line.startswith("REGISTRY_CMD_OVERRIDE=") and ">&8 2>&8" in line)
+                            if line.startswith(opener) and ">&8 2>&8" in line)
+                if wrapper == "ask-reviewer.sh":
+                    opened = lines.index("reviewer_dispatch() {")
+                    body = lines[opened:lines.index("}", opened)]
+                    self.assertEqual(sum("registry_run " in line for line in body), 1, body)
+                    self.assertFalse(any("run_mark_model" in line for line in body), body)
                 self.assertEqual(lines[call + 1:call + 3], ["RC=$?", "run_mark_model_returned"])
                 end = lines.index("run_mark_model_end")
                 sampled = next(i for i, line in enumerate(lines) if i > call and sample in line)
@@ -1455,6 +1470,241 @@ exit 0
                               DEV_TRIO_REVIEWER_MODEL="codex")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("features.memories=false", self.recorded()[0])
+
+    RESUME_ID = "01a20b28-60f9-7d62-a071-6526835421b9"
+
+    def final_path(self):
+        finals = list(self.workspace.glob(".dev-trio/log/host-test/reviewer-*.final.md"))
+        self.assertEqual(len(finals), 1, finals)
+        return str(finals[0])
+
+    def test_resume_session_runs_codex_exec_resume_with_the_fresh_prompt(self):
+        result = self.run_cli("ask-reviewer.sh", "resume focus")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        fresh = self.recorded()
+        self.assertEqual(len(fresh), 1)
+        # Without the option nothing about the call changed.
+        self.assertEqual(fresh[0][:-1], ["exec", "--skip-git-repo-check", "--output-last-message",
+                                         self.final_path(), "-", "<stdin>"])
+        for label, args, model, extra in (
+                ("codex", (), "codex", []),
+                ("--no-memories", ("--no-memories",), "codex-no-memories", ["-c", "features.memories=false"]),
+                ("--model codex-no-memories", ("--model", "codex-no-memories"), "codex-no-memories",
+                 ["-c", "features.memories=false"]),
+        ):
+            with self.subTest(reviewer=label):
+                self.reset_run_state()
+                result = self.run_cli("ask-reviewer.sh", "--resume-session", self.RESUME_ID,
+                                      *args, "resume focus")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = self.recorded()
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0][:-1], ["exec", "resume", self.RESUME_ID, "--skip-git-repo-check",
+                                                 *extra, "--output-last-message", self.final_path(),
+                                                 "-", "<stdin>"])
+                # The resumed reviewer is sent what a fresh one is.
+                self.assertEqual(calls[0][-1], fresh[0][-1])
+                self.assert_ran_model(model)
+
+    def test_resume_session_is_recorded_in_the_log_run_metadata_and_manifest(self):
+        result = self.run_cli("ask-reviewer.sh", "resume focus", "--resume-session", self.RESUME_ID)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        logdir = self.workspace / ".dev-trio/log/host-test"
+        entry = {"kind": "resume-session", "value": self.RESUME_ID}
+        run = json.loads(next(logdir.glob("reviewer-*.run.json")).read_text())
+        self.assertIn(entry, run["inputs"])
+        manifest = json.loads(next(logdir.glob("reviewer-*.manifest.json")).read_text())
+        self.assertIn(entry, manifest["inputs"])
+        log = next(p for p in logdir.glob("reviewer-*.log") if not p.is_symlink()).read_text()
+        self.assertIn(f"=== RESUME SESSION: {self.RESUME_ID} ===\n", log)
+        # A fresh run says nothing about a session.
+        self.reset_run_state()
+        result = self.run_cli("ask-reviewer.sh", "resume focus")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run = json.loads(next(logdir.glob("reviewer-*.run.json")).read_text())
+        self.assertEqual([i["kind"] for i in run["inputs"]], ["focus"])
+        log = next(p for p in logdir.glob("reviewer-*.log") if not p.is_symlink()).read_text()
+        self.assertNotIn("RESUME SESSION", log)
+
+    def test_resume_session_needs_a_uuid(self):
+        upper = self.RESUME_ID.upper()
+        for value in ("abc", self.RESUME_ID[:-1], self.RESUME_ID + "0", self.RESUME_ID.replace("-", "_"),
+                      "01a20b2-860f9-7d62-a071-6526835421b9", "g1a20b28-60f9-7d62-a071-6526835421b9",
+                      "01a20b28-60f9-7d62-a071-6526835421b\u212a", self.RESUME_ID + "\n",
+                      "--", "--no-memories", ""):
+            with self.subTest(value=value):
+                self.reset_run_state()
+                result = self.run_cli("ask-reviewer.sh", "--resume-session", value, "q")
+                self.assert_untouched(result, 2)
+                self.assertEqual(result.stderr.splitlines(), [
+                    "error: --resume-session requires a session id: a UUID of 8-4-4-4-12 hexadecimal digits",
+                    "Try 'ask-reviewer.sh --help'."])
+        for args, message in (
+                (("q", "--resume-session"), "error: --resume-session requires a session id: a UUID of 8-4-4-4-12 hexadecimal digits"),
+                (("--resume-session", self.RESUME_ID, "--resume-session", self.RESUME_ID, "q"),
+                 "error: --resume-session given more than once"),
+                ((f"--resume-session={self.RESUME_ID}", "q"), f"error: unknown option: --resume-session={self.RESUME_ID}"),
+        ):
+            with self.subTest(args=args):
+                self.reset_run_state()
+                result = self.run_cli("ask-reviewer.sh", *args)
+                self.assert_untouched(result, 2)
+                self.assertEqual(result.stderr.splitlines()[0], message)
+        self.reset_run_state()
+        result = self.run_cli("ask-reviewer.sh", "--resume-session", upper, "q")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.recorded()[0][:3], ["exec", "resume", upper])
+
+    def test_resume_session_is_refused_for_anything_but_a_built_in_codex_reviewer(self):
+        codex_def = {"command": str(self.stub), "prompt_via": "stdin", "args": ["exec", "-"]}
+        for label, args, env, config, reason in (
+                ("another model", ("--model", "claude"), {}, None,
+                 "error: --resume-session only applies to the codex reviewer; resolved model is 'claude'"),
+                ("host default claude", (), {"DEV_TRIO_PM_HOST": "codex"}, None,
+                 "error: --resume-session only applies to the codex reviewer; resolved model is 'claude'"),
+                ("config redefines codex", (), {}, {"models": {"codex": codex_def}, "roles": {}},
+                 "error: --resume-session needs the built-in codex model, but "),
+                ("config redefines codex-no-memories", ("--no-memories",), {},
+                 {"models": {"codex-no-memories": codex_def}, "roles": {}}, "error: --no-memories needs "),
+                ("config redefines codex-no-memories, by id", ("--model", "codex-no-memories"), {},
+                 {"models": {"codex-no-memories": codex_def}, "roles": {}},
+                 "error: --resume-session needs the built-in codex-no-memories model, but "),
+                ("under a parent wrapper", (), {"MANIFEST_PARENT_TMP": str(self.root / "parent.tmp")}, None,
+                 "error: --resume-session cannot be used under another wrapper"),
+        ):
+            with self.subTest(case=label):
+                if config is None:
+                    self.reset_run_state()
+                else:
+                    self.reset_run_state(json.dumps(config))
+                # Refused before the login probe, a CLI or any artifact.
+                result = self.run_cli("ask-reviewer.sh", "--resume-session", self.RESUME_ID, *args, "q", **env)
+                self.assert_untouched(result, 2)
+                self.assertTrue(result.stderr.splitlines()[-1].startswith(reason), result.stderr)
+                self.assertEqual(result.stdout, "")
+                # --summary prints nothing for a refusal either.
+                result = self.run_cli("ask-reviewer.sh", "--summary", "--resume-session", self.RESUME_ID,
+                                      *args, "q", **env)
+                self.assert_untouched(result, 2)
+                self.assertEqual(result.stdout, "")
+
+    def test_resume_session_binary_follows_the_fresh_call_and_never_the_config(self):
+        failing = self.root / "failing-codex"
+        failing.write_text("#!/bin/sh\nexit 9\n")
+        failing.chmod(0o755)
+        # REVIEWER_CLI wins over CODEX_CLI, as for a fresh call.
+        result = self.run_cli("ask-reviewer.sh", "--resume-session", self.RESUME_ID, "q",
+                              CODEX_CLI=str(failing), REVIEWER_CLI=str(self.stub))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.recorded()[0][:2], ["exec", "resume"])
+        # CODEX_CLI is used when REVIEWER_CLI is not set, and its failure is the run's.
+        self.reset_run_state()
+        resumed = self.run_cli("ask-reviewer.sh", "--resume-session", self.RESUME_ID, "q", CODEX_CLI=str(failing))
+        self.assertEqual(self.recorded(), [])
+        self.reset_run_state()
+        fresh = self.run_cli("ask-reviewer.sh", "q", CODEX_CLI=str(failing))
+        self.assertEqual((resumed.returncode, fresh.returncode), (9, 9))
+
+    def test_resume_session_with_a_missing_binary_fails_as_a_fresh_call_does(self):
+        missing = str(self.root / "no-such-codex")
+        for host in ("claude", "codex"):
+            with self.subTest(pm_host=host):
+                outcomes = []
+                for args in ((), ("--resume-session", self.RESUME_ID)):
+                    self.reset_run_state()
+                    result = self.run_cli("ask-reviewer.sh", "--model", "codex", *args, "q",
+                                          DEV_TRIO_PM_HOST=host, CODEX_CLI=missing)
+                    outcomes.append((result.returncode, self.recorded(),
+                                     (self.workspace / ".dev-trio").exists()))
+                self.assertEqual(outcomes[1], outcomes[0])
+                self.assertNotEqual(outcomes[0][0], 0)
+        # A Codex PM's preflight probes a login only for a Claude reviewer.
+        self.reset_run_state()
+        result = self.run_cli("ask-reviewer.sh", "--resume-session", self.RESUME_ID, "--model", "codex", "q",
+                              DEV_TRIO_PM_HOST="codex")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([call[:2] for call in self.recorded()], [["exec", "resume"]])
+
+    def test_resume_session_ignores_a_models_config_that_changes_while_it_runs(self):
+        # The stub prints a well-formed review on stdout and writes no final.
+        # While it runs, the models config gains a `codex` without final_args:
+        # for a run that asked the config again, that model has no native final
+        # and its review would be pieced together from the transcript.
+        shadow = json.dumps({"models": {"codex": {"command": str(self.stub), "prompt_via": "stdin",
+                                                  "args": ["exec", "-"]}}, "roles": {}})
+        for label, extra in (("config unchanged", {}), ("config changed mid-run", {"STUB_WRITE_CONFIG": shadow})):
+            with self.subTest(case=label):
+                self.reset_run_state()
+                result = subprocess.run(
+                    [str(self.plugin / "bin/ask-reviewer.sh"), "--resume-session", self.RESUME_ID, "q"],
+                    cwd=self.workspace, input="", text=True, capture_output=True, timeout=20,
+                    env=self.env | {"STUB_NO_FINAL": "1", "STUB_CONFIG_PATH": str(self.config)} | extra)
+                self.assertEqual(self.config.read_text() == shadow, bool(extra))
+                logdir = self.workspace / ".dev-trio/log/host-test"
+                review = json.loads(next(logdir.glob("reviewer-*.review.json")).read_text())
+                self.assertEqual((result.returncode, review["status"], review["verdict"]),
+                                 (3, "parse-failed", None), result.stderr)
+                run = json.loads(next(logdir.glob("reviewer-*.run.json")).read_text())
+                self.assertEqual((run["model"], run["final_source"]), ("codex", "native"))
+        self.reset_run_state()
+
+    def test_resume_session_leaves_the_models_config_variable_alone_for_the_cli(self):
+        seen = self.root / "child-config-env"
+        # Exported by the caller: the CLI sees the caller's path, not the pin.
+        result = self.run_cli("ask-reviewer.sh", "--resume-session", self.RESUME_ID, "q",
+                              STUB_ENV_OUT=str(seen))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(seen.read_text(), str(self.config))
+        # Not set by the caller: not set for the CLI either. XDG_CONFIG_HOME
+        # keeps the default path inside the fixture.
+        self.reset_run_state()
+        env = {k: v for k, v in self.env.items() if k != "AGENT_TEAM_MODELS_CONFIG"}
+        env.update(XDG_CONFIG_HOME=str(self.root / "xdg"), STUB_ENV_OUT=str(seen))
+        result = subprocess.run(
+            [str(self.plugin / "bin/ask-reviewer.sh"), "--resume-session", self.RESUME_ID, "q"],
+            cwd=self.workspace, env=env, input="", text=True, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(seen.read_text(), "<unset>")
+        self.assertEqual(self.recorded()[0][:2], ["exec", "resume"])
+
+    def test_resume_session_failure_and_summary_are_those_of_a_fresh_call(self):
+        logdir = self.workspace / ".dev-trio/log/host-test"
+
+        def artifact(suffix):
+            found = [p for p in logdir.glob("reviewer-*" + suffix) if not p.is_symlink()]
+            self.assertEqual(len(found), 1, found)
+            return found[0]
+
+        outcomes = {}
+        for label, args in (("fresh", ()), ("resumed", ("--resume-session", self.RESUME_ID))):
+            with self.subTest(call=label):
+                self.reset_run_state()
+                failed = self.run_cli("ask-reviewer.sh", *args, "q", STUB_RC="1")
+                status = json.loads(artifact(".review.json").read_text())["status"]
+
+                self.reset_run_state()
+                ok = self.run_cli("ask-reviewer.sh", "--summary", *args, "q")
+                self.assertEqual(ok.returncode, 0, ok.stderr)
+                self.assertEqual(len(ok.stdout.splitlines()), 1, ok.stdout)
+                doc = json.loads(ok.stdout)
+                self.assertEqual(doc["paths"], {"log": str(artifact(".log")), "final": str(artifact(".final.md")),
+                                                "result": str(artifact(".review.json"))})
+                self.assertEqual(doc["final_text"], artifact(".final.md").read_text())
+                self.assertEqual(doc["result"], json.loads(artifact(".review.json").read_text()))
+                self.assertEqual((doc["exit_code"], doc["model"], doc["result"]["status"], doc["error"]),
+                                 (0, "codex", "ok", None))
+
+                self.reset_run_state()
+                bad = self.run_cli("ask-reviewer.sh", "--summary", *args, "q", STUB_RC="1")
+                self.assertEqual(len(bad.stdout.splitlines()), 1, bad.stdout)
+                bad_doc = json.loads(bad.stdout)
+                self.assertEqual(bad_doc["result"], json.loads(artifact(".review.json").read_text()))
+                self.assertEqual((bad.returncode, bad_doc["exit_code"], bad_doc["result"]["status"],
+                                  bad_doc["result"]["verdict"], bad_doc["final_text"]),
+                                 (1, 1, "invocation-failed", None, None))
+                outcomes[label] = (failed.returncode, status, doc["result"]["verdict"])
+        self.assertEqual(outcomes["resumed"], outcomes["fresh"])
+        self.assertEqual(outcomes["fresh"][:2], (1, "invocation-failed"))
 
     def test_api_login_is_accepted_and_secret_not_logged(self):
         result = self.run_cli(DEV_TRIO_PM_HOST="codex", ANTHROPIC_API_KEY="secret-sentinel",
