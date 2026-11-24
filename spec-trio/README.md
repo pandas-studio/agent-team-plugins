@@ -207,7 +207,7 @@ $PWD/.spec-trio/
     └── latest-spec-trio.log                              symlink to most-recent summary
 ```
 
-Team namespace priority: `$AGENT_TEAM` env > tmux `@team-name` window option > tmux session name > `default`.
+Team namespace priority: `$AGENT_TEAM` env > tmux `@team-name` window option > tmux session name > herdr tab (`herdr-<tab id>`, outside tmux) > `default`. A run started in herdr before the herdr name existed wrote under `default`; see [Team namespaces](../README.md#team-namespaces).
 
 ## Standalone coverage classifier
 

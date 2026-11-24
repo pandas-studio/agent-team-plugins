@@ -290,6 +290,111 @@ class DebateHostTests(unittest.TestCase):
         self.assertEqual(metadata["sources"]["generator"], "current-resolution")
         self.assertEqual(metadata["sources"]["critic"], "current-resolution")
 
+    def role_logs(self, log_dir):
+        return sorted(p.name for p in Path(log_dir).glob("*.log")
+                      if p.name.startswith(("gen-", "crit-")) and not p.is_symlink())
+
+    def assert_round_pair_logged(self, log_dir, before):
+        """One new generator log and one new critic log, each behind its own link."""
+        new = sorted(set(self.role_logs(log_dir)) - set(before))
+        self.assertEqual([n.split("-")[0] for n in new], ["crit", "gen"], new)
+        self.assertEqual(os.readlink(Path(log_dir) / "latest-crit.log"), new[0])
+        self.assertEqual(os.readlink(Path(log_dir) / "latest-gen.log"), new[1])
+        return self.role_logs(log_dir)
+
+    def test_continue_keeps_role_logs_with_the_debate_whatever_team_the_caller_is_in(self):
+        log_root = self.workspace / ".debate-conductor/log"
+        # Started where no team is named: the team is "default".
+        result = self.run_cli("debate.sh", "-n", "2", "fixture topic", AGENT_TEAM="", HERDR_ENV="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        first_dir = (log_root / "default/latest-debate").resolve()
+        before = self.assert_round_pair_logged(log_root / "default", [])
+        for label, env in (
+            ("herdr tab", dict(AGENT_TEAM="", HERDR_ENV="1", HERDR_TAB_ID="w6:t2")),
+            ("another team", dict(AGENT_TEAM="elsewhere", HERDR_ENV="")),
+        ):
+            with self.subTest(caller=label):
+                result = self.run_cli("debate.sh", "--continue-from", str(first_dir), "-n", "2",
+                                      "fixture topic", **env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                before = self.assert_round_pair_logged(log_root / "default", before)
+                self.assertEqual(sorted(p.name for p in log_root.iterdir()), ["default"])
+
+    def test_fresh_debate_in_a_herdr_tab_keeps_everything_under_the_tab_team(self):
+        log_root = self.workspace / ".debate-conductor/log"
+        receipt = self.root / "herdr-receipt.json"
+        result = self.run_cli("debate.sh", "-n", "2", "fixture topic", DEBATE_RECEIPT=str(receipt),
+                              AGENT_TEAM="", HERDR_ENV="1", HERDR_TAB_ID="w6:t2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        team_dir = log_root / "herdr-w6-t2"
+        self.assertEqual(sorted(p.name for p in log_root.iterdir()), ["herdr-w6-t2"])
+        self.assert_round_pair_logged(team_dir, [])
+        debate_dir = Path(json.loads(receipt.read_text())["debate_dir"])
+        self.assertEqual(debate_dir.parent, team_dir.resolve())
+        self.assertEqual((team_dir / "latest-debate").resolve(), debate_dir)
+        self.assertIn(f"monitor: tail -F {team_dir.resolve()}/latest-gen.log\n", result.stderr)
+
+    def test_continue_does_not_need_the_earlier_role_logs(self):
+        log_root = self.workspace / ".debate-conductor/log"
+        result = self.run_cli("debate.sh", "-n", "2", "fixture topic", AGENT_TEAM="", HERDR_ENV="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        first_dir = (log_root / "default/latest-debate").resolve()
+        for name in self.role_logs(log_root / "default") + ["latest-gen.log", "latest-crit.log"]:
+            (log_root / "default" / name).unlink()
+        result = self.run_cli("debate.sh", "--continue-from", str(first_dir), "-n", "2", "fixture topic",
+                              AGENT_TEAM="", HERDR_ENV="1", HERDR_TAB_ID="w6:t2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_round_pair_logged(log_root / "default", [])
+        self.assertEqual(sorted(p.name for p in log_root.iterdir()), ["default"])
+
+    def test_continue_follows_the_log_root_the_debate_was_written_under(self):
+        elsewhere = self.root / "other-root"
+        result = self.run_cli("debate.sh", "-n", "2", "fixture topic", DEBATE_LOG_DIR=str(elsewhere))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        first_dir = (elsewhere / "host-test/latest-debate").resolve()
+        before = self.assert_round_pair_logged(elsewhere / "host-test", [])
+        result = self.run_cli("debate.sh", "--continue-from", str(first_dir), "-n", "2", "fixture topic")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_round_pair_logged(elsewhere / "host-test", before)
+        self.assertFalse((self.workspace / ".debate-conductor/log/host-test").exists())
+
+    def test_continue_from_a_moved_debate_logs_beside_it_and_replaces_only_links(self):
+        home = self.workspace / ".debate-conductor/log/host-test"
+        result = self.run_cli("debate.sh", "-n", "2", "fixture topic")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        first_dir = self.latest_debate()
+        at_home = self.role_logs(home)
+        # Moved under a parent whose name could not be a team, next to files
+        # that are not this wrapper's links: one regular file, one directory.
+        parent = self.root / "moved dir"
+        parent.mkdir()
+        (parent / "latest-gen.log").write_text("not a link\n")
+        (parent / "latest-crit.log").mkdir()
+        moved = parent / first_dir.name
+        first_dir.rename(moved)
+        result = self.run_cli("debate.sh", "--continue-from", str(moved), "-n", "2", "fixture topic")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((moved / "round-4-crit.md").exists())
+        self.assertEqual([n.split("-")[0] for n in self.role_logs(parent)], ["crit", "gen"])
+        self.assertEqual(self.role_logs(home), at_home)
+        self.assertEqual((parent / "latest-gen.log").read_text(), "not a link\n")
+        self.assertEqual(list((parent / "latest-crit.log").iterdir()), [])
+        self.assertIn("latest-gen.log is not a link", result.stderr)
+        self.assertIn("latest-crit.log is not a link", result.stderr)
+        # The monitor hint names the log that was written, not the file left alone.
+        # (The wrappers print the physical path; the temp root may be a link.)
+        for name in self.role_logs(parent):
+            self.assertIn(f"monitor: tail -F {parent.resolve() / name}\n", result.stderr)
+        self.assertNotIn("monitor: tail -F " + str(parent.resolve() / "latest-"), result.stderr)
+
+    def test_role_wrapper_run_alone_uses_the_team_directory(self):
+        result = self.run_cli("ask-generator.sh", "standalone fixture")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        home = self.workspace / ".debate-conductor/log/host-test"
+        logs = self.role_logs(home)
+        self.assertEqual([n.split("-")[0] for n in logs], ["gen"])
+        self.assertEqual(os.readlink(home / "latest-gen.log"), logs[0])
+
     def test_continue_one_generator_round_skips_unscheduled_critic_preflight(self):
         result = self.run_cli("debate.sh", "-n", "2", "fixture topic")
         self.assertEqual(result.returncode, 0, result.stderr)
