@@ -680,12 +680,64 @@ class RealViewTests(ViewFixture):
         super().setUp()
         self.tool("tmux", f"exec {shlex.quote(REAL_TMUX)} -f /dev/null \"$@\"\n")
         self.socket = self.root / ("tmux-" + str(os.getuid())) / "default"
-        self.addCleanup(lambda: subprocess.run([REAL_TMUX, "-S", str(self.socket), "kill-server"],
-                                              capture_output=True, timeout=5))
+        self.viewers = set()
+        self.addCleanup(self.stop_server)
 
     def tmux(self, *args):
         return subprocess.run([REAL_TMUX, "-S", str(self.socket), *args],
                               capture_output=True, text=True, timeout=5)
+
+    def prepare(self, *args, **env):
+        ctx = super().prepare(*args, **env)
+        # Every pane runs its viewer as the pane's own process, the leader of its group.
+        # Noted while the server answers, so teardown need not ask a server that may be gone.
+        panes = self.tmux("list-panes", "-a", "-F", "#{pane_pid}")
+        self.assertEqual(panes.returncode, 0, panes)
+        self.viewers.update(int(pid) for pid in panes.stdout.split())
+        return ctx
+
+    def live_viewers(self):
+        """The (pid, command) rows of the noted PIDs that are still a viewer from this fixture."""
+        if not self.viewers:
+            return []
+        listed = subprocess.run(["ps", "-ww", "-o", "pid=", "-o", "args=", "-p", ",".join(map(str, sorted(self.viewers)))],
+                                capture_output=True, text=True, timeout=10)
+        # ps exits 1, printing nothing, when none of the PIDs exists. Anything else failed.
+        none_left = listed.returncode == 1 and not (listed.stdout + listed.stderr).strip()
+        self.assertTrue(listed.returncode == 0 or none_left, listed)
+        rows = []
+        for line in listed.stdout.splitlines():
+            pid, _, command = line.strip().partition(" ")
+            # A reused PID would name some other command.
+            if str(self.plugin) in command and "tail-role.sh" in command:
+                rows.append((int(pid), command.strip()))
+        return rows
+
+    def stop_server(self):
+        problems = []
+        try:
+            stopped = subprocess.run([REAL_TMUX, "-S", str(self.socket), "kill-server"],
+                                     capture_output=True, text=True, timeout=5)
+            if self.viewers and stopped.returncode:
+                problems.append(f"kill-server failed: {stopped}")
+        except subprocess.TimeoutExpired as error:
+            problems.append(f"kill-server timed out: {error}")
+        # Each viewer has lost its terminal and must end on its own. One that does not can
+        # hold a core until someone notices, so it fails the test and is killed here.
+        deadline = time.monotonic() + 10
+        while True:
+            left = self.live_viewers()
+            if not left or time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
+        for pid, _ in left:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if left:
+            problems.append(f"viewers outlived their tmux server and were killed: {left}")
+        self.assertEqual(problems, [])
 
     def test_real_two_role_output_reuse_and_dead_viewer_recovery(self):
         ctx = self.prepare("--view=tmux", AGENT_TEAM="real-test")
