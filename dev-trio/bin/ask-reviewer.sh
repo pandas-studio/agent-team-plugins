@@ -9,6 +9,7 @@
 #   ask-reviewer.sh --model agy "focus"          # pick the reviewer model for this call
 #   ask-reviewer.sh -m agy "focus"               # same, short form
 #   ask-reviewer.sh --focus-file angles.txt      # focus read from a file
+#   ask-reviewer.sh --summary "focus"            # one JSON summary on stdout, no transcript
 #   ask-reviewer.sh -h | --help                  # usage; runs nothing, exit 0
 #
 # --focus-file exists for callers that cannot pass a computed argument: a
@@ -58,6 +59,13 @@
 # transcript — so the verdict and findings can be parsed from a clean file even
 # when the streamed stdout duplicates or drops the closing block.
 # Override log root via DEV_TRIO_LOG_DIR=/abs/path.
+#
+# --summary replaces the stdout replay with one JSON document (see summary_emit)
+# once the model call has returned; before that, and on a signal during the
+# call, stdout stays empty. Exit code, stderr, receipt, manifest and the result
+# files are what the same run writes without it, but for one stderr notice:
+# an out-of-band transcript (see run_cleanup_files) is kept and named at exit,
+# after the `(log: …)` line, even when the review was published.
 set -euo pipefail
 # Baseline for the run metadata's completion.timing (run_clock and run_timing
 # in lib/run-lifecycle.sh, sourced later): the epoch second, or empty.
@@ -78,6 +86,9 @@ Options (any order relative to the focus):
   --focus-file FILE     read the focus from FILE instead of an argument
   -m, --model ID        reviewer model for this call (see: agent-team-models list)
   --no-memories         run Codex without its memory summary (codex reviewer only)
+  --summary             print one JSON document on stdout (exit code, paths,
+                        the published result and the final review's text)
+                        instead of replaying the transcript
   --                    end of options: the one argument after it is the
                         focus, even if it starts with a dash
   -h, --help            show this help and exit
@@ -129,6 +140,7 @@ FOCUS_FILE=""
 FOCUS=""
 MODEL_ARG=""
 NO_MEMORIES=0
+SUMMARY=0
 POSITIONAL_SEEN=0
 take_positional() {
   [ "$POSITIONAL_SEEN" -eq 0 ] || usage_error "unexpected extra positional argument: $1"
@@ -157,6 +169,7 @@ while [ $# -gt 0 ]; do
         || usage_error "$1 requires a model id"
       MODEL_ARG="$2"; shift 2 ;;
     --no-memories) NO_MEMORIES=1; shift ;;
+    --summary) SUMMARY=1; shift ;;
     --) shift
         while [ $# -gt 0 ]; do take_positional "$1"; shift; done ;;
     *)
@@ -557,10 +570,17 @@ run_cleanup_files() {
   # been read and does not need it. The condition is this run's own flag, not
   # the presence of a result file: an interrupted run must not be talked out of
   # keeping its only copy.
-  if [ "${REVIEW_PUBLISHED:-0}" -eq 0 ] && [ -n "${TRANSCRIPT_TMP:-}" ] \
-     && [ -s "$TRANSCRIPT_TMP" ]; then
-    echo "[ask-reviewer] no review was published; the transcript is at $TRANSCRIPT_TMP" >&2
-    TRANSCRIPT_TMP=""
+  # With --summary the transcript is never replayed, so the out-of-band file is
+  # the only copy even when a review was published: it is kept then too, with
+  # the one notice worded for that case.
+  if [ -n "${TRANSCRIPT_TMP:-}" ] && [ -s "$TRANSCRIPT_TMP" ]; then
+    if [ "${REVIEW_PUBLISHED:-0}" -eq 0 ]; then
+      echo "[ask-reviewer] no review was published; the transcript is at $TRANSCRIPT_TMP" >&2
+      TRANSCRIPT_TMP=""
+    elif [ "${SUMMARY:-0}" -eq 1 ]; then
+      echo "[ask-reviewer] the transcript could not be logged and --summary does not replay it; it is at $TRANSCRIPT_TMP" >&2
+      TRANSCRIPT_TMP=""
+    fi
   fi
   [ -z "${RESULT_TMP:-}" ] || rm -f "$RESULT_TMP" "$RESULT_TMP.denied" || true
   [ -z "${LATEST_TMP:-}" ] || rm -f "$LATEST_TMP" || true
@@ -784,6 +804,57 @@ if ! registry_has_final "$REVIEWER_MODEL" && [ ! -s "$FINAL" ] \
   fi
 fi
 INVOCATION_RC="$RC"
+# --summary: what this run prints on stdout instead of the transcript replay,
+# once the model call has returned. One JSON document:
+#   summary_version 1, exit_code, model, paths {log, final, result},
+#   result       the published .review.json as it is, or null when none was
+#                published (the review's fields keep their meaning there:
+#                a null findings.* is unknown, and so on)
+#   final_text   the .final.md text when result.status is "ok" and the text
+#                is at most 64 KiB, else null (a failed run's final is never
+#                read for a verdict); final_truncated says the size was why
+#   error        null, or "result-write-failed: <step>"
+# The verdict and counts are read from `result`; final_text is there for what
+# a caller used to read the final for (NEED RESEARCH, NEED CONTEXT). It is
+# jq's reading of the file: a byte that is not UTF-8 arrives as U+FFFD, and
+# the file at paths.final keeps the bytes.
+# Each input is read once. `result` and its status are what the caller already
+# validated, passed in, never the file again. The final is read by the one jq
+# call that renders the document, which also decides the size, so no second
+# read can disagree with the first. If rendering fails (an ok result whose
+# final is not a regular file or cannot be read counts), or the exit code is
+# not an integer, a fixed document is written instead; its exit_code is that
+# integer, or null. The write runs in a subshell: a builtin printf to a pipe
+# with no reader would kill this shell with SIGPIPE before the completion is
+# published (measured on Bash 3.2.57: rc 141 in place, the parent's own rc
+# from a subshell). None of this changes the exit code. Called once, after the
+# result, receipt and manifest are published (or have failed to be).
+SUMMARY_FINAL_MAX=65536
+summary_emit() {
+  local result_path="$1" result_json="$2" status="$3" error="$4" doc="" code=""
+  local final_src=/dev/null use_final=false
+  case "$RC" in '' | *[!0-9]*) ;; *) code="$RC" ;; esac
+  if [ "$status" = ok ]; then final_src="$FINAL"; use_final=true; fi
+  if [ -n "$code" ] && { [ "$use_final" = false ] || [ -f "$FINAL" ]; }; then
+    doc=$(printf '%s\n' "${result_json:-null}" | jq -c \
+      --argjson exit_code "$code" --arg model "$REVIEWER_MODEL" \
+      --arg log "$LOG" --arg final "$FINAL" --arg result "$result_path" --arg error "$error" \
+      --rawfile final_text "$final_src" --argjson use_final "$use_final" \
+      --argjson max "$SUMMARY_FINAL_MAX" \
+      '. as $res
+       | ($use_final and ($final_text | utf8bytelength) > $max) as $over
+       | {summary_version: 1, exit_code: $exit_code, model: $model,
+          paths: {log: $log, final: $final, result: (if $result == "" then null else $result end)},
+          result: $res,
+          final_text: (if $use_final and ($over | not) then $final_text else null end),
+          final_truncated: $over,
+          error: (if $error == "" then null else $error end)}' 2>/dev/null) || doc=""
+  fi
+  [ -n "$doc" ] \
+    || doc='{"summary_version":1,"exit_code":'"${code:-null}"',"result":null,"final_text":null,"error":"summary-unavailable"}'
+  ( printf '%s\n' "$doc" ) 2>/dev/null || true
+  return 0
+}
 result_output_failed() {
   # An I/O failure is not a successful review. Preserve a failed invocation's
   # rc, otherwise use 2. Completion metadata tells the dashboard it has ended,
@@ -795,7 +866,12 @@ result_output_failed() {
   manifest_finalize || true
   # The transcript is still this wrapper's stdout on the failure path, and this
   # exits — without the replay here, a result-write failure would lose it.
-  emit_transcript
+  # With --summary the summary takes its place and names no result.
+  if [ "$SUMMARY" -eq 1 ]; then
+    summary_emit "" "" "" "result-write-failed: $1"
+  else
+    emit_transcript
+  fi
   run_finish_log "$RC"
   exec 8>&- 7<&- 9>&- || true
   echo "[ask-reviewer] result write failed: $1 (log: $LOG, final: $FINAL, rc=$RC)" >&2
@@ -858,10 +934,15 @@ if [ -n "$RECEIPT" ]; then
 fi
 manifest_finalize || result_output_failed 'finalize manifest'
 # Completion is published only after the final, result and manifest are ready.
-emit_transcript
+if [ "$SUMMARY" -eq 1 ]; then
+  summary_emit "$RESULT" "$RESULT_JSON" "$STATUS" ""
+else
+  emit_transcript
+fi
 run_finish_log "$RC"
 exec 8>&- 7<&- 9>&- || true
-echo || true
+# The blank line ends the replay; a summary is one document with nothing after it.
+[ "$SUMMARY" -eq 1 ] || echo || true
 if [ "$RC" -ne 0 ]; then
   ERROR=$(printf '%s\n' "$RESULT_JSON" | jq -r '.error')
   echo "[ask-reviewer] review failed: $ERROR (result: $RESULT)" >&2

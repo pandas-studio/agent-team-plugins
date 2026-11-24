@@ -528,6 +528,46 @@ log path out of it and recovers the partial transcript from the log itself, so
 naming the artifacts serves it better than replaying bytes onto a stdout it may
 not have captured. `result:` is absent because no review exists.
 
+**`--summary`.** With `ask-reviewer.sh --summary`, stdout carries one JSON
+document on one line instead of the transcript replay (median 498 KB in local
+run logs). The exit code, stderr, receipt, manifest, `*.review.json` and
+`*.final.md` are what the same run writes without the flag.
+
+```json
+{"summary_version": 1, "exit_code": 0, "model": "codex",
+ "paths": {"log": "…", "final": "…", "result": "…"},
+ "result": {"…": "the published *.review.json, as it is"},
+ "final_text": "## Verdict\nSHIP — …", "final_truncated": false, "error": null}
+```
+
+- `result` is the published review result unchanged, so its fields keep their
+  meaning (a `null` `findings.*` is unknown, not zero). Read the verdict and the
+  counts from it.
+- `final_text` is the `*.final.md` text only when `result.status` is `ok` and
+  the text is at most 64 KiB; otherwise it is `null`, and `final_truncated` is
+  `true` when the size was the reason. A failed run's final is not a review.
+  The text is jq's reading of the file: a byte that is not UTF-8 arrives as
+  U+FFFD, and the file at `paths.final` keeps the bytes.
+- A run whose result could not be written has `result: null`,
+  `paths.result: null` and `error: "result-write-failed: <step>"`.
+- If the document cannot be rendered — an `ok` result whose final is no longer
+  a readable regular file counts — stdout is the fixed
+  `{"summary_version":1,"exit_code":N,"result":null,"final_text":null,"error":"summary-unavailable"}`.
+  `N` is the exit code, or `null` if the wrapper's own code is not an integer.
+  Neither case, nor a stdout with no reader, changes the exit code.
+- `exit_code` is the code the wrapper was about to exit with when it wrote the
+  document. The process status is the authority: a wrapper killed after that
+  point (a stderr with no reader) exits differently.
+- Stdout is empty for a usage error, a setup failure before the model call, and
+  a signal during the call. `--help` still prints the usage.
+- The one stderr difference: when the log could not be opened, the transcript
+  went to a private temp file and, with no replay, that file is the only copy.
+  It is kept even after a published review, and stderr names it once at exit,
+  after the artifact line. So read the paths from the last line that starts with
+  `(log:`, not from the last line of stderr. A run whose result could not be
+  written has no such line: its paths are in the
+  `[ask-reviewer] result write failed: <step> (log: …, rc=…)` line.
+
 **Researcher answer.** `researcher-<TS>-<PID>.final.md` holds the answer on its own,
 captured by `registry_run_answer`: the model's own last message when it defines
 `final_args`, otherwise that function's existing copy of stdout — stdout alone,
