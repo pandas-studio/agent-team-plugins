@@ -93,6 +93,9 @@ detached tmux layout outside tmux and prints an attach command for a terminal.
 - `codex` (OpenAI Codex CLI) authenticated
 - Python 3.9+ for the policy installer and development tests
 - `jq` (1.6+) — required for the model registry and RFC 0004 run manifests
+- `gh` (GitHub CLI) authenticated — only for `pr-context.sh`, which also needs
+  `python3` for its git probes. In a partial clone (`--filter=…`) it needs
+  Git 2.45.0 or newer; an ordinary clone works with older Git
 
 Models and CLI binaries are configurable — see [Model configuration](#model-configuration). Quick binary overrides still work: `AGY_CLI` / `RESEARCHER_CLI` (researcher), `CODEX_CLI` / `REVIEWER_CLI` (reviewer).
 
@@ -244,6 +247,16 @@ claude --plugin-dir ./agent-team-plugins/dev-trio
    When calling `ask-reviewer.sh` directly, a long focus can be passed as `--focus-file <file>` instead of an argument. That works where a host refuses a computed `"$(cat angles.txt)"` argument, and it needs no shell quoting. `/dev-trio:review` itself takes the focus as text.
 
    **Reviewers may run without network access** (Codex's sandbox disables it by default), so the PM supplies repository facts. For a PR, resolve the base/head commits with `gh pr view` first and pass them as `--with-context <file>` with a `<merge-base>..<head>` range focus; a bare `"pr 55"` focus leaves a sandboxed reviewer unable to identify the commits. When a reviewer still needs a remote fact it returns a `## NEED CONTEXT` block of read-only commands; the PM runs them, appends the output to the context file, and re-reviews once with every original flag.
+
+   `pr-context.sh` does that PR resolution in one call. It asks `gh` once, checks that the head and base commits are in this repository, takes their merge base, writes the context file and prints one JSON line with `context_file` and `focus`:
+
+   ```bash
+   pr-context.sh 55        # or '#55', or the PR's URL; --with-context FILE appends a file
+   # {"pr_context_version":1,"number":55,…,"context_file":"/abs/…/pr-55-context-…","focus":"review <merge-base>..<head> (PR #55)"}
+   ask-reviewer.sh --with-context <context_file> -- "<focus>"
+   ```
+
+   It starts no review and never fetches: a head or base commit that is missing locally ends it with exit 4, what to fetch, and `(pr: 55, missing: head, rc=4)` as the last stderr line (`missing: base`, `missing: head base`). Head and base that share no history here end it with exit 4 and `missing: merge-base`, with nothing to fetch named. A usage error is exit 2 with the `--help` hint as the last line; any other failure it detects is exit 2 with `(pr: 55, failed: <reason>, rc=2)`. A signal, or a tool failing where no check expects it, ends it with that status and no marker. Discard stdout whenever the exit status is not 0. A PR URL must name the repository `gh` selects in this directory. `gh` runs with no timeout of its own, so the caller's time limit bounds the call.
 
 ## Research troubleshooting
 
@@ -717,6 +730,7 @@ dev-trio/
 ├── bin/                       # on plugin PATH while active
 │   ├── ask-researcher.sh             # Researcher wrapper
 │   ├── ask-reviewer.sh           # Reviewer wrapper
+│   ├── pr-context.sh          # PR → review range + context file (gh, no fetch)
 │   ├── agent-team-models.sh   # shared model-registry CLI (vendored)
 │   ├── dashboard.sh           # live dashboard (researcher|reviewer)
 │   ├── team-layout.sh         # tmux 3-pane splitter
