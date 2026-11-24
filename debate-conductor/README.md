@@ -282,7 +282,7 @@ $PWD/.debate-conductor/log/<team>/
 └── crit-<TS>.log
 ```
 
-`<team>` is the tmux window's `@team-name` option (default: `debate-conductor`), so multiple windows in the same workspace produce isolated log streams.
+`<team>` is the tmux window's `@team-name` option (the layout commands set it, to `debate-conductor` unless told otherwise), so multiple windows in the same workspace produce isolated log streams; a window without the option uses the tmux session name. `$AGENT_TEAM` overrides both. Outside tmux the team is `default`, or in a herdr tab `herdr-<tab id>` (`w6:t2` → `herdr-w6-t2`). `--continue-from` does not use the caller's team: `debate.sh` tells the generator and critic to write their role logs, and the `latest-gen.log` / `latest-crit.log` links, into the directory that holds the debate being continued (`DEBATE_ROLE_LOG_DIR`, set by `debate.sh` for every run), which is also where its `latest-debate` link goes. A debate started under `default` before the herdr name existed is therefore continued in place, and a debate directory that was moved is continued where it now is. The two wrappers replace `latest-gen.log` / `latest-crit.log` only when it is a link; a file or directory of that name is left alone, with a note on stderr. See [Team namespaces](../README.md#team-namespaces).
 
 Override the log location with `DEBATE_LOG_DIR=/path/to/logs`.
 

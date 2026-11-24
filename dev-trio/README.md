@@ -615,6 +615,10 @@ debate-conductor's generator and critic use.
 3. tmux session name
 4. `default`
 
+Outside tmux, in a herdr tab, steps 2 and 3 are replaced by the tab:
+`HERDR_TAB_ID` `w6:t2` → `herdr-w6-t2`. These runs used to land in `default`;
+see [Team namespaces](../README.md#team-namespaces) for what moves on upgrade.
+
 Override the log root with `DEV_TRIO_LOG_DIR=/path/to/logs`. The wrappers create
 missing log directories with private permissions. An existing team log directory
 must be owned by the caller and must not be writable by group or others. Every
@@ -699,6 +703,20 @@ and tests rather than a pane.
 tail -F .dev-trio/log/${AGENT_TEAM:-default}/latest-researcher.log
 tail -F .dev-trio/log/${AGENT_TEAM:-default}/latest-reviewer.log
 ```
+
+`default` is the team only when nothing else names one: inside a tmux layout or
+a herdr tab, use the directory the wrapper prints when it starts.
+
+**In herdr** there is no layout command yet. Create a pane in the tab the PM
+runs in, with the same checkout as its working directory, and start the
+dashboard there by the absolute path of dev-trio's `bin/dashboard.sh`
+(the directory `ask-reviewer.sh` is in) followed by `reviewer` or
+`researcher`. A bare `dashboard.sh` is not enough: a new pane's shell does not
+have the plugin's `bin/` on `PATH`, and ralph-trio ships a `dashboard.sh` of
+its own. A pane created in the same tab has the same `HERDR_TAB_ID`, so the
+dashboard follows the team the wrappers write to. `AGENT_TEAM` or
+`DEV_TRIO_LOG_DIR` exported only in the PM's shell are not inherited by a new
+pane; set them there too.
 
 The wrapper scripts print both the dashboard command and the raw `tail -F` hint to stderr when they start.
 

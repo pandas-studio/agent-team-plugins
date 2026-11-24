@@ -16,6 +16,7 @@
 #
 # Output goes to stdout AND $LOG_DIR/crit-<timestamp>.log
 # Log location: $DEBATE_LOG_DIR (default: $PWD/.debate-conductor/log) / $TEAM /
+# unless DEBATE_ROLE_LOG_DIR names the directory, as debate.sh does for its runs.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,7 +37,9 @@ unset _REGISTRY_LIB
 
 TEAM=$(agent_team_detect_team) || exit 2
 LOG_BASE="${DEBATE_LOG_DIR:-$PWD/.debate-conductor/log}"
-LOG_DIR="$LOG_BASE/$TEAM"
+# debate.sh names the directory it settled on; run alone, this wrapper uses
+# the team's.
+LOG_DIR="${DEBATE_ROLE_LOG_DIR:-$LOG_BASE/$TEAM}"
 
 RESEARCH_FILE=""
 MODEL_OPT=""
@@ -109,7 +112,15 @@ mkdir -p "$LOG_DIR"
 # same second (BSD `date` has no sub-second precision).
 TS="$(date +%Y%m%d-%H%M%S)-$$"
 LOG="$LOG_DIR/crit-$TS.log"
-ln -sfn "crit-$TS.log" "$LOG_DIR/latest-crit.log"
+# Only a link is replaced: anything else at this name is somebody's file, and
+# the monitor hint below then names this run's own log instead.
+MONITOR="$LOG_DIR/latest-crit.log"
+if [ -e "$MONITOR" ] && [ ! -L "$MONITOR" ]; then
+  echo "[ask-critic] $MONITOR is not a link; leaving it as it is" >&2
+  MONITOR="$LOG"
+else
+  ln -sfn "crit-$TS.log" "$MONITOR"
+fi
 
 {
   echo "=== ask-critic.sh @ $TS ==="
@@ -122,7 +133,7 @@ ln -sfn "crit-$TS.log" "$LOG_DIR/latest-crit.log"
   echo "=== RESPONSE ==="
 } > "$LOG"
 
-echo "[ask-critic] running ($MODEL) — monitor: tail -F $LOG_DIR/latest-crit.log" >&2
+echo "[ask-critic] running ($MODEL) — monitor: tail -F $MONITOR" >&2
 # Only answer bytes go to stdout and the ordinary role log.
 RAW_LOG=""
 [ "${DEBATE_RAW_LOG:-0}" != 1 ] || RAW_LOG="$LOG_DIR/crit-$TS.raw.log"

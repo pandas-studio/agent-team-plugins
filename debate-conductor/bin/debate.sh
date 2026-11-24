@@ -379,6 +379,12 @@ else
   START_ROUND=1
   END_ROUND="$ROUNDS"
 fi
+# The generator and critic keep their role logs, and the latest-gen.log /
+# latest-crit.log links, in the directory this run settled on. Left to work it
+# out again from AGENT_TEAM and DEBATE_LOG_DIR, they agree for a fresh debate,
+# but a debate continued from another tmux window or herdr tab would keep its
+# rounds beside the debate and send its role logs to the caller's team.
+export DEBATE_ROLE_LOG_DIR="$LOG_DIR"
 
 # Continue must keep the original model pair unless this invocation explicitly
 # selects a replacement through flags or per-role env vars. Global config still

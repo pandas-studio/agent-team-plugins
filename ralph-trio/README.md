@@ -312,7 +312,9 @@ $PWD/.ralph-trio/
     └── prompt.sha256                              Stop-hook tamper detection
 ```
 
-Team namespace priority: `$AGENT_TEAM` env var → tmux `@team-name` window option → tmux session name → `default`.
+Team namespace priority: `$AGENT_TEAM` env var → tmux `@team-name` window option → tmux session name → herdr tab (`herdr-<tab id>`, outside tmux) → `default`.
+
+A loop started in herdr before the herdr name existed kept its `iter` and `prompt.sha256` under `state/default/`. To continue it, export `AGENT_TEAM=default` in a shell and start (or resume) Claude from that shell: the Stop hook inherits Claude's environment, so an export made after Claude is running does not reach it, and the hook reads an empty directory and starts from zero. `ralph-meta.sh --since-latest-run` takes the same pin directly. See [Team namespaces](../README.md#team-namespaces).
 
 ## Variant-internal helpers
 
