@@ -114,6 +114,10 @@ The sources are treated differently on purpose:
 
 - **`$AGENT_TEAM`** is an identifier you chose deliberately. An unusable value is
   a hard error (exit 2) rather than something silently rewritten under you.
+  The alphabet is ASCII in every locale. Under some Linux locales (GNU grep
+  with `en_US.UTF-8`) a name with a non-ASCII letter such as `é` used to pass
+  this check and is now refused; its logs and state are still on disk under
+  the old name, so pick an ASCII name and rename that directory to keep them.
 - **tmux window / session names** are *derived* — you never picked them as a path
   component, and names like `my project` or `feat/x` are ordinary. These are
   sanitized to the allowed character set with a warning on stderr.

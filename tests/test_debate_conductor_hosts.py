@@ -320,6 +320,20 @@ class DebateHostTests(unittest.TestCase):
                 before = self.assert_round_pair_logged(log_root / "default", before)
                 self.assertEqual(sorted(p.name for p in log_root.iterdir()), ["default"])
 
+    def test_fresh_debate_in_a_herdr_tab_keeps_everything_under_the_tab_team(self):
+        log_root = self.workspace / ".debate-conductor/log"
+        receipt = self.root / "herdr-receipt.json"
+        result = self.run_cli("debate.sh", "-n", "2", "fixture topic", DEBATE_RECEIPT=str(receipt),
+                              AGENT_TEAM="", HERDR_ENV="1", HERDR_TAB_ID="w6:t2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        team_dir = log_root / "herdr-w6-t2"
+        self.assertEqual(sorted(p.name for p in log_root.iterdir()), ["herdr-w6-t2"])
+        self.assert_round_pair_logged(team_dir, [])
+        debate_dir = Path(json.loads(receipt.read_text())["debate_dir"])
+        self.assertEqual(debate_dir.parent, team_dir.resolve())
+        self.assertEqual((team_dir / "latest-debate").resolve(), debate_dir)
+        self.assertIn(f"monitor: tail -F {team_dir.resolve()}/latest-gen.log\n", result.stderr)
+
     def test_continue_does_not_need_the_earlier_role_logs(self):
         log_root = self.workspace / ".debate-conductor/log"
         result = self.run_cli("debate.sh", "-n", "2", "fixture topic", AGENT_TEAM="", HERDR_ENV="")
@@ -367,6 +381,11 @@ class DebateHostTests(unittest.TestCase):
         self.assertEqual(list((parent / "latest-crit.log").iterdir()), [])
         self.assertIn("latest-gen.log is not a link", result.stderr)
         self.assertIn("latest-crit.log is not a link", result.stderr)
+        # The monitor hint names the log that was written, not the file left alone.
+        # (The wrappers print the physical path; the temp root may be a link.)
+        for name in self.role_logs(parent):
+            self.assertIn(f"monitor: tail -F {parent.resolve() / name}\n", result.stderr)
+        self.assertNotIn("monitor: tail -F " + str(parent.resolve() / "latest-"), result.stderr)
 
     def test_role_wrapper_run_alone_uses_the_team_directory(self):
         result = self.run_cli("ask-generator.sh", "standalone fixture")

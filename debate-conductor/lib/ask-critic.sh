@@ -112,11 +112,14 @@ mkdir -p "$LOG_DIR"
 # same second (BSD `date` has no sub-second precision).
 TS="$(date +%Y%m%d-%H%M%S)-$$"
 LOG="$LOG_DIR/crit-$TS.log"
-# Only a link is replaced: anything else at this name is somebody's file.
-if [ -e "$LOG_DIR/latest-crit.log" ] && [ ! -L "$LOG_DIR/latest-crit.log" ]; then
-  echo "[ask-critic] $LOG_DIR/latest-crit.log is not a link; leaving it as it is" >&2
+# Only a link is replaced: anything else at this name is somebody's file, and
+# the monitor hint below then names this run's own log instead.
+MONITOR="$LOG_DIR/latest-crit.log"
+if [ -e "$MONITOR" ] && [ ! -L "$MONITOR" ]; then
+  echo "[ask-critic] $MONITOR is not a link; leaving it as it is" >&2
+  MONITOR="$LOG"
 else
-  ln -sfn "crit-$TS.log" "$LOG_DIR/latest-crit.log"
+  ln -sfn "crit-$TS.log" "$MONITOR"
 fi
 
 {
@@ -130,7 +133,7 @@ fi
   echo "=== RESPONSE ==="
 } > "$LOG"
 
-echo "[ask-critic] running ($MODEL) — monitor: tail -F $LOG_DIR/latest-crit.log" >&2
+echo "[ask-critic] running ($MODEL) — monitor: tail -F $MONITOR" >&2
 # Only answer bytes go to stdout and the ordinary role log.
 RAW_LOG=""
 [ "${DEBATE_RAW_LOG:-0}" != 1 ] || RAW_LOG="$LOG_DIR/crit-$TS.raw.log"

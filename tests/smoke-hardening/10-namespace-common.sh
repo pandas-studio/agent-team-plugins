@@ -9,6 +9,12 @@ set -euo pipefail
 herdr_team() {
   AGENT_TEAM='' TMUX='' HERDR_ENV=1 HERDR_TAB_ID="$1" agent_team_detect_team 2>"$TMP/herdr.err"
 }
+# A grep that notes the LC_ALL it was started with, then is the real grep.
+mkdir "$TMP/grep-stub"
+printf '#!/bin/sh\nprintf "%%s\\n" "${LC_ALL-unset}" >> "%s"\nexec "%s" "$@"\n' \
+  "$TMP/grep-locale" "$(command -v grep)" > "$TMP/grep-stub/grep"
+chmod +x "$TMP/grep-stub/grep"
+
 # tmux_team WINDOW_NAME SESSION_NAME — the team resolved inside tmux, with a
 # herdr tab around it, from a tmux that answers with exactly these two names.
 mkdir "$TMP/tmux-stub"
@@ -47,6 +53,11 @@ EVIL" team
   assert_fail env LC_ALL=en_US.UTF-8 bash -c ". '$ROOT/$plugin/lib/namespace.sh'; agent_team_validate_id \"\$(printf 'w\303\251')\" team"
   assert_fail env LC_ALL=en_US.UTF-8 AGENT_TEAM="$(printf 'w\303\251')" bash -c ". '$ROOT/$plugin/lib/namespace.sh'; agent_team_detect_team"
   assert_ok env LC_ALL=en_US.UTF-8 bash -c ". '$ROOT/$plugin/lib/namespace.sh'; agent_team_validate_id abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ team 60"
+  # The same thing where no grep or locale can hide it: whatever locale the
+  # caller is in, the grep that checks the alphabet is started with LC_ALL=C.
+  : > "$TMP/grep-locale"
+  assert_ok env LC_ALL=en_US.UTF-8 PATH="$TMP/grep-stub:$PATH" bash -c ". '$ROOT/$plugin/lib/namespace.sh'; agent_team_validate_id team-1 team"
+  assert_eq "$(cat "$TMP/grep-locale")" "C"
   assert_fail env AGENT_TEAM="good
 EVIL" bash -c ". '$ROOT/$plugin/lib/namespace.sh'; agent_team_detect_team"
 
