@@ -13,13 +13,15 @@ skill's location, not a saved plugin-cache path or an assumed PATH entry.
 - Keep external CLI dispatch in the main session. Workers return evidence;
   they do not invoke one another or recursively orchestrate the team.
 - Review the returned verdict and findings, then address issues within the
-  user's authorized scope. If `NEED RESEARCH` requests evidence, obtain it
-  through research; if `NEED CONTEXT` lists repository commands, run the
-  read-only ones yourself. Repeat the review once with the same focus and every
+  user's authorized scope. Read the result and its final as the loaded review
+  skill says (`--summary` on every call). Only a successful review's final
+  routes follow-ups: if `NEED RESEARCH` requests evidence, obtain it through
+  research; if `NEED CONTEXT` lists repository commands, run the read-only
+  ones yourself. Repeat the review once with the same focus and every
   attachment, merged cumulatively.
-- For a pull request, resolve its base/head commits with `gh pr view` before
-  dispatch and pass them as a context file plus a range focus; the reviewer may
-  have no network access.
+- For a pull request, resolve it with `pr-context.sh` from the loaded skill's
+  plugin before dispatch and pass its context file and range focus; the
+  reviewer may have no network access. Dispatch only if it exited 0.
 - Report the actual model, exit status, verdict, and artifact paths. A failed
   invocation or missing final response is not a successful review. Do not use
   stale `latest` artifacts as evidence for a new invocation.

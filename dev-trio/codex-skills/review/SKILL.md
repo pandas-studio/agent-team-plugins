@@ -13,9 +13,11 @@ model. Never call a raw CLI to bypass its authentication check or logging.
 From the user's workspace:
 
 ```bash
-DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/ask-reviewer.sh" [options] -- "<focus>" </dev/null
+DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/ask-reviewer.sh" --summary [options] -- "<focus>" </dev/null
 ```
 
+Always pass `--summary`: stdout is then one JSON document instead of the
+transcript (see reading the result below).
 Omit focus (and the `--` before it) for the full working tree, including
 untracked files. Preserve `--model <id>`, `--with-research <file>`,
 `--with-spec <file>`, `--with-context <file>`, and `--no-memories` as separate
@@ -102,12 +104,60 @@ With several reviewers:
   against one revision together with its repeats. A new round starts only
   after a fix.
 
-For a pull request, never pass a bare `pr N` focus: the reviewer may lack
-network access and cannot tell which commits the PR contains. Run
-`gh pr view N --json number,url,title,baseRefName,baseRefOid,headRefName,headRefOid`
-yourself, save its output as a context file, confirm both commits exist locally
-(ask before fetching; `pull/N/head` works for fork PRs), and dispatch with
-`--with-context <file>` and a `<merge-base>..<headRefOid>` range focus.
+## Pull requests
+
+Never pass a bare `pr N` focus: the reviewer may lack network access and
+cannot tell which commits the PR contains. Resolve it with
+`"<plugin-root>/bin/pr-context.sh"`, which asks `gh` for the head and base,
+checks both commits are here, takes the merge base, writes a context file and
+prints one JSON line. It never fetches.
+
+- The focus (after options, including a focus written after `--`) names a PR
+  when its first word is `pr` (any case) followed by `N` or `#N` (digits
+  only) — the reference is `N` — or when its first word starts with
+  `https://` and contains `/pull/` — the reference is that word, unchanged;
+  the resolver checks its shape and repository. If the word right after the
+  reference is digits only (`pr 1320 1321`), dispatch nothing and ask which
+  PR. Every other word after the reference is the user's focus.
+- Run `"<plugin-root>/bin/pr-context.sh" [--with-context <file>] -- <reference>`
+  as its own command, not chained with other commands.
+  A `--with-context` file the user gave goes here (the last one if given more
+  than once); the reviewer then gets only the generated `context_file`.
+- Pass the reference, an attachment path and the generated `context_file` as
+  separate argv entries, never as shell text.
+- Exit 0: take `context_file` and `focus` from the JSON. Exit 4 with a last
+  stderr line `(pr: N, missing: …)`: show the resolver's stderr guidance as it
+  stands (a fetch command, a "by hand" instruction, a shallow-clone note) and
+  ask before fetching; do not fetch. Exit 4 without that line is a failure.
+  Exit 2: report the `(pr: N, failed: …)` reason or the usage error. Any other
+  status or no marker: report that the resolver did not finish, not that a
+  commit is missing. Dispatch nothing unless it exited 0.
+- Dispatch with `--summary`, the user's other options in the order written
+  (each attachment kind once, the last one given), `--with-context
+  <context_file>`, `--`, and the JSON's `focus` followed by
+  ` — <user focus>` when the user wrote one.
+
+| Request | Resolver argv | Reviewer argv, one call per reviewer |
+| :--- | :--- | :--- |
+| `pr 55` | `-- 55` | `--summary --with-context <cf> -- "<focus>"` |
+| `PR #55 check auth -m codex` | `-- 55` | `--summary --model codex --with-context <cf> -- "<focus> — check auth"` |
+| `--with-context notes.md pr 55 -m agy codex` | `--with-context notes.md -- 55` | agy and codex, each `--summary --model <id> --with-context <cf> -- "<focus>"` |
+| `https://github.com/o/r/pull/55` | `-- https://github.com/o/r/pull/55` | as in the first row |
+| `pr 1320 1321` | (not run) | (ask the user) |
+| `--with-context a.md pr 55 --with-context b.md --with-spec s.md -m agy codex --no-memories` | `--with-context b.md -- 55` | agy: `--summary --with-spec s.md --model agy --with-context <cf> -- "<focus>"`; codex: `--summary --with-spec s.md --model codex --no-memories --with-context <cf> -- "<focus>"` |
+
+`<cf>` is the JSON's `context_file` and `<focus>` its `focus`. If the user's
+focus itself contains a git range (`A..B`) and agy is a reviewer, say that agy
+may have reviewed without its workspace snapshot (the wrapper skips it for a
+focus with more than one range and does not say so).
+
+Host approval counts per command. The resolver needs GitHub network access,
+which a workspace sandbox can block. If the host already permits it, run the
+resolver normally. If it is known to be blocked and the host supports
+approval, request approval once for this resolver call, naming GitHub access;
+do not probe `gh` some other way. If approval is unavailable or refused, or the
+resolver fails, start no reviewer. A Claude reviewer call then gets its own
+approval attempt under the next section.
 
 ## Host permission for a Claude reviewer
 
@@ -141,9 +191,13 @@ the run.
   plugin update.
 
 Capture this invocation's exit code and the exact log/final/result paths from
-the last stderr line that starts with `(log:` (a notice can follow it). Read
-that exact `.review.json`: it is the parsed result
-the wrapper, manifest and dashboard share. Do not parse verdicts or count
+the last stderr line that starts with `(log:` (a notice can follow it). The
+parsed result the wrapper, manifest and dashboard share is that exact
+`.review.json`. Check the summary first: when exactly one stdout line starts
+with `{"summary_version":1`, parses as JSON, has a non-null `result`, and its
+`paths.result` equals the `result:` path in that `(log:` line, its `result` is
+that `.review.json` as published, so use it and do not open the file. In every
+other case read that exact `.review.json`. Do not parse verdicts or count
 bullets in Markdown, and do not use `latest` artifacts.
 
 - `status: "ok"`: use `verdict` (`SHIP`, `NEEDS-FIX`, `DISCUSS`, or
@@ -167,7 +221,7 @@ bullets in Markdown, and do not use `latest` artifacts.
   failure, its `error`, and the artifact paths. There is no verdict. A
   `parse-failed` result with `invocation_rc: 0` is a finished review that broke
   the output format (#125): repeat it once with the same focus, every original
-  flag (including `--model`) and the same attachments, and report both runs' artifact paths. If the
+  flag (including `--summary` and `--model`) and the same attachments, and report both runs' artifact paths. If the
   reviewed code changed in between, that is a new review, not a retry; if the
   retry fails to parse too, stop and report both. Never read a verdict or
   counts out of `.final.md`.
@@ -186,14 +240,17 @@ bullets in Markdown, and do not use `latest` artifacts.
 
 Report the actual reviewer model, verdict, substantive Blocker/Major findings,
 and the result artifact link. The `.final.md` of the same successful
-invocation is supporting text only. For `NEED RESEARCH`, obtain the requested evidence
+invocation is supporting text only. Look for `NEED RESEARCH` and `NEED
+CONTEXT` in that final, whether the result came from the summary or the file:
+the summary's `final_text` on the fast path when it is not `null`, otherwise
+the exact `.final.md` path from the `(log:` line. For `NEED RESEARCH`, obtain the requested evidence
 with the [research skill](../research/SKILL.md) within the user's authorized
 scope. For `NEED CONTEXT`, run only the read-only commands it lists (`gh pr
 view/diff/checks`, `gh issue view`, `gh run view`, `git log/show`; ask before
 `git fetch` or anything that changes state) and write their outputs to a new
 context file that starts with a copy of the original one; never edit a file
 that a finished or still-running review was given. Then repeat the review once
-with the same focus and every original flag, including `--model`; attachments
+with the same focus and every original flag, including `--summary` and `--model`; attachments
 are cumulative (one new file per kind holding the old and new evidence). Check
 before every repeat, the format repeat above included, whether the PR's head or
 base moved: if it did, start a new review instead of a retry, and with several

@@ -238,12 +238,12 @@ claude --plugin-dir ./agent-team-plugins/dev-trio
    ```
    /dev-trio:install-pm
    ```
-   This appends a marked block to `$PWD/CLAUDE.md` between `<!-- BEGIN dev-trio PM policy -->` / `<!-- END dev-trio PM policy -->`. Re-running upgrades in place; safe to run again after plugin updates.
+   This appends a marked block to `$PWD/CLAUDE.md` between `<!-- BEGIN dev-trio PM policy -->` / `<!-- END dev-trio PM policy -->`. Re-running upgrades in place; safe to run again after plugin updates. The block is a copy, so a plugin update does not reach it: after updating to 0.8.63, re-run it in each workspace and start a new session, or the PM keeps reading the full transcript and resolving PRs by hand.
 
 4. Drive normally. The PM policy tells Claude when to dispatch:
    ```
    ask-researcher.sh "What's the recommended way to stream tokens with langchain-anthropic 0.3.x?"
-   ask-reviewer.sh "review the new retry logic in src/agent.py — concurrency safety"
+   ask-reviewer.sh --summary "review the new retry logic in src/agent.py — concurrency safety"
    ```
    `ask-researcher.sh` exits **5** when the researcher CLI exits 0 with nothing but whitespace on stdout (for example, headless agy after soft-denying a tool). It exits **6** when the answer cannot be checked: the temp file cannot be created (the CLI is not run), or the CLI exits 0 but `tee` or the check fails. Treat both as failed research, not as an empty answer.
 
@@ -257,14 +257,14 @@ claude --plugin-dir ./agent-team-plugins/dev-trio
 
    When calling `ask-reviewer.sh` directly, a long focus can be passed as `--focus-file <file>` instead of an argument. That works where a host refuses a computed `"$(cat angles.txt)"` argument, and it needs no shell quoting. `/dev-trio:review` itself takes the focus as text.
 
-   **Reviewers may run without network access** (Codex's sandbox disables it by default), so the PM supplies repository facts. For a PR, resolve the base/head commits with `gh pr view` first and pass them as `--with-context <file>` with a `<merge-base>..<head>` range focus; a bare `"pr 55"` focus leaves a sandboxed reviewer unable to identify the commits. When a reviewer still needs a remote fact it returns a `## NEED CONTEXT` block of read-only commands; the PM runs them, appends the output to the context file, and re-reviews once with every original flag.
+   **Reviewers may run without network access** (Codex's sandbox disables it by default), so the PM supplies repository facts. For a PR, the PM resolves the base/head commits with `pr-context.sh` (below) and passes them as `--with-context <file>` with a `<merge-base>..<head>` range focus; a bare `"pr 55"` focus leaves a sandboxed reviewer unable to identify the commits. When a reviewer still needs a remote fact it returns a `## NEED CONTEXT` block of read-only commands; for a review whose parsed result is `ok`, the PM runs them, writes the output to a new context file that starts with a copy of the old one, and re-reviews once with every original flag.
 
    `pr-context.sh` does that PR resolution in one call. It asks `gh` once, checks that the head and base commits are in this repository, takes their merge base, writes the context file and prints one JSON line with `context_file` and `focus`:
 
    ```bash
    pr-context.sh 55        # or '#55', or the PR's URL; --with-context FILE appends a file
    # {"pr_context_version":1,"number":55,…,"context_file":"/abs/…/pr-55-context-…","focus":"review <merge-base>..<head> (PR #55)"}
-   ask-reviewer.sh --with-context <context_file> -- "<focus>"
+   ask-reviewer.sh --summary --with-context <context_file> -- "<focus>"
    ```
 
    It starts no review and never fetches: a head or base commit that is missing locally ends it with exit 4, what to fetch, and `(pr: 55, missing: head, rc=4)` as the last stderr line (`missing: base`, `missing: head base`). Head and base that share no history here end it with exit 4 and `missing: merge-base`, with nothing to fetch named. A usage error is exit 2 with the `--help` hint as the last line; any other failure it detects is exit 2 with `(pr: 55, failed: <reason>, rc=2)`. A signal, or a tool failing where no check expects it, ends it with that status and no marker. Discard stdout whenever the exit status is not 0. A PR URL must name the repository `gh` selects in this directory. `gh` runs with no timeout of its own, so the caller's time limit bounds the call.
@@ -427,7 +427,7 @@ stub checks are not evidence of a successful live research call.
 | :--- | :--- |
 | `/dev-trio:bootstrap` | Optional, one-time per session: splits the current tmux pane into 3 and starts the researcher/reviewer dashboards. |
 | `/dev-trio:research <question>` | One-shot Antigravity lookup. Streaming output lands in the top-right pane; chat-side surfaces the lead + cited URLs. |
-| `/dev-trio:review [focus] [-m <id>[,<id>...]] [--with-research <file>] [--with-spec <file>] [--with-context <file>]` | One-shot Codex review (default = git-uncommitted scope); several `-m` ids run one review each, in parallel. Chat-side surfaces verdict (`SHIP / NEEDS-FIX / DISCUSS`) + Blocker/Major counts. Handles `## NEED RESEARCH` (via Antigravity) and `## NEED CONTEXT` (via the PM's read-only `gh`/`git`) blocks. |
+| `/dev-trio:review [focus] [-m <id>[,<id>...]] [--with-research <file>] [--with-spec <file>] [--with-context <file>]` | One-shot Codex review (default = git-uncommitted scope); several `-m` ids run one review each, in parallel. A `pr N` or PR URL focus is resolved with `pr-context.sh` first; every review runs with `--summary`. Chat-side surfaces verdict (`SHIP / NEEDS-FIX / DISCUSS`) + Blocker/Major counts. Handles `## NEED RESEARCH` (via Antigravity) and `## NEED CONTEXT` (via the PM's read-only `gh`/`git`) blocks. |
 | `/dev-trio:install-pm` | Writes/upgrades the PM orchestration policy in the workspace's `CLAUDE.md` (idempotent, marker-guarded). |
 
 Claude skills carry `disable-model-invocation: true`; Codex skills use
