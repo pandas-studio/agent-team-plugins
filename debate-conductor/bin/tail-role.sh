@@ -95,11 +95,16 @@ fi
 TAIL_PID=""
 FILTER_PID=""
 PIPE_STARTING=0
+KEY_WAIT=0
 PENDING_EXIT=0
 
 handle_signal() {
-  # Finish recording both child PIDs if interrupted between fork and $!.
-  if [ "$PIPE_STARTING" = 1 ]; then PENDING_EXIT=$1; return 0; fi
+  # Two windows only record the signal; the code after each acts on it.
+  #  - PIPE_STARTING: between fork and $!, so both child PIDs get recorded.
+  #  - KEY_WAIT: bash 3.2 runs a trap inside `read -t`, with that read's alarm
+  #    still set. Exiting from there runs cleanup under the alarm; when it
+  #    fires first, the shell crashes or spins with TERM already ignored.
+  if [ "$PIPE_STARTING" = 1 ] || [ "$KEY_WAIT" = 1 ]; then PENDING_EXIT=$1; return 0; fi
   exit "$1"
 }
 
@@ -349,7 +354,16 @@ while true; do
       # sub-second `-t` values (added in bash 4.0). With 0.5, 3.2 treats it
       # as 0 (instant timeout) and `read` returns empty without ever seeing
       # the keystroke, so c/space/q appear unresponsive.
-      IFS= read -rs -t 1 -n 1 KEY </dev/tty 2>/dev/null || true
+      KEY_WAIT=1
+      KEY_TICK=$SECONDS
+      KEY_RC=0
+      IFS= read -rs -t 1 -n 1 KEY </dev/tty 2>/dev/null || KEY_RC=$?
+      KEY_WAIT=0
+      [ "$PENDING_EXIT" = 0 ] || exit "$PENDING_EXIT"
+      # The read is also this loop's pacing. A timeout takes its second, so the
+      # clock moves; a terminal that cannot be read (closed with no hangup
+      # reaching the trap) fails at once, every time. Wait the second here then.
+      if [ "$KEY_RC" != 0 ] && [ -z "$KEY" ] && [ "$SECONDS" = "$KEY_TICK" ]; then sleep 1; fi
     else
       sleep 1
     fi

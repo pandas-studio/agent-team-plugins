@@ -194,3 +194,159 @@ os.execv({real!r},[{real!r},*sys.argv[1:]])
                 for pid in pids:
                     with self.assertRaises(ProcessLookupError):
                         os.kill(int(pid), 0)
+
+    KEY_WAIT = 'IFS= read -rs -t 1 -n 1 KEY </dev/tty'
+
+    def start_viewer(self, team, tmux_body, ignore_hup=False):
+        """Start the gen viewer on a new pty, as in a pane whose `tmux` is TMUX_BODY. Its
+        process group is killed and it is reaped at cleanup, whatever the test did. The
+        script copy notes every key wait it begins in viewer['waits']."""
+        log_base = self.root / (team + '-logs')
+        debate = log_base / team / 'debate-one'
+        debate.mkdir(parents=True)
+        (debate / 'stream-gen.log').write_text('STREAM-IS-SHOWN\n')
+        (log_base / team / 'latest-debate.json').write_text(json.dumps(dict(
+            v=1, sequence=1, debate_dir=str(debate))))
+        self.tool('tmux', tmux_body)
+        script = self.plugin / 'bin/tail-role.sh'
+        source = script.read_text()
+        if 'VIEWER_TEST_WAITS' not in source:
+            self.assertEqual(source.count(self.KEY_WAIT), 1)
+            script.write_text(source.replace(
+                self.KEY_WAIT, 'echo wait >> "$VIEWER_TEST_WAITS"; ' + self.KEY_WAIT))
+        viewer = dict(waits=self.root / (team + '-waits'), calls=self.root / (team + '-tmux-calls'),
+                      master=None, status=None, left=None)
+        viewer['waits'].write_text('')
+        environment = self.env | dict(TMUX='', TMUX_PANE='%0', DEBATE_VIEW_NONCE='nonce-1', AGENT_TEAM=team,
+                                      DEBATE_LOG_DIR=str(log_base), VIEWER_TEST_WAITS=str(viewer['waits']),
+                                      VIEWER_TMUX_CALLS=str(viewer['calls']))
+        pid, master = pty.fork()
+        if pid == 0:
+            try:
+                if ignore_hup:
+                    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+                os.chdir(self.workspace)
+                os.execvpe('/bin/bash', ['/bin/bash', str(script), 'gen'], environment)
+            finally:
+                os._exit(127)  # never back into the test runner this child was forked from
+        viewer.update(pid=pid, master=master)
+        self.addCleanup(self.end_viewer, viewer)
+        return viewer
+
+    def close_terminal(self, viewer):
+        if viewer['master'] is not None:
+            os.close(viewer['master'])
+            viewer['master'] = None
+
+    def end_viewer(self, viewer):
+        """Close the terminal, kill what is left of the viewer's process group and reap
+        the viewer. The group is the pty's own session, and it is killed while the
+        viewer's PID is still held, so the number cannot have passed to anyone else."""
+        self.close_terminal(viewer)
+        if viewer['status'] is None:
+            # The group, then the viewer itself: a child that has not reached its own
+            # session yet has no group to signal. macOS answers EPERM for a group that
+            # holds only the exited viewer.
+            for send in (os.killpg, os.kill):
+                try:
+                    send(viewer['pid'], signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            viewer['status'] = os.waitpid(viewer['pid'], 0)[1]
+
+    def pump(self, viewer, seconds):
+        """Let SECONDS pass, reading the viewer's terminal while it is open: a process
+        cannot finish exiting while its terminal holds unread output."""
+        deadline = time.monotonic() + seconds
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return
+            if viewer['master'] is None:
+                time.sleep(min(left, 0.05))
+            elif select.select([viewer['master']], [], [], min(left, 0.05))[0]:
+                try:
+                    data = os.read(viewer['master'], 65536)
+                except OSError as error:
+                    if error.errno != errno.EIO:
+                        raise
+                    data = b''
+                if not data:  # the other end is closed: an empty read here, EIO on Linux
+                    self.close_terminal(viewer)
+
+    def waits(self, viewer):
+        return viewer['waits'].read_text().count('wait')
+
+    def enter_key_wait(self, viewer):
+        """Return a third of a second into a key wait, so that a signal sent now arrives
+        inside the 1 s read. A runner stalled for longer than the rest of that second
+        would deliver it outside the read; the tests below then pass on a script that
+        mishandles the read, and cannot fail on one that handles it."""
+        before = self.waits(viewer)
+        deadline = time.monotonic() + 15
+        while self.waits(viewer) == before:
+            self.assertLess(time.monotonic(), deadline, 'viewer did not start a key wait')
+            self.pump(viewer, 0.02)
+        self.pump(viewer, 0.3)
+
+    def has_exited(self, viewer):
+        # An exited, unreaped child stays in the table as a zombie, still holding its PID.
+        state = subprocess.run(['ps', '-o', 'stat=', '-p', str(viewer['pid'])],
+                               capture_output=True, text=True, check=True, timeout=10).stdout
+        return state.strip().startswith('Z')
+
+    def wait_status(self, viewer, seconds):
+        """Wait for the viewer to exit by itself and return its status. viewer['left']
+        gets the other members its process group still had at that moment."""
+        deadline = time.monotonic() + seconds
+        while not self.has_exited(viewer):
+            if time.monotonic() >= deadline:
+                self.end_viewer(viewer)
+                self.fail(f'viewer was still running {seconds} s later')
+            self.pump(viewer, 0.1)
+        listing = subprocess.run(['ps', '-A', '-ww', '-o', 'pid=', '-o', 'pgid=', '-o', 'args='],
+                                 capture_output=True, text=True, check=True, timeout=10).stdout
+        rows = [line.split(None, 2) for line in listing.splitlines()]
+        viewer['left'] = [row for row in rows if len(row) > 1 and row[1] == str(viewer['pid'])
+                          and row[0] != row[1]]
+        self.end_viewer(viewer)
+        return viewer['status']
+
+    def assert_exit(self, viewer, expected):
+        status = self.wait_status(viewer, 12)
+        self.assertFalse(os.WIFSIGNALED(status), f'viewer died of signal {os.WTERMSIG(status)}')
+        self.assertEqual(os.WEXITSTATUS(status), expected)
+        self.assertEqual(viewer['left'], [], 'processes the viewer left in its group')
+
+    def test_signal_during_the_key_wait_still_finishes_a_slow_cleanup(self):
+        # Every bash must exit with the signal's status after a complete cleanup. What this
+        # guards against is bash 3.2 (macOS): it runs a trap inside `read -t` with that
+        # read's alarm still set, and a cleanup the alarm interrupts crashed the shell or
+        # left it spinning with TERM ignored. The pane lookup below outlasts the 1 s alarm.
+        tmux = ('printf "%s\\n" "$*" >> "$VIEWER_TMUX_CALLS"\n'
+                'case " $* " in *" show-options "*) sleep 1.5; echo \'{"nonce":"nonce-1"}\' ;; esac\n')
+        for name, expected in (('hangup', 129), ('TERM', 143), ('INT', 130)):
+            with self.subTest(signal=name):
+                viewer = self.start_viewer('viewer-key-wait-' + name.lower(), tmux)
+                self.enter_key_wait(viewer)
+                if name == 'hangup':
+                    self.close_terminal(viewer)
+                else:
+                    os.kill(viewer['pid'], getattr(signal, 'SIG' + name))
+                self.assert_exit(viewer, expected)
+                calls = viewer['calls'].read_text().splitlines()
+                self.assertEqual(calls[-1], 'set-option -pu -t %0 @debate-view-ready', calls)
+
+    def test_key_wait_stays_paced_when_the_terminal_closes_without_a_hangup(self):
+        # A viewer started with SIGHUP ignored cannot trap it. With its terminal closed the
+        # key wait fails at once, and that wait was the loop's only pacing.
+        viewer = self.start_viewer('viewer-no-hangup', 'exit 0\n', ignore_hup=True)
+        self.enter_key_wait(viewer)
+        self.close_terminal(viewer)
+        self.pump(viewer, 1)
+        before = self.waits(viewer)
+        self.pump(viewer, 3)
+        begun = self.waits(viewer) - before
+        self.assertTrue(1 <= begun <= 6, f'{begun} key waits begun in 3 s; a paced loop begins about 3')
+        os.kill(viewer['pid'], signal.SIGTERM)
+        self.assert_exit(viewer, 143)
