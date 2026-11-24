@@ -149,7 +149,7 @@ view_make_record() {
 
 view_geometry_matches() {
   local target="$1" record="$2" want live
-  want=$(printf '%s' "$record" | jq -r '.gen,.crit' | sort)
+  want=$(printf '%s' "$record" | jq -r '.gen,.crit' | sort) || return 1
   live=$(view_tmux list-panes -t "$target" -F '#{pane_id}' | sort) || return 1
   [ "$want" = "$live" ]
 }

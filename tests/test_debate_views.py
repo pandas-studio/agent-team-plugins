@@ -71,6 +71,11 @@ class ViewFixture(unittest.TestCase):
     def read_state(self):
         return json.loads(self.state.read_text())
 
+    def jq_failing_after_geometry_output(self):
+        """A jq that prints the recorded pane ids for `-r .gen,.crit`, then exits 1."""
+        real = shlex.quote(shutil.which("jq"))
+        self.tool("jq", 'case "$*" in "-r .gen,.crit") %s "$@"; exit 1 ;; esac\nexec %s "$@"\n' % (real, real))
+
 
 class ViewPreparationTests(ViewFixture):
     def test_released_lock_eexist_race_is_retried(self):
@@ -159,6 +164,21 @@ class ViewPreparationTests(ViewFixture):
         self.assertEqual(second["session"], first["session"])
         self.assertEqual(sum(c[0] == "split-window" for c in state["calls"]), 1)
         self.assertEqual(sum(c[0] == "respawn-pane" for c in state["calls"]), 3)
+
+    def test_jq_failing_after_geometry_output_refuses_reuse(self):
+        first = self.prepare("--view=tmux")
+        state = self.read_state()
+        win = next(v for v in state["windows"].values() if v.get("session") == first["session"])
+        state["dead"] = {json.loads(win["options"]["@debate-view"])["gen"]: 1}
+        self.state.write_text(json.dumps(state))
+        before = len(self.read_state()["calls"])
+        self.jq_failing_after_geometry_output()
+        result = self.cli("team-3pane.sh", "--view=tmux")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("incomplete, conflicting or modified view", result.stderr)
+        later = [c[0] for c in self.read_state()["calls"][before:]]
+        self.assertNotIn("respawn-pane", later)
+        self.assertNotIn("split-window", later)
 
     def test_foreign_collision_is_not_modified(self):
         ctx = self.prepare("--view=tmux")
@@ -524,6 +544,17 @@ sys.exit({rc!r})
         result = self.cli("open-view.sh", "--context", ctx["context_file"])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["status"], "attached")
+
+    def test_jq_failing_after_geometry_output_is_a_changed_view(self):
+        ctx = self.prepare("--view=tmux")
+        state = self.read_state()
+        state["clients"] = "existing-client\n"
+        self.state.write_text(json.dumps(state))
+        self.tool("osascript", 'exit 99\n')
+        self.jq_failing_after_geometry_output()
+        result = self.cli("open-view.sh", "--context", ctx["context_file"])
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["reason_code"], "changed-view")
 
     def test_remote_environment_only_returns_instructions(self):
         ctx = self.prepare("--view=tmux")
