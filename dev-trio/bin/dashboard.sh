@@ -41,7 +41,10 @@ PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=../lib/runstate.sh
 . "$PLUGIN_ROOT/lib/runstate.sh" || exit 2
 
-ROLE="${1:?usage: $0 reviewer|researcher [--once]}"
+if [ "$#" -eq 0 ]; then
+  echo "usage: $0 reviewer|researcher [--once]" >&2; exit 2
+fi
+ROLE="$1"
 shift
 ONCE=0
 while [ "$#" -gt 0 ]; do

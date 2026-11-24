@@ -4535,6 +4535,19 @@ exit 0
                 self.assertEqual(result.stderr, f"usage: {script} reviewer|researcher [--once]\n")
 
 
+    def test_dashboard_without_a_role_takes_the_usage_path(self):
+        """No argument and an empty one are usage errors (rc 2), not a bash `${1:?}` failure."""
+        script = str(self.plugin / "bin/dashboard.sh")
+        for label, args in (("none", []), ("empty", [""])):
+            with self.subTest(arguments=label):
+                result = subprocess.run(
+                    [script, *args], cwd=self.workspace, env=self.env, input="",
+                    text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(result.stderr, f"usage: {script} reviewer|researcher [--once]\n")
+
+
     def test_dashboard_does_not_follow_a_link_left_by_an_older_wrapper(self):
         """Only a pre-role link names a complete run: "no runs yet" until a new run.
 
