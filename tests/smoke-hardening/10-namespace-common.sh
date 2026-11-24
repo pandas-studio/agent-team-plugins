@@ -41,6 +41,12 @@ for plugin in dev-trio debate-conductor ralph-trio spec-trio; do
   assert_fail agent_team_validate_id "good
 EVIL" team
   assert_fail agent_team_validate_id "$(printf 'good\rEVIL')" team
+  # The alphabet is ASCII in every locale. GNU grep under en_US.UTF-8 matches
+  # "é" with a-z unless it is told to use the C locale; this pair fails there
+  # (Linux CI) without that, and passes either way with BSD grep.
+  assert_fail env LC_ALL=en_US.UTF-8 bash -c ". '$ROOT/$plugin/lib/namespace.sh'; agent_team_validate_id \"\$(printf 'w\303\251')\" team"
+  assert_fail env LC_ALL=en_US.UTF-8 AGENT_TEAM="$(printf 'w\303\251')" bash -c ". '$ROOT/$plugin/lib/namespace.sh'; agent_team_detect_team"
+  assert_ok env LC_ALL=en_US.UTF-8 bash -c ". '$ROOT/$plugin/lib/namespace.sh'; agent_team_validate_id abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ team 60"
   assert_fail env AGENT_TEAM="good
 EVIL" bash -c ". '$ROOT/$plugin/lib/namespace.sh'; agent_team_detect_team"
 

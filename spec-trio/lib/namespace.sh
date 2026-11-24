@@ -20,7 +20,9 @@ agent_team_validate_id() {
       return 2
       ;;
   esac
-  if ! printf '%s' "$value" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
+  # grep runs in the C locale: elsewhere a range follows the locale's
+  # collation, and GNU grep under en_US.UTF-8 takes "é" for a letter in a-z.
+  if ! printf '%s' "$value" | LC_ALL=C grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
     printf 'ERROR: %s must match [A-Za-z0-9][A-Za-z0-9._-]*: %s\n' "$label" "$value" >&2
     return 2
   fi
