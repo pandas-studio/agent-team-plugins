@@ -264,7 +264,7 @@ claude --plugin-dir ./agent-team-plugins/dev-trio
    ```bash
    pr-context.sh 55        # or '#55', or the PR's URL; --with-context FILE appends a file
    # {"pr_context_version":1,"number":55,…,"context_file":"/abs/…/pr-55-context-…","focus":"review <merge-base>..<head> (PR #55)"}
-   ask-reviewer.sh --summary --with-context <context_file> -- "<focus>"
+   ask-reviewer.sh --summary --with-context '<context_file>' -- '<focus>'   # values from the JSON, single-quoted
    ```
 
    It starts no review and never fetches: a head or base commit that is missing locally ends it with exit 4, what to fetch, and `(pr: 55, missing: head, rc=4)` as the last stderr line (`missing: base`, `missing: head base`). Head and base that share no history here end it with exit 4 and `missing: merge-base`, with nothing to fetch named. A usage error is exit 2 with the `--help` hint as the last line; any other failure it detects is exit 2 with `(pr: 55, failed: <reason>, rc=2)`. A signal, or a tool failing where no check expects it, ends it with that status and no marker. Discard stdout whenever the exit status is not 0. A PR URL must name the repository `gh` selects in this directory. `gh` runs with no timeout of its own, so the caller's time limit bounds the call.

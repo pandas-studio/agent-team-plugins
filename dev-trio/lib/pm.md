@@ -54,7 +54,7 @@ ask-reviewer.sh --summary "review HEAD~2..HEAD"    # review last 2 commits
 **Reviewing a PR:** don't pass `"pr 55"` — the reviewer may run without network access and cannot see which commits the PR holds. Resolve it, then hand over the range it prints:
 ```bash
 pr-context.sh 55     # one JSON line with context_file and focus; never fetches
-ask-reviewer.sh --summary --with-context <context_file> -- "<focus>"
+ask-reviewer.sh --summary --with-context '<context_file>' -- '<focus>'   # values from its JSON, single-quoted
 ```
 Dispatch only if `pr-context.sh` exited 0. Exit 4 with a last stderr line `(pr: N, missing: …)` means a commit is missing locally, or head and base share no history here: show the user what it printed on stderr and ask before fetching. Anything else: report it and stop.
 
@@ -62,7 +62,7 @@ If `pr-context.sh` is not found, or `ask-reviewer.sh` says `error: unknown optio
 
 ## Reading the review result
 
-1. The result: stdout's one JSON line has `result` — use it when its `paths.result` equals the `result:` path in the last stderr line starting `(log:`. Otherwise read that `result:` file. Neither: there is no verdict.
+1. The result: use stdout's one `{"summary_version":1` JSON line when its `result` is not `null` and its `paths.result` equals the `result:` path in the last stderr line starting `(log:`. Otherwise read that `result:` file. Neither: there is no verdict.
 2. If that result has `status: "ok"`, wherever it came from, check its final for `## NEED RESEARCH` and `## NEED CONTEXT`: the JSON's `final_text`, or the `final:` file from the `(log:` line when `final_text` is `null` or the result came from the file.
 3. Any other status: report it; no NEED handling.
 
