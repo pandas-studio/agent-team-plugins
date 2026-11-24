@@ -11,6 +11,7 @@
 #
 # Output goes to stdout AND $LOG_DIR/gen-<timestamp>.log
 # Log location: $DEBATE_LOG_DIR (default: $PWD/.debate-conductor/log) / $TEAM /
+# unless DEBATE_ROLE_LOG_DIR names the directory, as debate.sh does for its runs.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,7 +32,9 @@ unset _REGISTRY_LIB
 
 TEAM=$(agent_team_detect_team) || exit 2
 LOG_BASE="${DEBATE_LOG_DIR:-$PWD/.debate-conductor/log}"
-LOG_DIR="$LOG_BASE/$TEAM"
+# debate.sh names the directory it settled on; run alone, this wrapper uses
+# the team's.
+LOG_DIR="${DEBATE_ROLE_LOG_DIR:-$LOG_BASE/$TEAM}"
 
 MODEL_OPT=""
 while [ "$#" -gt 0 ]; do
@@ -101,7 +104,12 @@ mkdir -p "$LOG_DIR"
 # same second (BSD `date` has no sub-second precision).
 TS="$(date +%Y%m%d-%H%M%S)-$$"
 LOG="$LOG_DIR/gen-$TS.log"
-ln -sfn "gen-$TS.log" "$LOG_DIR/latest-gen.log"
+# Only a link is replaced: anything else at this name is somebody's file.
+if [ -e "$LOG_DIR/latest-gen.log" ] && [ ! -L "$LOG_DIR/latest-gen.log" ]; then
+  echo "[ask-generator] $LOG_DIR/latest-gen.log is not a link; leaving it as it is" >&2
+else
+  ln -sfn "gen-$TS.log" "$LOG_DIR/latest-gen.log"
+fi
 
 {
   echo "=== ask-generator.sh @ $TS ==="

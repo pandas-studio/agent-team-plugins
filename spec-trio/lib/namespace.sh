@@ -41,13 +41,28 @@ agent_team_sanitize_id() {
 }
 
 # agent_team_detect_team — resolve the team namespace that scopes log/state
-# paths: $AGENT_TEAM > tmux @team-name > tmux session name > "default".
+# paths: $AGENT_TEAM > tmux @team-name > tmux session name > herdr tab >
+# "default".
 #
 # An explicit AGENT_TEAM is a deliberate identifier, so an unusable value is a
 # hard error the operator should see and fix. A tmux window or session name is
 # *derived* — the user never chose it as a path component and names like
 # "my project" or "feat/x" are ordinary — so those are sanitized with a loud
 # warning instead, preserving the pre-namespace.sh behaviour.
+#
+# herdr is consulted only outside tmux (TMUX empty): inside tmux the tmux
+# branch decides alone, and a tmux that names nothing still means "default".
+# With HERDR_ENV=1, herdr gives every pane created in a tab the same
+# HERDR_TAB_ID, such as "w6:t2", and that id names the team: "herdr-w6-t2".
+# It is read from the environment only, so a wrapper, the wrappers it starts
+# and a dashboard in the same tab agree without asking herdr, and renaming the
+# tab changes nothing. Ids are fields joined by ":", and ":" becomes "-"; an
+# id that already holds "-", or has an empty field, is refused, so two ids
+# never share a name. The name must then pass agent_team_validate_id like any
+# team name. An empty id says nothing and the team is "default", quietly. A
+# refused id is not repaired into something that might collide: the team is
+# "default", with one warning line that prints the value escaped. Tab ids belong to one herdr server; two servers working
+# in one checkout need AGENT_TEAM to stay apart.
 agent_team_detect_team() {
   local raw="" source="team name" clean
   if [ -n "${AGENT_TEAM:-}" ]; then
@@ -63,6 +78,22 @@ agent_team_detect_team() {
     else
       source="tmux @team-name"
     fi
+  elif [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_TAB_ID:-}" ]; then
+    # This branch decides one thing itself: that two ids cannot map to one
+    # name, which is why an id holding "-" or an empty field is refused.
+    # Whether the name is a safe path component is agent_team_validate_id's
+    # question, answered as it is for AGENT_TEAM.
+    case "$HERDR_TAB_ID" in
+      *-*|:*|*:|*::*) clean="" ;;
+      *) clean="herdr-${HERDR_TAB_ID//:/-}" ;;
+    esac
+    if [ -n "$clean" ] && agent_team_validate_id "$clean" "herdr tab id" 48 2>/dev/null; then
+      printf '%s\n' "$clean"
+      return 0
+    fi
+    printf 'WARNING: herdr tab id %q is not usable as a team name; using "default"\n' "$HERDR_TAB_ID" >&2
+    printf 'default\n'
+    return 0
   fi
   [ -z "$raw" ] && { printf 'default\n'; return 0; }
   clean=$(agent_team_sanitize_id "$raw")

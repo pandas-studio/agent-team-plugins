@@ -104,17 +104,54 @@ Config lives at `$AGENT_TEAM_MODELS_CONFIG`, else `${XDG_CONFIG_HOME:-~/.config}
 ## Team namespaces
 
 Every plugin scopes its logs and state under a **team name** so parallel tmux
-windows don't collide. It resolves as `$AGENT_TEAM` → tmux `@team-name` window
-option → tmux session name → `default`, and must match
-`[A-Za-z0-9][A-Za-z0-9._-]*` (max 48 chars) because it becomes a path component.
+windows and herdr tabs don't collide. `$AGENT_TEAM` decides when it is set.
+Otherwise, inside tmux: the `@team-name` window option → the tmux session name →
+`default`; outside tmux, in herdr: the herdr tab → `default`; anywhere else:
+`default`. The name must match `[A-Za-z0-9][A-Za-z0-9._-]*` (max 48 chars)
+because it becomes a path component.
 
-The two sources are treated differently on purpose:
+The sources are treated differently on purpose:
 
 - **`$AGENT_TEAM`** is an identifier you chose deliberately. An unusable value is
   a hard error (exit 2) rather than something silently rewritten under you.
 - **tmux window / session names** are *derived* — you never picked them as a path
   component, and names like `my project` or `feat/x` are ordinary. These are
   sanitized to the allowed character set with a warning on stderr.
+- **A herdr tab** (outside tmux, `HERDR_ENV=1`) is named from `HERDR_TAB_ID`,
+  which herdr sets in every pane it creates in the tab: `w6:t2` becomes the
+  team `herdr-w6-t2`. Only the environment is read, so a wrapper, the wrappers
+  it starts and a dashboard in a pane created in the same tab agree as long as
+  they share `AGENT_TEAM` and the log-root overrides, and renaming the tab
+  changes nothing. An empty `HERDR_TAB_ID` means `default`, quietly. `:` becomes
+  `-`, so an id that already holds `-` or has an empty field could share a
+  name with another tab; that id, and one whose name fails the rule above
+  (characters or the 48-character limit), is not repaired: the team is
+  `default`, with one warning on stderr. Inside tmux herdr is never consulted, even when tmux names
+  nothing. A pane keeps the id it was created with: after it is moved to
+  another tab it still writes to its first tab's team. Create a new pane in
+  the new tab, or set `AGENT_TEAM`.
+
+**Upgrading inside herdr.** These runs used to share the team `default`, so
+their logs and state now go to a new directory per tab, and nothing written
+under `default/` is moved. Restart dashboards and viewers that were started
+before the upgrade. To carry on work that was started under `default`, pin the
+old name with `AGENT_TEAM=default`:
+
+- A Ralph loop in progress keeps its iteration counter and prompt hash under
+  `state/<team>/`, and the Stop hook inherits its environment from the Claude
+  process. Export the pin in the shell first and start (or resume) Claude from
+  that shell; exporting it after Claude is running does not reach the hook,
+  which then starts from zero.
+- `ralph-meta.sh --since-latest-run` needs the pin to find a link written
+  under `default/`.
+
+`debate.sh --continue-from` needs no pin: the role logs of the new rounds and
+their `latest-gen.log` / `latest-crit.log` links go to the directory that
+holds the debate, as its `latest-debate` link always has, whatever team the
+caller is in.
+
+Tab ids belong to one herdr server, so two servers working in one checkout can
+share a name; set `AGENT_TEAM` to keep them apart.
 
 **Resolution precedence.** Which *model* runs a role: CLI flag (`--model`, `--primary-gen`/`--primary-crit`) → per-role env var → continued debate metadata where applicable → config binding → built-in default. Which *binary* runs a model: legacy per-role `*_CLI` (`RESEARCHER_CLI`, `REVIEWER_CLI`, `GENERATOR_CLI`, `CRITIC_CLI`) → the model's own env override (`AGY_CLI`, `CODEX_CLI`, `CLAUDE_CLI`, `KIMI_CLI`) → its built-in command. Existing env overrides retain this precedence. Debate wrappers for models with `final_args` must forward all arguments, including native final-capture options; see the [debate wrapper contract](debate-conductor/README.md#model-configuration).
 
