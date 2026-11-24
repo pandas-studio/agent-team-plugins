@@ -108,7 +108,9 @@ _dev_trio_darwin_acl_listing_safe() {
 
 _dev_trio_darwin_acl_safe() {
   local listing caller_uuid=""
-  listing=$(LC_ALL=C /bin/ls -lde "$1" 2>/dev/null) || return 1
+  # -q prints a newline in the name as '?', so the name stays on the first
+  # line, which the parser skips, and cannot be read as an ACL entry.
+  listing=$(LC_ALL=C /bin/ls -ldeq "$1" 2>/dev/null) || return 1
   case "$listing" in
     *" allow "*) caller_uuid=$(/usr/bin/dsmemberutil getuuid -U "$2" 2>/dev/null) || caller_uuid="" ;;
   esac

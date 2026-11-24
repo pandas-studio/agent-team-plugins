@@ -566,6 +566,17 @@ _dev_trio_check_log_ancestors "$CHECK_PATH" "$CHECK_TEAM" "$CHECK_UID" "$PRIVATE
         self.assertEqual(result.stdout, "")
         self.assertFalse((unsafe / "team").exists())
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS ACL parsing")
+    def test_safe_parent_ending_in_newline_passes_the_real_acl_check_on_macos(self):
+        # ls -lde prints a name with a newline on two lines; the second must
+        # not be read as an ACL entry.
+        base = self._private_dir(self.root / "safe parent")
+        self._private_dir(base / "logs", 0o777)
+        safe = self._private_dir(base / "logs\n")
+        result = self._prepare_log_dir(safe / "team", shim_acl=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, f"{safe}/team\n")
+
     def test_macos_private_group_requires_exclusive_enumerated_membership(self):
         shim_dir = self.root / "account shims"
         shim_dir.mkdir()
