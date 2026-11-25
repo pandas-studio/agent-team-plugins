@@ -193,6 +193,10 @@ the run.
   that wrapper at that versioned plugin path, and stops matching after a
   plugin update.
 
+Wait for the command to finish before reading anything below: a tool response
+that returns a running session instead of an exit code is not the result, so
+keep reading that same session until the host reports the command's exit, and
+take the summary, the `(log:` line and the exit code from its whole output.
 Capture this invocation's exit code from the host's result for the command,
 and the exact log/final/result paths from the last stderr line that starts
 with `(log:` (a notice can follow it). The
