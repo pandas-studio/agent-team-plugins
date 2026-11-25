@@ -2,7 +2,7 @@
 name: review
 description: One-shot Codex review. Default scope = uncommitted working-tree changes. Optional --with-research <file>, --with-spec <file> and --with-context <file> for context injection. Streaming output lands in the bottom-right dashboard pane; chat-side surfaces the verdict (SHIP/NEEDS-FIX/DISCUSS) + Blocker/Major counts and handles NEED RESEARCH and NEED CONTEXT blocks.
 disable-model-invocation: true
-allowed-tools: Bash(ask-reviewer.sh:*) Bash(ask-researcher.sh:*) Bash(gh pr view:*) Bash(gh pr diff:*) Bash(gh pr checks:*) Bash(gh issue view:*) Bash(gh run view:*) Bash(git:*) Bash(cat:*) Bash(ls:*) Bash(date:*) Bash(mkdir:*) Bash(echo:*) Bash(sed:*) Read
+allowed-tools: Bash(ask-reviewer.sh:*) Bash(pr-context.sh:*) Bash(ask-researcher.sh:*) Bash(gh pr view:*) Bash(gh pr diff:*) Bash(gh pr checks:*) Bash(gh issue view:*) Bash(gh run view:*) Bash(git:*) Bash(cat:*) Bash(ls:*) Bash(date:*) Bash(mkdir:*) Bash(echo:*) Bash(sed:*) Read
 argument-hint: "[focus] [-m|--model <id>[,<id>...]] [--with-research <file>] [--with-spec <file>] [--with-context <file>] [--no-memories] [-- <focus>]"
 ---
 
@@ -48,25 +48,50 @@ Algorithm:
 6. If a token is `--`, stop: it and nothing after it is an option, so every later token goes to the focus (`--model agy -- --help` reviews the focus `--help`; `-- --model codex` reviews the focus `--model codex`). A focus that mentions `-m`, such as `git commit -m`, must come after `--`, or step 4 reads it as a model option.
 7. Every remaining token belongs to the focus; join them with a single space into one FOCUS string.
 8. If FOCUS is empty, omit it entirely (the wrapper falls back to the default working-tree scope). Otherwise put the options first and pass the focus last as `-- "$FOCUS"`, so a focus that starts with a dash is never read as an option.
-9. If FOCUS names a pull request (`pr 55`, `PR #55`, or a PR URL), resolve it before dispatch — see **PR reviews** below. Never send a bare PR reference as the focus: the reviewer may run without network access, and then cannot tell which commits the PR contains (measured: Codex under `workspace-write` failed `gh pr view` and returned `DISCUSS` with zero findings).
+9. If FOCUS names a pull request, resolve it with `pr-context.sh` before dispatch — see **PR reviews** below. Never send a bare PR reference as the focus: the reviewer may run without network access, and then cannot tell which commits the PR contains (measured: Codex under `workspace-write` failed `gh pr view` and returned `DISCUSS` with zero findings).
 
 ### PR reviews
 
-You have network access; the reviewer may not. Fetch the PR's identity yourself and hand over a concrete range:
+You have network access; the reviewer may not. `pr-context.sh` asks `gh` for the PR's head and base commits, checks that both are in this repository, takes their merge base, writes a context file and prints one JSON line. It never fetches.
+
+**Is FOCUS a PR reference?** Look at FOCUS as step 7 built it; a focus written after `--` counts too.
+
+- First token `pr` (any case) and second token `N` or `#N`, digits only: the reference is `N`.
+- First token starts with `https://` and contains `/pull/`: the reference is that token, unchanged. `pr-context.sh` checks its shape and that it names this repository.
+- Anything else is not a PR reference.
+
+If the token right after the reference is digits only (`pr 1320 1321`), dispatch nothing and ask which pull request to review: one review covers one PR. Every other token after the reference is the user's focus.
+
+**Resolve it** with one foreground call (it makes one `gh` request). Run it as its own command, not chained with `;` or `&&`: the tool result already carries its exit status.
 
 ```bash
-CFILE="$PWD/.dev-trio/log/${AGENT_TEAM:-default}/context-$(date +%Y%m%d-%H%M%S).md"
-(umask 077; mkdir -p ".dev-trio/log/${AGENT_TEAM:-default}")
-gh pr view 55 --json number,url,title,baseRefName,baseRefOid,headRefName,headRefOid > "$CFILE"
-git cat-file -e <headRefOid>^{commit} && git cat-file -e <baseRefOid>^{commit}
-git merge-base <baseRefOid> <headRefOid>
+pr-context.sh -- 55
+pr-context.sh --with-context notes.md -- 55    # the user gave --with-context notes.md
 ```
 
-If either commit is missing locally, tell the user which one and ask before fetching (`git fetch <remote> pull/55/head` for the head — it works for fork PRs — and the base branch from the base repository's remote, which is not necessarily `origin`). Do not fetch without asking. Then dispatch with a range focus:
+Single-quote the reference and any path in the command (as `'https://github.com/o/r/pull/55'`, `'notes.md'`), and the generated `context_file` when you dispatch; a value that itself contains `'` is written as `'\''`. A `--with-context` file the user gave goes to `pr-context.sh`, which appends it to the context file it writes; given more than once, pass the last one, as the wrapper would. The reviewer then gets only the generated `context_file`.
 
-```bash
-ask-reviewer.sh --with-context "$CFILE" -- "review <merge-base>..<headRefOid> (PR #55)"
-```
+- Exit 0: stdout is one JSON line. Take its `context_file` and `focus`.
+- Exit 4 with a last stderr line `(pr: N, missing: …, rc=4)`: a commit is missing locally, or the head and base share no history here. Show the user what `pr-context.sh` printed on stderr as it stands — a fetch command, a "by hand" instruction, a shallow-clone note — and ask before fetching. Do not fetch.
+- Exit 2: report the reason in the last stderr line, `(pr: N, failed: <reason>, rc=2)`, or the usage error when that line is the `--help` hint.
+- Any other status, or no such marker line: report that `pr-context.sh` did not finish. Do not say that a commit is missing.
+
+Dispatch nothing unless it exited 0. On any other status, discard its stdout.
+
+**Dispatch** with `--summary`, then the user's other options in the order written (each attachment kind once, the last one given), then `--with-context <context_file>`, `--`, and the focus: the JSON's `focus`, followed by ` — <user focus>` when the user wrote one.
+
+| Argument string | `pr-context.sh` argv | `ask-reviewer.sh` argv, one call per reviewer |
+| :--- | :--- | :--- |
+| `pr 55` | `-- 55` | `--summary --with-context <cf> -- "<focus>"` |
+| `PR #55 check auth -m codex` | `-- 55` | `--summary --model codex --with-context <cf> -- "<focus> — check auth"` |
+| `--with-context notes.md pr 55 -m agy codex` | `--with-context notes.md -- 55` | agy and codex, each `--summary --model <id> --with-context <cf> -- "<focus>"` |
+| `https://github.com/o/r/pull/55` | `-- https://github.com/o/r/pull/55` | as in the first row |
+| `pr 1320 1321` | (not called) | (ask the user) |
+| `--with-context a.md pr 55 --with-context b.md --with-spec s.md -m agy codex --no-memories` | `--with-context b.md -- 55` | agy: `--summary --with-spec s.md --model agy --with-context <cf> -- "<focus>"`; codex: `--summary --with-spec s.md --model codex --no-memories --with-context <cf> -- "<focus>"` |
+
+`<cf>` is the JSON's `context_file` and `<focus>` its `focus`.
+
+If the user's focus itself contains a git range (`A..B`) and agy is among the reviewers, say in your report that agy may have reviewed without its workspace snapshot: the wrapper skips the snapshot for a focus that names more than one range, and does not say so on stderr.
 
 ### Several reviewers
 
@@ -93,21 +118,23 @@ Focus text that begins with `agy`, `claude` or `codex` directly after a model va
 
 ## 2 · Dispatch
 
-One Bash call per review. `ask-reviewer.sh` is on the plugin's `bin/` PATH while the plugin is active. **Wrap FOCUS in double quotes** so it stays a single positional argument; the `--with-*` flag pairs go through as their own argv slots.
+One Bash call per review. `ask-reviewer.sh` is on the plugin's `bin/` PATH while the plugin is active. **Every call passes `--summary` first**, so stdout is one JSON document instead of the transcript (§3). **Wrap FOCUS in double quotes** so it stays a single positional argument; the `--with-*` flag pairs go through as their own argv slots.
+
+If `pr-context.sh` is not found (the shell's `command not found`, status 127), or `ask-reviewer.sh` exits 2 with exactly `error: unknown option: --summary`, the dev-trio on this session's PATH is older than this skill. Tell the user to update the plugin and start a new session, and stop. Any other failure of either script is not this case.
 
 A review takes minutes, not seconds: over 319 measured Codex reviews the median was about 3 minutes and one in ten took more than 11; an agy reviewer is slower. That is past the Bash tool's default timeout (2 minutes) and sometimes past its cap (10 minutes). **Run the call with `run_in_background: true`** and wait for its completion notice. Do not poll it, and do not edit the files under review while it runs.
 
 Concrete shapes (these are what you actually invoke):
 
 ```bash
-ask-reviewer.sh                                                 # empty argument string → default scope
-ask-reviewer.sh -- "focus on src/agent.py concurrency"          # focus only
-ask-reviewer.sh --with-research notes.md -- "concurrency focus" # flag written before the focus
-ask-reviewer.sh --with-spec docs/auth.md -- "focus on auth flow"  # flag written after the focus
-ask-reviewer.sh --with-spec docs/rfcs/0004.md --with-research notes.md -- "review against the spec"
-ask-reviewer.sh --no-memories -- "fresh-eyes pass over the branch"   # no Codex memory summary
-ask-reviewer.sh --model agy -- "second opinion on the parser"   # a different reviewer for this call
-ask-reviewer.sh --model codex                                   # default scope, chosen model
+ask-reviewer.sh --summary                                                 # empty argument string → default scope
+ask-reviewer.sh --summary -- "focus on src/agent.py concurrency"          # focus only
+ask-reviewer.sh --summary --with-research notes.md -- "concurrency focus" # flag written before the focus
+ask-reviewer.sh --summary --with-spec docs/auth.md -- "focus on auth flow"  # flag written after the focus
+ask-reviewer.sh --summary --with-spec docs/rfcs/0004.md --with-research notes.md -- "review against the spec"
+ask-reviewer.sh --summary --no-memories -- "fresh-eyes pass over the branch"   # no Codex memory summary
+ask-reviewer.sh --summary --model agy -- "second opinion on the parser"   # a different reviewer for this call
+ask-reviewer.sh --summary --model codex                                   # default scope, chosen model
 ```
 
 Worked example — the argument string is `focus on src/agent.py concurrency --with-spec docs/agent.md`:
@@ -115,11 +142,13 @@ Worked example — the argument string is `focus on src/agent.py concurrency --w
 1. Tokens: `focus on src/agent.py concurrency --with-spec docs/agent.md`
 2. `--with-spec` consumes itself + `docs/agent.md` → SPEC = `docs/agent.md`
 3. Remaining tokens joined → FOCUS = `focus on src/agent.py concurrency`
-4. Invoke: `ask-reviewer.sh --with-spec docs/agent.md -- "focus on src/agent.py concurrency"`
+4. Invoke: `ask-reviewer.sh --summary --with-spec docs/agent.md -- "focus on src/agent.py concurrency"`
 
 **When the dev-trio layout is up (`/dev-trio:bootstrap`), streaming output is already visible in the bottom-right pane — do not duplicate it in the chat.** With several reviewers that pane follows only the most recent run. Acknowledge that it's running and wait.
 
 ## 3 · Surface the verdict after completion
+
+When the completion notice arrives, read the call's output file once. It holds stdout and stderr in the order they were written, then `[exited with code N]`.
 
 The wrapper reports exact paths for this invocation in the last stderr line that starts with `(log:` (a notice can follow it):
 
@@ -127,7 +156,9 @@ The wrapper reports exact paths for this invocation in the last stderr line that
 (log: .../reviewer-<TS>-<PID>.log, final: .../reviewer-<TS>-<PID>.final.md, result: .../reviewer-<TS>-<PID>.review.json, rc=...)
 ```
 
-**Read that exact `.review.json` result.** It is the common parsed result used by the wrapper, manifest and dashboard. Do not independently parse verdicts or count bullets in Markdown. Do not resolve `latest` links after completion: another invocation may already have retargeted them.
+**Fast path.** Use the summary when all of these hold: exactly one line starts with `{"summary_version":1`, it parses as JSON, its `result` is not `null`, and its `paths.result` equals the `result:` path in that `(log:` line. Its `result` is then that `.review.json` as published, so apply every rule below to it instead of reading the file. The path check matters because stderr shares the output file and can print paths the user supplied. In every other case, read the file.
+
+**Otherwise read that exact `.review.json` result.** It is the common parsed result used by the wrapper, manifest and dashboard. Do not independently parse verdicts or count bullets in Markdown. Do not resolve `latest` links after completion: another invocation may already have retargeted them.
 
 - `status: "ok"`, `invocation_rc: 0`, `exit_code: 0`: use `verdict` (`SHIP`, `NEEDS-FIX`, `DISCUSS`) and quote `verdict_line` verbatim. The canonical `TOKEN — reason` and observed `TOKEN. reason` and `TOKEN: reason` forms share the same normalized token.
 - `findings.blocker`, `.major`, `.minor`: arrays of real finding bullets; count their entries. `null` means that section is missing, so report its count as **unknown**, not zero. `- None.` / `- none` placeholders (case-insensitive, optional final period) and Korean `- 없음` / `- 없음.` placeholders, including those with trailing whitespace, have already been excluded.
@@ -150,7 +181,7 @@ Color the framing — 🟢 SHIP / 🔴 NEEDS-FIX / 🟡 DISCUSS — to match the
 
 ## 4 · Handle `## NEED RESEARCH` blocks
 
-If the exact `.final.md` path reported by the same successful invocation contains a `## NEED RESEARCH` section after the verdict, Codex needs Antigravity's help before the review can finalize. Do this:
+If the final of the same successful invocation contains a `## NEED RESEARCH` section after the verdict, Codex needs Antigravity's help before the review can finalize. Read that final from the summary's `final_text` when §3 took the fast path and `final_text` is not `null`; otherwise read the exact `.final.md` path that invocation reported (`final:` in its `(log:` line). A result read from the file gets this check too. Do this:
 
 1. Surface the questions to the user. Confirm before fetching (research costs latency and tokens).
 2. On confirmation, run each question through `ask-researcher.sh` and concatenate the answers into a temp file. Run the loop below as one background Bash call (§2): several research calls in a row can outlast a foreground call. `ask-researcher.sh` prints only the answer on stdout (the `=== RESPONSE ===` markers go to its log file), and exits with the researcher's rc:
@@ -180,7 +211,7 @@ If the exact `.final.md` path reported by the same successful invocation contain
 
 ## 4b · Handle `## NEED CONTEXT` blocks
 
-A `## NEED CONTEXT` section lists repository facts the reviewer could not fetch, as commands. Antigravity cannot answer these; you can.
+A `## NEED CONTEXT` section lists repository facts the reviewer could not fetch, as commands. Look for it in the same successful invocation's final, read as in §4. Antigravity cannot answer these; you can.
 
 1. Surface the commands to the user with one line each on why the reviewer needs it.
 2. Run only read-only commands yourself: `gh pr view`, `gh pr diff`, `gh pr checks`, `gh issue view`, `gh run view` (including `--log-failed`), `git log`, `git show`. Ask before anything that changes state, including `git fetch`, and never run a command that writes to the remote.
@@ -191,9 +222,9 @@ A `## NEED CONTEXT` section lists repository facts the reviewer could not fetch,
 
 A retry re-reviews the **same scope**, with more evidence when the review asked for it:
 
-- Same focus (still after `--`), and every flag the original call had: `--model`, `--with-spec`, `--with-research`, `--with-context`, `--no-memories`.
+- Same focus (still after `--`), and every flag the original call had: `--summary`, `--model`, `--with-spec`, `--with-research`, `--with-context`, `--no-memories`.
 - Attachments are cumulative. The wrapper takes one file per kind, so a second `--with-research` replaces the first — write the previous content plus the new answers into one new file and pass that.
-- Check before every retry whether the PR's head or base commit moved since the first review (`gh pr view` shows different IDs). If it did, that is a new review, not a retry: drop the old context, resolve the PR again, and say so to the user. With several reviewers, stop instead and ask first (**Several reviewers**, item 5).
+- Check before every retry whether the PR's head or base commit moved since the first review (`gh pr view` shows different IDs). If it did, that is a new review, not a retry: drop the old context, resolve the PR again (passing `pr-context.sh` the `--with-context` file the user originally gave, if any), and say so to the user. With several reviewers, stop instead and ask first (**Several reviewers**, item 5).
 
 ## 5 · Don't auto-fix
 
@@ -216,6 +247,6 @@ If the user approves a replacement: deleting code you have already fixed round a
 ## Constraints
 
 - **Do not call `codex` directly.** `ask-reviewer.sh` is the only entry point — it handles role-prompt loading, trust-boundary tag stripping, `codex exec --output-last-message` capture, and RFC 0004 manifest emission (`dev-trio-review` variant).
-- **Use the exact `.review.json` result path printed by this invocation.** The wrapper, manifest and dashboard share this parsed result. Missing/failed results mean the verdict is unavailable; never infer it from raw logs, prompt examples or `latest` artifacts.
+- **Use this invocation's summary `result`, or the exact `.review.json` path it printed.** The wrapper, manifest and dashboard share this parsed result. Missing/failed results mean the verdict is unavailable; never infer it from raw logs, prompt examples or `latest` artifacts.
 - **Only an `ok` result carries a verdict.** Invocation and parse failures retain `null`; a token found in prose or a role-prompt example is not a review result.
 - **Do not paste the full Codex output back to chat.** Verdict line + Blocker/Major bullets only. The full text is in the pane and on disk.
