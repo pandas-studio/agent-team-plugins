@@ -22,7 +22,7 @@ skill's location, not a saved plugin-cache path or an assumed PATH entry.
 - For a pull request, resolve it with `pr-context.sh` from the loaded skill's
   plugin before dispatch and pass its context file and range focus; the
   reviewer may have no network access. Dispatch only if it exited 0.
-- Report the actual model, exit status, verdict, and artifact paths. A failed
+- Report the actual model, exit status, verdict (when there is one), and artifact paths. A failed
   invocation or missing final response is not a successful review. Do not use
   stale `latest` artifacts as evidence for a new invocation.
 - Repeated findings in the same unit warrant checking whether a tested library

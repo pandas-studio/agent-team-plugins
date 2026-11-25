@@ -63,8 +63,9 @@ If `pr-context.sh` is not found, or `ask-reviewer.sh` says `error: unknown optio
 ## Reading the review result
 
 1. The result: use stdout's one `{"summary_version":1` JSON line when its `result` is not `null` and its `paths.result` equals the `result:` path in the last stderr line starting `(log:`. Otherwise read that `result:` file. Neither: there is no verdict.
-2. If that result has `status: "ok"`, wherever it came from, check its final for `## NEED RESEARCH` and `## NEED CONTEXT`: the JSON's `final_text`, or the `final:` file from the `(log:` line when `final_text` is `null` or the result came from the file.
-3. Any other status: report it; no NEED handling.
+2. Compare that result's `exit_code` with the call's own exit status (`[exited with code N]` of a background call, the tool's status for a foreground one), on every call. Different or missing: the run did not finish normally — report the result's `exit_code`, the call's status (or "unavailable") and the log/final/result paths; no verdict, findings or NEED handling. A review is a result with `status: "ok"` that passed this step; only a review gives a verdict and findings.
+3. For a review (step 2), wherever its result came from, check its final for `## NEED RESEARCH` and `## NEED CONTEXT`: the JSON's `final_text`, or the `final:` file from the `(log:` line when `final_text` is `null` or the result came from the file.
+4. Any other result: report it; no NEED handling.
 
 ## Handling Codex's `NEED RESEARCH` block
 
@@ -82,7 +83,7 @@ Do this:
    ```bash
    ask-reviewer.sh --summary --with-research .dev-trio/log/${AGENT_TEAM:-default}/research-<ts>.md "<original focus>"
    ```
-4. Use Codex's final review to decide next steps. Surface blockers/major findings to the user before continuing.
+4. Read the re-review as "Reading the review result" says; only if it is a review (step 2), use it to decide next steps. Surface blockers/major findings to the user before continuing.
 
 ## Handling Codex's `NEED CONTEXT` block
 
@@ -94,7 +95,7 @@ A `## NEED CONTEXT` section of its own after the verdict in Codex's final (see a
 ## Reporting back to the user
 
 - After research: summarize Antigravity's key points in 2–4 lines, cite the log file.
-- After review: give the user Codex's verdict (`SHIP` / `NEEDS-FIX` / `DISCUSS`) + blockers/major findings inline. Don't dump the full Codex output unless asked — link the log.
+- After a review ("Reading the review result", step 2): give the user Codex's verdict (`SHIP` / `NEEDS-FIX` / `DISCUSS`) + blockers/major findings inline. Don't dump the full Codex output unless asked — link the log.
 - Logs live in `.dev-trio/log/` (gitignored).
 
 ## Don't

@@ -238,7 +238,7 @@ claude --plugin-dir ./agent-team-plugins/dev-trio
    ```
    /dev-trio:install-pm
    ```
-   This appends a marked block to `$PWD/CLAUDE.md` between `<!-- BEGIN dev-trio PM policy -->` / `<!-- END dev-trio PM policy -->`. Re-running upgrades in place; safe to run again after plugin updates. The block is a copy, so a plugin update does not reach it: after updating to 0.8.65, re-run it in each workspace and start a new session, or the PM keeps reading the full transcript and resolving PRs by hand.
+   This appends a marked block to `$PWD/CLAUDE.md` between `<!-- BEGIN dev-trio PM policy -->` / `<!-- END dev-trio PM policy -->`. Re-running upgrades in place; safe to run again after plugin updates. The block is a copy, so a plugin update does not reach it: after updating to 0.8.66, re-run it in each workspace and start a new session. A block from before 0.8.65 reads the full transcript and resolves PRs by hand; one from before 0.8.66 also trusts a result without comparing its `exit_code` with the wrapper's exit status.
 
 4. Drive normally. The PM policy tells Claude when to dispatch:
    ```
@@ -257,7 +257,7 @@ claude --plugin-dir ./agent-team-plugins/dev-trio
 
    When calling `ask-reviewer.sh` directly, a long focus can be passed as `--focus-file <file>` instead of an argument. That works where a host refuses a computed `"$(cat angles.txt)"` argument, and it needs no shell quoting. `/dev-trio:review` itself takes the focus as text.
 
-   **Reviewers may run without network access** (Codex's sandbox disables it by default), so the PM supplies repository facts. For a PR, the PM resolves the base/head commits with `pr-context.sh` (below) and passes them as `--with-context <file>` with a `<merge-base>..<head>` range focus; a bare `"pr 55"` focus leaves a sandboxed reviewer unable to identify the commits. When a reviewer still needs a remote fact it returns a `## NEED CONTEXT` block of read-only commands; for a review whose parsed result is `ok`, the PM runs them, writes the output to a new context file that starts with a copy of the old one, and re-reviews once with every original flag.
+   **Reviewers may run without network access** (Codex's sandbox disables it by default), so the PM supplies repository facts. For a PR, the PM resolves the base/head commits with `pr-context.sh` (below) and passes them as `--with-context <file>` with a `<merge-base>..<head>` range focus; a bare `"pr 55"` focus leaves a sandboxed reviewer unable to identify the commits. When a reviewer still needs a remote fact it returns a `## NEED CONTEXT` block of read-only commands; for a review whose parsed result is `ok` and whose exit status matches the result's `exit_code`, the PM runs them, writes the output to a new context file that starts with a copy of the old one, and re-reviews once with every original flag.
 
    `pr-context.sh` does that PR resolution in one call. It asks `gh` once, checks that the head and base commits are in this repository, takes their merge base, writes the context file and prints one JSON line with `context_file` and `focus`:
 
@@ -566,7 +566,7 @@ run logs). The exit code, stderr, receipt, manifest, `*.review.json` and
 
 - `result` is the published review result unchanged, so its fields keep their
   meaning (a `null` `findings.*` is unknown, not zero). Read the verdict and the
-  counts from it.
+  counts from it once the process's exit status matches `exit_code` (below).
 - `final_text` is the `*.final.md` text only when `result.status` is `ok` and
   the text is at most 64 KiB; otherwise it is `null`, and `final_truncated` is
   `true` when the size was the reason. A failed run's final is not a review.
