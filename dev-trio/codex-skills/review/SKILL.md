@@ -253,7 +253,9 @@ that a finished or still-running review was given. Then repeat the review once
 with the same focus and every original flag, including `--summary` and `--model`; attachments
 are cumulative (one new file per kind holding the old and new evidence). Check
 before every repeat, the format repeat above included, whether the PR's head or
-base moved: if it did, start a new review instead of a retry, and with several
+base moved: if it did, start a new review instead of a retry (resolve the PR
+again, passing the resolver the `--with-context` file the user originally
+gave, if any), and with several
 reviewers stop and ask first (**Several reviewers**). Fix findings only within
 the authorized task.
 

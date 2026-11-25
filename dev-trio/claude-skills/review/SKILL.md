@@ -224,7 +224,7 @@ A retry re-reviews the **same scope**, with more evidence when the review asked 
 
 - Same focus (still after `--`), and every flag the original call had: `--summary`, `--model`, `--with-spec`, `--with-research`, `--with-context`, `--no-memories`.
 - Attachments are cumulative. The wrapper takes one file per kind, so a second `--with-research` replaces the first — write the previous content plus the new answers into one new file and pass that.
-- Check before every retry whether the PR's head or base commit moved since the first review (`gh pr view` shows different IDs). If it did, that is a new review, not a retry: drop the old context, resolve the PR again, and say so to the user. With several reviewers, stop instead and ask first (**Several reviewers**, item 5).
+- Check before every retry whether the PR's head or base commit moved since the first review (`gh pr view` shows different IDs). If it did, that is a new review, not a retry: drop the old context, resolve the PR again (passing `pr-context.sh` the `--with-context` file the user originally gave, if any), and say so to the user. With several reviewers, stop instead and ask first (**Several reviewers**, item 5).
 
 ## 5 · Don't auto-fix
 

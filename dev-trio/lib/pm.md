@@ -89,7 +89,7 @@ Do this:
 A `## NEED CONTEXT` section of its own after the verdict in Codex's final (see above; not text inside a code block) lists repository facts (PR commits, issue text, CI logs) as commands the reviewer could not run. Antigravity cannot answer these — you can:
 1. Run only the read-only commands (`gh pr view/diff/checks`, `gh issue view`, `gh run view`, `git log/show`). Ask the user before `git fetch` or anything that changes state.
 2. Write each command and its output to one new context file (start it with a copy of the existing one if the review already had `--with-context`; never edit a file a review was already given).
-3. Re-invoke once with `--with-context <file>`, the original focus, and every original flag. If the PR's head or base moved meanwhile, start a new review instead.
+3. Re-invoke once with `--with-context <file>`, the original focus, and every original flag. If the PR's head or base moved meanwhile, start a new review instead: run `pr-context.sh` again, with the `--with-context` file the user originally gave, if any.
 
 ## Reporting back to the user
 

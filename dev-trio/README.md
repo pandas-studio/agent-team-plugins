@@ -238,7 +238,7 @@ claude --plugin-dir ./agent-team-plugins/dev-trio
    ```
    /dev-trio:install-pm
    ```
-   This appends a marked block to `$PWD/CLAUDE.md` between `<!-- BEGIN dev-trio PM policy -->` / `<!-- END dev-trio PM policy -->`. Re-running upgrades in place; safe to run again after plugin updates. The block is a copy, so a plugin update does not reach it: after updating to 0.8.63, re-run it in each workspace and start a new session, or the PM keeps reading the full transcript and resolving PRs by hand.
+   This appends a marked block to `$PWD/CLAUDE.md` between `<!-- BEGIN dev-trio PM policy -->` / `<!-- END dev-trio PM policy -->`. Re-running upgrades in place; safe to run again after plugin updates. The block is a copy, so a plugin update does not reach it: after updating to 0.8.65, re-run it in each workspace and start a new session, or the PM keeps reading the full transcript and resolving PRs by hand.
 
 4. Drive normally. The PM policy tells Claude when to dispatch:
    ```
