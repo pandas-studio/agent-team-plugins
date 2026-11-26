@@ -86,9 +86,12 @@ With several reviewers:
   handled by the one-approval rule below comes first: that rule applies to each
   Claude reviewer call separately, and its "stop" ends that reviewer only.
   After it, a usage or setup failure (exit 2), a denied or unavailable host
-  approval, or a failed invocation makes that reviewer "no verdict"; let the
-  rest finish and report every reviewer.
-- Report each reviewer's model, verdict and counts side by side, then every
+  approval, a failed invocation, or an exit code that differs from the
+  result's `exit_code` (see the result section) makes that reviewer "no
+  verdict"; let the rest finish and report every reviewer.
+- Report each reviewer's model, verdict and counts side by side for the
+  reviewers that have a verdict, and the result section's failure report for
+  each one that does not. Then every
   Blocker and Major finding labelled with its reviewer. Do not merge or
   de-duplicate findings across reviewers.
 - A `NEED RESEARCH`, `NEED CONTEXT` or format repeat re-runs only the reviewer
@@ -190,8 +193,13 @@ the run.
   that wrapper at that versioned plugin path, and stops matching after a
   plugin update.
 
-Capture this invocation's exit code and the exact log/final/result paths from
-the last stderr line that starts with `(log:` (a notice can follow it). The
+Wait for the command to finish before reading anything below: a tool response
+that returns a running session instead of an exit code is not the result, so
+keep reading that same session until the host reports the command's exit, and
+take the summary, the `(log:` line and the exit code from its whole output.
+Capture this invocation's exit code from the host's result for the command,
+and the exact log/final/result paths from the last stderr line that starts
+with `(log:` (a notice can follow it). The
 parsed result the wrapper, manifest and dashboard share is that exact
 `.review.json`. Check the summary first: when exactly one stdout line starts
 with `{"summary_version":1`, parses as JSON, has a non-null `result`, and its
@@ -199,6 +207,19 @@ with `{"summary_version":1`, parses as JSON, has a non-null `result`, and its
 that `.review.json` as published, so use it and do not open the file. In every
 other case read that exact `.review.json`. Do not parse verdicts or count
 bullets in Markdown, and do not use `latest` artifacts.
+
+Then, before anything below, compare the selected result's `exit_code` with
+the exit code the host reported for the command — never with the `(log:`
+line's `rc=`, the summary's `exit_code` or `invocation_rc`. If they differ, or
+the host reported no exit code, the run did not finish normally: report the
+result's `exit_code`, the host's exit code (or "unavailable") and the log,
+final and result paths. Give no verdict and no counts, and take no follow-up
+— no `NEED RESEARCH` or `NEED CONTEXT` handling, no format repeat. The process
+status is the authority: a wrapper killed after publishing its result exits
+differently while the result still reads `ok`. When they match, the rules
+below apply as written. Every call gets this check, repeats included. An
+invocation is **successful** only when its result is `ok` and this check
+passed; a verdict, counts or a NEED section come only from a successful one.
 
 - `status: "ok"`: use `verdict` (`SHIP`, `NEEDS-FIX`, `DISCUSS`, or
   `OUT-OF-SCOPE` under the spec profile) and quote `verdict_line` verbatim.
@@ -238,9 +259,9 @@ bullets in Markdown, and do not use `latest` artifacts.
 - A missing or unreadable result means the verdict is unavailable; never fall
   back to the raw log or `.final.md`.
 
-Report the actual reviewer model, verdict, substantive Blocker/Major findings,
-and the result artifact link. The `.final.md` of the same successful
-invocation is supporting text only. Look for `NEED RESEARCH` and `NEED
+For a successful invocation (defined above), report
+the actual reviewer model, verdict, substantive Blocker/Major findings, and
+the result artifact link. Its `.final.md` is supporting text only. Look for `NEED RESEARCH` and `NEED
 CONTEXT` in that final, whether the result came from the summary or the file:
 the summary's `final_text` on the fast path when it is not `null`, otherwise
 the exact `.final.md` path from the `(log:` line. For `NEED RESEARCH`, obtain the requested evidence
