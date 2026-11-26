@@ -36,16 +36,18 @@ Single Bash call. `ask-researcher.sh` is on the plugin's `bin/` PATH while the p
 Most calls finish in under a minute, but not all: over 54 measured agy calls the median was about 30 seconds, one in ten took more than 2 minutes, and the longest took almost 6. That reaches past the Bash tool's default timeout (2 minutes), so **run the call with `run_in_background: true`** and wait for its completion notice instead of polling.
 
 ```bash
-ask-researcher.sh -- "<the user's question, verbatim>"
-ask-researcher.sh --model codex -- "<question>"    # the argument string began with --model codex or -m codex
+ask-researcher.sh -- '<the user'\''s question, verbatim>'
+ask-researcher.sh --model 'codex' -- '<question>'    # the argument string began with --model codex or -m codex
 ```
 
 Always put `--` before the question, so a question such as `--help` is researched instead of being read as an option.
 
-To pipe extra context (e.g., your own grep results):
+**Quoting rule.** The question and each model id go into the command as one single-quoted word each, and a `'` inside is written `'\''` (as in the first line above); the question keeps its whitespace and newlines. Never double quotes or no quotes: inside `"..."` the shell still runs `$(...)` and backticks and expands `$VAR`, so a question such as `why does $(id) differ` would run a command in this shell before the wrapper starts.
+
+To pipe extra context (e.g., your own grep results), quote it the same way:
 
 ```bash
-echo "<context bullets>" | ask-researcher.sh -- "<question>"
+printf '%s\n' '<context bullets>' | ask-researcher.sh -- '<question>'
 ```
 
 **When the dev-trio layout is up (`/dev-trio:bootstrap`), streaming output is already visible in the top-right pane — do not duplicate it in the chat.** Just acknowledge that it's running and wait.
@@ -76,8 +78,8 @@ With the default Claude host and no overrides, run `dev-trio-doctor.sh --researc
 from the same workspace. Preserve any explicit host, model, registry and CLI
 overrides from the failed invocation when running the check. The doctor has no
 `--model`: after a `--model <id>` call, check with
-`DEV_TRIO_RESEARCHER_MODEL=<id> dev-trio-doctor.sh --research` (the wrapper's
-own failure hint prints this command), and keep `--model <id>` on any retry. A prefixed or
+`DEV_TRIO_RESEARCHER_MODEL='<id>' dev-trio-doctor.sh --research` (the wrapper's
+own failure hint prints this command), and keep `--model '<id>'` on any retry. A prefixed or
 absolute-path command may require the host's normal permission flow; do not
 drop overrides or broaden permissions to avoid that flow. This is a read-only
 setup check, not authentication, inference, or proof of research access.
@@ -114,7 +116,7 @@ successful final answer.
 
 If the user's broader intent was code-then-review, suggest the natural next step:
 
-> Want me to feed this into a Codex review? `/dev-trio:review --with-research <final-path> "<focus>"`
+> Want me to feed this into a Codex review? `/dev-trio:review --with-research <final-path> -- <focus>` (no quotes: the review skill quotes it when it dispatches; `--` keeps a focus with `-m` in it a focus)
 
 But don't dispatch automatically — let the user confirm.
 

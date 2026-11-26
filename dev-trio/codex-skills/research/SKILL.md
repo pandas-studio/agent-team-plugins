@@ -55,13 +55,19 @@ Run from the user's workspace under that host policy, passing the question as
 one quoted argument after `--`:
 
 ```bash
-DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/ask-researcher.sh" [--model <id>] -- "<question>" </dev/null
+DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/ask-researcher.sh" [--model '<id>'] -- '<question>' </dev/null
 ```
+
+When you write the command as shell text, the question and each model id are
+each one single-quoted word, and a `'` inside is written `'\''`; the question
+keeps its whitespace and newlines. Never double quotes: inside `"..."` the
+shell still runs `$(...)` and backticks and expands `$VAR`, and a question can
+come from a reviewer's output.
 
 Extract options from the start of the request only:
 
 1. While it starts with `--model <id>` or `-m <id>`, remove those two tokens
-   and repeat; pass every pair, in order, as `--model <id>` before `--` (the
+   and repeat; pass every pair, in order, as `--model '<id>'` before `--` (the
    wrapper rejects any pair whose id is missing or option-shaped, and the last
    id wins and must be registered). This picks the
    researcher for this call over `DEV_TRIO_RESEARCHER_MODEL` and the role
@@ -76,7 +82,9 @@ Extract options from the start of the request only:
 `--` before the question keeps a question such as `--help` from being read as
 an option.
 
-When there is additional context, pass it through stdin instead of /dev/null.
+When there is additional context, pass it through stdin instead of /dev/null,
+quoted the same way, the rest of the command unchanged:
+`printf '%s\n' '<context>' | DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/ask-researcher.sh" [--model '<id>'] -- '<question>'`.
 Preserve the actual working directory and any explicit role model overrides.
 The wrapper chooses the researcher and records its actual model in the log.
 
@@ -113,8 +121,8 @@ for this wrapper instead.
 
 Otherwise run the read-only setup check from the same workspace, preserving the
 model, registry and CLI overrides used for the failed call. The doctor has no
-`--model`; translate one to `DEV_TRIO_RESEARCHER_MODEL=<id>` (the wrapper's
-failure hint prints the exact command), and keep `--model <id>` on any retry:
+`--model`; translate one to `DEV_TRIO_RESEARCHER_MODEL='<id>'` (the wrapper's
+failure hint prints the exact command), and keep `--model '<id>'` on any retry:
 
 ```bash
 DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/dev-trio-doctor.sh" --research

@@ -12,7 +12,9 @@
 # repository, takes their merge base, writes a context file and prints one JSON
 # line naming that file and a range focus:
 #
-#   ask-reviewer.sh --with-context <context_file> -- "<focus>"
+#   ask-reviewer.sh --summary --with-context '<context_file>' -- '<focus>'
+#
+# each value single-quoted, a ' inside written '\''.
 #
 # It starts no review and never fetches. A commit that is missing locally is
 # reported (exit 4) with the fetch command to run; nothing is fetched here,
@@ -51,7 +53,8 @@ context file and prints one JSON line on stdout:
   {"pr_context_version":1,"number":55,"url":"...","head":"<oid>","base":"<oid>",
    "merge_base":"<oid>","context_file":"/abs/path","focus":"review <mb>..<head> (PR #55)"}
 
-Pass it on as:  ask-reviewer.sh --with-context <context_file> -- "<focus>"
+Pass it on as:  ask-reviewer.sh --summary --with-context '<context_file>' -- '<focus>'
+(each value single-quoted, a ' inside written '\'').
 
 It starts no review and never fetches. The repository is the one gh selects in
 this directory (GH_REPO and `gh repo set-default` apply). A PR URL must name
