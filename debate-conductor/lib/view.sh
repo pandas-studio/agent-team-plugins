@@ -106,11 +106,12 @@ view_pane_ready() {
 
 view_wait_ready() {
   local record="$1" gen crit nonce team dir deadline
-  gen=$(printf '%s' "$record" | jq -r .gen) || return 1
-  crit=$(printf '%s' "$record" | jq -r .crit) || return 1
-  nonce=$(printf '%s' "$record" | jq -r .nonce) || return 1
-  team=$(printf '%s' "$record" | jq -r .team) || return 1
-  dir=$(printf '%s' "$record" | jq -r .log_dir) || return 1
+  gen=$(printf '%s' "$record" | jq -r .gen) &&
+    crit=$(printf '%s' "$record" | jq -r .crit) &&
+    nonce=$(printf '%s' "$record" | jq -r .nonce) &&
+    team=$(printf '%s' "$record" | jq -r .team) &&
+    dir=$(printf '%s' "$record" | jq -r .log_dir) ||
+    { view_error 'viewer startup/readiness could not be verified'; return 1; }
   deadline=$((SECONDS + 5))
   while [ "$SECONDS" -lt "$deadline" ]; do
     if view_pane_ready "$gen" gen "$nonce" "$team" "$dir" &&

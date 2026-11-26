@@ -275,6 +275,7 @@ class ViewPreparationTests(ViewFixture):
                 second = self.prepare("--view=auto", **env)
                 self.assertEqual(second["status"], "manual")
                 self.assertEqual(second["reason_code"], "setup-failed")
+                self.assertIn("readiness could not be verified", second["reason"])
                 state = self.read_state()
                 later = [call[0] for call in state["calls"][before:]]
                 self.assertIn("new-session", later)
