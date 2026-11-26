@@ -566,7 +566,7 @@ run logs). The exit code, stderr, receipt, manifest, `*.review.json` and
 
 - `result` is the published review result unchanged, so its fields keep their
   meaning (a `null` `findings.*` is unknown, not zero). Read the verdict and the
-  counts from it once the process's exit status matches `exit_code` (below).
+  counts from it once the process's exit status matches `result.exit_code`.
 - `final_text` is the `*.final.md` text only when `result.status` is `ok` and
   the text is at most 64 KiB; otherwise it is `null`, and `final_truncated` is
   `true` when the size was the reason. A failed run's final is not a review.
