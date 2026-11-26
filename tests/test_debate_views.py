@@ -203,6 +203,28 @@ class ViewPreparationTests(ViewFixture):
         self.assertEqual(ctx["team"], "work")
         self.assertEqual(self.read_state()["windows"]["@0"]["panes"], ["%0", "%1", "%2"])
 
+    def test_jq_failing_after_geometry_output_does_not_confirm_here(self):
+        state = self.read_state()
+        state["windows"]["@0"].update(session="work", sid="$0")
+        self.state.write_text(json.dumps(state))
+        env = dict(TMUX=str(self.root / "socket") + ",1,0", TMUX_PANE="%0")
+        first = self.prepare("--view=auto", **env)
+        self.assertEqual(first["status"], "present")
+        state = self.read_state()
+        panes = state["windows"]["@0"]["panes"]
+        before = len(state["calls"])
+
+        self.jq_failing_after_geometry_output()
+        second = self.prepare("--view=auto", **env)
+        self.assertEqual(second["status"], "manual")
+        self.assertEqual(second["reason_code"], "setup-failed")
+        state = self.read_state()
+        later = [call[0] for call in state["calls"][before:]]
+        self.assertIn("new-session", later)
+        self.assertIn("kill-session", later)
+        self.assertEqual({key: win["panes"] for key, win in state["windows"].items()},
+                         {"@0": panes})
+
     def test_hand_split_window_is_preserved_with_separate_view(self):
         state = self.read_state()
         state["windows"]["@0"]["panes"].append("%9")

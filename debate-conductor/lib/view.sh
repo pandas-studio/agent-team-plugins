@@ -121,9 +121,10 @@ view_wait_ready() {
 }
 
 view_here_geometry_matches() {
-  local pane="$1" record="$2" want live
+  local pane="$1" record="$2" ids want live
   [ "$(printf '%s' "$record" | jq -r .type)" = here ] || return 1
-  want=$(printf '%s\n%s\n' "$pane" "$(printf '%s' "$record" | jq -r '.gen,.crit')" | sort)
+  ids=$(printf '%s' "$record" | jq -r '.gen,.crit') || return 1
+  want=$(printf '%s\n%s\n' "$pane" "$ids" | sort) || return 1
   live=$(view_tmux list-panes -t "$pane" -F '#{pane_id}' | sort) || return 1
   [ "$want" = "$live" ]
 }
