@@ -191,7 +191,7 @@ prepare_detached() {
 }
 
 prepare_view() {
-  local version major minor here_record here_pane
+  local version major minor here_record here_pane here_cwd
   [ "$MODE" != none ] && [ "$KIND" = team ] || return 0
   [ -n "$VIEW_TMUX" ] || { view_error 'tmux is not installed'; return 1; }
   version=$("$VIEW_TMUX" -V) || return 1
@@ -228,7 +228,8 @@ prepare_view() {
       here_record=$(view_record "$here_pane") || here_record=""
       if view_record_matches "$here_record" "$TEAM" "$LOG_DIR" &&
         view_here_geometry_matches "$here_pane" "$here_record" &&
-        [ "$(printf '%s' "$here_record" | jq -r .cwd)" = "$CWD" ] &&
+        here_cwd=$(printf '%s' "$here_record" | jq -r .cwd) &&
+        [ "$here_cwd" = "$CWD" ] &&
         view_wait_ready "$here_record"; then
         STATUS=present RECORD=$here_record
         # The session can have dots; only detached names enter the opener.

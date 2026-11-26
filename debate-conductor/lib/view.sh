@@ -44,7 +44,7 @@ view_private_file() {
 }
 
 view_context_read() {
-  local file="$1" parent data
+  local file="$1" parent data cwd
   case "$file" in /*/context.json) ;; *) view_error 'expected an absolute context.json path'; return 2 ;; esac
   parent=${file%/*}
   [ ! -L "$parent" ] && [ -d "$parent" ] &&
@@ -68,7 +68,8 @@ view_context_read() {
       (.socket | path) and (.tmux_bin | path)
       else .session == null and .socket == null end)
   ' "$file" 2>/dev/null) || { view_error 'invalid context'; return 2; }
-  [ -d "$(printf '%s' "$data" | jq -r .cwd)" ] || { view_error 'workspace no longer exists'; return 2; }
+  cwd=$(printf '%s' "$data" | jq -r .cwd) || { view_error 'invalid context'; return 2; }
+  [ -d "$cwd" ] || { view_error 'workspace no longer exists'; return 2; }
   printf '%s\n' "$data"
 }
 
@@ -105,11 +106,11 @@ view_pane_ready() {
 
 view_wait_ready() {
   local record="$1" gen crit nonce team dir deadline
-  gen=$(printf '%s' "$record" | jq -r .gen)
-  crit=$(printf '%s' "$record" | jq -r .crit)
-  nonce=$(printf '%s' "$record" | jq -r .nonce)
-  team=$(printf '%s' "$record" | jq -r .team)
-  dir=$(printf '%s' "$record" | jq -r .log_dir)
+  gen=$(printf '%s' "$record" | jq -r .gen) || return 1
+  crit=$(printf '%s' "$record" | jq -r .crit) || return 1
+  nonce=$(printf '%s' "$record" | jq -r .nonce) || return 1
+  team=$(printf '%s' "$record" | jq -r .team) || return 1
+  dir=$(printf '%s' "$record" | jq -r .log_dir) || return 1
   deadline=$((SECONDS + 5))
   while [ "$SECONDS" -lt "$deadline" ]; do
     if view_pane_ready "$gen" gen "$nonce" "$team" "$dir" &&
@@ -121,8 +122,9 @@ view_wait_ready() {
 }
 
 view_here_geometry_matches() {
-  local pane="$1" record="$2" ids want live
-  [ "$(printf '%s' "$record" | jq -r .type)" = here ] || return 1
+  local pane="$1" record="$2" type ids want live
+  type=$(printf '%s' "$record" | jq -r .type) || return 1
+  [ "$type" = here ] || return 1
   ids=$(printf '%s' "$record" | jq -r '.gen,.crit') || return 1
   want=$(printf '%s\n%s\n' "$pane" "$ids" | sort) || return 1
   live=$(view_tmux list-panes -t "$pane" -F '#{pane_id}' | sort) || return 1

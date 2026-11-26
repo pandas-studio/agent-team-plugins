@@ -71,10 +71,15 @@ class ViewFixture(unittest.TestCase):
     def read_state(self):
         return json.loads(self.state.read_text())
 
+    def jq_failing_after_output(self, *queries):
+        """A jq that prints the real output for any matching `-r <query>`, then exits 1."""
+        real = shlex.quote(shutil.which("jq"))
+        pattern = "|".join(shlex.quote(f"-r {q}") for q in queries)
+        self.tool("jq", f'case "$*" in {pattern}) {real} "$@"; exit 1 ;; esac\nexec {real} "$@"\n')
+
     def jq_failing_after_geometry_output(self):
         """A jq that prints the recorded pane ids for `-r .gen,.crit`, then exits 1."""
-        real = shlex.quote(shutil.which("jq"))
-        self.tool("jq", 'case "$*" in "-r .gen,.crit") %s "$@"; exit 1 ;; esac\nexec %s "$@"\n' % (real, real))
+        self.jq_failing_after_output(".gen,.crit")
 
 
 class ViewPreparationTests(ViewFixture):
@@ -224,6 +229,58 @@ class ViewPreparationTests(ViewFixture):
         self.assertIn("kill-session", later)
         self.assertEqual({key: win["panes"] for key, win in state["windows"].items()},
                          {"@0": panes})
+
+    def test_jq_failing_after_here_type_output_does_not_confirm_here(self):
+        state = self.read_state()
+        state["windows"]["@0"].update(session="work", sid="$0")
+        self.state.write_text(json.dumps(state))
+        env = dict(TMUX=str(self.root / "socket") + ",1,0", TMUX_PANE="%0")
+        first = self.prepare("--view=auto", **env)
+        self.assertEqual(first["status"], "present")
+        panes = self.read_state()["windows"]["@0"]["panes"]
+
+        self.jq_failing_after_output(".type")
+        second = self.prepare("--view=auto", **env)
+        self.assertEqual(second["status"], "ready-detached")
+        self.assertEqual(self.read_state()["windows"]["@0"]["panes"], panes)
+
+    def test_jq_failing_after_here_cwd_output_does_not_confirm_here(self):
+        state = self.read_state()
+        state["windows"]["@0"].update(session="work", sid="$0")
+        self.state.write_text(json.dumps(state))
+        env = dict(TMUX=str(self.root / "socket") + ",1,0", TMUX_PANE="%0")
+        first = self.prepare("--view=auto", **env)
+        self.assertEqual(first["status"], "present")
+        panes = self.read_state()["windows"]["@0"]["panes"]
+
+        self.jq_failing_after_output(".cwd")
+        second = self.prepare("--view=auto", **env)
+        self.assertEqual(second["status"], "ready-detached")
+        self.assertEqual(self.read_state()["windows"]["@0"]["panes"], panes)
+
+    def test_jq_failing_after_wait_ready_field_output_does_not_confirm_here(self):
+        state = self.read_state()
+        state["windows"]["@0"].update(session="work", sid="$0")
+        self.state.write_text(json.dumps(state))
+        env = dict(TMUX=str(self.root / "socket") + ",1,0", TMUX_PANE="%0")
+        first = self.prepare("--view=auto", **env)
+        self.assertEqual(first["status"], "present")
+
+        for field in (".gen", ".crit", ".nonce", ".team", ".log_dir"):
+            with self.subTest(field=field):
+                state = self.read_state()
+                panes = state["windows"]["@0"]["panes"]
+                before = len(state["calls"])
+                self.jq_failing_after_output(field)
+                second = self.prepare("--view=auto", **env)
+                self.assertEqual(second["status"], "manual")
+                self.assertEqual(second["reason_code"], "setup-failed")
+                state = self.read_state()
+                later = [call[0] for call in state["calls"][before:]]
+                self.assertIn("new-session", later)
+                self.assertIn("kill-session", later)
+                self.assertEqual({key: win["panes"] for key, win in state["windows"].items()},
+                                 {"@0": panes})
 
     def test_hand_split_window_is_preserved_with_separate_view(self):
         state = self.read_state()
@@ -577,6 +634,18 @@ sys.exit({rc!r})
         result = self.cli("open-view.sh", "--context", ctx["context_file"])
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertEqual(json.loads(result.stdout)["reason_code"], "changed-view")
+
+    def test_jq_failing_after_context_cwd_output_is_rejected(self):
+        ctx = self.prepare("--view=tmux")
+        state = self.read_state()
+        state["clients"] = "existing-client\n"
+        self.state.write_text(json.dumps(state))
+        self.tool("osascript", 'exit 99\n')
+        self.jq_failing_after_output(".cwd")
+        result = self.cli("open-view.sh", "--context", ctx["context_file"])
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("invalid context", result.stderr)
 
     def test_remote_environment_only_returns_instructions(self):
         ctx = self.prepare("--view=tmux")
