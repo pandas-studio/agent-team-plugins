@@ -131,7 +131,7 @@ acquire_view_lock() {
 }
 
 prepare_detached() {
-  local name hash target live nonce record pane dead count wid
+  local name hash target live nonce record pane dead count wid rtype
   name=$(printf '%s' "$TEAM" | tr -c 'A-Za-z0-9_-' '_')
   hash=$(printf '%s' "$LOG_DIR" | cksum | cut -d' ' -f1)
   SESSION="debate-view-$name-$hash"
@@ -149,16 +149,19 @@ prepare_detached() {
     [ "$count" = 1 ] || { view_error "modified session: $SESSION"; return 1; }
     record=$(view_record "$target:") || return 1
     view_record_matches "$record" "$TEAM" "$LOG_DIR" &&
-      [ "$(printf '%s' "$record" | jq -r .type)" = detached ] &&
+      rtype=$(printf '%s' "$record" | jq -r .type) &&
+      [ "$rtype" = detached ] &&
       view_complete "$target:" "$record" &&
       view_geometry_matches "$target:" "$record" || {
       view_error "incomplete, conflicting or modified view: $SESSION"
       view_error "Inspect first; cleanup only this view with: $(view_quote "$VIEW_TMUX") -S $(view_quote "$VIEW_SOCKET") kill-session -t $(view_quote "$target")"
       return 1
     }
-    nonce=$(printf '%s' "$record" | jq -r .nonce)
+    nonce=$(printf '%s' "$record" | jq -r .nonce) ||
+      { view_error 'viewer startup/readiness could not be verified'; return 1; }
     for role in gen crit; do
-      pane=$(printf '%s' "$record" | jq -r ".$role")
+      pane=$(printf '%s' "$record" | jq -r ".$role") ||
+        { view_error 'viewer startup/readiness could not be verified'; return 1; }
       dead=$(view_tmux display-message -p -t "$pane" '#{pane_dead}') || return 1
       if [ "$dead" = 1 ]; then
         view_start_pane "$pane" "$role" "$nonce" "$TEAM" "$BASE" "$CWD" "$SCRIPT_DIR/../bin/tail-role.sh" dead || return 1

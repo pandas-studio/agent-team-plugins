@@ -41,7 +41,10 @@ if [ "$READ" = 1 ]; then
     jq -e '.exit_code == 0' "$DIR/dispatch-status.json" >/dev/null &&
     view_private_file "$RECEIPT" || { view_error 'incomplete dispatch or missing receipt'; exit 2; }
   RESULT=$(debate_receipt_read "$RECEIPT") || { view_error 'invalid receipt'; exit 2; }
-  [ "$(printf '%s' "$RESULT" | jq -r '.debate_dir | split("/") | .[:-1] | join("/")')" = "$(printf '%s' "$DATA" | jq -r .log_dir)" ] || {
+  result_parent=$(printf '%s' "$RESULT" | jq -r '.debate_dir | split("/") | .[:-1] | join("/")') ||
+    { view_error 'invalid receipt'; exit 2; }
+  context_log_dir=$(printf '%s' "$DATA" | jq -r .log_dir) || { view_error 'invalid context'; exit 2; }
+  [ "$result_parent" = "$context_log_dir" ] || {
     view_error 'receipt does not belong to the prepared log directory'; exit 2; }
   printf '%s\n' "$RESULT"
   exit 0
@@ -52,8 +55,8 @@ fi
 for arg in "$@"; do
   case "$arg" in --continue-from|--continue-from=*) view_error 'use the runner continuation option, never a forwarded --continue-from'; exit 2 ;; esac
 done
-KIND=$(printf '%s' "$DATA" | jq -r .kind)
-LOG_DIR=$(printf '%s' "$DATA" | jq -r .log_dir)
+KIND=$(printf '%s' "$DATA" | jq -r .kind) &&
+  LOG_DIR=$(printf '%s' "$DATA" | jq -r .log_dir) || { view_error 'invalid context'; exit 2; }
 ARGS=("$@")
 if [ -n "$CONTINUE" ]; then
   case "$CONTINUE" in /*) ;; *) view_error 'continuation must be absolute'; exit 2 ;; esac
@@ -63,14 +66,22 @@ if [ -n "$CONTINUE" ]; then
 elif [ "$KIND" = log-dir ]; then
   view_error 'raw log-directory contexts are continuation-only'; exit 2
 fi
-(umask 077; mkdir "$DIR/dispatch.started") 2>/dev/null || { view_error 'context has already been dispatched; prepare a fresh context for a retry'; exit 2; }
 if [ "$KIND" = team ]; then
-  AGENT_TEAM=$(printf '%s' "$DATA" | jq -r .team)
-  DEBATE_LOG_DIR=$(printf '%s' "$DATA" | jq -r .log_base)
-  export AGENT_TEAM DEBATE_LOG_DIR
+  AGENT_TEAM=$(printf '%s' "$DATA" | jq -r .team) &&
+    DEBATE_LOG_DIR=$(printf '%s' "$DATA" | jq -r .log_base) || { view_error 'invalid context'; exit 2; }
 fi
+# A local keeps the workspace path out of the engine's environment, whatever
+# names the caller exports. The claim stays before the cd, as before: a
+# relative PATH entry must not resolve mkdir inside the workspace.
+claim_and_enter() {
+  local cwd
+  cwd=$(printf '%s' "$DATA" | jq -r .cwd) || { view_error 'invalid context'; return 2; }
+  (umask 077; mkdir "$DIR/dispatch.started") 2>/dev/null || { view_error 'context has already been dispatched; prepare a fresh context for a retry'; return 2; }
+  cd "$cwd"
+}
+claim_and_enter || exit $?
+[ "$KIND" != team ] || export AGENT_TEAM DEBATE_LOG_DIR
 export DEBATE_RECEIPT="$RECEIPT" DEBATE_CONDUCTOR_PM_HOST="$HOST"
-cd "$(printf '%s' "$DATA" | jq -r .cwd)"
 child=""
 stop_dispatch() {
   local status="$1"
