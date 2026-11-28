@@ -58,11 +58,11 @@ one quoted argument after `--`:
 DEV_TRIO_PM_HOST=codex '<plugin-root>/bin/ask-researcher.sh' [--model '<id>'] -- '<question>' </dev/null
 ```
 
-When you write the command as shell text, the question and each model id are
-each one single-quoted word, and a `'` inside is written `'\''`; the question
-keeps its whitespace and newlines. Never double quotes: inside `"..."` the
-shell still runs `$(...)` and backticks and expands `$VAR`, and a question can
-come from a reviewer's output.
+When you write the command as shell text, the question, each model id and the
+resolved `<plugin-root>/bin/<script>` path are each one single-quoted word, and
+a `'` inside is written `'\''`; the question keeps its whitespace and newlines.
+Never double quotes: inside `"..."` the shell still runs `$(...)` and backticks
+and expands `$VAR`, and a question can come from a reviewer's output.
 
 Extract options from the start of the request only:
 

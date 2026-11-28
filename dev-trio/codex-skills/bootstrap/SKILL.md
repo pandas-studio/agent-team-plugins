@@ -14,6 +14,9 @@ When already inside tmux and the user requests this window's layout, run:
 DEV_TRIO_PM_HOST=codex '<plugin-root>/bin/team-layout.sh' --here
 ```
 
+The path is one single-quoted word; a `'` in the resolved plugin root is
+written `'\''`.
+
 The script only builds the layout in a one-pane window. "Already present" with
 exit 0 means the layout is in place. Exit 2 means it refused to change this
 window; relay its error message verbatim and stop. Do not unset tmux options or
