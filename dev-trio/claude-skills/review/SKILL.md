@@ -43,11 +43,13 @@ Algorithm:
 4. If a token is `--model` or `-m`, the next token is its value: one model id, or a comma list of ids (`agy,codex`). Consume both. `-m`/`--model` may appear more than once.
    - **Malformed value — dispatch nothing.** Tell the user the model id goes in its own token and that focus text containing `-m` belongs after `--`, when: there is no next token; the next token is `--` or is shaped like an option (`-m --with-spec spec.md`); a token is an attached form (step 1); or a comma list has an empty element (`agy,,codex`, `agy,`).
    - **Ids written after the value.** While the token after the value is exactly `agy`, `claude` or `codex`, consume it as one more reviewer (`-m agy codex` names two). Only these three ids are read this way, and you do not look anything up: any other id — a model the user registered, `codex-no-memories` — is named in a comma list or with its own `-m`. The run ends at the first other token, which these steps handle like any other, so a later `-m` is still an option.
-   - Keep the ids as written, in first-seen order, each once. With one id, dispatch it as `--model <id>`; with several, follow **Several reviewers** below. You do not check that an id is registered: the wrapper rejects an unregistered one with exit 2 before any model runs.
+   - Keep the ids as written, in first-seen order, each once. With one id, dispatch it as `--model '<id>'`; with several, follow **Several reviewers** below. You do not check that an id is registered: the wrapper rejects an unregistered one with exit 2 before any model runs.
 5. If a token is `--no-memories`, pass it through as its own argv slot; consume only it.
 6. If a token is `--`, stop: it and nothing after it is an option, so every later token goes to the focus (`--model agy -- --help` reviews the focus `--help`; `-- --model codex` reviews the focus `--model codex`). A focus that mentions `-m`, such as `git commit -m`, must come after `--`, or step 4 reads it as a model option.
 7. Every remaining token belongs to the focus; join them with a single space into one FOCUS string.
-8. If FOCUS is empty, omit it entirely (the wrapper falls back to the default working-tree scope). Otherwise put the options first and pass the focus last as `-- "$FOCUS"`, so a focus that starts with a dash is never read as an option.
+8. If FOCUS is empty, omit it entirely (the wrapper falls back to the default working-tree scope). Otherwise put the options first and pass the focus last as `-- '<FOCUS>'`, so a focus that starts with a dash is never read as an option.
+
+   **Quoting rule.** Every value you take from the argument string, from a reviewer's output or from a JSON line a script printed — the focus, each `--with-*` path, each model id, the PR reference, `context_file`, each research question — goes into the command as one single-quoted word, and a `'` inside it is written `'\''` (`it's` becomes `'it'\''s'`). Never put such a value in double quotes or leave it bare: inside `"..."` the shell still runs `$(...)` and backticks and expands `$VAR`, so a focus such as `check what $(git rev-parse HEAD) changed` would run a command in this shell before the wrapper starts, and a `"` in it would end the word early. The rule quotes the value parsing gave you; it does not change the parsing above.
 9. If FOCUS names a pull request, resolve it with `pr-context.sh` before dispatch — see **PR reviews** below. Never send a bare PR reference as the focus: the reviewer may run without network access, and then cannot tell which commits the PR contains (measured: Codex under `workspace-write` failed `gh pr view` and returned `DISCUSS` with zero findings).
 
 ### PR reviews
@@ -65,11 +67,12 @@ If the token right after the reference is digits only (`pr 1320 1321`), dispatch
 **Resolve it** with one foreground call (it makes one `gh` request). Run it as its own command, not chained with `;` or `&&`: the tool result already carries its exit status.
 
 ```bash
-pr-context.sh -- 55
-pr-context.sh --with-context notes.md -- 55    # the user gave --with-context notes.md
+pr-context.sh -- '55'
+pr-context.sh --with-context 'notes.md' -- '55'    # the user gave --with-context notes.md
+pr-context.sh -- 'https://github.com/o/r/pull/55'
 ```
 
-Single-quote the reference and any path in the command (as `'https://github.com/o/r/pull/55'`, `'notes.md'`), and the generated `context_file` when you dispatch; a value that itself contains `'` is written as `'\''`. A `--with-context` file the user gave goes to `pr-context.sh`, which appends it to the context file it writes; given more than once, pass the last one, as the wrapper would. The reviewer then gets only the generated `context_file`.
+The reference, any path, and the generated `context_file` when you dispatch, follow the quoting rule (step 8). A `--with-context` file the user gave goes to `pr-context.sh`, which appends it to the context file it writes; given more than once, pass the last one, as the wrapper would. The reviewer then gets only the generated `context_file`.
 
 - Exit 0: stdout is one JSON line. Take its `context_file` and `focus`.
 - Exit 4 with a last stderr line `(pr: N, missing: …, rc=4)`: a commit is missing locally, or the head and base share no history here. Show the user what `pr-context.sh` printed on stderr as it stands — a fetch command, a "by hand" instruction, a shallow-clone note — and ask before fetching. Do not fetch.
@@ -78,18 +81,18 @@ Single-quote the reference and any path in the command (as `'https://github.com/
 
 Dispatch nothing unless it exited 0. On any other status, discard its stdout.
 
-**Dispatch** with `--summary`, then the user's other options in the order written (each attachment kind once, the last one given), then `--with-context <context_file>`, `--`, and the focus: the JSON's `focus`, followed by ` — <user focus>` when the user wrote one.
+**Dispatch** with `--summary`, then the user's other options in the order written (each attachment kind once, the last one given), then `--with-context '<context_file>'`, `--`, and the focus: the JSON's `focus`, followed by ` — <user focus>` when the user wrote one.
 
 | Argument string | `pr-context.sh` argv | `ask-reviewer.sh` argv, one call per reviewer |
 | :--- | :--- | :--- |
-| `pr 55` | `-- 55` | `--summary --with-context <cf> -- "<focus>"` |
-| `PR #55 check auth -m codex` | `-- 55` | `--summary --model codex --with-context <cf> -- "<focus> — check auth"` |
-| `--with-context notes.md pr 55 -m agy codex` | `--with-context notes.md -- 55` | agy and codex, each `--summary --model <id> --with-context <cf> -- "<focus>"` |
-| `https://github.com/o/r/pull/55` | `-- https://github.com/o/r/pull/55` | as in the first row |
+| `pr 55` | `-- '55'` | `--summary --with-context '<cf>' -- '<focus>'` |
+| `PR #55 check auth -m codex` | `-- '55'` | `--summary --model 'codex' --with-context '<cf>' -- '<focus> — check auth'` |
+| `--with-context notes.md pr 55 -m agy codex` | `--with-context 'notes.md' -- '55'` | agy and codex, each `--summary --model '<id>' --with-context '<cf>' -- '<focus>'` |
+| `https://github.com/o/r/pull/55` | `-- 'https://github.com/o/r/pull/55'` | as in the first row |
 | `pr 1320 1321` | (not called) | (ask the user) |
-| `--with-context a.md pr 55 --with-context b.md --with-spec s.md -m agy codex --no-memories` | `--with-context b.md -- 55` | agy: `--summary --with-spec s.md --model agy --with-context <cf> -- "<focus>"`; codex: `--summary --with-spec s.md --model codex --no-memories --with-context <cf> -- "<focus>"` |
+| `--with-context a.md pr 55 --with-context b.md --with-spec s.md -m agy codex --no-memories` | `--with-context 'b.md' -- '55'` | agy: `--summary --with-spec 's.md' --model 'agy' --with-context '<cf>' -- '<focus>'`; codex: `--summary --with-spec 's.md' --model 'codex' --no-memories --with-context '<cf>' -- '<focus>'` |
 
-`<cf>` is the JSON's `context_file` and `<focus>` its `focus`.
+`<cf>` is the JSON's `context_file` and `<focus>` its `focus`, each written by the quoting rule (step 8): the joined focus `<focus> — <user focus>` is one word, so a `'` in either part is written `'\''`.
 
 If the user's focus itself contains a git range (`A..B`) and agy is among the reviewers, say in your report that agy may have reviewed without its workspace snapshot: the wrapper skips the snapshot for a focus that names more than one range, and does not say so on stderr.
 
@@ -109,7 +112,7 @@ How step 4 reads five argument strings. The last column is the focus text as par
 
 Focus text that begins with `agy`, `claude` or `codex` directly after a model value goes after `--`, as in the fourth row.
 
-1. **Dispatch one call per reviewer, in parallel** — one background Bash call each (§2) — with the same focus, the same flags and the same attachment files. The calls differ only in `--model <id>` and, by item 2, in `--no-memories`. For a pull request, resolve it once (**PR reviews** above) and hand the same context file and the same range to every reviewer. An attachment that can change under the batch — a `latest-*` link, a file still being written — is copied to a fresh file first, and every reviewer gets the copy.
+1. **Dispatch one call per reviewer, in parallel** — one background Bash call each (§2) — with the same focus, the same flags and the same attachment files. The calls differ only in `--model '<id>'` and, by item 2, in `--no-memories`. For a pull request, resolve it once (**PR reviews** above) and hand the same context file and the same range to every reviewer. An attachment that can change under the batch — a `latest-*` link, a file still being written — is copied to a fresh file first, and every reviewer gets the copy.
 2. **`--no-memories` with several reviewers** goes only on the calls whose id is exactly `codex` or `codex-no-memories`; the wrapper refuses it for any other model. Say in your report which calls carried it. With one reviewer, or with no `-m` at all, pass it through unchanged and let the wrapper decide.
 3. **One reviewer failing does not cancel the others.** A usage or setup failure (exit 2), a declined permission prompt, a failed invocation or an exit status that differs from the result's `exit_code` (§3) makes that reviewer "no verdict"; let the rest finish and report every reviewer.
 4. **Report side by side.** §3 applies to each result: one verdict line and one findings count per reviewer that has a verdict, §3's failure report for each one that does not, then every Blocker and Major bullet labelled with its reviewer. Do not merge or de-duplicate findings across reviewers.
@@ -118,7 +121,7 @@ Focus text that begins with `agy`, `claude` or `codex` directly after a model va
 
 ## 2 · Dispatch
 
-One Bash call per review. `ask-reviewer.sh` is on the plugin's `bin/` PATH while the plugin is active. **Every call passes `--summary` first**, so stdout is one JSON document instead of the transcript (§3). **Wrap FOCUS in double quotes** so it stays a single positional argument; the `--with-*` flag pairs go through as their own argv slots.
+One Bash call per review. `ask-reviewer.sh` is on the plugin's `bin/` PATH while the plugin is active. **Every call passes `--summary` first**, so stdout is one JSON document instead of the transcript (§3). **Single-quote FOCUS** by the quoting rule (§1 step 8), never double quotes, so it stays one positional argument and nothing in it runs; the `--with-*` flag pairs go through as their own argv slots, each value quoted the same way.
 
 If `pr-context.sh` is not found (the shell's `command not found`, status 127), or `ask-reviewer.sh` exits 2 with exactly `error: unknown option: --summary`, the dev-trio on this session's PATH is older than this skill. Tell the user to update the plugin and start a new session, and stop. Any other failure of either script is not this case.
 
@@ -128,13 +131,14 @@ Concrete shapes (these are what you actually invoke):
 
 ```bash
 ask-reviewer.sh --summary                                                 # empty argument string → default scope
-ask-reviewer.sh --summary -- "focus on src/agent.py concurrency"          # focus only
-ask-reviewer.sh --summary --with-research notes.md -- "concurrency focus" # flag written before the focus
-ask-reviewer.sh --summary --with-spec docs/auth.md -- "focus on auth flow"  # flag written after the focus
-ask-reviewer.sh --summary --with-spec docs/rfcs/0004.md --with-research notes.md -- "review against the spec"
-ask-reviewer.sh --summary --no-memories -- "fresh-eyes pass over the branch"   # no Codex memory summary
-ask-reviewer.sh --summary --model agy -- "second opinion on the parser"   # a different reviewer for this call
-ask-reviewer.sh --summary --model codex                                   # default scope, chosen model
+ask-reviewer.sh --summary -- 'focus on src/agent.py concurrency'          # focus only
+ask-reviewer.sh --summary --with-research 'notes.md' -- 'concurrency focus' # flag written before the focus
+ask-reviewer.sh --summary --with-spec 'docs/auth.md' -- 'focus on auth flow'  # flag written after the focus
+ask-reviewer.sh --summary --with-spec 'docs/rfcs/0004.md' --with-research 'notes.md' -- 'review against the spec'
+ask-reviewer.sh --summary --no-memories -- 'fresh-eyes pass over the branch'   # no Codex memory summary
+ask-reviewer.sh --summary --model 'agy' -- 'second opinion on the parser'   # a different reviewer for this call
+ask-reviewer.sh --summary --model 'codex'                                   # default scope, chosen model
+ask-reviewer.sh --summary -- 'check what $(git rev-parse HEAD) changed in the user'\''s "parser"'   # reaches the wrapper as typed
 ```
 
 Worked example — the argument string is `focus on src/agent.py concurrency --with-spec docs/agent.md`:
@@ -142,7 +146,7 @@ Worked example — the argument string is `focus on src/agent.py concurrency --w
 1. Tokens: `focus on src/agent.py concurrency --with-spec docs/agent.md`
 2. `--with-spec` consumes itself + `docs/agent.md` → SPEC = `docs/agent.md`
 3. Remaining tokens joined → FOCUS = `focus on src/agent.py concurrency`
-4. Invoke: `ask-reviewer.sh --summary --with-spec docs/agent.md -- "focus on src/agent.py concurrency"`
+4. Invoke: `ask-reviewer.sh --summary --with-spec 'docs/agent.md' -- 'focus on src/agent.py concurrency'`
 
 **When the dev-trio layout is up (`/dev-trio:bootstrap`), streaming output is already visible in the bottom-right pane — do not duplicate it in the chat.** With several reviewers that pane follows only the most recent run. Acknowledge that it's running and wait.
 
@@ -194,10 +198,10 @@ If the final of the same successful invocation (§3) contains a `## NEED RESEARC
    RESEARCH_FAILED=0
    {
      echo "# Research for codex review @ $RTS"
-     for q in "<question 1>" "<question 2>"; do
+     for q in '<question 1>' '<question 2>'; do
        echo; echo "## Q: $q"; echo
        # </dev/null: ask-researcher.sh reads a non-terminal stdin as extra context.
-       if ! ask-researcher.sh "$q" </dev/null; then
+       if ! ask-researcher.sh -- "$q" </dev/null; then
          RESEARCH_FAILED=1
          echo "(research failed for this question — see the ask-researcher log; do not treat the text above as findings)"
        fi
@@ -207,6 +211,7 @@ If the final of the same successful invocation (§3) contains a `## NEED RESEARC
    echo "RFILE=$RFILE RESEARCH_FAILED=$RESEARCH_FAILED"
    [ "$RESEARCH_FAILED" -eq 0 ]
    ```
+   The questions are the reviewer's text: write each one into the `for` list by the quoting rule (§1 step 8), one single-quoted word per question, newlines kept. `"$q"` inside the loop is safe as it stands, and `--` keeps a question that starts with a dash a question.
    If `RESEARCH_FAILED=1`, tell the user which question failed before re-reviewing; don't present the failed output to Codex as evidence (drop that section or re-run it).
 3. Re-invoke under the **Retry rule** below with `<RFILE>` as the research attachment (merged with any research file the original call had).
 4. Use the second verdict as the actionable one. Mention the round-trip to the user (Antigravity → Codex re-review) so they understand why latency was higher.

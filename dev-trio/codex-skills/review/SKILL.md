@@ -13,7 +13,7 @@ model. Never call a raw CLI to bypass its authentication check or logging.
 From the user's workspace:
 
 ```bash
-DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/ask-reviewer.sh" --summary [options] -- "<focus>" </dev/null
+DEV_TRIO_PM_HOST=codex '<plugin-root>/bin/ask-reviewer.sh' --summary [options] -- '<focus>' </dev/null
 ```
 
 Always pass `--summary`: stdout is then one JSON document instead of the
@@ -24,6 +24,13 @@ untracked files. Preserve `--model <id>`, `--with-research <file>`,
 quoted argv entries before `--` when requested; pass a requested `-m <id>` as
 `--model <id>`. Paths can contain spaces. Do not split a
 raw argument string on whitespace or interpolate it as executable shell text.
+**Quoting rule:** when you write the command as shell text, every value taken
+from the request, from a reviewer's output or from a JSON line a script
+printed — the focus, each path, each model id, the PR reference,
+`context_file` — is one single-quoted word, and a `'` inside it is written
+`'\''`; so is the resolved `<plugin-root>/bin/<script>` path. Never double
+quotes: inside `"..."` the shell still runs `$(...)` and backticks and
+expands `$VAR`.
 In the user's request, a `--` ends the options: everything after it is focus,
 even `--help`, `-m` or `--model x`. Before that `--`, a `-m`/`--model` with no
 id or with `--` as its id, or an attached form (`-m=agy`, `--model=agy`), is not
@@ -74,7 +81,7 @@ value goes after `--`, as in the fourth row.
 With several reviewers:
 
 - Dispatch the calls in parallel with the same focus, the same flags and the
-  same attachment files. The calls differ only in `--model <id>` and, by the
+  same attachment files. The calls differ only in `--model '<id>'` and, by the
   next rule, in `--no-memories`. For a pull request, resolve it once and hand
   the same context file and range to every reviewer. An attachment that can
   change under the batch — a `latest-*` link, a file still being written — is
@@ -111,7 +118,7 @@ With several reviewers:
 
 Never pass a bare `pr N` focus: the reviewer may lack network access and
 cannot tell which commits the PR contains. Resolve it with
-`"<plugin-root>/bin/pr-context.sh"`, which asks `gh` for the head and base,
+`'<plugin-root>/bin/pr-context.sh'`, which asks `gh` for the head and base,
 checks both commits are here, takes the merge base, writes a context file and
 prints one JSON line. It never fetches.
 
@@ -122,7 +129,7 @@ prints one JSON line. It never fetches.
   the resolver checks its shape and repository. If the word right after the
   reference is digits only (`pr 1320 1321`), dispatch nothing and ask which
   PR. Every other word after the reference is the user's focus.
-- Run `"<plugin-root>/bin/pr-context.sh" [--with-context <file>] -- <reference>`
+- Run `'<plugin-root>/bin/pr-context.sh' [--with-context '<file>'] -- '<reference>'`
   as its own command, not chained with other commands.
   A `--with-context` file the user gave goes here (the last one if given more
   than once); the reviewer then gets only the generated `context_file`.
@@ -137,19 +144,21 @@ prints one JSON line. It never fetches.
   commit is missing. Dispatch nothing unless it exited 0.
 - Dispatch with `--summary`, the user's other options in the order written
   (each attachment kind once, the last one given), `--with-context
-  <context_file>`, `--`, and the JSON's `focus` followed by
+  '<context_file>'`, `--`, and the JSON's `focus` followed by
   ` — <user focus>` when the user wrote one.
 
 | Request | Resolver argv | Reviewer argv, one call per reviewer |
 | :--- | :--- | :--- |
-| `pr 55` | `-- 55` | `--summary --with-context <cf> -- "<focus>"` |
-| `PR #55 check auth -m codex` | `-- 55` | `--summary --model codex --with-context <cf> -- "<focus> — check auth"` |
-| `--with-context notes.md pr 55 -m agy codex` | `--with-context notes.md -- 55` | agy and codex, each `--summary --model <id> --with-context <cf> -- "<focus>"` |
-| `https://github.com/o/r/pull/55` | `-- https://github.com/o/r/pull/55` | as in the first row |
+| `pr 55` | `-- '55'` | `--summary --with-context '<cf>' -- '<focus>'` |
+| `PR #55 check auth -m codex` | `-- '55'` | `--summary --model 'codex' --with-context '<cf>' -- '<focus> — check auth'` |
+| `--with-context notes.md pr 55 -m agy codex` | `--with-context 'notes.md' -- '55'` | agy and codex, each `--summary --model '<id>' --with-context '<cf>' -- '<focus>'` |
+| `https://github.com/o/r/pull/55` | `-- 'https://github.com/o/r/pull/55'` | as in the first row |
 | `pr 1320 1321` | (not run) | (ask the user) |
-| `--with-context a.md pr 55 --with-context b.md --with-spec s.md -m agy codex --no-memories` | `--with-context b.md -- 55` | agy: `--summary --with-spec s.md --model agy --with-context <cf> -- "<focus>"`; codex: `--summary --with-spec s.md --model codex --no-memories --with-context <cf> -- "<focus>"` |
+| `--with-context a.md pr 55 --with-context b.md --with-spec s.md -m agy codex --no-memories` | `--with-context 'b.md' -- '55'` | agy: `--summary --with-spec 's.md' --model 'agy' --with-context '<cf>' -- '<focus>'`; codex: `--summary --with-spec 's.md' --model 'codex' --no-memories --with-context '<cf>' -- '<focus>'` |
 
-`<cf>` is the JSON's `context_file` and `<focus>` its `focus`. If the user's
+`<cf>` is the JSON's `context_file` and `<focus>` its `focus`, each one quoted
+word by the quoting rule above (the joined `<focus> — <user focus>` is one
+word). If the user's
 focus itself contains a git range (`A..B`) and agy is a reviewer, say that agy
 may have reviewed without its workspace snapshot (the wrapper skips it for a
 focus with more than one range and does not say so).
@@ -266,7 +275,9 @@ CONTEXT` in that final, whether the result came from the summary or the file:
 the summary's `final_text` on the fast path when it is not `null`, otherwise
 the exact `.final.md` path from the `(log:` line. For `NEED RESEARCH`, obtain the requested evidence
 with the [research skill](../research/SKILL.md) within the user's authorized
-scope. For `NEED CONTEXT`, run only the read-only commands it lists (`gh pr
+scope, handing it each question as `-- <question>` so that skill's leading
+`--model` parsing never reads the reviewer's text; the question is then quoted
+by its rule. For `NEED CONTEXT`, run only the read-only commands it lists (`gh pr
 view/diff/checks`, `gh issue view`, `gh run view`, `git log/show`; ask before
 `git fetch` or anything that changes state) and write their outputs to a new
 context file that starts with a copy of the original one; never edit a file
