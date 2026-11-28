@@ -242,10 +242,11 @@ run_write_header() {
 run_begin_metadata() {
   local channel="$1" variant="$2" role="$3" model="$4" final_source nested
   shift 4
+  # Unreadable is recorded as "none", not guessed (#296).
   if registry_has_final "$model"; then
     final_source=native
   else
-    final_source=stdout
+    case $? in 1) final_source=stdout ;; *) final_source=none ;; esac
   fi
   if manifest_is_nested; then
     nested=true

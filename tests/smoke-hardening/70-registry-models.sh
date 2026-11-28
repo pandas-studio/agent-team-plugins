@@ -106,8 +106,9 @@ REG_CALL='REGISTRY_WORKSPACE=/r REGISTRY_CLI_LOG=/l registry_run codex P'
 assert_eq "$(registry_argv)" '[exec][--skip-git-repo-check][-] stdin=2'
 REG_CALL='REGISTRY_WORKSPACE=/r REGISTRY_CLI_LOG=/l registry_run_answer agy P; echo "rc=$?"'
 assert_eq "$(registry_argv)" "$(printf '[--log-file][/l][--add-dir][/r][--input-format][text][--output-format][text] stdin=2\nrc=0')"
-REG_CALL='registry_has_workspace agy && ! registry_has_workspace codex && echo yes'
-assert_eq "$(registry_argv)" yes
+# rc 1 exactly: 3 means the template could not be read (#296).
+REG_CALL='registry_has_workspace agy; a=$?; registry_has_workspace codex; echo "$a $?"'
+assert_eq "$(registry_argv)" '0 1'
 
 # #102: one argument is capped at 128 KiB on Linux (MAX_ARG_STRLEN). The claude
 # and codex built-ins take the prompt on stdin, whole; argv models refuse a

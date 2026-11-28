@@ -315,22 +315,26 @@ registry_model_exists() {
   [ -n "$def" ] && [ "$def" != "null" ]
 }
 
-# rc=0 iff the model defines a non-empty workspace_args template — callers key
-# workspace-aware behaviour on this rather than on the binary's name.
-registry_has_workspace() {
-  local def
-  def="$(_registry_model_def "$1")" || return 3
+# registry_has_workspace / registry_has_final <model-id>: rc 0 if the model
+# defines a non-empty workspace_args / final_args template, 1 if it does not
+# (or the model is unknown), 3 if that cannot be read, with the reason on
+# stderr. Callers key workspace-aware behaviour and the capture mode on these
+# rather than on the binary's name. `if` sees 1 and 3 alike, so a caller tells
+# them apart with `case $? in` as the first statement of its else branch (#296).
+_registry_has_template() {
+  local id="$1" field="$2" def has
+  def="$(_registry_model_def "$id")" || return 3
   if [ -z "$def" ] || [ "$def" = "null" ]; then return 1; fi
-  [ "$(printf '%s' "$def" | jq -r '((.workspace_args // []) | length) > 0')" = "true" ]
+  has="$(printf '%s' "$def" | jq -r --arg f "$field" '((.[$f] // []) | length) > 0' 2>/dev/null)" || {
+    echo "registry: cannot read the $field of model '$id'" >&2
+    return 3
+  }
+  [ "$has" = "true" ]
 }
 
-# rc=0 iff the model defines a non-empty final_args template.
-registry_has_final() {
-  local def
-  def="$(_registry_model_def "$1")" || return 3
-  if [ -z "$def" ] || [ "$def" = "null" ]; then return 1; fi
-  [ "$(printf '%s' "$def" | jq -r '((.final_args // []) | length) > 0')" = "true" ]
-}
+registry_has_workspace() { _registry_has_template "$1" workspace_args; }
+
+registry_has_final() { _registry_has_template "$1" final_args; }
 
 # registry_prompt_via <model-id> — echo "argv" or "stdin" (#102). rc 3, with the
 # reason on stderr, for an unknown model or any other prompt_via value.
@@ -618,8 +622,12 @@ registry_run() {
   via="$(registry_prompt_via "$id")" || return 3
   registry_check_model "$id" || return 3
   field="args"
-  if [ -n "$final_file" ] && registry_has_final "$id"; then
-    field="final_args"
+  if [ -n "$final_file" ]; then
+    if registry_has_final "$id"; then
+      field="final_args"
+    else
+      case $? in 1) ;; *) return 3 ;; esac
+    fi
   fi
   # Elements arrive NUL-delimited, so one holding a newline stays one (#130).
   # A template may be empty (a stdin CLI with no arguments): every expansion
@@ -769,10 +777,18 @@ registry_run_answer() {
     if [ -n "$answer_path" ]; then
       if registry_has_final "$1"; then
         inspect="$answer_path"
-      elif ! cat "$tmp" > "$answer_path"; then
-        echo "registry_run_answer: could not capture the answer to $answer_path" >&2
-        exit 6
       else
+        # Unreadable is not "stdout model": copying the stream there would
+        # overwrite a native answer the CLI may have written (#296).
+        case $? in 1) ;; *)
+          echo "registry_run_answer: cannot tell where model '$1' left its answer" >&2
+          exit 6
+          ;;
+        esac
+        if ! cat "$tmp" > "$answer_path"; then
+          echo "registry_run_answer: could not capture the answer to $answer_path" >&2
+          exit 6
+        fi
         inspect="$answer_path"
       fi
     fi

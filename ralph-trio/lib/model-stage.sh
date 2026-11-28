@@ -52,6 +52,8 @@ trio_stage_model() {
     [ -r "$final" ] || { echo "model left no final answer: $final" >&2; return 5; }
     cat "$final" || return 6
   else
+    # Unreadable capture mode: rc 3 and nothing started, not the stdout path (#296).
+    case $? in 1) ;; *) return 3 ;; esac
     registry_run "$model" "$prompt"
   fi
 }

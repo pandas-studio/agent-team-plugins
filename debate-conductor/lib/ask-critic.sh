@@ -103,6 +103,9 @@ if registry_has_workspace "$MODEL"; then
   PROMPT="$PROMPT
 
 $(debate_conductor_agy_exec_note)"
+else
+  # Unreadable is a setup error, not "not workspace-aware" (#296).
+  case $? in 1) ;; *) exit 2 ;; esac
 fi
 
 REGISTRY_CMD_OVERRIDE="${CRITIC_CLI:-}" debate_conductor_check_cli "$MODEL" || exit $?

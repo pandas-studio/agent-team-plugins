@@ -632,6 +632,9 @@ The <workspace_snapshot> covers only \`git diff ${AGY_RANGE_PIN}\`. When it has 
     skipped:disabled|skipped:focus|ok:*) ;;
     *) echo "[ask-reviewer] workspace snapshot skipped: ${SNAPSHOT_STATUS#skipped:}" >&2 ;;
   esac
+else
+  # Unreadable is a setup error, not "not workspace-aware" (#296).
+  case $? in 1) ;; *) exit 2 ;; esac
 fi
 
 REGISTRY_CMD_OVERRIDE="${REVIEWER_CLI:-}" dev_trio_check_cli "$REVIEWER_MODEL" || exit $?
@@ -911,26 +914,39 @@ fi
 # either marker parses the way it always has. The snapshot is given the opening
 # marker the extractor keys on, which is also what lets the out-of-band fallback
 # — a transcript with no header at all — go through the same path.
-if ! registry_has_final "$REVIEWER_MODEL" && [ ! -s "$FINAL" ] \
-   && [ -n "$TRANSCRIPT_OFFSET" ] && [ -n "$TRANSCRIPT_END" ]; then
-  TRANSCRIPT_MARKER='=== RESPONSE ==='
-  if TRANSCRIPT_SNAP="$(mktemp "$LOG_DIR/ask-reviewer-transcript.XXXXXX")"; then
-    { printf '%s\n' "$TRANSCRIPT_MARKER"; transcript_range; } > "$TRANSCRIPT_SNAP" 2>/dev/null || true
-    # A snapshot that came up short — a full temp filesystem — would otherwise
-    # be extracted into a review that parses: a valid verdict line followed by
-    # findings that were never written. Leaving $FINAL absent instead routes it
-    # to the same rc=3 a missing native final gets.
-    if [ "$(wc -c < "$TRANSCRIPT_SNAP")" \
-         -eq "$((${#TRANSCRIPT_MARKER} + 1 + TRANSCRIPT_END - TRANSCRIPT_OFFSET))" ]; then
-      # LC_ALL=C, as in review_result_parse (#260). A subshell, because an
-      # assignment prefixed to a function call can outlive it in POSIX mode.
-      ( export LC_ALL=C; registry_extract_response "$TRANSCRIPT_SNAP" ) > "$FINAL" 2>/dev/null || true
-    else
-      echo "[ask-reviewer] the transcript could not be captured in full; no review was synthesized" >&2
+# The capture mode is read again here, after the run: a status variable set
+# before dispatch could shadow an env_command override. Unreadable means no
+# synthesized final, and is reported even when the CLI wrote one (#296).
+if registry_has_final "$REVIEWER_MODEL"; then
+  :
+else
+  case $? in
+  1)
+    if [ ! -s "$FINAL" ] && [ -n "$TRANSCRIPT_OFFSET" ] && [ -n "$TRANSCRIPT_END" ]; then
+      TRANSCRIPT_MARKER='=== RESPONSE ==='
+      if TRANSCRIPT_SNAP="$(mktemp "$LOG_DIR/ask-reviewer-transcript.XXXXXX")"; then
+        { printf '%s\n' "$TRANSCRIPT_MARKER"; transcript_range; } > "$TRANSCRIPT_SNAP" 2>/dev/null || true
+        # A snapshot that came up short — a full temp filesystem — would otherwise
+        # be extracted into a review that parses: a valid verdict line followed by
+        # findings that were never written. Leaving $FINAL absent instead routes it
+        # to the same rc=3 a missing native final gets.
+        if [ "$(wc -c < "$TRANSCRIPT_SNAP")" \
+             -eq "$((${#TRANSCRIPT_MARKER} + 1 + TRANSCRIPT_END - TRANSCRIPT_OFFSET))" ]; then
+          # LC_ALL=C, as in review_result_parse (#260). A subshell, because an
+          # assignment prefixed to a function call can outlive it in POSIX mode.
+          ( export LC_ALL=C; registry_extract_response "$TRANSCRIPT_SNAP" ) > "$FINAL" 2>/dev/null || true
+        else
+          echo "[ask-reviewer] the transcript could not be captured in full; no review was synthesized" >&2
+        fi
+        rm -f "$TRANSCRIPT_SNAP" || true
+        TRANSCRIPT_SNAP=""
+      fi
     fi
-    rm -f "$TRANSCRIPT_SNAP" || true
-    TRANSCRIPT_SNAP=""
-  fi
+    ;;
+  *)
+    echo "[ask-reviewer] the capture mode of $REVIEWER_MODEL could not be read; no review is synthesized from the transcript" >&2
+    ;;
+  esac
 fi
 INVOCATION_RC="$RC"
 # --summary: what this run prints on stdout instead of the transcript replay,
