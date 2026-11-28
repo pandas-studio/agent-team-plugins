@@ -341,7 +341,10 @@ registry_prompt_via() {
     echo "registry: unknown model '$1'" >&2
     return 3
   fi
-  via="$(printf '%s' "$def" | jq -r '.prompt_via // "argv"')"
+  via="$(printf '%s' "$def" | jq -r '.prompt_via // "argv"' 2>/dev/null)" || {
+    echo "registry: cannot read prompt_via of model '$1'" >&2
+    return 3
+  }
   case "$via" in
     argv|stdin) printf '%s\n' "$via" ;;
     *)
@@ -436,13 +439,15 @@ _registry_def_problem() {
 # copy of the rule: registry_check_model applies it to a configured model,
 # agent-team-models to a definition before saving it.
 registry_check_def() {
-  local id="$1" problem
+  local id="$1" problem reason
   if ! problem="$(_registry_def_problem "$2")" || [ -z "$problem" ]; then
     echo "registry: model '$id' has a definition that is not valid JSON" >&2
     return 3
   fi
   if [ "$problem" != null ]; then
-    echo "registry: model '$id' $(printf '%s' "$problem" | jq -r .reason)" >&2
+    reason="$(printf '%s' "$problem" | jq -r .reason 2>/dev/null)" && [ -n "$reason" ] ||
+      reason="breaks the definition rule (its reason could not be read)"
+    echo "registry: model '$id' $reason" >&2
     return 3
   fi
 }
@@ -471,9 +476,16 @@ registry_list_model_ids() {
   printf '%s' "$merged" | jq -r 'keys[]'
 }
 
-# rc=0 iff the model is one of the built-ins (not removable via the CLI).
+# rc 0 when the model is one of the built-ins (not removable via the CLI), 1
+# when it is not, 3 with the reason on stderr when that cannot be checked — a
+# caller that reads 3 as "not built-in" would let `add` redefine a built-in.
 registry_model_is_builtin() {
-  [ "$(_registry_builtin_models | jq -r --arg id "$1" 'has($id)')" = "true" ]
+  local builtin
+  builtin="$(_registry_builtin_models | jq -r --arg id "$1" 'has($id)' 2>/dev/null)" || {
+    echo "registry: cannot check whether model '$1' is built-in" >&2
+    return 3
+  }
+  [ "$builtin" = "true" ]
 }
 
 # ---- resolution -------------------------------------------------------------
@@ -496,7 +508,11 @@ registry_resolve_command() {
     printf '%s\n' "$REGISTRY_CMD_OVERRIDE"
     return 0
   fi
-  envvar="$(printf '%s' "$def" | jq -r '.env_command // ""')"
+  # A failed read is not "no env_command": the override it names would be lost.
+  envvar="$(printf '%s' "$def" | jq -r '.env_command // ""' 2>/dev/null)" || {
+    echo "registry: cannot read the env_command of model '$id'" >&2
+    return 3
+  }
   if [ -n "$envvar" ]; then
     val="${!envvar:-}"
     if [ -n "$val" ]; then
@@ -504,7 +520,10 @@ registry_resolve_command() {
       return 0
     fi
   fi
-  cmd="$(printf '%s' "$def" | jq -r '.command // ""')"
+  cmd="$(printf '%s' "$def" | jq -r '.command // ""' 2>/dev/null)" || {
+    echo "registry: cannot read the command of model '$id'" >&2
+    return 3
+  }
   if [ -z "$cmd" ]; then
     echo "registry: model '$id' has no command" >&2
     return 3
@@ -525,9 +544,17 @@ registry_resolve_role() {
     if [ -n "$val" ]; then printf '%s\n' "$val"; return 0; fi
   fi
   cfg="$(_registry_config_json)" || return 3
-  cfg="$(printf '%s' "$cfg" | jq -r --arg k "$key" '.roles[$k] // ""')"
+  # A failed read is not "unbound": the built-in default would then run in
+  # place of the model the user bound (#133, #294).
+  cfg="$(printf '%s' "$cfg" | jq -r --arg k "$key" '.roles[$k] // ""' 2>/dev/null)" || {
+    echo "registry: cannot read the role binding for '$key' from the config" >&2
+    return 3
+  }
   if [ -n "$cfg" ]; then printf '%s\n' "$cfg"; return 0; fi
-  def="$(_registry_builtin_roles | jq -r --arg k "$key" '.[$k] // ""')"
+  def="$(_registry_builtin_roles | jq -r --arg k "$key" '.[$k] // ""' 2>/dev/null)" || {
+    echo "registry: cannot read the built-in role binding for '$key'" >&2
+    return 3
+  }
   if [ -n "$def" ]; then printf '%s\n' "$def"; return 0; fi
   echo "registry: no model resolvable for role '$key'" >&2
   return 3

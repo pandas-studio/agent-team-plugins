@@ -131,7 +131,7 @@ acquire_view_lock() {
 }
 
 prepare_detached() {
-  local name hash target live nonce record pane dead count wid
+  local name hash target live nonce record pane dead count wid rtype gen_pane crit_pane
   name=$(printf '%s' "$TEAM" | tr -c 'A-Za-z0-9_-' '_')
   hash=$(printf '%s' "$LOG_DIR" | cksum | cut -d' ' -f1)
   SESSION="debate-view-$name-$hash"
@@ -149,16 +149,22 @@ prepare_detached() {
     [ "$count" = 1 ] || { view_error "modified session: $SESSION"; return 1; }
     record=$(view_record "$target:") || return 1
     view_record_matches "$record" "$TEAM" "$LOG_DIR" &&
-      [ "$(printf '%s' "$record" | jq -r .type)" = detached ] &&
+      rtype=$(printf '%s' "$record" | jq -r .type) &&
+      [ "$rtype" = detached ] &&
       view_complete "$target:" "$record" &&
       view_geometry_matches "$target:" "$record" || {
       view_error "incomplete, conflicting or modified view: $SESSION"
       view_error "Inspect first; cleanup only this view with: $(view_quote "$VIEW_TMUX") -S $(view_quote "$VIEW_SOCKET") kill-session -t $(view_quote "$target")"
       return 1
     }
-    nonce=$(printf '%s' "$record" | jq -r .nonce)
+    # Every lookup before any respawn: a failed .crit must not leave a
+    # Generator restarted by a run that then reports setup-failed.
+    nonce=$(printf '%s' "$record" | jq -r .nonce) &&
+      gen_pane=$(printf '%s' "$record" | jq -r .gen) &&
+      crit_pane=$(printf '%s' "$record" | jq -r .crit) ||
+      { view_error 'viewer startup/readiness could not be verified'; return 1; }
     for role in gen crit; do
-      pane=$(printf '%s' "$record" | jq -r ".$role")
+      if [ "$role" = gen ]; then pane=$gen_pane; else pane=$crit_pane; fi
       dead=$(view_tmux display-message -p -t "$pane" '#{pane_dead}') || return 1
       if [ "$dead" = 1 ]; then
         view_start_pane "$pane" "$role" "$nonce" "$TEAM" "$BASE" "$CWD" "$SCRIPT_DIR/../bin/tail-role.sh" dead || return 1
@@ -191,7 +197,7 @@ prepare_detached() {
 }
 
 prepare_view() {
-  local version major minor here_record here_pane
+  local version major minor here_record here_pane here_cwd
   [ "$MODE" != none ] && [ "$KIND" = team ] || return 0
   [ -n "$VIEW_TMUX" ] || { view_error 'tmux is not installed'; return 1; }
   version=$("$VIEW_TMUX" -V) || return 1
@@ -228,7 +234,8 @@ prepare_view() {
       here_record=$(view_record "$here_pane") || here_record=""
       if view_record_matches "$here_record" "$TEAM" "$LOG_DIR" &&
         view_here_geometry_matches "$here_pane" "$here_record" &&
-        [ "$(printf '%s' "$here_record" | jq -r .cwd)" = "$CWD" ] &&
+        here_cwd=$(printf '%s' "$here_record" | jq -r .cwd) &&
+        [ "$here_cwd" = "$CWD" ] &&
         view_wait_ready "$here_record"; then
         STATUS=present RECORD=$here_record
         # The session can have dots; only detached names enter the opener.
