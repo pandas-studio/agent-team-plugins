@@ -654,6 +654,17 @@ run_paths reviewer review "$AGY_WORKSPACE"
 RESULT="${LOG%.log}.review.json"
 RUNSTATE_LOG=""
 REVIEW_PUBLISHED=0
+# Every name run_cleanup_files reads is set before the traps (#258), so a
+# variable inherited from the caller never names a file for it to remove. The
+# OWN_ names are this wrapper's alone:
+# a name set before dispatch hides the caller's value from a model's
+# env_command, so the shorter names stay untouched. LATEST_TMP is the library's
+# name, which run_publish_latest empties before dispatch anyway.
+OWN_RESULT_TMP=""
+OWN_TRANSCRIPT_TMP=""
+OWN_FROZEN_TRANSCRIPT=""
+OWN_TRANSCRIPT_SNAP=""
+LATEST_TMP=""
 run_cleanup_files() {
   # After the completion run_cleanup records, so a failure here cannot cost
   # the dashboard its record. An out-of-band transcript is the only copy of
@@ -665,20 +676,20 @@ run_cleanup_files() {
   # With --summary the transcript is never replayed, so the out-of-band file is
   # the only copy even when a review was published: it is kept then too, with
   # the one notice worded for that case.
-  if [ -n "${TRANSCRIPT_TMP:-}" ] && [ -s "$TRANSCRIPT_TMP" ]; then
+  if [ -n "${OWN_TRANSCRIPT_TMP:-}" ] && [ -s "$OWN_TRANSCRIPT_TMP" ]; then
     if [ "${REVIEW_PUBLISHED:-0}" -eq 0 ]; then
-      echo "[ask-reviewer] no review was published; the transcript is at $TRANSCRIPT_TMP" >&2
-      TRANSCRIPT_TMP=""
+      echo "[ask-reviewer] no review was published; the transcript is at $OWN_TRANSCRIPT_TMP" >&2
+      OWN_TRANSCRIPT_TMP=""
     elif [ "${SUMMARY:-0}" -eq 1 ]; then
-      echo "[ask-reviewer] the transcript could not be logged and --summary does not replay it; it is at $TRANSCRIPT_TMP" >&2
-      TRANSCRIPT_TMP=""
+      echo "[ask-reviewer] the transcript could not be logged and --summary does not replay it; it is at $OWN_TRANSCRIPT_TMP" >&2
+      OWN_TRANSCRIPT_TMP=""
     fi
   fi
-  [ -z "${RESULT_TMP:-}" ] || rm -f "$RESULT_TMP" "$RESULT_TMP.denied" || true
+  [ -z "${OWN_RESULT_TMP:-}" ] || rm -f "$OWN_RESULT_TMP" "$OWN_RESULT_TMP.denied" || true
   [ -z "${LATEST_TMP:-}" ] || rm -f "$LATEST_TMP" || true
-  [ -z "${TRANSCRIPT_TMP:-}" ] || rm -f "$TRANSCRIPT_TMP" || true
-  [ -z "${FROZEN_TRANSCRIPT:-}" ] || rm -f "$FROZEN_TRANSCRIPT" || true
-  [ -z "${TRANSCRIPT_SNAP:-}" ] || rm -f "$TRANSCRIPT_SNAP" || true
+  [ -z "${OWN_TRANSCRIPT_TMP:-}" ] || rm -f "$OWN_TRANSCRIPT_TMP" || true
+  [ -z "${OWN_FROZEN_TRANSCRIPT:-}" ] || rm -f "$OWN_FROZEN_TRANSCRIPT" || true
+  [ -z "${OWN_TRANSCRIPT_SNAP:-}" ] || rm -f "$OWN_TRANSCRIPT_SNAP" || true
 }
 run_install_traps
 run_agy_log_fallback
@@ -806,10 +817,10 @@ else
   # Keep the original inode for END while fd 8 captures the out-of-band run.
   if exec 9>&8; then ORIGINAL_LOG_FD=9; fi
   exec 8>&- 7<&- || true
-  TRANSCRIPT_TMP="$(mktemp "$LOG.transcript.XXXXXX")" || TRANSCRIPT_TMP=""
-  if [ -n "$TRANSCRIPT_TMP" ] && exec 8>>"$TRANSCRIPT_TMP" && exec 7<"$TRANSCRIPT_TMP"; then
+  OWN_TRANSCRIPT_TMP="$(mktemp "$LOG.transcript.XXXXXX")" || OWN_TRANSCRIPT_TMP=""
+  if [ -n "$OWN_TRANSCRIPT_TMP" ] && exec 8>>"$OWN_TRANSCRIPT_TMP" && exec 7<"$OWN_TRANSCRIPT_TMP"; then
     echo "[ask-reviewer] the transcript could not be logged to $LOG; keeping it out of band" >&2
-    TRANSCRIPT_PATH="$TRANSCRIPT_TMP"
+    TRANSCRIPT_PATH="$OWN_TRANSCRIPT_TMP"
     TRANSCRIPT_OFFSET=0
   else
     echo "[ask-reviewer] the transcript could not be logged; $LOG may be incomplete" >&2
@@ -891,10 +902,10 @@ fi
 # Read the exact bytes present at the post-call boundary through the held
 # descriptor. Path replacement after creation cannot alter replay or parsing.
 if [ -n "$TRANSCRIPT_OFFSET" ] && [ -n "$TRANSCRIPT_END" ]; then
-  FROZEN_TRANSCRIPT="$(mktemp "$LOG_DIR/ask-reviewer-frozen.XXXXXX")" || FROZEN_TRANSCRIPT=""
-  if [ -n "$FROZEN_TRANSCRIPT" ]; then
-    if run_freeze_range "$FROZEN_TRANSCRIPT" "$TRANSCRIPT_OFFSET" "$TRANSCRIPT_END"; then
-      TRANSCRIPT_PATH="$FROZEN_TRANSCRIPT"
+  OWN_FROZEN_TRANSCRIPT="$(mktemp "$LOG_DIR/ask-reviewer-frozen.XXXXXX")" || OWN_FROZEN_TRANSCRIPT=""
+  if [ -n "$OWN_FROZEN_TRANSCRIPT" ]; then
+    if run_freeze_range "$OWN_FROZEN_TRANSCRIPT" "$TRANSCRIPT_OFFSET" "$TRANSCRIPT_END"; then
+      TRANSCRIPT_PATH="$OWN_FROZEN_TRANSCRIPT"
       TRANSCRIPT_END=$((TRANSCRIPT_END - TRANSCRIPT_OFFSET))
       TRANSCRIPT_OFFSET=0
     else
@@ -924,22 +935,22 @@ else
   1)
     if [ ! -s "$FINAL" ] && [ -n "$TRANSCRIPT_OFFSET" ] && [ -n "$TRANSCRIPT_END" ]; then
       TRANSCRIPT_MARKER='=== RESPONSE ==='
-      if TRANSCRIPT_SNAP="$(mktemp "$LOG_DIR/ask-reviewer-transcript.XXXXXX")"; then
-        { printf '%s\n' "$TRANSCRIPT_MARKER"; transcript_range; } > "$TRANSCRIPT_SNAP" 2>/dev/null || true
+      if OWN_TRANSCRIPT_SNAP="$(mktemp "$LOG_DIR/ask-reviewer-transcript.XXXXXX")"; then
+        { printf '%s\n' "$TRANSCRIPT_MARKER"; transcript_range; } > "$OWN_TRANSCRIPT_SNAP" 2>/dev/null || true
         # A snapshot that came up short — a full temp filesystem — would otherwise
         # be extracted into a review that parses: a valid verdict line followed by
         # findings that were never written. Leaving $FINAL absent instead routes it
         # to the same rc=3 a missing native final gets.
-        if [ "$(wc -c < "$TRANSCRIPT_SNAP")" \
+        if [ "$(wc -c < "$OWN_TRANSCRIPT_SNAP")" \
              -eq "$((${#TRANSCRIPT_MARKER} + 1 + TRANSCRIPT_END - TRANSCRIPT_OFFSET))" ]; then
           # LC_ALL=C, as in review_result_parse (#260). A subshell, because an
           # assignment prefixed to a function call can outlive it in POSIX mode.
-          ( export LC_ALL=C; registry_extract_response "$TRANSCRIPT_SNAP" ) > "$FINAL" 2>/dev/null || true
+          ( export LC_ALL=C; registry_extract_response "$OWN_TRANSCRIPT_SNAP" ) > "$FINAL" 2>/dev/null || true
         else
           echo "[ask-reviewer] the transcript could not be captured in full; no review was synthesized" >&2
         fi
-        rm -f "$TRANSCRIPT_SNAP" || true
-        TRANSCRIPT_SNAP=""
+        rm -f "$OWN_TRANSCRIPT_SNAP" || true
+        OWN_TRANSCRIPT_SNAP=""
       fi
     fi
     ;;
@@ -1039,7 +1050,7 @@ AGY_CONVERSATIONS=()
 agy_denial_result() {
   local line
   [ -n "$AGY_WORKSPACE" ] && [ "$RC" -eq 0 ] || return 1
-  jq -e '.status == "parse-failed"' "$RESULT_TMP" >/dev/null 2>&1 || return 1
+  jq -e '.status == "parse-failed"' "$OWN_RESULT_TMP" >/dev/null 2>&1 || return 1
   agy_denial_notice_in "$TRANSCRIPT_PATH" "$TRANSCRIPT_OFFSET" "$TRANSCRIPT_END" || return 1
   if [ -n "$AGY_CLI_LOG" ]; then
     while IFS= read -r line; do AGY_CONVERSATIONS+=("$line"); done \
@@ -1048,19 +1059,19 @@ agy_denial_result() {
       < <(agy_denial_targets "$(dev_trio_agy_home)" "$AGY_CLI_LOG")
   fi
   agy_denial_notice_only "$FINAL" || return 1
-  review_result_permission_denied "$(cat "$RESULT_TMP")" \
+  review_result_permission_denied "$(cat "$OWN_RESULT_TMP")" \
     ${AGY_CONVERSATIONS[@]+"${AGY_CONVERSATIONS[@]}"} -- ${AGY_DENIED[@]+"${AGY_DENIED[@]}"}
 }
-RESULT_TMP=$(mktemp "$RESULT.tmp.XXXXXX") || result_output_failed 'create result temporary file'
-review_result_parse "$FINAL" "$RC" "$REVIEW_PROFILE" > "$RESULT_TMP" || result_output_failed 'parse result'
+OWN_RESULT_TMP=$(mktemp "$RESULT.tmp.XXXXXX") || result_output_failed 'create result temporary file'
+review_result_parse "$FINAL" "$RC" "$REVIEW_PROFILE" > "$OWN_RESULT_TMP" || result_output_failed 'parse result'
 if [ -n "$AGY_WORKSPACE" ] && AGY_DENIAL_JSON="$(agy_denial_result 2>/dev/null)" \
    && [ -n "$AGY_DENIAL_JSON" ]; then
   # Best-effort: if the replacement cannot be written, the parse result stands.
-  printf '%s\n' "$AGY_DENIAL_JSON" > "$RESULT_TMP.denied" 2>/dev/null \
-    && mv -f "$RESULT_TMP.denied" "$RESULT_TMP" 2>/dev/null || rm -f "$RESULT_TMP.denied" 2>/dev/null || true
+  printf '%s\n' "$AGY_DENIAL_JSON" > "$OWN_RESULT_TMP.denied" 2>/dev/null \
+    && mv -f "$OWN_RESULT_TMP.denied" "$OWN_RESULT_TMP" 2>/dev/null || rm -f "$OWN_RESULT_TMP.denied" 2>/dev/null || true
 fi
-mv "$RESULT_TMP" "$RESULT" || result_output_failed 'publish result'
-RESULT_TMP=""
+mv "$OWN_RESULT_TMP" "$RESULT" || result_output_failed 'publish result'
+OWN_RESULT_TMP=""
 RESULT_JSON=$(review_result_read "$RESULT") || result_output_failed 'read result'
 RC=$(printf '%s\n' "$RESULT_JSON" | jq -r '.exit_code') || result_output_failed 'read exit code'
 VERDICT=$(printf '%s\n' "$RESULT_JSON" | jq -r '.verdict // ""') || result_output_failed 'read verdict'
