@@ -240,10 +240,12 @@ class ReviewerWrapperTests(unittest.TestCase):
     def test_unreadable_capture_mode_after_the_run_synthesizes_no_review(self):
         # codex has final_args. The stub writes no final and prints a review that
         # parses; the transcript fallback is what would turn it into $FINAL.
-        self.shim("final_args", n=1, after=self.calls)
+        self.shim("final_args", n=1, after=self.calls, noisy=True)
         r = self.run_cli("ask-reviewer.sh", "--summary", "q", STUB_NO_FINAL="1")
         self.assertEqual(self.hits(), 1)
         self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertEqual(r.stderr.count("registry: cannot read the final_args of model 'codex'\n"), 1)
+        self.assertNotIn(INJECTED, r.stderr)
         self.assertIn("[ask-reviewer] the capture mode of codex could not be read; no review was synthesized\n", r.stderr)
         summary = json.loads(r.stdout)
         self.assertEqual(summary["result"]["status"], "parse-failed")
