@@ -4,8 +4,11 @@
 set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 input=$(cat) || exit 0
-command=$(jq -r '.tool_input.command // ""' <<<"$input") || exit 0
-[[ $(jq -r '.tool_name // ""' <<<"$input") == Bash ]] || exit 0
+# Every jq read below is a checked assignment with jq's stderr suppressed: this
+# notice is redundant, so a read that fails ends the hook with rc 0 and no output.
+command=$(jq -r '.tool_input.command // ""' <<<"$input" 2>/dev/null) || exit 0
+tool_name=$(jq -r '.tool_name // ""' <<<"$input" 2>/dev/null) || exit 0
+[[ $tool_name == Bash ]] || exit 0
 . "$ROOT/lib/view.sh"
 # Match an actual runner first token, not grep/cat/echo mentioning the runner.
 command="${command#"${command%%[![:space:]]*}"}"
@@ -15,10 +18,10 @@ case "$command" in
 esac
 [[ $command == *--host=* ]] || exit 0
 context_ids=$(jq -cn --arg command "$command" \
-  '[$command | scan("debate-view-context\\.[A-Za-z0-9]+")] | unique') || exit 0
-transcript=$(jq -r '.transcript_path // ""' <<<"$input") || exit 0
+  '[$command | scan("debate-view-context\\.[A-Za-z0-9]+")] | unique' 2>/dev/null) || exit 0
+transcript=$(jq -r '.transcript_path // ""' <<<"$input" 2>/dev/null) || exit 0
 if [[ -f $transcript && ! -L $transcript && -r $transcript ]]; then
-  if result=$(jq -ncR --argjson ids "$context_ids" -f "$ROOT/lib/view-message.jq" "$transcript") &&
+  if result=$(jq -ncR --argjson ids "$context_ids" -f "$ROOT/lib/view-message.jq" "$transcript" 2>/dev/null) &&
       result_type=$(jq -r 'type' <<<"$result" 2>/dev/null) && [[ $result_type == object ]]; then
     # No permissionDecision: the normal host permission checks still apply.
     # A failed read is no notice: print nothing rather than an empty one, and

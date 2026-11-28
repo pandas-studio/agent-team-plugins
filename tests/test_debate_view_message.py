@@ -111,14 +111,20 @@ class ViewMessageTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)['systemMessage'], self.view['user_message'])
 
     def test_failed_notice_reads_print_nothing_and_never_block(self):
-        # A failed jq in the notice is an absent notice (#297): rc 0, nothing on either stream.
+        # A failed jq anywhere in the hook is an absent notice (#297): rc 0, nothing on either
+        # stream. One row per jq call in announce-view.sh, each matched by an argument only it has.
         temp = tempfile.TemporaryDirectory(prefix='view message jq ')
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
-        for query, modes in (('type', ('empty', 'output')),
-                             ('.user_message', ('empty', 'output')),
-                             ('{systemMessage:$message}', ('empty', 'output'))):
-            for mode in modes:
+        for query in ('.tool_input.command // ""',
+                      '.tool_name // ""',
+                      r'[$command | scan("debate-view-context\\.[A-Za-z0-9]+")] | unique',
+                      '.transcript_path // ""',
+                      '-ncR',
+                      'type',
+                      '.user_message',
+                      '{systemMessage:$message}'):
+            for mode in ('empty', 'output'):
                 for noisy in (False, True):
                     with self.subTest(query=query, mode=mode, noisy=noisy):
                         counter = root / 'count'
