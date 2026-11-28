@@ -97,11 +97,13 @@ _check_def() {
 
 _role_source() {
   # Echo a human label for where a role binding currently comes from.
-  local key="$1" envname
+  local key="$1" envname bound
   envname="$(_registry_role_envname "$key")"
   if [ -n "$envname" ] && [ -n "${!envname:-}" ]; then
     printf 'env %s' "$envname"
-  elif [ -n "$(registry_config_role "$key")" ]; then
+  elif ! bound="$(registry_config_role "$key")"; then
+    printf '?'
+  elif [ -n "$bound" ]; then
     printf 'config'
   else
     printf 'built-in default'
@@ -121,7 +123,13 @@ cmd_list() {
   # not print an empty list (#133).
   ids="$(registry_list_model_ids)" || exit 3
   for id in $ids; do
-    if registry_model_is_builtin "$id"; then origin="built-in"; else origin="user"; fi
+    # No new local for the status: registry_resolve_command below reads the
+    # env_command variable by name, and a caller's local would shadow it.
+    if registry_model_is_builtin "$id"; then
+      origin="built-in"
+    else
+      case "$?" in 1) origin="user" ;; *) origin="?" ;; esac
+    fi
     cmd="$(registry_resolve_command "$id" 2>/dev/null || echo '?')"
     if registry_has_final "$id"; then
       printf '  %-16s %-9s binary=%-10s (native final-capture)\n' "$id" "[$origin]" "$cmd"
@@ -229,10 +237,17 @@ cmd_preset() {
       [ -n "$name" ] || die "usage: $PROG preset add <name>  (available: $(registry_preset_names | tr '\n' ' '))"
       local preset
       preset="$(_registry_preset_json "$name")" || die "unknown preset '$name' (available: $(registry_preset_names | tr '\n' ' '))"
-      local pid
-      while IFS= read -r pid; do
-        _check_def "$pid" "$(printf '%s' "$preset" | jq -c --arg id "$pid" '.[$id]')"
-      done < <(printf '%s' "$preset" | jq -r 'keys[]')
+      # Each read is captured and checked: a failed one would otherwise skip the
+      # validation below and save the preset unchecked.
+      local pid ids def
+      ids="$(printf '%s' "$preset" | jq -r 'keys[]' 2>/dev/null)" || die "cannot read the models of preset '$name'"
+      if [ -n "$ids" ]; then
+        while IFS= read -r pid; do
+          def="$(printf '%s' "$preset" | jq -c --arg id "$pid" '.[$id]' 2>/dev/null)" ||
+            die "cannot read model '$pid' of preset '$name'"
+          _check_def "$pid" "$def"
+        done <<< "$ids"
+      fi
       _registry_config_json | jq --argjson p "$preset" '.models = (.models + $p)' | _cfg_save
       echo "preset '$name' added -> models: $(printf '%s' "$preset" | jq -r 'keys | join(", ")')"
       echo "config: $CONFIG"
@@ -244,9 +259,13 @@ cmd_preset() {
 cmd_add() {
   local id="${1:-}"; shift || true
   [ -n "$id" ] || die "usage: $PROG add <id> --command <cmd> [--env-command VAR] [--stdin] [--arg A ...] [--final-arg A ...]"
-  if registry_model_is_builtin "$id"; then
-    die "'$id' is a built-in model; pick a different id (built-ins cannot be redefined via add)"
-  fi
+  local builtin_rc=0
+  registry_model_is_builtin "$id" || builtin_rc=$?
+  case "$builtin_rc" in
+    0) die "'$id' is a built-in model; pick a different id (built-ins cannot be redefined via add)" ;;
+    1) ;;
+    *) exit 2 ;;  # the registry already said why
+  esac
   local command="" envcmd="" via="" args=() finals=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
