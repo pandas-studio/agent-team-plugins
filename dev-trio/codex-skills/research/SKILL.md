@@ -55,7 +55,7 @@ Run from the user's workspace under that host policy, passing the question as
 one quoted argument after `--`:
 
 ```bash
-DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/ask-researcher.sh" [--model '<id>'] -- '<question>' </dev/null
+DEV_TRIO_PM_HOST=codex '<plugin-root>/bin/ask-researcher.sh' [--model '<id>'] -- '<question>' </dev/null
 ```
 
 When you write the command as shell text, the question and each model id are
@@ -84,7 +84,7 @@ an option.
 
 When there is additional context, pass it through stdin instead of /dev/null,
 quoted the same way, the rest of the command unchanged:
-`printf '%s\n' '<context>' | DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/ask-researcher.sh" [--model '<id>'] -- '<question>'`.
+`printf '%s\n' '<context>' | DEV_TRIO_PM_HOST=codex '<plugin-root>/bin/ask-researcher.sh' [--model '<id>'] -- '<question>'`.
 Preserve the actual working directory and any explicit role model overrides.
 The wrapper chooses the researcher and records its actual model in the log.
 
@@ -125,7 +125,7 @@ model, registry and CLI overrides used for the failed call. The doctor has no
 failure hint prints the exact command), and keep `--model '<id>'` on any retry:
 
 ```bash
-DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/dev-trio-doctor.sh" --research
+DEV_TRIO_PM_HOST=codex '<plugin-root>/bin/dev-trio-doctor.sh' --research
 ```
 
 Read the exact run's `.run.json` and `.log` reported by the wrapper. If startup

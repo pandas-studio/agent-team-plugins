@@ -10,7 +10,7 @@ Resolve the plugin root two directories above this skill directory. Read the
 bundled [Codex policy](../../lib/pm-codex.md), then run from the target workspace:
 
 ```bash
-python3 "<plugin-root>/bin/install-pm.py" --host codex
+python3 '<plugin-root>/bin/install-pm.py' --host codex
 ```
 
 The installer targets only the current directory's `AGENTS.md`. It preserves

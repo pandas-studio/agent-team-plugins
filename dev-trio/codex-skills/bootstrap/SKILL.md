@@ -11,7 +11,7 @@ Resolve the plugin root two directories above this skill directory.
 When already inside tmux and the user requests this window's layout, run:
 
 ```bash
-DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/team-layout.sh" --here
+DEV_TRIO_PM_HOST=codex '<plugin-root>/bin/team-layout.sh' --here
 ```
 
 The script only builds the layout in a one-pane window. "Already present" with

@@ -13,7 +13,7 @@ model. Never call a raw CLI to bypass its authentication check or logging.
 From the user's workspace:
 
 ```bash
-DEV_TRIO_PM_HOST=codex "<plugin-root>/bin/ask-reviewer.sh" --summary [options] -- '<focus>' </dev/null
+DEV_TRIO_PM_HOST=codex '<plugin-root>/bin/ask-reviewer.sh' --summary [options] -- '<focus>' </dev/null
 ```
 
 Always pass `--summary`: stdout is then one JSON document instead of the
@@ -28,8 +28,9 @@ raw argument string on whitespace or interpolate it as executable shell text.
 from the request, from a reviewer's output or from a JSON line a script
 printed — the focus, each path, each model id, the PR reference,
 `context_file` — is one single-quoted word, and a `'` inside it is written
-`'\''`. Never double quotes: inside `"..."` the shell still runs `$(...)` and
-backticks and expands `$VAR`.
+`'\''`; so is the resolved `<plugin-root>/bin/<script>` path. Never double
+quotes: inside `"..."` the shell still runs `$(...)` and backticks and
+expands `$VAR`.
 In the user's request, a `--` ends the options: everything after it is focus,
 even `--help`, `-m` or `--model x`. Before that `--`, a `-m`/`--model` with no
 id or with `--` as its id, or an attached form (`-m=agy`, `--model=agy`), is not
@@ -117,7 +118,7 @@ With several reviewers:
 
 Never pass a bare `pr N` focus: the reviewer may lack network access and
 cannot tell which commits the PR contains. Resolve it with
-`"<plugin-root>/bin/pr-context.sh"`, which asks `gh` for the head and base,
+`'<plugin-root>/bin/pr-context.sh'`, which asks `gh` for the head and base,
 checks both commits are here, takes the merge base, writes a context file and
 prints one JSON line. It never fetches.
 
@@ -128,7 +129,7 @@ prints one JSON line. It never fetches.
   the resolver checks its shape and repository. If the word right after the
   reference is digits only (`pr 1320 1321`), dispatch nothing and ask which
   PR. Every other word after the reference is the user's focus.
-- Run `"<plugin-root>/bin/pr-context.sh" [--with-context '<file>'] -- '<reference>'`
+- Run `'<plugin-root>/bin/pr-context.sh' [--with-context '<file>'] -- '<reference>'`
   as its own command, not chained with other commands.
   A `--with-context` file the user gave goes here (the last one if given more
   than once); the reviewer then gets only the generated `context_file`.

@@ -242,8 +242,8 @@ claude --plugin-dir ./agent-team-plugins/dev-trio
 
 4. Drive normally. The PM policy tells Claude when to dispatch:
    ```
-   ask-researcher.sh "What's the recommended way to stream tokens with langchain-anthropic 0.3.x?"
-   ask-reviewer.sh --summary "review the new retry logic in src/agent.py — concurrency safety"
+   ask-researcher.sh -- 'What'\''s the recommended way to stream tokens with langchain-anthropic 0.3.x?'
+   ask-reviewer.sh --summary -- 'review the new retry logic in src/agent.py — concurrency safety'
    ```
    `ask-researcher.sh` exits **5** when the researcher CLI exits 0 with nothing but whitespace on stdout (for example, headless agy after soft-denying a tool). It exits **6** when the answer cannot be checked: the temp file cannot be created (the CLI is not run), or the CLI exits 0 but `tee` or the check fails. Treat both as failed research, not as an empty answer.
 
