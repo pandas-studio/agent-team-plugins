@@ -21,6 +21,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from jq_shim import SHELLS, write_jq_shim
+import test_dev_trio_hosts as dev_hosts
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY_COPIES = ("dev-trio", "debate-conductor", "ralph-trio", "spec-trio")
@@ -255,6 +256,82 @@ class ReceiptReaderTests(JqFixture):
                                              'debate_receipt_read "$1"', str(receipt))
                     self.assertGreaterEqual(self.hits(), 1)
                     self.assertEqual((r.returncode, r.stdout, r.stderr), (1, "", ""))
+
+
+class ReviewerSnapshotTests(unittest.TestCase):
+    """ask-reviewer reads a workspace model's prompt_via to size the snapshot, before
+    any log or model call. A failure there is a setup error, exit 2 (#300)."""
+
+    setUp = dev_hosts.HostTests.setUp
+    recorded = dev_hosts.HostTests.recorded
+    sent_prompt = dev_hosts.HostTests.sent_prompt
+    fenced = dev_hosts.HostTests.fenced
+    _init_git_workspace = dev_hosts.HostTests._init_git_workspace
+
+    def git_workspace(self):
+        self._init_git_workspace()
+        (self.workspace / "tracked.txt").write_text("initial\n")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=self.workspace, check=True)
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=self.workspace, check=True)
+        (self.workspace / "tracked.txt").write_text("modified\n")
+
+    def shim(self, mode, stderr=False):
+        bin_dir = self.root / "jq shim"
+        bin_dir.mkdir(exist_ok=True)
+        self.counter = self.root / "jq-count"
+        write_jq_shim(bin_dir, self.counter, shutil.which("jq"), '.prompt_via // "argv"', 1, mode, stderr)
+        return {"PATH": f"{bin_dir}:{self.env['PATH']}"}
+
+    def run_in(self, shell, **env):
+        # Each shell explicitly: the wrapper's shebang would pick one bash for both.
+        # A fresh call record and log root per run, so one case cannot blame the next.
+        self.calls.unlink(missing_ok=True)
+        shutil.rmtree(self.workspace / ".dev-trio", ignore_errors=True)
+        return subprocess.run([shell, str(self.plugin / "bin" / "ask-reviewer.sh")], cwd=self.workspace,
+                              env=self.env | {"DEV_TRIO_REVIEWER_MODEL": "agy"} | env,
+                              stdin=subprocess.DEVNULL, text=True, capture_output=True, timeout=30)
+
+    def assert_setup_error(self, r, diagnostic):
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertEqual(self.recorded(), [])
+        # The registry's line is the only one: no wrapper line, no injected jq line.
+        self.assertEqual(r.stderr, diagnostic)
+        self.assertFalse((self.workspace / ".dev-trio").exists(), "a log was written")
+
+    def test_unreadable_prompt_via_is_a_setup_error(self):
+        self.git_workspace()
+        for mode in ("empty", "output"):
+            for noisy in (False, True):
+                for shell in SHELLS:
+                    with self.subTest(mode=mode, stderr=noisy, shell=shell):
+                        r = self.run_in(shell, **self.shim(mode, noisy))
+                        self.assertEqual(int(self.counter.read_text()), 1)
+                        self.assert_setup_error(r, "registry: cannot read prompt_via of model 'agy'\n")
+
+    def test_invalid_prompt_via_is_a_setup_error(self):
+        # A config model replaces the built-in one whole: keep its workspace_args.
+        lib = shlex.quote(str(ROOT / "dev-trio" / "lib" / "registry.sh"))
+        out = subprocess.run(["bash", "-c", f". {lib} && _registry_model_def agy"], env=self.env,
+                             stdin=subprocess.DEVNULL, text=True, capture_output=True, check=True).stdout
+        agy = json.loads(out)
+        self.assertTrue(agy.get("workspace_args"))
+        self.config.write_text(json.dumps({"models": {"agy": {**agy, "prompt_via": "invalid"}}, "roles": {}}))
+        self.git_workspace()
+        for shell in SHELLS:
+            with self.subTest(shell=shell):
+                r = self.run_in(shell)
+                self.assert_setup_error(
+                    r, "registry: model 'agy' has prompt_via 'invalid'; use \"argv\" or \"stdin\"\n")
+
+    def test_readable_prompt_via_still_snapshots(self):
+        # Control: the shim's query is the read the wrapper makes, and a good read reviews.
+        self.git_workspace()
+        for shell in SHELLS:
+            with self.subTest(shell=shell):
+                r = self.run_in(shell, **self.shim("count"))
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertGreaterEqual(int(self.counter.read_text()), 1)
+                self.assertIn("### Tracked modifications", self.fenced(self.sent_prompt(), "workspace_snapshot"))
 
 
 if __name__ == "__main__":
