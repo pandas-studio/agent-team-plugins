@@ -511,7 +511,7 @@ $INLINED_NOTE"
     if [ -n "$AGY_SCOPE" ]; then
       # Only an argv model needs room for the rest of its prompt. The built-in
       # agy model reads stdin, so the snapshot ceiling is the whole budget.
-      snapshot_via="$(registry_prompt_via "$REVIEWER_MODEL")" || exit 3
+      snapshot_via="$(registry_prompt_via "$REVIEWER_MODEL")" || exit 2
       budget="$ceiling"
       if [ "$snapshot_via" = argv ]; then
         limit="${REGISTRY_ARGV_MAX_BYTES:-131072}"
