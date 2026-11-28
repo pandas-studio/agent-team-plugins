@@ -922,7 +922,9 @@ if ! registry_has_final "$REVIEWER_MODEL" && [ ! -s "$FINAL" ] \
     # to the same rc=3 a missing native final gets.
     if [ "$(wc -c < "$TRANSCRIPT_SNAP")" \
          -eq "$((${#TRANSCRIPT_MARKER} + 1 + TRANSCRIPT_END - TRANSCRIPT_OFFSET))" ]; then
-      registry_extract_response "$TRANSCRIPT_SNAP" > "$FINAL" 2>/dev/null || true
+      # LC_ALL=C, as in review_result_parse (#260). A subshell, because an
+      # assignment prefixed to a function call can outlive it in POSIX mode.
+      ( export LC_ALL=C; registry_extract_response "$TRANSCRIPT_SNAP" ) > "$FINAL" 2>/dev/null || true
     else
       echo "[ask-reviewer] the transcript could not be captured in full; no review was synthesized" >&2
     fi

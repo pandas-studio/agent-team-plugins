@@ -139,9 +139,11 @@ agy_denial_targets() {
 # wrappers' pipefail that turned a match into 141 — or, negated, a mismatch
 # into success (measured, bash 3.2.57, a notice followed by 200,000 lines).
 #
-# _agy_denial_scan: prints "<notices> <other non-blank lines>".
+# _agy_denial_scan: prints "<notices> <other non-blank lines>". LC_ALL=C: what
+# it reads is the run's own output, as bytes (#260), so a line is blank only
+# when it holds ASCII whitespace.
 _agy_denial_scan() {
-  awk -v notice="$_AGY_DENIAL_NOTICE" '
+  LC_ALL=C awk -v notice="$_AGY_DENIAL_NOTICE" '
     index($0, notice) == 1 && /permission/ { n++; next }
     /[^[:space:]]/ { o++ }
     END { printf "%d %d\n", n, o }

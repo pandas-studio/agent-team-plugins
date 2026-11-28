@@ -23,7 +23,10 @@ review_result_parse() {
     return
   fi
   local records
-  records=$(awk -v profile="$profile" '
+  # LC_ALL=C: the final is read as bytes, so a byte that is not UTF-8 cannot
+  # fail awk and the caller's locale cannot change the result (#260).
+  # [[:space:]] is therefore ASCII whitespace only.
+  records=$(LC_ALL=C awk -v profile="$profile" '
     BEGIN { bullet = "• " }
     function emit(tag, value) { print tag "\t" value }
     function verdict(line, token, reason) {

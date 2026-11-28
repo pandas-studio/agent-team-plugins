@@ -1836,6 +1836,66 @@ check 'no log directory and no safe TMPDIR: no --log-file' test "$(head -1 "$TMP
 mv "$AGY_HOME/log.off" "$AGY_HOME/log"
 check 'the reserved agy log is private' test "$(find "$AGY_HOME/log" -name 'cli-dev-trio-review-*' ! -perm 600 | wc -l | tr -d ' ')" = 0
 
+# #260: the final and the captured transcript are read as bytes, so a byte that
+# is not UTF-8 cannot fail a reader, and only ASCII whitespace is whitespace,
+# whatever the caller's locale. Under a UTF-8 locale macOS awk failed on the
+# byte and took U+00A0 for whitespace; macOS is where these checks were seen to
+# fail without the fix.
+is_utf8_locale() {
+  local charmap
+  charmap=$(LC_ALL="$1" locale charmap 2>/dev/null) && [ "$charmap" = UTF-8 ]
+}
+if [ "$(uname -s)" = Darwin ]; then
+  UTF8_CANDIDATES=en_US.UTF-8
+else
+  UTF8_CANDIDATES='en_US.UTF-8 C.UTF-8'
+fi
+UTF8_LOCALE=""
+for candidate in $UTF8_CANDIDATES; do
+  if is_utf8_locale "$candidate"; then UTF8_LOCALE="$candidate"; break; fi
+done
+check 'a UTF-8 locale to test under' test -n "$UTF8_LOCALE"
+parse_in() { ( export LC_ALL="$1"; parse ); }
+latin1_fixture() {
+  printf '## Verdict\nSHIP — latin-1\n\n## Findings\n\n### Blocker\n- None.\n\n### Major\n- None.\n\n### Minor / Nit\n- `a.txt:1` — caf\351\n- next\n' > "$TMP/review.md"
+}
+LATIN1_PARSED='.status=="ok" and .findings.blocker==[] and .findings.major==[] and (.findings.minor | length)==2 and (.findings.minor[0] | endswith("caf�")) and .findings.minor[1]=="- next"'
+for loc in "$UTF8_LOCALE" C; do
+  latin1_fixture
+  check "$loc: a non-UTF-8 byte does not fail the parser" parse_in "$loc"
+  check "$loc: the byte arrives as U+FFFD, the next finding apart" json_is "$TMP/parsed.json" "$LATIN1_PARSED"
+  # U+00A0 after a fence run is not whitespace, so those lines close nothing.
+  printf '## Verdict\nNEEDS-FIX — fence\n## Findings\n### Blocker\n~~~\n~~~\302\240\n- Actual.\n~~~\302\240\n~~~\n' > "$TMP/review.md"
+  check "$loc: the U+00A0 fence case parses" parse_in "$loc"
+  check "$loc: U+00A0 does not close a fence" json_is "$TMP/parsed.json" \
+    '.status=="ok" and .findings=={blocker:[],major:null,minor:null}'
+  printf '## Verdict\nNEEDS-FIX — marker\n## Findings\n### Major\n- None.\302\240\n- Actual.\n' > "$TMP/review.md"
+  check "$loc: the U+00A0 marker case parses" parse_in "$loc"
+  check "$loc: a marker followed by U+00A0 is a finding" json_is "$TMP/parsed.json" \
+    '.status=="ok" and .findings.major==["- None.\u00a0","- Actual."]'
+done
+# codex writes its final itself; claude's is synthesized from the transcript.
+for model in codex claude; do
+  latin1_fixture
+  run_review 0 LC_ALL="$UTF8_LOCALE" DEV_TRIO_REVIEWER_MODEL="$model"
+  check "$model: a final with a non-UTF-8 byte is a parsed review" json_is "$RESULT" "$LATIN1_PARSED"
+  check "$model: the final keeps the non-UTF-8 byte" \
+    test "$(LC_ALL=C tr -cd '\351' < "$FINAL" | wc -c | tr -d ' ')" = 1
+  check "$model: completion is ok" json_is "${LOG%.log}.run.json" \
+    '.completion.exit_code==0 and .completion.reason=="ok"'
+done
+# The denial scan reads the same way: a notice carrying the byte before
+# "permission" is still the notice, and a U+00A0-only line beside it is text.
+agy_notice_saved=$AGY_NOTICE
+rm -rf "$AGY_HOME/brain"
+AGY_NOTICE=$'jetski: no output produced \342\200\224 caf\351 permission was auto-denied'
+agy_review 3 TEST_AGY_NOTICE=1 LC_ALL="$UTF8_LOCALE"
+check 'a denial notice with a non-UTF-8 byte is still a denial' json_is "$RESULT" '.status=="permission-denied"'
+AGY_NOTICE="$agy_notice_saved"$'\n\302\240'
+agy_review 3 TEST_AGY_NOTICE=1 LC_ALL="$UTF8_LOCALE"
+check 'a U+00A0 line beside the denial notice is other text' json_is "$RESULT" '.status=="parse-failed"'
+AGY_NOTICE=$agy_notice_saved
+
 # --summary: stdout is one JSON document once the model call has returned, and
 # nothing before that. Every field is compared with what the run published.
 one_document() {
@@ -1924,11 +1984,8 @@ check 'a field-shaped line in the final does not become a field' json_is "$TMP/w
 
 # final_text is jq's reading of the final: a byte that is not UTF-8 arrives as
 # U+FFFD, and the file keeps the byte.
-# LC_ALL=C: under a UTF-8 locale macOS awk fails on that byte in the parser and
-# the run ends as a result-write failure (exit 2, a summary with no result), so
-# only the C locale gets an ok result to check.
 printf '## Verdict\nSHIP — latin-1\n\n## Findings\n\n### Blocker\n- None.\n\n### Major\n- None.\n\n### Minor / Nit\n- `a.txt:1` — caf\351 → none.\n' > "$TMP/review.md"
-run_review 0 LC_ALL=C
+run_review 0 LC_ALL="$UTF8_LOCALE"
 check 'a summary with a non-UTF-8 final is still one document' one_document "$TMP/wrapper.out"
 check 'a non-UTF-8 byte in the final arrives as U+FFFD' json_is "$TMP/wrapper.out" \
   '.exit_code==0 and .result.status=="ok" and .final_truncated==false and (.final_text | endswith("— caf� → none.\n"))'
