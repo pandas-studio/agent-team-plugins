@@ -210,15 +210,16 @@ STUB
     [ "$rc" -eq 0 ] || note "stderr: $(head -3 "$TMPDIR_SMOKE/$host-host.err" 2>/dev/null)"
   }
 
-  # Highest completed round, from the same ledger the driver uses.
+  # Highest completed round, from the same ledger the driver uses. A read that
+  # fails is a failed check, whatever it printed: it is never compared as a round.
   last_done_round() {
-    _index_completed_rounds "$1" "" | sort -n | tail -1
+    last_completed_round "$1"
   }
 
   # --- 3a. STRENGTHEN converges at the first Critic round (round 2) ---
   run_smoke STRENGTHEN 6 conv-strengthen >/dev/null
   DIR_A="$TMPDIR_SMOKE/.debate-conductor/log/conv-strengthen/latest-debate"
-  LAST_A=$(last_done_round "$DIR_A")
+  LAST_A=$(last_done_round "$DIR_A") || LAST_A="(ledger read failed)"
   if [ "$LAST_A" = "2" ]; then ok "STRENGTHEN → stops at round 2 (cap was 6)"
   else fail "STRENGTHEN → expected to stop at round 2, last completed round = '${LAST_A:-none}'"; fi
   if grep -q "Converged at round 2" "$TMPDIR_SMOKE/conv-strengthen.out"; then
@@ -231,7 +232,7 @@ STUB
   # --- 3b. RECONSIDER never converges → runs to the cap ---
   run_smoke RECONSIDER 4 conv-reconsider >/dev/null
   DIR_B="$TMPDIR_SMOKE/.debate-conductor/log/conv-reconsider/latest-debate"
-  LAST_B=$(last_done_round "$DIR_B")
+  LAST_B=$(last_done_round "$DIR_B") || LAST_B="(ledger read failed)"
   if [ "$LAST_B" = "4" ]; then ok "RECONSIDER → runs all 4 rounds (no early stop)"
   else fail "RECONSIDER → expected 4 completed rounds, got '${LAST_B:-none}'"; fi
   if grep -q "without a STRENGTHEN verdict" "$TMPDIR_SMOKE/conv-reconsider.out"; then
@@ -241,7 +242,7 @@ STUB
   # --- 3c. Placeholder-only Critic must NOT be read as STRENGTHEN ---
   run_smoke PLACEHOLDER 4 conv-placeholder >/dev/null
   DIR_C="$TMPDIR_SMOKE/.debate-conductor/log/conv-placeholder/latest-debate"
-  LAST_C=$(last_done_round "$DIR_C")
+  LAST_C=$(last_done_round "$DIR_C") || LAST_C="(ledger read failed)"
   if [ "$LAST_C" = "4" ]; then ok "placeholder verdict → not a false convergence (ran to cap)"
   else fail "placeholder leaked as convergence: stopped at round '${LAST_C:-none}' (expected 4)"; fi
 

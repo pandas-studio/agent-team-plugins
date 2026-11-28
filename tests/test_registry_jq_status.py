@@ -15,14 +15,16 @@ from pathlib import Path
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from jq_shim import SHELLS, write_jq_shim
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY_COPIES = ("dev-trio", "debate-conductor", "ralph-trio", "spec-trio")
 CLI_COPIES = ("dev-trio", "debate-conductor")
-# The libraries target macOS's bash 3.2 as well as current bash.
-SHELLS = tuple(dict.fromkeys(s for s in ("/bin/bash", shutil.which("bash")) if s and os.path.exists(s)))
 
 
 class JqFixture(unittest.TestCase):
@@ -45,28 +47,7 @@ class JqFixture(unittest.TestCase):
 
     def fail_jq(self, query, n=1, mode="empty", stderr=False):
         """Fail the n-th jq call whose arguments include `query` exactly."""
-        self.counter.write_text("0")
-        real = shlex.quote(self.real_jq)
-        c = shlex.quote(str(self.counter))
-        if mode == "empty":
-            fail = "exit 1"
-        elif mode == "output":
-            fail = f'{real} "$@"; exit 1'
-        else:
-            raise ValueError(mode)
-        if stderr:
-            fail = "echo 'jq: error: injected' >&2; " + fail
-        shim = self.bin / "jq"
-        shim.write_text(
-            "#!/bin/sh\n"
-            "hit=\n"
-            f'for a in "$@"; do [ "$a" = {shlex.quote(query)} ] && hit=1; done\n'
-            'if [ -n "$hit" ]; then\n'
-            f"  k=$(($(cat {c}) + 1)); echo \"$k\" > {c}\n"
-            f'  if [ "$k" = {int(n)} ]; then {fail}; fi\n'
-            "fi\n"
-            f'exec {real} "$@"\n')
-        shim.chmod(0o755)
+        write_jq_shim(self.bin, self.counter, self.real_jq, query, n, mode, stderr)
 
     def hits(self):
         return int(self.counter.read_text())
