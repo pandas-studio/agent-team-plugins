@@ -21,7 +21,12 @@ if [[ -f $transcript && ! -L $transcript && -r $transcript ]]; then
   if result=$(jq -ncR --argjson ids "$context_ids" -f "$ROOT/lib/view-message.jq" "$transcript") &&
       [[ $(jq -r 'type' <<<"$result") == object ]]; then
     # No permissionDecision: the normal host permission checks still apply.
-    jq -n --arg message "$(jq -r '.user_message' <<<"$result")" '{systemMessage:$message}'
+    # A failed read is no notice: print nothing rather than an empty one, and
+    # exit 0 rather than letting errexit fail the hook.
+    message=$(jq -r '.user_message' <<<"$result" 2>/dev/null) || exit 0
+    [[ -n $message ]] || exit 0
+    notice=$(jq -n --arg message "$message" '{systemMessage:$message}' 2>/dev/null) || exit 0
+    printf '%s\n' "$notice"
     exit 0
   fi
 fi

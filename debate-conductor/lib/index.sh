@@ -51,6 +51,10 @@ debate_index_file() {
 # multi-line JSON and the caller's `sort -n | tail -1` would return "4]".
 # `select(type == "object")` guards a line that is valid JSON but a scalar, and
 # the number/positive/integral test guards a round shell arithmetic cannot use.
+#
+# The torn and malformed lines are absorbed inside the filter, so a non-zero jq
+# exit is a read that failed, never "no completed round": it returns 2 with one
+# diagnostic. Its output is then not an answer, and callers discard it.
 _index_completed_rounds() {
   local idx
   idx="$(debate_index_file "$1")"
@@ -64,35 +68,56 @@ _index_completed_rounds() {
     | select($role == "" or .role == $role)
     | .round
     | select(type == "number" and . > 0 and . == floor)
-  ' "$idx" 2>/dev/null || true
-  return 0
+  ' "$idx" 2>/dev/null || {
+    echo "debate: cannot read the attempt ledger $idx" >&2
+    return 2
+  }
+}
+
+# Every reader below takes its answer into a variable and checks that status on
+# the same line: callers run them inside `$(…)` or left of `||`, where errexit is
+# off on bash 3.2 and 5, so a status nobody checks there would be lost.
+
+# completed_rounds DIR [ROLE]: the completed rounds for that role, in numeric
+# order, one per line, possibly repeated (invariant 1). Empty ROLE means any
+# role. Returns 2, printing nothing, when the ledger cannot be read.
+completed_rounds() {
+  local rounds
+  rounds="$(_index_completed_rounds "$1" "${2:-}")" || return 2
+  [ -n "$rounds" ] || return 0
+  printf '%s\n' "$rounds" | sort -n
 }
 
 # last_completed_round_of_role DIR ROLE: highest completed round for that role,
-# empty when there is none. Empty ROLE means any role.
+# empty when there is none. Empty ROLE means any role. Returns 2 when the ledger
+# cannot be read.
 last_completed_round_of_role() {
-  _index_completed_rounds "$1" "${2:-}" \
-    | sort -n | tail -1
-  return 0
+  local rounds
+  rounds="$(completed_rounds "$1" "${2:-}")" || return 2
+  [ -n "$rounds" ] || return 0
+  printf '%s\n' "${rounds##*$'\n'}"
 }
 
 # last_completed_round DIR: highest completed round of the debate.
 last_completed_round() {
   last_completed_round_of_role "$1" ""
-  return 0
 }
 
-# round_is_complete DIR N: rc=0 iff round N completed. A predicate — it must be
-# allowed to return non-zero.
+# round_is_complete DIR N: 0 when round N completed, 1 when it did not, 2 when
+# the ledger cannot be read. A predicate — it must be allowed to return non-zero.
 #
-# `grep -x … >/dev/null` rather than `grep -qx`: -q makes grep exit on the first
-# match, the producers then take SIGPIPE, and `pipefail` returns 141 for a round
-# that *is* complete. Measured on a ledger of 20000 records with 199 sidecars:
-# every query returned 141; at 4000 records it did not reproduce, the output
-# still fitting the pipe buffer. Redirecting instead keeps grep reading to EOF.
+# The match is done in the shell on the captured rounds, not by piping into
+# grep: under pipefail a `jq | grep` pipeline returns 1 both for a failed read
+# and for no match, and a pipe into `grep -q` takes SIGPIPE on a large ledger.
 round_is_complete() {
-  _index_completed_rounds "$1" "" \
-    | grep -x -- "$2" >/dev/null
+  local rounds nl='
+'
+  rounds="$(_index_completed_rounds "$1" "")" || return 2
+  [ -n "$2" ] || return 1
+  case "$nl$rounds$nl" in
+    *"$nl$2$nl"*) return 0 ;;
+  esac
+  return 1
 }
 
 # completed_round_file DIR N ROLE: the transcript basename of round N's
@@ -103,7 +128,8 @@ round_is_complete() {
 # attempt's record, and with no ordering assumption ("the latest attempt") and
 # no matching `start` required, since a crash can destroy one. Identical
 # candidates are deduplicated; two *distinct* filenames for one completed round
-# are ambiguous, and this guesses at neither.
+# are ambiguous, and this guesses at neither. A ledger that cannot be read
+# returns 1 as well: the name it printed before failing is not an answer.
 completed_round_file() {
   local dir="$1" round="$2" role="$3" idx names
   idx="$(debate_index_file "$dir")"
@@ -121,7 +147,7 @@ completed_round_file() {
         | select(type == "string" and . != "" and (explode | map(select(. < 32 or . == 127 or . == 65533)) | length == 0))
       ] | unique
       | if length == 1 then .[0] elif length == 0 then empty else "\u0001" end
-    ' "$idx" 2>/dev/null || true)"
+    ' "$idx" 2>/dev/null)" || return 1
     case "$names" in
       "$(printf '\001')") return 1 ;;   # two different filenames: ambiguous
       "") ;;

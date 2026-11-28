@@ -1,9 +1,15 @@
 """Claude dispatch emits current-context viewing instructions as a host notice."""
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from jq_shim import write_jq_shim
 
 HOOK = Path(__file__).resolve().parents[1] / 'debate-conductor/bin/announce-view.sh'
 
@@ -25,12 +31,12 @@ class ViewMessageTests(unittest.TestCase):
     def chat(self, text):
         return dict(type='assistant', message=dict(content=[dict(type='text', text=text)]))
 
-    def check(self, entries, command=None):
+    def check(self, entries, command=None, env=None):
         self.transcript.write_text(''.join(json.dumps(e) + '\n' for e in entries))
         event = dict(tool_name='Bash', transcript_path=str(self.transcript), tool_input=dict(
             command=command or 'run-debate.sh --host=claude --context "' + self.context + '" -- topic'))
         return subprocess.run([str(HOOK)], input=json.dumps(event), text=True,
-                              capture_output=True, timeout=5)
+                              capture_output=True, timeout=5, env=env)
 
     def test_missing_helper_never_blocks_dispatch(self):
         result = self.check([])
@@ -103,6 +109,23 @@ class ViewMessageTests(unittest.TestCase):
         result = self.check([helper, self.chat(self.view['user_message'])])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)['systemMessage'], self.view['user_message'])
+
+    def test_failed_notice_reads_print_nothing_and_never_block(self):
+        # A failed jq in the notice is an absent notice (#297): rc 0, nothing on either stream.
+        temp = tempfile.TemporaryDirectory(prefix='view message jq ')
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        for query, modes in (('.user_message', ('empty', 'output')),
+                             ('{systemMessage:$message}', ('empty', 'output'))):
+            for mode in modes:
+                for noisy in (False, True):
+                    with self.subTest(query=query, mode=mode, noisy=noisy):
+                        counter = root / 'count'
+                        write_jq_shim(root, counter, shutil.which('jq'), query, mode=mode, stderr=noisy)
+                        result = self.check([self.helper()],
+                                            env=dict(os.environ, PATH=f'{root}{os.pathsep}{os.environ["PATH"]}'))
+                        self.assertEqual(int(counter.read_text()), 1)
+                        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, '', ''))
 
 
 if __name__ == '__main__':
