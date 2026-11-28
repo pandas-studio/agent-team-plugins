@@ -357,7 +357,12 @@ if [ -n "$CONTINUE_FROM" ]; then
   debate_index_can_continue "$DEBATE_DIR" || exit 2
   # Only successful ledger ends advance the resume point. Empty/start-only
   # ledgers can retry round 1 when the saved topic shows the debate started.
-  LAST_ROUND="$(last_completed_round "$DEBATE_DIR")"
+  # This is the run's one read of the completed rounds: the placeholder cleanup
+  # below reuses it, because a read failing there would come after this run had
+  # already written models.json and the scheduled round files. Under the lock and
+  # before any attempt, the ledger cannot change in between.
+  COMPLETED_ROUNDS="$(completed_rounds "$DEBATE_DIR")" || exit 2
+  LAST_ROUND="${COMPLETED_ROUNDS##*$'\n'}"
   if [ -z "$LAST_ROUND" ]; then
     [ -f "$DEBATE_DIR/topic.txt" ] || { echo "no completed round in $DEBATE_DIR — start a fresh debate with /run instead of /continue" >&2; exit 2; }
     echo "debate: no completed round in $DEBATE_DIR; resuming from round 1" >&2
@@ -465,26 +470,41 @@ infer_rotation_from_files() {
   return 0
 }
 
+# The two readers of a saved models.json. An absent file is no metadata; a field
+# that is missing or of the wrong type is an empty value, and the caller infers
+# it from the round files. A file that does not hold exactly one JSON object
+# (empty, unparseable, several documents), or a jq that fails, returns 2: with no
+# round file yet, models.json is the only record of --rotate, so guessing past an
+# unreadable one would continue the debate with the wrong generator.
 metadata_value() {
-  local file="$1" key="$2"
+  local file="$1" key="$2" out
   [ -f "$file" ] || return 0
-  jq -r --arg key "$key" '
-    if $key == "rotate" then
-      if (.[$key] | type) == "boolean" then (.[$key] | tostring) else "" end
-    elif (.[$key] | type) == "string" then
-      .[$key]
-    else
-      ""
-    end
-  ' "$file" 2>/dev/null || true
+  out="$(jq -rs --arg key "$key" '
+    if length == 1 and (.[0] | type) == "object" then .[0] else error("not one object") end
+    | if $key == "rotate" then
+        if (.[$key] | type) == "boolean" then (.[$key] | tostring) else "" end
+      elif (.[$key] | type) == "string" then
+        .[$key]
+      else
+        ""
+      end
+  ' "$file" 2>/dev/null)" || return 2
+  [ -z "$out" ] || printf '%s\n' "$out"
 }
 
 metadata_source_value() {
-  local file="$1" key="$2"
+  local file="$1" key="$2" out
   [ -f "$file" ] || return 0
-  jq -r --arg key "$key" '
-    if (.sources[$key] | type) == "string" then .sources[$key] else "" end
-  ' "$file" 2>/dev/null || true
+  out="$(jq -rs --arg key "$key" '
+    if length == 1 and (.[0] | type) == "object" then .[0] else error("not one object") end
+    | if (.sources | type) == "object" and (.sources[$key] | type) == "string" then .sources[$key] else "" end
+  ' "$file" 2>/dev/null)" || return 2
+  [ -z "$out" ] || printf '%s\n' "$out"
+}
+
+metadata_unreadable() {
+  echo "debate: cannot read $DEBATE_DIR/models.json (it must hold one JSON object); repair it or start a fresh debate" >&2
+  exit 2
 }
 
 write_model_metadata() {
@@ -511,19 +531,19 @@ PERSISTED_GEN_SOURCE=""
 PERSISTED_CRIT_SOURCE=""
 PERSISTED_ROTATE_SOURCE=""
 if [ -n "$CONTINUE_FROM" ] && [ -f "$DEBATE_DIR/models.json" ]; then
-  PERSISTED_GEN="$(metadata_value "$DEBATE_DIR/models.json" generator)"
-  PERSISTED_CRIT="$(metadata_value "$DEBATE_DIR/models.json" critic)"
-  PERSISTED_ROTATE="$(metadata_value "$DEBATE_DIR/models.json" rotate)"
+  PERSISTED_GEN="$(metadata_value "$DEBATE_DIR/models.json" generator)" || metadata_unreadable
+  PERSISTED_CRIT="$(metadata_value "$DEBATE_DIR/models.json" critic)" || metadata_unreadable
+  PERSISTED_ROTATE="$(metadata_value "$DEBATE_DIR/models.json" rotate)" || metadata_unreadable
   if [ -n "$PERSISTED_GEN" ]; then
-    PERSISTED_GEN_SOURCE="$(metadata_source_value "$DEBATE_DIR/models.json" generator)"
+    PERSISTED_GEN_SOURCE="$(metadata_source_value "$DEBATE_DIR/models.json" generator)" || metadata_unreadable
     [ -n "$PERSISTED_GEN_SOURCE" ] || PERSISTED_GEN_SOURCE="metadata"
   fi
   if [ -n "$PERSISTED_CRIT" ]; then
-    PERSISTED_CRIT_SOURCE="$(metadata_source_value "$DEBATE_DIR/models.json" critic)"
+    PERSISTED_CRIT_SOURCE="$(metadata_source_value "$DEBATE_DIR/models.json" critic)" || metadata_unreadable
     [ -n "$PERSISTED_CRIT_SOURCE" ] || PERSISTED_CRIT_SOURCE="metadata"
   fi
   if [ -n "$PERSISTED_ROTATE" ]; then
-    PERSISTED_ROTATE_SOURCE="$(metadata_source_value "$DEBATE_DIR/models.json" rotate)"
+    PERSISTED_ROTATE_SOURCE="$(metadata_source_value "$DEBATE_DIR/models.json" rotate)" || metadata_unreadable
     [ -n "$PERSISTED_ROTATE_SOURCE" ] || PERSISTED_ROTATE_SOURCE="metadata"
   fi
   case "$PERSISTED_ROTATE" in
@@ -708,7 +728,10 @@ done
 # A resume shorter than the original run leaves that run's placeholders past
 # END_ROUND behind: empty, no successful ledger end, never written. Remove
 # these unused placeholders; keep any file with content or a successful end.
+# "A successful end" is the COMPLETED_ROUNDS this run read under the lock.
 if [ -n "$CONTINUE_FROM" ]; then
+  _nl='
+'
   for _f in "$DEBATE_DIR"/round-*.md; do
     [ -e "$_f" ] || continue
     _base="${_f##*/}"
@@ -721,7 +744,7 @@ if [ -n "$CONTINUE_FROM" ]; then
     case "$_n" in ""|*[!0-9]*) continue ;; esac
     [ "$_n" -gt "$END_ROUND" ] || continue
     [ -s "$_f" ] && continue
-    round_is_complete "$DEBATE_DIR" "$_n" && continue
+    case "$_nl$COMPLETED_ROUNDS$_nl" in *"$_nl$_n$_nl"*) continue ;; esac
     rm -f "$_f"
   done
 fi
@@ -1244,11 +1267,14 @@ fi
 # read and the write. Success only — a failed round never reaches this line.
 if [ -n "$DEBATE_RECEIPT" ]; then
   RECEIPT_DIR="$(cd "$DEBATE_DIR" && pwd -P)" || { echo "debate: cannot resolve $DEBATE_DIR" >&2; exit 1; }
-  RECEIPT_LAST="$(last_completed_round "$DEBATE_DIR")"
+  # A ledger read that fails stops here (its own diagnostic), whatever it printed:
+  # an empty critic answer would publish null critic fields, which the reader
+  # takes as "no critic round" and skips its critic checks for.
+  RECEIPT_LAST="$(last_completed_round "$DEBATE_DIR")" || exit 1
   # Reaching this line means every scheduled round completed, so an empty
   # answer here is a broken read, not an empty debate.
   [ -n "$RECEIPT_LAST" ] || { echo "debate: no completed round to report in $DEBATE_DIR" >&2; exit 1; }
-  RECEIPT_CRIT="$(last_completed_round_of_role "$DEBATE_DIR" crit)"
+  RECEIPT_CRIT="$(last_completed_round_of_role "$DEBATE_DIR" crit)" || exit 1
   RECEIPT_FILE=""
   if [ -n "$RECEIPT_CRIT" ]; then
     # A lookup that fails is an error, not "no critic round completed": the

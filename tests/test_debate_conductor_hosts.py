@@ -12,6 +12,9 @@ import tempfile
 import time
 import unittest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from jq_shim import SHELLS, write_jq_shim
+
 PLUGIN = Path(__file__).resolve().parents[1] / "debate-conductor"
 VERDICT = "## Verdict\nSTRENGTHEN - position is sound.\n\nVerdict: STRENGTHEN\n"
 
@@ -1968,6 +1971,198 @@ stream_header() {
                                    STUB_RESPONSE=non_converging)
             self.assertEqual(result2.returncode, 0, result2.stderr)
             self.assertIn("Reached round cap 2", result2.stdout)
+
+    # ── A failed jq read in the resume and receipt paths (#297) ────────────
+
+    def jq_shim(self, match, n=1, mode="empty", stderr=False):
+        """Env that puts a jq failing (or counting) the n-th call carrying `match` first on PATH."""
+        jq_bin = self.root / "jq-bin"
+        jq_bin.mkdir(exist_ok=True)
+        self.jq_count = self.root / "jq-count"
+        write_jq_shim(jq_bin, self.jq_count, shutil.which("jq"), match, n, mode, stderr)
+        return {"PATH": f"{jq_bin}{os.pathsep}{self.env['PATH']}"}
+
+    def jq_hits(self):
+        return int(self.jq_count.read_text())
+
+    def completed_debate(self, *args):
+        result = self.run_cli("debate.sh", *args, "t")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return self.latest_debate()
+
+    def test_continue_refuses_when_the_ledger_read_fails(self):
+        debate = self.completed_debate("-n", "1")
+        ledger = str(debate / "index.jsonl")
+        # Overwriting the finished round is what the bug did; make it visible.
+        (debate / "round-1-gen.md").write_text("ORIGINAL FINISHED DRAFT\n")
+        for mode in ("empty", "output"):
+            with self.subTest(mode=mode):
+                before, calls = self.snapshot(debate), self.recorded()
+                env = self.jq_shim((ledger, "-rRn", ""), mode=mode, stderr=True)
+                result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t", **env)
+                self.assertEqual(self.jq_hits(), 1)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                # The library's line, once, and none of jq's own.
+                self.assertEqual(result.stderr.count(f"debate: cannot read the attempt ledger {ledger}\n"), 1)
+                self.assertNotIn("injected", result.stderr)
+                self.assertNotIn("resuming from round 1", result.stderr)
+                self.assertEqual(self.snapshot(debate), before)
+                self.assertEqual(self.recorded(), calls)
+                self.assertFalse(self.lock_of(debate).is_symlink())
+
+    def test_placeholder_cleanup_reuses_the_resume_read(self):
+        result = self.run_cli("debate.sh", "-n", "4", "t", STUB_RC="9")
+        self.assertNotEqual(result.returncode, 0)
+        debate = self.latest_debate()
+        self.assertTrue((debate / "round-4-crit.md").exists())
+        env = self.jq_shim((str(debate / "index.jsonl"), "-rRn", ""), mode="count")
+        result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t", **env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # One completion query decides the resume and the cleanup; a second read could fail
+        # after this run had already written models.json and its placeholders.
+        self.assertEqual(self.jq_hits(), 1)
+        for name in ("round-2-crit.md", "round-3-gen.md", "round-4-crit.md"):
+            self.assertFalse((debate / name).exists(), name)
+
+    def test_receipt_is_not_published_when_a_ledger_read_fails(self):
+        cases = (
+            # The last round, printed and then failed: the non-empty check alone passes it.
+            ("last round", ("-rRn", ""), 1, "output"),
+            ("critic round", ("-rRn", "crit"), 1, "empty"),
+            ("critic round", ("-rRn", "crit"), 1, "output"),
+            ("critic transcript", ("-rRn", "--argjson"), 1, "output"),
+        )
+        for label, match, n, mode in cases:
+            with self.subTest(read=label, mode=mode):
+                receipt = self.receipt_path()
+                # The run picks its directory itself, so the match cannot name the ledger.
+                env = self.jq_shim(match, n=n, mode=mode)
+                result = self.run_cli("debate.sh", "-n", "2", "t", DEBATE_RECEIPT=str(receipt), **env)
+                self.assertEqual(self.jq_hits(), n)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertFalse(receipt.exists())
+                self.assertFalse(self.lock_of(self.latest_debate()).is_symlink())
+                if label == "critic transcript":
+                    self.assertIn("debate: cannot determine the transcript of completed critic round 2\n",
+                                  result.stderr)
+                else:
+                    self.assertIn("debate: cannot read the attempt ledger ", result.stderr)
+
+    def models_json_refusal(self, debate):
+        return (f"debate: cannot read {debate}/models.json (it must hold one JSON object); "
+                "repair it or start a fresh debate\n")
+
+    def test_rotation_read_failure_refuses_before_any_round_file_exists(self):
+        result = self.run_cli("debate.sh", "--rotate", "-n", "2", "t", STUB_RC="9")
+        self.assertNotEqual(result.returncode, 0)
+        debate = self.latest_debate()
+        self.assertTrue(json.loads((debate / "models.json").read_text())["rotate"])
+        # The issue's case: models.json is the only record of --rotate.
+        for f in debate.glob("round-*.md"):
+            f.unlink()
+        for mode in ("empty", "output"):
+            with self.subTest(mode=mode):
+                before, calls = self.snapshot(debate), self.recorded()
+                env = self.jq_shim((str(debate / "models.json"), "rotate"), mode=mode)
+                result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t", **env)
+                self.assertEqual(self.jq_hits(), 1)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(self.models_json_refusal(debate), result.stderr)
+                self.assertEqual(self.snapshot(debate), before)
+                self.assertEqual(self.recorded(), calls)
+                self.assertFalse(self.lock_of(debate).is_symlink())
+
+    def test_source_read_failure_refuses_continuation(self):
+        debate = self.completed_debate("--rotate", "-n", "2")
+        before, calls = self.snapshot(debate), self.recorded()
+        # Match 1 is the rotate value, match 2 its source label.
+        env = self.jq_shim((str(debate / "models.json"), "rotate"), n=2)
+        result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t", **env)
+        self.assertEqual(self.jq_hits(), 2)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn(self.models_json_refusal(debate), result.stderr)
+        self.assertEqual(self.snapshot(debate), before)
+        self.assertEqual(self.recorded(), calls)
+        self.assertFalse(self.lock_of(debate).is_symlink())
+
+    def test_unreadable_models_json_refuses_continuation(self):
+        debate = self.completed_debate("-n", "1")
+        for label, text in (("empty", ""), ("whitespace", " \n\t\n"), ("not JSON", '{"generator":'),
+                            ("two documents", "{} {}"), ("not an object", "[1]")):
+            with self.subTest(models=label):
+                (debate / "models.json").write_text(text)
+                before, calls = self.snapshot(debate), self.recorded()
+                result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t")
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(self.models_json_refusal(debate), result.stderr)
+                self.assertEqual(self.snapshot(debate), before)
+                self.assertEqual(self.recorded(), calls)
+
+    def test_wrong_typed_sources_keep_the_fallback_label(self):
+        # Compatibility: valid JSON with a wrong-typed field falls back, before and after #297.
+        debate = self.completed_debate("-n", "1")
+        metadata = json.loads((debate / "models.json").read_text())
+        metadata["sources"] = []
+        (debate / "models.json").write_text(json.dumps(metadata))
+        result = self.run_cli("debate.sh", "--continue-from", str(debate), "-n", "1", "t")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        sources = json.loads((debate / "models.json").read_text())["sources"]
+        self.assertEqual((sources["generator"], sources["critic"]), ("metadata", "metadata"))
+
+    def library(self, shell, call, **env):
+        lib = self.plugin / "lib" / "index.sh"
+        script = f"set -euo pipefail; . '{lib}'; {call}"
+        return subprocess.run([shell, "-c", script, "bash"], env=self.env | env, stdin=subprocess.DEVNULL,
+                              text=True, capture_output=True, timeout=20)
+
+    def test_ledger_readers_report_a_failed_read(self):
+        debate = self.completed_debate("-n", "2")
+        ledger = str(debate / "index.jsonl")
+        for shell in SHELLS:
+            for mode in ("empty", "output"):
+                with self.subTest(reader="last_completed_round", shell=shell, mode=mode):
+                    env = self.jq_shim(ledger, mode=mode, stderr=True)
+                    r = self.library(shell, f'rc=0; out="$(last_completed_round "{debate}")" || rc=$?; '
+                                            'printf "%s|%s" "$rc" "$out"', **env)
+                    self.assertEqual(self.jq_hits(), 1)
+                    self.assertEqual(r.stdout, "2|")
+                    self.assertEqual(r.stderr, f"debate: cannot read the attempt ledger {ledger}\n")
+                with self.subTest(reader="round_is_complete", shell=shell, mode=mode):
+                    env = self.jq_shim(ledger, mode=mode)
+                    r = self.library(shell, f'rc=0; round_is_complete "{debate}" 1 || rc=$?; printf "%s" "$rc"',
+                                     **env)
+                    self.assertEqual(self.jq_hits(), 1)
+                    self.assertEqual(r.stdout, "2")
+
+    def test_completed_rounds_lists_rounds_and_fails_closed(self):
+        debate = self.completed_debate("-n", "2")
+        ledger = str(debate / "index.jsonl")
+        for shell in SHELLS:
+            with self.subTest(shell=shell):
+                r = self.library(shell, f'completed_rounds "{debate}"; completed_rounds "{debate}" crit')
+                self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "1\n2\n2\n", ""))
+                env = self.jq_shim(ledger, mode="output")
+                r = self.library(shell, f'rc=0; out="$(completed_rounds "{debate}")" || rc=$?; '
+                                        'printf "%s|%s" "$rc" "$out"', **env)
+                self.assertEqual(r.stdout, "2|")
+
+    def test_doctor_smoke_fails_when_its_ledger_read_fails(self):
+        tools = self.root / "tools"
+        tools.mkdir()
+        for name in ("tmux", "agy", "codex", "claude"):
+            tool = tools / name
+            tool.write_text("#!/usr/bin/env sh\nexit 0\n")
+            tool.chmod(0o755)
+        # Printed and then failed: a smoke check that ignores the status would pass.
+        env = self.jq_shim(("-rRn", ""), mode="output")
+        result = subprocess.run(
+            [str(self.plugin / "bin" / "debate-conductor-doctor.sh")],
+            cwd=self.workspace,
+            env=self.env | {"PATH": str(tools) + os.pathsep + env["PATH"]},
+            input="", text=True, capture_output=True, timeout=120)
+        self.assertGreaterEqual(self.jq_hits(), 1)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("(ledger read failed)", result.stdout)
 
 
 class PolicyTests(unittest.TestCase):
