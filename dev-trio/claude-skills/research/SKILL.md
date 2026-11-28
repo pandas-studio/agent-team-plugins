@@ -22,7 +22,7 @@ Everything between the tags is the argument string the user typed. It may be emp
 
 The argument string is the research question, free-form, optionally preceded by options. Look only at its start:
 
-1. While it starts with `--model <id>` or `-m <id>`, remove those two tokens, keep the pair as `--model <id>`, and repeat. Pass every kept pair to `ask-researcher.sh`, in order, before `--`: the wrapper rejects any pair whose id is missing or option-shaped, and the last id wins and must be registered. The id is the researcher model for this call (`agy`, `codex`, `claude`, or any id from `agent-team-models list`) and wins over `DEV_TRIO_RESEARCHER_MODEL` and the role binding. If a leading `--model`/`-m` has no id after it or its id is `--`, or what is left starts with an attached form (`-m=agy`, `--model=agy`), do not dispatch: tell the user the id goes in its own token, and that `--` before the question keeps it literal.
+1. While it starts with `--model <id>` or `-m <id>`, remove those two tokens, keep the id, and repeat. Pass every kept id to `ask-researcher.sh` as `--model '<id>'` (§2's quoting rule), in order, before `--`: the wrapper rejects any pair whose id is missing or option-shaped, and the last id wins and must be registered. The id is the researcher model for this call (`agy`, `codex`, `claude`, or any id from `agent-team-models list`) and wins over `DEV_TRIO_RESEARCHER_MODEL` and the role binding. If a leading `--model`/`-m` has no id after it or its id is `--`, or what is left starts with an attached form (`-m=agy`, `--model=agy`), do not dispatch: tell the user the id goes in its own token, and that `--` before the question keeps it literal.
 2. If what is left starts with a `--` token, remove it. Everything after it is the question, so `-- --model is deprecated?` asks about `--model`.
 3. The rest, with its whitespace kept, is QUESTION. A `--model` or `-m` later in the text is part of the question.
 
@@ -36,16 +36,18 @@ Single Bash call. `ask-researcher.sh` is on the plugin's `bin/` PATH while the p
 Most calls finish in under a minute, but not all: over 54 measured agy calls the median was about 30 seconds, one in ten took more than 2 minutes, and the longest took almost 6. That reaches past the Bash tool's default timeout (2 minutes), so **run the call with `run_in_background: true`** and wait for its completion notice instead of polling.
 
 ```bash
-ask-researcher.sh -- "<the user's question, verbatim>"
-ask-researcher.sh --model codex -- "<question>"    # the argument string began with --model codex or -m codex
+ask-researcher.sh -- '<the user'\''s question, verbatim>'
+ask-researcher.sh --model 'codex' -- '<question>'    # the argument string began with --model codex or -m codex
 ```
 
 Always put `--` before the question, so a question such as `--help` is researched instead of being read as an option.
 
-To pipe extra context (e.g., your own grep results):
+**Quoting rule.** The question and each model id go into the command as one single-quoted word each, and a `'` inside is written `'\''` (as in the first line above); the question keeps its whitespace and newlines. Never double quotes or no quotes: inside `"..."` the shell still runs `$(...)` and backticks and expands `$VAR`, so a question such as `why does $(id) differ` would run a command in this shell before the wrapper starts.
+
+To pipe extra context (e.g., your own grep results), quote it the same way:
 
 ```bash
-echo "<context bullets>" | ask-researcher.sh -- "<question>"
+printf '%s\n' '<context bullets>' | ask-researcher.sh -- '<question>'
 ```
 
 **When the dev-trio layout is up (`/dev-trio:bootstrap`), streaming output is already visible in the top-right pane — do not duplicate it in the chat.** Just acknowledge that it's running and wait.
@@ -76,8 +78,8 @@ With the default Claude host and no overrides, run `dev-trio-doctor.sh --researc
 from the same workspace. Preserve any explicit host, model, registry and CLI
 overrides from the failed invocation when running the check. The doctor has no
 `--model`: after a `--model <id>` call, check with
-`DEV_TRIO_RESEARCHER_MODEL=<id> dev-trio-doctor.sh --research` (the wrapper's
-own failure hint prints this command), and keep `--model <id>` on any retry. A prefixed or
+`DEV_TRIO_RESEARCHER_MODEL='<id>' dev-trio-doctor.sh --research` (the wrapper's
+own failure hint prints this command), and keep `--model '<id>'` on any retry. A prefixed or
 absolute-path command may require the host's normal permission flow; do not
 drop overrides or broaden permissions to avoid that flow. This is a read-only
 setup check, not authentication, inference, or proof of research access.
@@ -114,7 +116,7 @@ successful final answer.
 
 If the user's broader intent was code-then-review, suggest the natural next step:
 
-> Want me to feed this into a Codex review? `/dev-trio:review --with-research <final-path> "<focus>"`
+> Want me to feed this into a Codex review? `/dev-trio:review --with-research <final-path> -- <focus>` (no quotes: the review skill quotes it when it dispatches; `--` keeps a focus with `-m` in it a focus)
 
 But don't dispatch automatically — let the user confirm.
 
