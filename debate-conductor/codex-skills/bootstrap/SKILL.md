@@ -14,7 +14,7 @@ it is written `'\''`.
 
 This is an explicit user view-only entry point. Parse leading
 `--view=auto|tmux|none` (default auto), `--open-view` and optional
-`--terminal=auto|ghostty|terminal`. Prepare via `'<plugin-root>/bin/team-3pane.sh' --view=<mode>`,
+`--terminal=auto|ghostty|terminal`. Prepare via `'<plugin-root>/bin/team-3pane.sh' --view='<mode>'`,
 adding `--view-only` for an opening request. Read the returned context JSON.
 
 Inside tmux a verified layout is reused or a guarded one-pane window is split.

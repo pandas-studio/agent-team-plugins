@@ -87,7 +87,7 @@ approved the run.
   through that path, and stops matching after a plugin update.
 
 Capture the dispatch exit code. On failure, report the incomplete debate.
-Only after exit 0, run the absolute `run-debate.sh --read-receipt --context
+Only after exit 0, run `'<plugin-root>/bin/run-debate.sh' --read-receipt --context
 '<context_file>'` and use its validated `debate_dir`; never bind results by
 parsing stdout or following `latest-debate`. Missing/invalid receipt means
 incomplete. On success, read the files in that directory and report only:
@@ -103,6 +103,6 @@ cannot be determined.
 In Codex host mode, the default Critic is Claude Code so Codex does not review
 its own debate output as an external agent. Explicit model settings still win.
 
-For a later **"뷰 열어줘" directly call the absolute `open-view.sh --context
+For a later **"뷰 열어줘" directly call `'<plugin-root>/bin/open-view.sh' --context
 '<saved-file>'`**, following the shared standing instructions. Never invoke
 bootstrap implicitly or dispatch another debate for that request.

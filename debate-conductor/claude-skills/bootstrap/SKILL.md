@@ -11,7 +11,7 @@ This explicit user entry point is **view-only**. Never launch `debate.sh`,
 `run-debate.sh`, or a model from bootstrap.
 
 Read the [shared viewing contract](../../lib/view-workflow.md), parse its
-controls, and call `team-3pane.sh --view=<mode>` (default auto). Add
+controls, and call `team-3pane.sh --view='<mode>'` (default auto). Add
 `--view-only` for `--open-view` so the new terminal never mirrors the PM pane.
 
 Inside tmux the helper can build a guarded three-pane layout from one pane,
