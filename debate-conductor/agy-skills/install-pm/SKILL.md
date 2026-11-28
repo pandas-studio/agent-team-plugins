@@ -11,8 +11,11 @@ bundled [Antigravity policy](../../lib/pm-agy.md), then run from the target
 workspace:
 
 ```bash
-python3 "<plugin-root>/bin/install-pm.py" --host agy
+python3 '<plugin-root>/bin/install-pm.py' --host agy
 ```
+
+The path is one single-quoted word; a `'` in the resolved plugin root is
+written `'\''`.
 
 The installer targets only the current directory's `GEMINI.md`. It preserves
 content outside the debate-conductor marker pair, updates an existing complete

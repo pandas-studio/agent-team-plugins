@@ -7,7 +7,9 @@ description: Evaluate a submitted local result against a task and criteria with 
 
 Create a version 1 case JSON following `${CLAUDE_PLUGIN_ROOT}/README.md`. Put the task,
 criteria, and independent check files beside it. Run
-`DEV_TRIO_PM_HOST=claude "${CLAUDE_PLUGIN_ROOT}/bin/eval-trio" run --case <case.json> --output-dir <fresh-private-dir> --allow-execution`.
+`DEV_TRIO_PM_HOST=claude '${CLAUDE_PLUGIN_ROOT}/bin/eval-trio' run --case '<case.json>' --output-dir '<fresh-private-dir>' --allow-execution`.
+The path and each value are one single-quoted word, and a `'` inside one is
+written `'\''`; never double quotes.
 Use `--checks-only` to skip model reviews and authentication. Check the
 authoritative `report.json`, its `status`, `mode`, `reason`, and `exit_code`.
 `PASS` requires fixed checks and both model reviews; `HOLD` is never a pass.

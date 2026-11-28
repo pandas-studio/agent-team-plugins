@@ -14,7 +14,7 @@ Consume leading `--view=auto|tmux|none`, `--open-view` and optional
 `--terminal=auto|ghostty|terminal`; bootstrap is optional. Use absolute plugin
 paths for all helpers, never assume bin is on PATH. Prepare in one tool call,
 optionally open in another, **show the viewing instructions in chat before
-dispatch**, then pass the topic as one quoted argument:
+dispatch**, then pass the topic as one single-quoted argument:
 
 Copy the actual attach command (`ready-detached`) or **both tail commands**
 (`manual`, even for `--view=none`) into your visible reply before the dispatch
@@ -25,16 +25,20 @@ first if opening was requested; otherwise send preparation's message immediately
 This includes short runs and `--view=none`.
 
 ```bash
-"<plugin-root>/bin/run-debate.sh" --host=agy --context '<exact context_file>' -- -n <rounds> [flags] "<topic>" [context-file.md]
+'<plugin-root>/bin/run-debate.sh' --host=agy --context '<exact context_file>' -- -n '<rounds>' [flags] '<topic>' ['<context-file.md>']
 ```
+
+Each substituted value, the resolved path included, is one single-quoted
+word, and a `'` inside it is written `'\''` (the quoting rule in the
+[shared contract](../../lib/view-workflow.md)).
 
 Ordinary debates default to **4 rounds**: proposal, critique, revision, final
 critique. Use `2` for a quick pass and honor every explicit round count.
 
 If the user asks for convergence, add `--until-converged`; then `-n` is the
 upper bound and may be omitted to use the default cap. Preserve explicit
-`--rotate`, `--primary-gen=<model>` (`--gen=<model>`), and
-`--primary-crit=<model>` (`--crit=<model>`) choices, and translate natural-language
+`--rotate`, `--primary-gen='<model>'` (`--gen='<model>'`), and
+`--primary-crit='<model>'` (`--crit='<model>'`) choices, and translate natural-language
 role requests (e.g. `gen=agy crit=kimi-code`, `claude vs agy`) into those flags
 rather than leaving model labels inside `<topic>`.
 
@@ -45,7 +49,7 @@ entities (e.g. `"Track 4"`, local specs, plans, or module names) without
 self-contained context, read the relevant workspace files first and include the
 essential repository facts directly in `<topic>` (every round — Generator and
 Critic alike — sees `<topic>`), optionally passing longer Round-1 Generator
-background via `[context-file.md]` (`--context=<file>`, written under
+background via `[context-file.md]` (`--context='<file>'`, written under
 `.debate-conductor/log/` or `$TMPDIR`; read by Round 1's Generator only).
 
 When no topic is supplied, inspect workspace `topics/*.txt` first, then the

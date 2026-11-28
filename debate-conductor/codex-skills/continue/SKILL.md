@@ -27,8 +27,12 @@ optional opener step if requested.
 Read `<debate-dir>/topic.txt` and run:
 
 ```bash
-"<plugin-root>/bin/run-debate.sh" --host=codex --context '<context_file>' --continue-from "<debate-dir>" -- -n <extra-rounds> "<topic>"
+'<plugin-root>/bin/run-debate.sh' --host=codex --context '<context_file>' --continue-from '<debate-dir>' -- -n '<extra-rounds>' '<topic>'
 ```
+
+Each substituted value, the topic read from `topic.txt` and the resolved path included, is one single-quoted
+word, and a `'` inside it is written `'\''` (the quoting rule in the
+[shared contract](../../lib/view-workflow.md)).
 
 If `debate.sh` prints `Claude login unverified in this environment`, follow
 [the run skill's host permission rules](../run/SKILL.md#host-permission-for-a-claude-role):
