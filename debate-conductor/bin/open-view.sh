@@ -31,14 +31,18 @@ emit() {
         else $context.user_message end)}'
 }
 fail() { emit "${3:-open-failed}" "$1" "$2"; exit 2; }
-[ "$(printf '%s' "$DATA" | jq -r .status)" = ready-detached ] || fail 'No detached view was prepared; prepare --view-only first.' no-view manual
-VIEW_TMUX=$(printf '%s' "$DATA" | jq -r .tmux_bin)
-VIEW_SOCKET=$(printf '%s' "$DATA" | jq -r .socket)
-SESSION=$(printf '%s' "$DATA" | jq -r .session)
+ctx_status=$(printf '%s' "$DATA" | jq -r .status) || fail 'Invalid view context.' setup-failed
+[ "$ctx_status" = ready-detached ] || fail 'No detached view was prepared; prepare --view-only first.' no-view manual
+VIEW_TMUX=$(printf '%s' "$DATA" | jq -r .tmux_bin) &&
+  VIEW_SOCKET=$(printf '%s' "$DATA" | jq -r .socket) &&
+  SESSION=$(printf '%s' "$DATA" | jq -r .session) &&
+  team=$(printf '%s' "$DATA" | jq -r .team) &&
+  log_dir=$(printf '%s' "$DATA" | jq -r .log_dir) || fail 'Invalid view context.' setup-failed
 TARGET="=$SESSION"
 record=$(view_record "$TARGET:") || fail 'Cannot reach the prepared tmux view.' setup-failed
-view_record_matches "$record" "$(printf '%s' "$DATA" | jq -r .team)" "$(printf '%s' "$DATA" | jq -r .log_dir)" &&
-  [ "$(printf '%s' "$record" | jq -r .type)" = detached ] &&
+view_record_matches "$record" "$team" "$log_dir" &&
+  rtype=$(printf '%s' "$record" | jq -r .type) &&
+  [ "$rtype" = detached ] &&
   view_complete "$TARGET:" "$record" &&
   view_geometry_matches "$TARGET:" "$record" || fail 'View identity or geometry changed; prepare it again.' changed-view
 owner=$(view_tmux show-options -qv -t "$TARGET:" @debate-view-owner) || fail 'Cannot verify ownership.' changed-view
@@ -57,6 +61,7 @@ else
   SCRIPT="$SCRIPT_DIR/../lib/open-terminal.applescript"
 fi
 command -v osascript >/dev/null || fail 'osascript is unavailable.' unsupported-host
+cwd=$(printf '%s' "$DATA" | jq -r .cwd) || fail 'Invalid view context.' setup-failed
 CMD="/usr/bin/env -u TMUX -u TMUX_PANE $(view_quote "$VIEW_TMUX") -S $(view_quote "$VIEW_SOCKET") attach-session -t $(view_quote "$TARGET")"
 # Ghostty's macOS .shell launcher already prepends `exec -l` (v1.3.1
 # src/termio/Exec.zig). It needs an executable, not another exec builtin.
@@ -66,7 +71,7 @@ ERR=$(mktemp "${CONTEXT%/*}/open-error.XXXXXX")
 OUT=$(mktemp "${CONTEXT%/*}/open-output.XXXXXX")
 pid=""
 trap '[ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null; rm -f "$ERR" "$OUT"' EXIT
-osascript "$SCRIPT" "$CMD" "$(printf '%s' "$DATA" | jq -r .cwd)" >"$OUT" 2>"$ERR" &
+osascript "$SCRIPT" "$CMD" "$cwd" >"$OUT" 2>"$ERR" &
 pid=$!
 # First Automation consent/cold start may take time. The host tool bounds this
 # call; only the AFTER-launch attachment poll is five seconds. Never kill an
