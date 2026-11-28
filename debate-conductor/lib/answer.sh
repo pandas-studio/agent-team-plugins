@@ -2,7 +2,8 @@
 # Debate answers are distinct from CLI diagnostics. Source registry.sh first.
 # Native final capture is authoritative; stdout-only adapters must emit only
 # answer text on stdout. RAW_LOG, when supplied, is a fresh private debug log.
-# Return the CLI's failure first, else 5 for no answer or 6 for capture I/O.
+# Return 3 when the model's capture mode cannot be read (nothing is started),
+# else the CLI's failure, else 5 for no answer or 6 for capture I/O.
 #
 # The native path runs the CLI itself rather than calling registry_run_answer,
 # and the reason is the model's own exit status. The library reports "the model

@@ -128,30 +128,34 @@ class PredicateTests(LibraryFixture):
 
 class RegistryRunTests(LibraryFixture):
     def test_registry_run_starts_nothing(self):
-        for shell in SHELLS:
-            for plugin in REGISTRY_COPIES:
-                with self.subTest(shell=shell, plugin=plugin):
-                    self.marker.unlink(missing_ok=True)
-                    self.inject("final_args")
-                    r = self.lib(shell, plugin, f'registry_run codex P {shlex.quote(str(self.root / "final"))}; echo "rc=$?"')
-                    self.assertEqual(self.hits(), 1)
-                    self.assertEqual(r.stdout, "rc=3\n")
-                    self.assertFalse(self.marker.exists(), "the CLI was started")
+        for noisy in (False, True):
+            for shell in SHELLS:
+                for plugin in REGISTRY_COPIES:
+                    with self.subTest(shell=shell, plugin=plugin, noisy=noisy):
+                        self.marker.unlink(missing_ok=True)
+                        self.inject("final_args", noisy=noisy)
+                        r = self.lib(shell, plugin, f'registry_run codex P {shlex.quote(str(self.root / "final"))}; echo "rc=$?"')
+                        self.assertEqual(self.hits(), 1)
+                        self.assertEqual(r.stdout, "rc=3\n")
+                        self.assertFalse(self.marker.exists(), "the CLI was started")
+                        self.assertEqual(r.stderr, "registry: cannot read the final_args of model 'codex'\n")
 
     def test_registry_run_answer_keeps_a_native_answer_it_cannot_classify(self):
         # 1st read: registry_run picks final_args, the CLI writes final-bytes.
         # 2nd read: after the CLI exited 0, the answer's location is unreadable.
-        for shell in SHELLS:
-            for plugin in REGISTRY_COPIES:
-                with self.subTest(shell=shell, plugin=plugin):
-                    answer = self.root / "answer"
-                    answer.unlink(missing_ok=True)
-                    self.inject("final_args", n=2)
-                    r = self.lib(shell, plugin, f'registry_run_answer codex P {shlex.quote(str(answer))}; echo "rc=$?"')
-                    self.assertEqual(self.hits(), 2)
-                    self.assertEqual(r.stdout.splitlines()[-1], "rc=6")
-                    self.assertEqual(answer.read_text(), "final-bytes")
-                    self.assertIn("registry_run_answer: cannot tell where model 'codex' left its answer\n", r.stderr)
+        for noisy in (False, True):
+            for shell in SHELLS:
+                for plugin in REGISTRY_COPIES:
+                    with self.subTest(shell=shell, plugin=plugin, noisy=noisy):
+                        answer = self.root / "answer"
+                        answer.unlink(missing_ok=True)
+                        self.inject("final_args", n=2, noisy=noisy)
+                        r = self.lib(shell, plugin, f'registry_run_answer codex P {shlex.quote(str(answer))}; echo "rc=$?"')
+                        self.assertEqual(self.hits(), 2)
+                        self.assertEqual(r.stdout, "streamed-answer\nrc=6\n")
+                        self.assertEqual(answer.read_text(), "final-bytes")
+                        self.assertEqual(r.stderr, "registry: cannot read the final_args of model 'codex'\n"
+                                         "registry_run_answer: cannot tell where model 'codex' left its answer\n")
 
 
 class StageTests(LibraryFixture):
@@ -255,13 +259,14 @@ class ReviewerWrapperTests(unittest.TestCase):
         r = self.run_cli("ask-reviewer.sh", "--summary", "--model", "plain", "q", STUB_NO_FINAL="1")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout)["result"]["status"], "ok")
-        # A native final the CLI did write still parses when the read fails.
+        # A native final the CLI did write needs no capture-mode read after the
+        # run: the fallback is only considered for an empty final.
         self.config.write_text('{"models":{},"roles":{}}')
-        for p in self.logdir().iterdir():
-            if p.is_file() or p.is_symlink():
-                p.unlink()
+        self.calls.unlink()
         self.shim("final_args", n=1, after=self.calls)
         r = self.run_cli("ask-reviewer.sh", "--summary", "q")
+        self.assertEqual(self.hits(), 0)
+        self.assertIn(["exec"], [c[:1] for c in self.recorded()])
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout)["result"]["status"], "ok")
 
