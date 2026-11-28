@@ -916,13 +916,13 @@ fi
 # — a transcript with no header at all — go through the same path.
 # The capture mode is read again here, after the run: a status variable set
 # before dispatch could shadow an env_command override. Unreadable means no
-# synthesized final; the run ends like a missing native final (#296).
-if [ ! -s "$FINAL" ] && [ -n "$TRANSCRIPT_OFFSET" ] && [ -n "$TRANSCRIPT_END" ]; then
-  if registry_has_final "$REVIEWER_MODEL"; then
-    :
-  else
-    case $? in
-    1)
+# synthesized final, and is reported even when the CLI wrote one (#296).
+if registry_has_final "$REVIEWER_MODEL"; then
+  :
+else
+  case $? in
+  1)
+    if [ ! -s "$FINAL" ] && [ -n "$TRANSCRIPT_OFFSET" ] && [ -n "$TRANSCRIPT_END" ]; then
       TRANSCRIPT_MARKER='=== RESPONSE ==='
       if TRANSCRIPT_SNAP="$(mktemp "$LOG_DIR/ask-reviewer-transcript.XXXXXX")"; then
         { printf '%s\n' "$TRANSCRIPT_MARKER"; transcript_range; } > "$TRANSCRIPT_SNAP" 2>/dev/null || true
@@ -939,12 +939,12 @@ if [ ! -s "$FINAL" ] && [ -n "$TRANSCRIPT_OFFSET" ] && [ -n "$TRANSCRIPT_END" ];
         rm -f "$TRANSCRIPT_SNAP" || true
         TRANSCRIPT_SNAP=""
       fi
-      ;;
-    *)
-      echo "[ask-reviewer] the capture mode of $REVIEWER_MODEL could not be read; no review was synthesized" >&2
-      ;;
-    esac
-  fi
+    fi
+    ;;
+  *)
+    echo "[ask-reviewer] the capture mode of $REVIEWER_MODEL could not be read; no review is synthesized from the transcript" >&2
+    ;;
+  esac
 fi
 INVOCATION_RC="$RC"
 # --summary: what this run prints on stdout instead of the transcript replay,

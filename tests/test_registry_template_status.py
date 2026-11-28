@@ -246,7 +246,7 @@ class ReviewerWrapperTests(unittest.TestCase):
         self.assertEqual(r.returncode, 3, r.stderr)
         self.assertEqual(r.stderr.count("registry: cannot read the final_args of model 'codex'\n"), 1)
         self.assertNotIn(INJECTED, r.stderr)
-        self.assertIn("[ask-reviewer] the capture mode of codex could not be read; no review was synthesized\n", r.stderr)
+        self.assertIn("[ask-reviewer] the capture mode of codex could not be read; no review is synthesized from the transcript\n", r.stderr)
         summary = json.loads(r.stdout)
         self.assertEqual(summary["result"]["status"], "parse-failed")
         self.assertEqual(summary["result"]["invocation_rc"], 0)
@@ -261,16 +261,16 @@ class ReviewerWrapperTests(unittest.TestCase):
         r = self.run_cli("ask-reviewer.sh", "--summary", "--model", "plain", "q", STUB_NO_FINAL="1")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout)["result"]["status"], "ok")
-        # A native final the CLI did write needs no capture-mode read after the
-        # run: the fallback is only considered for an empty final.
+        # A native final the CLI did write still parses when the post-run read
+        # fails, and the failure is still reported.
         self.config.write_text('{"models":{},"roles":{}}')
         self.calls.unlink()
         self.shim("final_args", n=1, after=self.calls)
         r = self.run_cli("ask-reviewer.sh", "--summary", "q")
-        self.assertEqual(self.hits(), 0)
-        self.assertIn(["exec"], [c[:1] for c in self.recorded()])
+        self.assertEqual(self.hits(), 1)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout)["result"]["status"], "ok")
+        self.assertEqual(r.stderr.count("registry: cannot read the final_args of model 'codex'\n"), 1)
 
     def test_run_metadata_records_an_unknown_final_source(self):
         # The first final_args read is run_begin_metadata's.
