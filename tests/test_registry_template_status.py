@@ -172,6 +172,18 @@ class StageTests(LibraryFixture):
                     self.assertFalse(self.marker.exists(), "the CLI was started")
                     self.assertEqual(r.stderr, "registry: cannot read the final_args of model 'codex'\n")
 
+    def test_trio_stage_still_runs_a_stdout_model(self):
+        # Control: agy has no final_args, so a readable rc 1 takes the stdout path.
+        self.inject("final_args", n=99)
+        for shell in SHELLS:
+            for plugin in ("ralph-trio", "spec-trio"):
+                with self.subTest(shell=shell, plugin=plugin):
+                    self.marker.unlink(missing_ok=True)
+                    r = self.lib(shell, plugin, f'echo P | trio_stage_model agy {shlex.quote(str(self.root / "final"))}; echo "rc=$?"',
+                                 extra=("model-stage.sh",), PLUGIN_ROOT=str(ROOT / plugin))
+                    self.assertEqual(r.stdout, "streamed-answer\nrc=0\n", r.stderr)
+                    self.assertTrue(self.marker.exists(), "the CLI was not started")
+
     def test_debate_answer_starts_nothing(self):
         for shell in SHELLS:
             with self.subTest(shell=shell):
@@ -184,7 +196,9 @@ class StageTests(LibraryFixture):
                 self.assertEqual(self.hits(), 1)
                 self.assertEqual(r.stdout, "rc=3\n")
                 self.assertFalse(self.marker.exists(), "the CLI was started")
-                self.assertIn("registry: cannot read the final_args of model 'codex'", raw.read_text())
+                diag = "registry: cannot read the final_args of model 'codex'\n"
+                self.assertEqual(raw.read_text().count(diag), 1)
+                self.assertNotIn(diag, r.stderr)
                 self.assertIn("debate-answer: model 'codex' failed (rc=3;", r.stderr)
 
 
