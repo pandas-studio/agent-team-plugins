@@ -85,7 +85,7 @@ debate_receipt_write() {
 # expected to carry the replacement character, and failing closed on one costs
 # nothing.
 debate_receipt_read() {
-  local receipt="$1" data dir file round
+  local receipt="$1" data dir file round last
   [ -f "$receipt" ] || return 1
   # Reject malformed UTF-8 in the file as a whole, before jq can paper over it.
   # iconv ships with glibc and with macOS; when it is absent the U+FFFD rule
@@ -133,7 +133,9 @@ debate_receipt_read() {
     [ -L "$dir/$file" ] && return 1
     [ -f "$dir/$file" ] || return 1
     [ -r "$dir/$file" ] || return 1
-    [ "$round" -le "$(printf '%s\n' "$data" | jq -r '.last_round')" ] || return 1
+    # Captured first: a read that prints a value and then fails must not pass.
+    last="$(printf '%s\n' "$data" | jq -r '.last_round' 2>/dev/null)" || return 1
+    [ "$round" -le "$last" ] || return 1
   fi
   printf '%s\n' "$data"
 }
