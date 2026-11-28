@@ -12,8 +12,8 @@ start a fresh debate from this skill.
 Read the [shared viewing/dispatch contract](../../lib/view-workflow.md).
 Consume `--view=auto|tmux|none`, `--open-view` and optional `--terminal=…`.
 Prefer the last validated receipt in this workspace task; otherwise use the
-saved normalized base, or discovery-only `'<plugin-root>/bin/team-3pane.sh' --view=none`,
-then find `<absolute-log-base>/*/latest-debate`, including custom roots. Ask
+saved normalized base, or get the base from a discovery-only
+`'<plugin-root>/bin/team-3pane.sh' --view=none` call; then find `<absolute-log-base>/*/latest-debate`, including custom roots. Ask
 which team only for multiple candidates. No match means run a debate first.
 Prepare with explicit `--team`/`--log-base` derived from the chosen directory
 (nonstandard parent: manual `--log-dir`). Use absolute plugin helper paths.
