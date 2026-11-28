@@ -19,7 +19,7 @@ context_ids=$(jq -cn --arg command "$command" \
 transcript=$(jq -r '.transcript_path // ""' <<<"$input") || exit 0
 if [[ -f $transcript && ! -L $transcript && -r $transcript ]]; then
   if result=$(jq -ncR --argjson ids "$context_ids" -f "$ROOT/lib/view-message.jq" "$transcript") &&
-      [[ $(jq -r 'type' <<<"$result") == object ]]; then
+      result_type=$(jq -r 'type' <<<"$result" 2>/dev/null) && [[ $result_type == object ]]; then
     # No permissionDecision: the normal host permission checks still apply.
     # A failed read is no notice: print nothing rather than an empty one, and
     # exit 0 rather than letting errexit fail the hook.

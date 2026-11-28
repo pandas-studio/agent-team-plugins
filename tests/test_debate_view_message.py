@@ -115,7 +115,8 @@ class ViewMessageTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory(prefix='view message jq ')
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
-        for query, modes in (('.user_message', ('empty', 'output')),
+        for query, modes in (('type', ('empty', 'output')),
+                             ('.user_message', ('empty', 'output')),
                              ('{systemMessage:$message}', ('empty', 'output'))):
             for mode in modes:
                 for noisy in (False, True):
