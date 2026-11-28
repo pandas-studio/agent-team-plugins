@@ -1061,6 +1061,101 @@ rmdir "$oob2_log"
 mv "$oob2_log.saved" "$oob2_log"
 fixture 'SHIP — leaked descendant'
 
+# #258: no variable inherited from the caller names a file for the EXIT cleanup.
+# A caller's environment can hold any name the cleanup reads, and a model's
+# env_command can name any variable, so two things are pinned: a caller's file
+# under such a name survives each way of ending a run tried here, and dispatch
+# still reads an env_command name as the caller set it (initializing the old
+# names would have cleared it).
+# The env_command guards come first and pass on the unchanged wrapper, so a
+# baseline run that fails afterwards fails on a preservation check, not on setup.
+mkdir -p "$TMP/own258"
+fixture 'SHIP — env_command override'
+for own258_name in RESULT_TMP TRANSCRIPT_TMP FROZEN_TRANSCRIPT TRANSCRIPT_SNAP; do
+  rm -f "$TMP/own258/ran-override" "$TMP/own258/ran-fallback"
+  # Written afresh for each name: the override path is itself what the variable
+  # names, and the wrapper under test may remove it.
+  for own258_role in override fallback; do
+    cat > "$TMP/own258/$own258_role" <<STUB
+#!/usr/bin/env bash
+cat > /dev/null
+: > "$TMP/own258/ran-$own258_role"
+cat "$TMP/review.md"
+STUB
+    chmod +x "$TMP/own258/$own258_role"
+  done
+  printf '{"models":{"own258":{"command":"%s","env_command":"%s","prompt_via":"stdin","args":[]}}}\n' \
+    "$TMP/own258/fallback" "$own258_name" > "$TMP/own258/models.json"
+  own258_rc=0
+  invoke AGENT_TEAM_MODELS_CONFIG="$TMP/own258/models.json" DEV_TRIO_REVIEWER_MODEL=own258 \
+    "$own258_name=$TMP/own258/override" > "$TMP/own258/guard.out" 2> "$TMP/wrapper.err" || own258_rc=$?
+  check "an env_command named $own258_name still selects its override (rc $own258_rc)" test "$own258_rc" -eq 0
+  check "an env_command named $own258_name runs the override" test -e "$TMP/own258/ran-override"
+  check "an env_command named $own258_name does not run the fallback" test ! -e "$TMP/own258/ran-fallback"
+done
+fixture 'SHIP — caller files kept'
+OWN258_NAMES='RESULT_TMP LATEST_TMP TRANSCRIPT_TMP FROZEN_TRANSCRIPT TRANSCRIPT_SNAP OWN_RESULT_TMP OWN_TRANSCRIPT_TMP OWN_FROZEN_TRANSCRIPT OWN_TRANSCRIPT_SNAP'
+own258_seed() {
+  rm -rf "$TMP/own258/files"
+  mkdir "$TMP/own258/files"
+  OWN258_ENV=()
+  for own258_name in $OWN258_NAMES; do
+    printf 'caller\n' > "$TMP/own258/files/$own258_name"
+    OWN258_ENV+=("$own258_name=$TMP/own258/files/$own258_name")
+  done
+  printf 'caller\n' > "$TMP/own258/files/RESULT_TMP.denied"
+  printf 'caller\n' > "$TMP/own258/files/OWN_RESULT_TMP.denied"
+}
+own258_kept() {
+  local own258_file
+  for own258_file in $OWN258_NAMES RESULT_TMP.denied OWN_RESULT_TMP.denied; do
+    check "#258 a caller's $own258_file survives $1" grep -qx caller "$TMP/own258/files/$own258_file"
+  done
+}
+# The directory the caller's files sit in, matched literally in a stderr file.
+# Only grep's "no match" passes: a missing file or a read error is not "names no
+# caller file".
+own258_unnamed() {
+  local own258_grep_rc=0
+  [ -f "$1" ] || return 1
+  grep -qF -- "$TMP/own258/files" "$1" || own258_grep_rc=$?
+  [ "$own258_grep_rc" -eq 1 ]
+}
+
+# TERM while the model call runs.
+own258_seed
+interrupt_review TERM "${OWN258_ENV[@]}"
+check '258 setup: the stub was running when signalled' test "$interrupted_ready" -eq 1
+check '258 setup: the run exits on the signal' test "$interrupted_rc" -eq 143
+own258_kept 'a signal during the model call'
+check '#258 stderr names no caller file after a signal' own258_unnamed "$TMP/interrupted.err"
+
+# A run that completes, on a native-final model and on one whose final is
+# synthesized from the transcript.
+for own258_model in codex claude; do
+  own258_seed
+  own258_rc=0
+  invoke "${OWN258_ENV[@]}" DEV_TRIO_REVIEWER_MODEL="$own258_model" \
+    > "$TMP/own258/done.out" 2> "$TMP/wrapper.err" || own258_rc=$?
+  check "258 setup: a $own258_model run completes" test "$own258_rc" -eq 0
+  own258_kept "a completed $own258_model run"
+done
+
+# A run that ends in manifest_init, before the first latest-* link is made.
+mkdir "$TMP/own258/mktemp-shim"
+printf '#!/bin/sh\ncase "$*" in *".manifest.json.tmp."*) exit 1 ;; esac\nexec %s "$@"\n' \
+  "$(command -v mktemp)" > "$TMP/own258/mktemp-shim/mktemp"
+chmod +x "$TMP/own258/mktemp-shim/mktemp"
+own258_seed
+own258_rc=0
+invoke "${OWN258_ENV[@]}" PATH="$TMP/own258/mktemp-shim:$PATH" DEV_TRIO_LOG_DIR="$TMP/own258/log" \
+  > "$TMP/own258/early.out" 2> "$TMP/wrapper.err" || own258_rc=$?
+check '258 setup: the run fails' test "$own258_rc" -ne 0
+check '258 setup: it fails in manifest_init' grep -q 'manifest_init: cannot create' "$TMP/wrapper.err"
+own258_kept 'a run that ends in manifest_init'
+check '#258 stderr names no caller file after an early failure' own258_unnamed "$TMP/wrapper.err"
+fixture 'SHIP — leaked descendant'
+
 # An ordinary run pays nothing for the bound — the failure mode the first
 # attempt at this issue shipped with.
 fixture 'SHIP — ordinary run'

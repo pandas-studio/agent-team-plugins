@@ -182,7 +182,9 @@ run_cleanup() {
   manifest_cleanup || true
 }
 
-# run_install_traps — aborting. RUNSTATE_LOG must be set (empty) first.
+# run_install_traps — aborting. RUNSTATE_LOG, and every variable the caller's
+# run_cleanup_files reads, must be set first: one not yet set holds whatever the
+# caller's environment had under that name, and the cleanup would remove it.
 run_install_traps() {
   trap run_cleanup EXIT
   trap 'exit 130' INT
