@@ -38,9 +38,9 @@ Everything between the tags is the argument string the user typed. It may be emp
 - **No matches** → tell the user: "No prior debate found in this workspace. Run `/debate-conductor:run` first."
 
 Use the selected absolute directory. For a normal `<base>/<team>/debate-*`,
-prepare with both `--team=<team>` and `--log-base=<absolute-base>`. The runner
+prepare with both `--team='<team>'` and `--log-base='<absolute-base>'`. The runner
 resolves the selected path physically once and checks its parent against the
-prepared context. Nonstandard parents use manual `--log-dir=<absolute-parent>`
+prepared context. Nonstandard parents use manual `--log-dir='<absolute-parent>'`
 context as described in the shared contract; strict tmux refuses that case.
 
 ## 2 · Resolve the topic
@@ -71,8 +71,11 @@ this invocation passes explicit model flags/env vars. Start a fresh debate to
 change model pairs inside rotation or to change whether rotation is enabled.
 
 ```
-run-debate.sh --host=claude --context '<context_file>' --continue-from '<absolute-debate-dir>' -- -n <EXTRA> "<topic>"
+run-debate.sh --host=claude --context '<context_file>' --continue-from '<absolute-debate-dir>' -- -n '<EXTRA>' '<topic>'
 ```
+
+The topic and every other substituted value is one single-quoted word, and a
+`'` inside it is written `'\''`; never double quotes.
 
 Only say the current panes are ready for `present`; detached/manual states
 need their actual connection/tail instructions. Use a host timeout or

@@ -12,8 +12,8 @@ start a fresh debate from this skill.
 Read the [shared viewing/dispatch contract](../../lib/view-workflow.md).
 Consume `--view=auto|tmux|none`, `--open-view` and optional `--terminal=…`.
 Prefer the last validated receipt in this workspace task; otherwise use the
-saved normalized base, or discovery-only absolute `team-3pane.sh --view=none`,
-then find `<absolute-log-base>/*/latest-debate`, including custom roots. Ask
+saved normalized base, or get the base from a discovery-only
+`'<plugin-root>/bin/team-3pane.sh' --view=none` call; then find `<absolute-log-base>/*/latest-debate`, including custom roots. Ask
 which team only for multiple candidates. No match means run a debate first.
 Prepare with explicit `--team`/`--log-base` derived from the chosen directory
 (nonstandard parent: manual `--log-dir`). Use absolute plugin helper paths.
@@ -27,8 +27,12 @@ optional opener step if requested.
 Read `<debate-dir>/topic.txt` and run:
 
 ```bash
-"<plugin-root>/bin/run-debate.sh" --host=agy --context '<context_file>' --continue-from "<debate-dir>" -- -n <extra-rounds> "<topic>"
+'<plugin-root>/bin/run-debate.sh' --host=agy --context '<context_file>' --continue-from '<debate-dir>' -- -n '<extra-rounds>' '<topic>'
 ```
+
+Each substituted value, the topic read from `topic.txt` and the resolved path included, is one single-quoted
+word, and a `'` inside it is written `'\''` (the quoting rule in the
+[shared contract](../../lib/view-workflow.md)).
 
 Follow [the run skill's host permission rules](../run/SKILL.md#host-permissions).
 A denied command or unverified Claude login is incomplete. A continued debate
@@ -42,7 +46,7 @@ at round 1 and reuses the round-1 context saved in `context.md`. `debate.sh`
 persists and reuses the transcript's model pair and any saved rotation unless
 this invocation supplies explicit model flags/env vars. Start a fresh debate to
 change model pairs inside rotation or to change whether rotation is enabled.
-After exit 0 run the absolute `run-debate.sh --read-receipt --context
+After exit 0 run `'<plugin-root>/bin/run-debate.sh' --read-receipt --context
 '<context_file>'`; missing/invalid receipt means incomplete. Use only its
 validated `debate_dir` (never stdout/latest) and read all round files there to
 summarize the latest verdict plus only the new shifts introduced by the appended
@@ -59,6 +63,6 @@ absent from the ledger, or nonempty transcripts beyond the next retry round.
 Report the refusal and start a fresh debate if requested. Do not migrate, delete
 sidecars, or fabricate ledger records.
 
-For **"뷰 열어줘" directly call the absolute `open-view.sh --context
+For **"뷰 열어줘" directly call `'<plugin-root>/bin/open-view.sh' --context
 '<saved-file>'`** under the shared standing contract. Never implicitly invoke
 bootstrap or dispatch another debate. Use normal host permissions on new turns.

@@ -5,6 +5,17 @@ Read this for `run`, `continue`, or explicit `bootstrap`. Claude uses bare
 absolute `<plugin-root>/bin/…` paths. No leading shell environment assignments,
 `eval`, raw model CLIs, or implicit invocation of another skill are needed.
 
+**Quoting rule:** when you write a command as shell text, every substituted
+value — the resolved `<plugin-root>/bin/…` path, and each value from the
+user's request, a file you read or a helper's JSON (topic, debate directory,
+team, log base, `context_file`, model ids, round count) — is one
+single-quoted word, and a `'` inside it is written `'\''`. Never double
+quotes: inside `"..."` the shell still runs `$(...)` and backticks and
+expands `$VAR`. A `--flag=<value>` form quotes the value after the `=`
+(`--gen='<model>'`). In a synopsis, `[...]` marks an optional part: drop the
+brackets; each flag is its own word, and a present context file is one more
+quoted word.
+
 Claude run/continue register a narrow `PreToolUse` announcement hook. Claude
 keeps skill hooks for the session; this hook ignores other commands and receipt
 reads. Before runner dispatch it also displays the latest helper's instructions
@@ -27,18 +38,18 @@ rounds before preparing a view. Bootstrap is view-only and needs no topic.
 For a new debate:
 
 ```sh
-team-3pane.sh --view=auto
+team-3pane.sh --view='<mode>'
 ```
 
-Replace the mode with the selected value. Add `--view-only` for `--open-view`
+`<mode>` is the selected value (`auto` by default). Add `--view-only` for `--open-view`
 so the separate terminal will contain two viewers and no PM pane. Read the
 returned JSON; retain its **exact `context_file` path**, never retype its JSON.
 
 For a continuation, first resolve the chosen debate physically. Its parent is
 the selection/log directory. For normal `<base>/<team>/debate-*`, pass both
-`--team=<team>` and `--log-base=<absolute-base>` to this same preparation call.
+`--team='<team>'` and `--log-base='<absolute-base>'` to this same preparation call.
 For a nonstandard parent that is not a valid team namespace, use
-`--log-dir=<absolute-parent>`: auto/none return manual tails; strict tmux refuses.
+`--log-dir='<absolute-parent>'`: auto/none return manual tails; strict tmux refuses.
 Never construct a different namespace from the PM's current tmux window.
 
 `auto` can fall back to manual tails; `tmux` requires a ready view and exits 2
@@ -53,10 +64,10 @@ stops. Do not repeatedly probe tmux or start a model before this is resolved.
 Only if `--open-view` was requested and status is `ready-detached`, call:
 
 ```sh
-open-view.sh --context '<exact context_file>' --terminal=auto
+open-view.sh --context '<exact context_file>' --terminal='<terminal>'
 ```
 
-Use the chosen terminal. Local macOS supports Ghostty >=1.3 and Terminal.app;
+`<terminal>` is the chosen terminal (`auto` by default). Local macOS supports Ghostty >=1.3 and Terminal.app;
 other/SSH hosts return instructions. Allow at least 180 seconds for this tool
 call (or background it and poll), so
 native Automation consent/Apple Event timeout can finish before the host timeout.
@@ -133,7 +144,7 @@ Private context/receipt artifacts remain until OS temp cleanup for follow-ups.
 
 ## Standing instruction: a later “뷰 열어줘”
 
-**Directly call `open-view.sh --context <saved-file>`; do not invoke bootstrap
+**Directly call `open-view.sh --context '<saved-file>'`; do not invoke bootstrap
 implicitly and do not run a debate.** If the saved context is `present` or
 `manual`, or a
 detached view has gone away, prepare with `--view=auto --view-only` using the

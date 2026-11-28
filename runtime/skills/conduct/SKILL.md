@@ -40,8 +40,8 @@ coder changes outside it fails the gate.
 ```bash
 uv run --project "${CLAUDE_PLUGIN_ROOT}" agent-team-graph run \
   --project-id demo --workspace . --spec SPEC.md \
-  --task "implement the first vertical slice" \
-  --test-command "pytest -q" \
+  --task 'implement the first vertical slice' \
+  --test-command 'pytest -q' \
   --allow-path src --allow-path tests \
   --exclude-path .reviewer-cache
 ```
@@ -55,17 +55,20 @@ outputs are reused. This does not bound retries or billing inside a model CLI.
 `--role-timeout` (per role call) and `--gate-timeout` (per test run) take seconds, default
 900, range 1–86400. They are stored with the run, so `resume` keeps them.
 
+Each value you substitute (task text, paths, `<id>`, the digest) is one
+single-quoted word, and a `'` inside it is written `'\''`; never double quotes.
+
 The command prints a JSON view containing the `thread_id`. Keep it — every
 other subcommand takes it.
 
 ## Inspect, resume, approve
 
 ```bash
-uv run --project "${CLAUDE_PLUGIN_ROOT}" agent-team-graph status  --thread-id <id>
-uv run --project "${CLAUDE_PLUGIN_ROOT}" agent-team-graph resume  --thread-id <id>   # continue after a crash
-uv run --project "${CLAUDE_PLUGIN_ROOT}" agent-team-graph approve --thread-id <id> --decision approve \
-  --reviewed-digest <reviewed_change_sha256 from status>
-uv run --project "${CLAUDE_PLUGIN_ROOT}" agent-team-graph approve --thread-id <id> --decision reject
+uv run --project "${CLAUDE_PLUGIN_ROOT}" agent-team-graph status  --thread-id '<id>'
+uv run --project "${CLAUDE_PLUGIN_ROOT}" agent-team-graph resume  --thread-id '<id>'   # continue after a crash
+uv run --project "${CLAUDE_PLUGIN_ROOT}" agent-team-graph approve --thread-id '<id>' --decision approve \
+  --reviewed-digest '<reviewed_change_sha256 from status>'
+uv run --project "${CLAUDE_PLUGIN_ROOT}" agent-team-graph approve --thread-id '<id>' --decision reject
 ```
 
 Approving requires the `reviewed_change_sha256` you showed the user, from `status`. A

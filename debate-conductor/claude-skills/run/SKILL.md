@@ -30,8 +30,8 @@ Everything between the tags is the argument string the user typed. It may be emp
 Strip any explicit CLI flags or natural-language role/model assignments from the argument string before resolving the topic string:
 
 - **Role / model assignment** (`agy` / `antigravity`, `claude`, `codex`, `kimi-code` / `kimi`, or any registered model id):
-  - Flags: `--primary-gen=<model>` (or `--gen=<model>`), `--primary-crit=<model>` (or `--crit=<model>`).
-  - Natural-language labels in the prompt (e.g. `gen=claude crit=codex`, `Generator: agy, Critic: kimi`, `claude vs codex로`): translate them into `--primary-gen=<model>` and/or `--primary-crit=<model>` flags on `debate.sh` and strip them from the topic text.
+  - Flags: `--primary-gen='<model>'` (or `--gen='<model>'`), `--primary-crit='<model>'` (or `--crit='<model>'`).
+  - Natural-language labels in the prompt (e.g. `gen=claude crit=codex`, `Generator: agy, Critic: kimi`, `claude vs codex로`): translate them into `--primary-gen='<model>'` and/or `--primary-crit='<model>'` flags on `debate.sh` and strip them from the topic text.
   - Defaults (when not specified): Generator = `agy`, Critic = `codex` (or `agy` if Generator is `codex`). Generator and Critic must differ.
 - **Mode & round flags**:
   - `--rotate` (or "rotate ON"): alternate Generator and Critic models every two rounds.
@@ -62,7 +62,7 @@ Strip any explicit CLI flags or natural-language role/model assignments from the
 - **Rounds**: Default 4 (or cap 6 with `--until-converged`). Honour explicit `-n` or trailing integer. Ask the user only when the count is non-default and ambiguous.
 - **Repository context (`<topic>` + optional `context-file.md`)**: Generator and Critic run in **non-interactive headless mode**, where arbitrary shell search commands (`rg`, `find`, `grep`, compound commands) are auto-denied and abort the round.
   - If the topic is a general/self-contained question (e.g. `"FastAPI vs Django"`, `"찍먹 vs 부먹"`), pass it directly.
-  - If the topic references **repository-internal entities** (e.g. `"Track 4"`, local roadmap/spec docs, module names, or current codebase constraints) that are not self-contained in the user's message, use `Glob` / `Grep` / `Read` to gather the relevant facts first. Put the **essential repository facts and constraints directly into the `<topic>` string** (because every round — both Generator and Critic — receives `Topic: $TOPIC`), and optionally pass a `[context-file.md]` (`--context=<file>`, written under `.debate-conductor/log/` or `$TMPDIR`) when Round 1's Generator needs longer supporting material (note: only Round 1's Generator reads `context-file.md`).
+  - If the topic references **repository-internal entities** (e.g. `"Track 4"`, local roadmap/spec docs, module names, or current codebase constraints) that are not self-contained in the user's message, use `Glob` / `Grep` / `Read` to gather the relevant facts first. Put the **essential repository facts and constraints directly into the `<topic>` string** (because every round — both Generator and Critic — receives `Topic: $TOPIC`), and optionally pass a `[context-file.md]` (`--context='<file>'`, written under `.debate-conductor/log/` or `$TMPDIR`) when Round 1's Generator needs longer supporting material (note: only Round 1's Generator reads `context-file.md`).
 
 ## 3 · Run the debate
 
@@ -84,26 +84,29 @@ short run.
 
 For a **topics/ reference**:
 ```
-run-debate.sh --host=claude --context '<context_file>' -- -n <ROUNDS> [model/mode flags] "<read topic-file content as one argument>" [context-file.md]
+run-debate.sh --host=claude --context '<context_file>' -- -n '<ROUNDS>' [model/mode flags] '<read topic-file content as one argument>' ['<context-file.md>']
 ```
 
 For a **free-form topic**:
 ```
-run-debate.sh --host=claude --context '<context_file>' -- -n <ROUNDS> [model/mode flags] "<the user's topic text, verbatim>" [context-file.md]
+run-debate.sh --host=claude --context '<context_file>' -- -n '<ROUNDS>' [model/mode flags] '<the user'\''s topic text, verbatim>' ['<context-file.md>']
 ```
 
-Pass the topic as one argument. Only `present` permits saying the current
+Pass the topic as one argument: one single-quoted word, with a `'` inside it
+written `'\''`; so is every other substituted value (`context_file`, model ids,
+the round count, a context file). Never double quotes: inside `"..."` the
+shell still runs `$(...)` and backticks and expands `$VAR`. Only `present` permits saying the current
 panes are ready. `ready-detached` needs the emitted attach command in another
 terminal; a background session alone is not visible. `manual` needs both tail
 commands. Do not paste full transcripts into chat.
 
-For role rotation experiments, add `--rotate` (model alternates each pair of rounds). For non-default model assignments, pass `--primary-gen=<model>` (`--gen=<model>`) and/or `--primary-crit=<model>` (`--crit=<model>`).
+For role rotation experiments, add `--rotate` (model alternates each pair of rounds). For non-default model assignments, pass `--primary-gen='<model>'` (`--gen='<model>'`) and/or `--primary-crit='<model>'` (`--crit='<model>'`).
 
 **Run until the debate converges** instead of a fixed count: add `--until-converged`. The debate then stops as soon as a Critic round returns `Verdict: STRENGTHEN`, and `-n` becomes the upper bound (a hard cap; default cap 6 if `-n` is omitted). Use this when the user asks to debate "합의/수렴할 때까지", "until they agree", or "keep going until the critic is satisfied". Reach for it instead of guessing a round count:
 
 ```
-run-debate.sh --host=claude --context '<context_file>' -- --until-converged "<topic>" [context-file.md]       # cap 6
-run-debate.sh --host=claude --context '<context_file>' -- --until-converged -n 8 "<topic>" [context-file.md]  # cap 8
+run-debate.sh --host=claude --context '<context_file>' -- --until-converged '<topic>' ['<context-file.md>']       # cap 6
+run-debate.sh --host=claude --context '<context_file>' -- --until-converged -n 8 '<topic>' ['<context-file.md>']  # cap 8
 ```
 
 A converged run prints `✓ Converged at round N`; hitting the cap without a STRENGTHEN prints a `⚠ Reached round cap` alert — surface whichever fired when you summarise.
