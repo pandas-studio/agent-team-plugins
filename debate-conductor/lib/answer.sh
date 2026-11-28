@@ -36,7 +36,8 @@ debate_run_answer() (
     exec 9>/dev/null || exit 6
   fi
 
-  if registry_has_final "$model"; then
+  # rc 3 when the capture mode cannot be read: nothing is started (#296).
+  if registry_has_final "$model" 2>&9; then
     capture_dir="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/debate-answer.XXXXXX" 2>&9)" || {
       echo 'debate-answer: cannot create final-answer capture' >&2
       exit 6
@@ -61,20 +62,25 @@ debate_run_answer() (
         esac
       fi
     fi
-  elif [ -n "$raw_log" ]; then
-    registry_run_answer "$model" "$prompt" 2>&9 | tee -a "$raw_log"
-    statuses=("${PIPESTATUS[@]}")
-    rc=${statuses[0]}
-    if [ "$rc" -eq 0 ] && [ "${statuses[1]}" -ne 0 ]; then rc=6; fi
   else
-    registry_run_answer "$model" "$prompt" 2>&9
-    rc=$?
+    case $? in 1) ;; *) rc=3 ;; esac
+    if [ "$rc" -ne 0 ]; then
+      :
+    elif [ -n "$raw_log" ]; then
+      registry_run_answer "$model" "$prompt" 2>&9 | tee -a "$raw_log"
+      statuses=("${PIPESTATUS[@]}")
+      rc=${statuses[0]}
+      if [ "$rc" -eq 0 ] && [ "${statuses[1]}" -ne 0 ]; then rc=6; fi
+    else
+      registry_run_answer "$model" "$prompt" 2>&9
+      rc=$?
+    fi
   fi
 
   if [ "$rc" -ne 0 ]; then
     # The registry's own reason goes to the raw diagnostics, so name rc 3 here:
     # an argv model given a prompt one Linux argument cannot hold is one (#102).
-    echo "debate-answer: model '$model' failed (rc=$rc; 3=not started: unknown model, bad template, or a prompt too large for one argument; 5=no answer; 6=capture failure)" >&2
+    echo "debate-answer: model '$model' failed (rc=$rc; 3=not started: unknown model, bad or unreadable template, or a prompt too large for one argument; 5=no answer; 6=capture failure)" >&2
     if [ -n "$raw_log" ]; then
       echo "debate-answer: raw diagnostics: $raw_log" >&2
     else

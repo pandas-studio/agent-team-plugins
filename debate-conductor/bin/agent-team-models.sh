@@ -134,7 +134,10 @@ cmd_list() {
     if registry_has_final "$id"; then
       printf '  %-16s %-9s binary=%-10s (native final-capture)\n' "$id" "[$origin]" "$cmd"
     else
-      printf '  %-16s %-9s binary=%s\n' "$id" "[$origin]" "$cmd"
+      case "$?" in
+        1) printf '  %-16s %-9s binary=%s\n' "$id" "[$origin]" "$cmd" ;;
+        *) printf '  %-16s %-9s binary=%-10s (final-capture=?)\n' "$id" "[$origin]" "$cmd" ;;
+      esac
     fi
   done
   echo

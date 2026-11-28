@@ -270,6 +270,9 @@ if registry_has_workspace "$RESEARCHER_MODEL"; then
   PROMPT="$PROMPT
 
 $(dev_trio_agy_exec_note "$AGY_WORKSPACE" 0 "$AGY_GIT_OUTSIDE")"
+else
+  # Unreadable is a setup error, not "not workspace-aware" (#296).
+  case $? in 1) ;; *) exit 2 ;; esac
 fi
 
 CHECK_RC=0
