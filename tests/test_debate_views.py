@@ -207,7 +207,12 @@ class ViewPreparationTests(ViewFixture):
                                  (".gen", 1, "readiness could not be verified"),
                                  (".crit", 1, "readiness could not be verified")):
             with self.subTest(query=query):
-                self.prepare("--view=tmux")
+                first = self.prepare("--view=tmux")
+                # A stopped Generator: no respawn may run before every lookup passed.
+                state = self.read_state()
+                win = next(v for v in state["windows"].values() if v.get("session") == first["session"])
+                state["dead"] = {json.loads(win["options"]["@debate-view"])["gen"]: 1}
+                self.state.write_text(json.dumps(state))
                 before = len(self.read_state()["calls"])
                 calls = self.jq_failing_nth(query, n)
                 result = self.cli("team-3pane.sh", "--view=tmux")
